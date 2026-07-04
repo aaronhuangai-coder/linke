@@ -1,0 +1,399 @@
+#!/usr/bin/env node
+
+/**
+ * Linke Agent CLI
+ *
+ * Commands:
+ *   heartbeat           — send heartbeat to server
+ *   backup              — backup source path to server
+ *   backup-preflight-dry-run — preview backup file selection without creating a snapshot
+ *   restore             — restore snapshot to target path
+ *   restore-dry-run     — preview restore plan without copying files
+ *   snapshots           — list snapshots for a device
+ *   status              — show device status
+ *   run-once            — run backup once using config file
+ *   launchd-dry-run     — generate launchd plist without installing
+ *   nas-dry-run         — show NAS dry-run plan (no network, no write)
+ *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
+ *
+ * Options:
+ *   --server <url>       Server URL (default: http://localhost:3000)
+ *   --device <id>        Device ID
+ *   --source <path>      Source path for backup
+ *   --exclude <pattern>  Exclude pattern (repeatable for backup-preflight-dry-run)
+ *   --target <path>      Target path for restore
+ *   --snapshot <id>      Snapshot ID for restore
+ *   --hostname <name>    Hostname for heartbeat
+ *   --ip <address>       IP address for heartbeat
+ *   --config <path>      Config file path (run-once, launchd-dry-run)
+ *   --output <path>      Output path (launchd-dry-run)
+ *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
+ */
+
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { loadConfig, validateConfig } from './config.js';
+import { runNasDryRunFromConfig } from './nas.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PROJECT_ROOT = resolve(join(__dirname, '..'));
+
+// ── HTTP helper ────────────────────────────────────────────────────
+
+async function request(server, path, method, body) {
+  const url = `${server}${path}`;
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+// ── Arg parsing ────────────────────────────────────────────────────
+
+export function parseArgs(argv) {
+  const args = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith('--')) {
+      const key = arg.slice(2);
+      const val = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
+      if (Object.hasOwn(args, key)) {
+        if (Array.isArray(args[key])) args[key].push(val);
+        else args[key] = [args[key], val];
+      } else {
+        args[key] = val;
+      }
+    } else {
+      args._.push(arg);
+    }
+  }
+  return args;
+}
+
+// ── run-once ───────────────────────────────────────────────────────
+
+/**
+ * Load config from `configPath`, validate, then POST /api/backups for each job.
+ * Returns an array of snapshot records.
+ */
+export async function runOnceFromConfig(configPath) {
+  const raw = await loadConfig(configPath);
+  const config = validateConfig(raw);
+
+  // Heartbeat first — marks device online before any backup work
+  await request(config.serverUrl, '/api/heartbeat', 'POST', {
+    deviceId: config.deviceId,
+    hostname: config.hostname,
+    ipAddress: config.ipAddress,
+  });
+
+  const results = [];
+  for (const job of config.backupJobs) {
+    const body = {
+      deviceId: config.deviceId,
+      hostname: config.hostname,
+      ipAddress: config.ipAddress,
+      sourcePath: job.sourcePath,
+      excludePatterns: config.excludePatterns,
+      jobName: job.name,
+    };
+    const result = await request(config.serverUrl, '/api/backups', 'POST', body);
+    results.push(result);
+  }
+  return results;
+}
+
+// ── launchd dry-run ────────────────────────────────────────────────
+
+function xmlEscape(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Generate a launchd plist XML string.
+ * @param {object} config  — validated config object
+ * @param {string} configPath — path to the config file (embedded in ProgramArguments)
+ */
+export function generateLaunchdPlist(config, configPath) {
+  const label = config.launchdLabel || `com.linke.agent.${config.deviceId}`;
+  const interval = config.scheduleSeconds || 3600;
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '\t<key>Label</key>',
+    `\t<string>${xmlEscape(label)}</string>`,
+    '\t<key>ProgramArguments</key>',
+    '\t<array>',
+    '\t\t<string>/usr/bin/env</string>',
+    '\t\t<string>node</string>',
+    `\t\t<string>${xmlEscape(__filename)}</string>`,
+    '\t\t<string>run-once</string>',
+    '\t\t<string>--config</string>',
+    `\t\t<string>${xmlEscape(resolve(configPath))}</string>`,
+    '\t</array>',
+    '\t<key>StartInterval</key>',
+    `\t<integer>${interval}</integer>`,
+    '</dict>',
+    '</plist>',
+  ].join('\n');
+}
+
+/**
+ * Validate that `outputPath` resolves inside the project directory.
+ * Rejects ~/Library/LaunchAgents, absolute external paths, and ../ escapes.
+ */
+export function validateOutputPath(outputPath) {
+  const resolved = resolve(outputPath);
+  if (!resolved.startsWith(PROJECT_ROOT + '/') && resolved !== PROJECT_ROOT) {
+    throw new Error(`Output path must be within project directory: ${PROJECT_ROOT}`);
+  }
+  return resolved;
+}
+
+/**
+ * Generate plist and optionally write it to `outputPath`.
+ * - If outputPath is falsy, returns the plist string (for stdout).
+ * - If outputPath is given, validates it, writes, and returns { written, path, content }.
+ */
+export async function writeLaunchdDryRun(configPath, outputPath) {
+  if (outputPath) {
+    validateOutputPath(outputPath);
+  }
+
+  const raw = await loadConfig(configPath);
+  const config = validateConfig(raw);
+  const plist = generateLaunchdPlist(config, configPath);
+
+  if (outputPath) {
+    const resolved = validateOutputPath(outputPath);
+    await writeFile(resolved, plist, 'utf-8');
+    return { written: true, path: resolved, content: plist };
+  }
+
+  return plist;
+}
+
+// ── Usage ──────────────────────────────────────────────────────────
+
+function printUsage() {
+  console.log(`
+Linke Agent CLI
+
+Usage:
+  node agent.js <command> [options]
+
+Commands:
+  heartbeat           Send heartbeat
+  backup              Backup files
+  backup-preflight-dry-run Preview backup file selection (dry-run, no snapshot)
+  restore             Restore from snapshot
+  restore-dry-run     Preview restore plan (dry-run, no copy, no overwrite)
+  snapshots           List snapshots
+  status              Show device status
+  run-once            Run backup once using config file
+  launchd-dry-run     Generate launchd plist (dry-run, no install)
+  nas-dry-run         Show NAS dry-run plan (no network, no write)
+  retention-dry-run   Show retention dry-run plan (no delete, read-only)
+
+Options:
+  --server <url>       Server URL (default: http://localhost:3000)
+  --device <id>        Device ID
+  --source <path>      Source path (for backup)
+  --exclude <pattern>  Exclude pattern (repeatable for backup-preflight-dry-run)
+  --target <path>      Target path (for restore)
+  --snapshot <id>      Snapshot ID (for restore)
+  --hostname <name>    Hostname
+  --ip <address>       IP address
+  --config <path>      Config file path (for run-once, launchd-dry-run, nas-dry-run)
+  --output <path>      Output path (for launchd-dry-run, project dir only)
+  --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
+`);
+}
+
+// ── Main ───────────────────────────────────────────────────────────
+
+export async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const command = args._[0];
+  const server = args.server || 'http://localhost:3000';
+
+  if (!command) {
+    printUsage();
+    process.exit(1);
+  }
+
+  try {
+    switch (command) {
+      case 'heartbeat': {
+        if (!args.device) throw new Error('--device is required');
+        const result = await request(server, '/api/heartbeat', 'POST', {
+          deviceId: args.device,
+          hostname: args.hostname,
+          ipAddress: args.ip,
+        });
+        console.log('Heartbeat recorded:');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'backup': {
+        if (!args.device || !args.source) throw new Error('--device and --source are required');
+        const result = await request(server, '/api/backups', 'POST', {
+          deviceId: args.device,
+          hostname: args.hostname,
+          ipAddress: args.ip,
+          sourcePath: args.source,
+        });
+        console.log('Backup created:');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'backup-preflight-dry-run': {
+        if (!args.source) throw new Error('--source is required');
+        const params = new URLSearchParams({ sourcePath: args.source });
+        const excludeValues = args.exclude === undefined
+          ? []
+          : (Array.isArray(args.exclude) ? args.exclude : [args.exclude]);
+        for (const pattern of excludeValues) {
+          if (pattern === true) throw new Error('--exclude requires a pattern value');
+          params.append('exclude', pattern);
+        }
+        const plan = await request(server, `/api/backup-preflight-dry-run?${params.toString()}`, 'GET');
+        console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+
+      case 'restore': {
+        if (!args.device || !args.snapshot || !args.target) {
+          throw new Error('--device, --snapshot, and --target are required');
+        }
+        const result = await request(server, '/api/restore', 'POST', {
+          deviceId: args.device,
+          snapshotId: args.snapshot,
+          targetPath: args.target,
+        });
+        console.log('Restore completed:');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'restore-dry-run': {
+        if (!args.device || !args.snapshot || !args.target) {
+          throw new Error('--device, --snapshot, and --target are required');
+        }
+        const path = `/api/devices/${encodeURIComponent(args.device)}`
+          + `/snapshots/${encodeURIComponent(args.snapshot)}`
+          + `/restore-dry-run?targetPath=${encodeURIComponent(args.target)}`;
+        const plan = await request(server, path, 'GET');
+        console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+
+      case 'snapshots': {
+        if (!args.device) throw new Error('--device is required');
+        const result = await request(server, `/api/devices/${encodeURIComponent(args.device)}/snapshots`, 'GET');
+        console.log('Snapshots:');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'status': {
+        if (!args.device) throw new Error('--device is required');
+        const devices = await request(server, '/api/devices', 'GET');
+        const device = devices.find((d) => d.deviceId === args.device);
+        if (!device) {
+          console.log(`Device "${args.device}" not found`);
+          process.exit(1);
+        }
+        console.log('Device status:');
+        console.log(JSON.stringify(device, null, 2));
+        break;
+      }
+
+      case 'run-once': {
+        if (!args.config) throw new Error('--config is required');
+        const results = await runOnceFromConfig(args.config);
+        console.log('Run-once completed:');
+        console.log(JSON.stringify(results, null, 2));
+        break;
+      }
+
+      case 'launchd-dry-run': {
+        if (!args.config) throw new Error('--config is required');
+        const result = await writeLaunchdDryRun(args.config, args.output);
+        if (typeof result === 'string') {
+          console.log(result);
+        } else {
+          console.log(`Plist written to: ${result.path}`);
+        }
+        break;
+      }
+
+      case 'nas-dry-run': {
+        if (!args.config) throw new Error('--config is required');
+        const plan = await runNasDryRunFromConfig(args.config);
+        console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+
+      case 'retention-dry-run': {
+        if (!args.device) throw new Error('--device is required');
+
+        // Validate --keep-last: must be a positive integer if provided
+        let keepLast;
+        const keepLastRaw = args['keep-last'];
+        if (keepLastRaw !== undefined) {
+          // Reject boolean true (flag without value)
+          if (keepLastRaw === true) {
+            throw new Error('--keep-last requires a positive integer value');
+          }
+          // Must be a string that represents a positive integer
+          if (typeof keepLastRaw !== 'string' || !/^\d+$/.test(keepLastRaw)) {
+            throw new Error('--keep-last must be a positive integer');
+          }
+          const parsed = Number(keepLastRaw);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            throw new Error('--keep-last must be a positive integer');
+          }
+          keepLast = parsed;
+        }
+
+        let path = `/api/devices/${encodeURIComponent(args.device)}/retention-dry-run`;
+        if (keepLast !== undefined) {
+          path += `?keepLast=${keepLast}`;
+        }
+        const plan = await request(server, path, 'GET');
+        console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+
+      default:
+        console.error(`Unknown command: ${command}`);
+        printUsage();
+        process.exit(1);
+    }
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// Only auto-start when executed directly (not when imported by tests)
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  main();
+}

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Linke — 备份管理控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div data-testid="linke-app" class="app">
+    <header class="app-header">
+      <h1>Linke</h1>
+      <span class="subtitle">备份管理控制台</span>
+    </header>
+    <main class="app-main">
+      <section class="panel fleet-panel" data-testid="fleet-summary">
+        <h2>设备总览</h2>
+        <div class="fleet-stats">
+          <div class="fleet-stat">
+            <span class="fleet-stat-value" data-testid="fleet-total">0</span>
+            <span class="fleet-stat-label">设备总数</span>
+          </div>
+          <div class="fleet-stat">
+            <span class="fleet-stat-value" data-testid="fleet-online">0</span>
+            <span class="fleet-stat-label">在线</span>
+          </div>
+          <div class="fleet-stat">
+            <span class="fleet-stat-value" data-testid="fleet-offline">0</span>
+            <span class="fleet-stat-label">离线/未知</span>
+          </div>
+          <div class="fleet-stat">
+            <span class="fleet-stat-value" data-testid="fleet-snapshots">0</span>
+            <span class="fleet-stat-label">快照总数</span>
+          </div>
+        </div>
+      </section>
+      <section class="panel devices-panel">
+        <h2>设备</h2>
+        <ul data-testid="device-list" id="device-list"></ul>
+      </section>
+      <section class="panel snapshots-panel">
+        <h2>快照 <span id="snapshots-device-name" class="device-name"></span></h2>
+        <ul data-testid="snapshot-list" id="snapshot-list">
+          <li class="placeholder">请选择一个设备</li>
+        </ul>
+      </section>
+      <section class="panel events-panel">
+        <h2>事件日志</h2>
+        <div data-testid="event-log" id="event-log"></div>
+      </section>
+      <section class="panel snapshot-detail-panel" data-testid="snapshot-detail-panel">
+        <h2>快照清单详情 <span id="snapshot-detail-title" class="device-name"></span></h2>
+        <div id="snapshot-detail-content" data-testid="snapshot-detail-content">
+          <p class="placeholder">请选择一个快照查看详情</p>
+        </div>
+        <div class="snapshot-detail-safety-note" data-testid="snapshot-detail-safety-note">
+          <p>只读查看 manifest 文件清单，不修改快照、不执行恢复、不删除数据。</p>
+        </div>
+      </section>
+      <section class="panel restore-dry-run-panel" data-testid="restore-dry-run-panel">
+        <h2>恢复预检 dry-run <span id="restore-dry-run-title" class="device-name"></span></h2>
+        <div class="restore-dry-run-controls">
+          <label for="restore-dry-run-target">目标目录</label>
+          <input
+            id="restore-dry-run-target"
+            data-testid="restore-dry-run-target"
+            type="text"
+            value="./restore-preview"
+          >
+        </div>
+        <div class="restore-dry-run-stats">
+          <div class="restore-dry-run-stat restore-create">
+            <span id="restore-dry-run-create-count" data-testid="restore-dry-run-create-count">0</span>
+            <span>拟创建</span>
+          </div>
+          <div class="restore-dry-run-stat restore-overwrite">
+            <span id="restore-dry-run-overwrite-count" data-testid="restore-dry-run-overwrite-count">0</span>
+            <span>拟覆盖</span>
+          </div>
+        </div>
+        <div id="restore-dry-run-result" data-testid="restore-dry-run-result">
+          <p class="placeholder">请选择一个快照进行恢复预检</p>
+        </div>
+        <div class="restore-dry-run-safety-note" data-testid="restore-dry-run-safety-note">
+          <p>Restore dry-run 只做恢复预检，不复制文件、不覆盖文件、不创建目录、不写入目标目录。</p>
+        </div>
+      </section>
+      <section class="panel snapshot-diff-panel" data-testid="snapshot-diff-panel">
+        <h2>快照差异 dry-run <span id="snapshot-diff-device-name" class="device-name"></span></h2>
+        <div class="snapshot-diff-controls">
+          <label for="snapshot-diff-from">From</label>
+          <select id="snapshot-diff-from" data-testid="snapshot-diff-from"></select>
+          <label for="snapshot-diff-to">To</label>
+          <select id="snapshot-diff-to" data-testid="snapshot-diff-to"></select>
+        </div>
+        <div class="snapshot-diff-stats">
+          <div class="snapshot-diff-stat diff-added">
+            <span id="snapshot-diff-added-count" data-testid="snapshot-diff-added-count">0</span>
+            <span>新增</span>
+          </div>
+          <div class="snapshot-diff-stat diff-removed">
+            <span id="snapshot-diff-removed-count" data-testid="snapshot-diff-removed-count">0</span>
+            <span>移除</span>
+          </div>
+          <div class="snapshot-diff-stat diff-unchanged">
+            <span id="snapshot-diff-unchanged-count" data-testid="snapshot-diff-unchanged-count">0</span>
+            <span>未变</span>
+          </div>
+        </div>
+        <div id="snapshot-diff-result" data-testid="snapshot-diff-result">
+          <p class="placeholder">请选择至少两个快照查看差异</p>
+        </div>
+        <div class="snapshot-diff-safety-note" data-testid="snapshot-diff-safety-note">
+          <p>Diff dry-run 只比较 manifest 文件路径，不读取文件内容、不写入、不恢复、不删除。</p>
+        </div>
+      </section>
+      <section class="panel retention-panel" data-testid="retention-panel">
+        <h2>保留计划 <span id="retention-device-name" class="device-name"></span></h2>
+        <div class="retention-controls">
+          <label for="retention-keep-last">保留最新</label>
+          <input
+            id="retention-keep-last"
+            data-testid="retention-keep-last"
+            type="number"
+            min="1"
+            step="1"
+            value="3"
+          >
+          <span>个快照</span>
+        </div>
+        <div class="retention-stats">
+          <div class="retention-stat retention-keep">
+            <span class="retention-stat-value" id="retention-keep-count" data-testid="retention-keep-count">0</span>
+            <span class="retention-stat-label">保留</span>
+          </div>
+          <div class="retention-stat retention-delete">
+            <span class="retention-stat-value" id="retention-delete-count" data-testid="retention-delete-count">0</span>
+            <span class="retention-stat-label">拟淘汰</span>
+          </div>
+        </div>
+        <ul id="retention-plan-list" data-testid="retention-plan-list">
+          <li class="placeholder">请选择一个设备</li>
+        </ul>
+        <div class="retention-safety-note" data-testid="retention-safety-note">
+          <p>Dry-run 只读预览，不删除快照、不写入文件、不执行自动清理。</p>
+        </div>
+      </section>
+      <section class="panel agent-panel" data-testid="agent-config-panel">
+        <h2>Agent 配置</h2>
+        <div class="agent-section">
+          <h3>示例配置</h3>
+          <pre data-testid="agent-config-sample">{
+  "serverUrl": "http://localhost:3000",
+  "deviceId": "my-macbook",
+  "backupJobs": [
+    { "name": "documents", "sourcePath": "/Users/ah/Documents" }
+  ],
+  "excludePatterns": ["*.tmp", "node_modules"],
+  "scheduleSeconds": 3600
+}</pre>
+        </div>
+        <div class="agent-section">
+          <h3>Launchd Dry-Run 命令</h3>
+          <code data-testid="launchd-dry-run-command">node src/agent.js launchd-dry-run --config config.json</code>
+        </div>
+        <div class="agent-section">
+          <h3>备份预检 Dry-Run 命令</h3>
+          <code data-testid="backup-preflight-dry-run-command">node src/agent.js backup-preflight-dry-run --source ./important-docs --exclude "*.tmp" --exclude node_modules</code>
+        </div>
+        <div class="agent-section" data-testid="backup-preflight-safety-note">
+          <p>⚠️ 备份预检 dry-run 只扫描 sourcePath — 不创建快照、不复制文件、不写入 metadata 或仓库元数据</p>
+        </div>
+        <div class="agent-section" data-testid="agent-safety-note">
+          <p>⚠️ 未安装到系统 — 仅生成 plist 预览（dry-run），不调用 launchctl，不写入 ~/Library/LaunchAgents</p>
+        </div>
+        <div class="agent-section">
+          <h3>NAS 目标示例</h3>
+          <pre data-testid="nas-config-sample">{
+  "nasTargets": [
+    {
+      "name": "my-synology",
+      "provider": "synology",
+      "endpoint": "http://192.168.1.100:5000",
+      "shareName": "backup",
+      "remotePath": "/volume1/backup",
+      "enabled": true
+    },
+    {
+      "name": "my-ugreen",
+      "provider": "ugreen",
+      "endpoint": "https://192.168.1.200",
+      "shareName": "data",
+      "remotePath": "/shares/data",
+      "enabled": false
+    }
+  ]
+}</pre>
+        </div>
+        <div class="agent-section">
+          <h3>NAS Dry-Run 命令</h3>
+          <code data-testid="nas-dry-run-command">node src/agent.js nas-dry-run --config config.json</code>
+        </div>
+        <div class="agent-section" data-testid="nas-safety-note">
+          <p>⚠️ NAS dry-run 仅生成计划预览 — 不连接 NAS、不发起网络请求、不写入任何远端存储</p>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
