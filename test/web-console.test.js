@@ -663,6 +663,78 @@ describe('Web Console / API contract', () => {
     assert.strictEqual(res.status, 400);
     assert.match(body.error, /credential|userinfo|not allowed|forbidden/i);
   });
+
+  // ── V0.14 NAS app adapter dry-run API ────────────────────────────
+
+  it('POST /api/nas-dry-run returns app adapter dry-run plans', async () => {
+    const res = await fetch(`http://localhost:${port}/api/nas-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: 'web-console-dry-run',
+        nasTargets: [
+          {
+            name: 'synology_web',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            appAdapter: {
+              appId: 'synology-backup',
+              operation: 'backup-plan',
+            },
+          },
+        ],
+        backupJobs: [{ name: 'documents', sourcePath: '/Users/ah/Documents' }],
+      }),
+    });
+    const body = await res.json();
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.targets[0].adapterPlan.appId, 'synology-backup');
+    assert.strictEqual(body.targets[0].adapterPlan.wouldInvokeApp, false);
+    assert.strictEqual(body.targets[0].adapterPlan.wouldConnect, false);
+    assert.strictEqual(body.targets[0].adapterPlan.wouldWrite, false);
+  });
+
+  it('POST /api/nas-dry-run rejects provider/app adapter mismatch', async () => {
+    const res = await fetch(`http://localhost:${port}/api/nas-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: 'web-console-dry-run',
+        nasTargets: [
+          {
+            name: 'synology_web',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            appAdapter: {
+              appId: 'ugreen-backup',
+            },
+          },
+        ],
+        backupJobs: [{ name: 'documents', sourcePath: '/Users/ah/Documents' }],
+      }),
+    });
+    const body = await res.json();
+
+    assert.strictEqual(res.status, 400);
+    assert.match(body.error, /appAdapter|provider|supported/i);
+  });
+
+  it('NAS dry-run Web panel sample includes appAdapter without credentials', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="nas-dry-run-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'nas-dry-run-panel section must exist');
+    assert.ok(panelMatch[0].includes('appAdapter'), 'sample must include appAdapter');
+    assert.ok(panelMatch[0].includes('synology-backup'), 'sample must include synology-backup');
+    assert.ok(panelMatch[0].includes('ugreen-files'), 'sample must include ugreen-files');
+    assert.ok(!/password|token|apiKey|secret|accessKey|refreshToken/.test(panelMatch[0]), 'sample must not include credential fields');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -1601,5 +1673,78 @@ describe('initConsole DOM data-testid hooks', () => {
     await new Promise((r) => setTimeout(r, 20));
 
     assert.match(doc.getElementById('nas-dry-run-result').textContent, /endpoint must be a valid URL/);
+  });
+
+  it('renders NAS app adapter dry-run plan details', async () => {
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            targets: [
+              {
+                name: 'synology-web',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                adapterPlan: {
+                  mode: 'dry-run',
+                  provider: 'synology',
+                  appId: 'synology-backup',
+                  operation: 'backup-plan',
+                  wouldInvokeApp: false,
+                  wouldConnect: false,
+                  wouldWrite: false,
+                  steps: [
+                    'validate-target',
+                    'prepare-app-request',
+                    'map-backup-jobs',
+                    'preview-remote-destination',
+                  ],
+                },
+              },
+              {
+                name: 'plain-web',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.101:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/plain',
+                enabled: true,
+                adapterPlan: null,
+              },
+            ],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const noopInterval = () => 0;
+
+    initConsole(doc, fetchImpl, noopInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const text = doc.getElementById('nas-dry-run-result').textContent;
+    assert.match(text, /synology-backup/);
+    assert.match(text, /backup-plan/);
+    assert.match(text, /wouldInvokeApp:false|不调用/);
+    assert.match(text, /prepare-app-request/);
+    assert.match(text, /未配置应用适配器/);
   });
 });

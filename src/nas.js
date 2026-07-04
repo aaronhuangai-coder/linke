@@ -11,6 +11,55 @@ import { loadConfig, validateConfig, assertNoCredentials } from './config.js';
 
 const VALID_PROVIDERS = ['synology', 'ugreen'];
 
+const VALID_APP_ADAPTERS = Object.freeze({
+  synology: ['synology-backup', 'synology-files'],
+  ugreen: ['ugreen-backup', 'ugreen-files'],
+});
+
+const BACKUP_ADAPTER_STEPS = Object.freeze([
+  'validate-target',
+  'prepare-app-request',
+  'map-backup-jobs',
+  'preview-remote-destination',
+]);
+
+const FILES_ADAPTER_STEPS = Object.freeze([
+  'validate-target',
+  'prepare-file-browser-request',
+  'map-share-and-path',
+  'preview-file-operation',
+]);
+
+function validateNasAppAdapter(provider, appAdapter) {
+  if (appAdapter === undefined || appAdapter === null) return null;
+  if (!appAdapter || typeof appAdapter !== 'object' || Array.isArray(appAdapter)) {
+    throw new Error('nasTargets[].appAdapter must be an object');
+  }
+
+  assertNoCredentials(appAdapter);
+
+  if (!appAdapter.appId || typeof appAdapter.appId !== 'string' || appAdapter.appId.trim() === '') {
+    throw new Error('nasTargets[].appAdapter.appId must be a non-empty string');
+  }
+
+  const allowed = VALID_APP_ADAPTERS[provider] || [];
+  if (!allowed.includes(appAdapter.appId)) {
+    throw new Error(
+      `nasTargets[].appAdapter.appId "${appAdapter.appId}" is not supported for provider "${provider}"`,
+    );
+  }
+
+  if (appAdapter.operation !== undefined
+    && (typeof appAdapter.operation !== 'string' || appAdapter.operation.trim() === '')) {
+    throw new Error('nasTargets[].appAdapter.operation must be a non-empty string');
+  }
+
+  return {
+    appId: appAdapter.appId,
+    operation: appAdapter.operation || 'backup-plan',
+  };
+}
+
 /**
  * Validate a single NAS target object.
  * Returns a normalised copy with defaults applied.
@@ -63,6 +112,8 @@ export function validateNasTarget(target) {
   // ── enabled (default true) ────────────────────────────────────
   const enabled = target.enabled !== undefined ? Boolean(target.enabled) : true;
 
+  const appAdapter = validateNasAppAdapter(target.provider, target.appAdapter);
+
   return {
     name: target.name,
     provider: target.provider,
@@ -70,6 +121,7 @@ export function validateNasTarget(target) {
     shareName: target.shareName,
     remotePath: target.remotePath,
     enabled,
+    appAdapter,
   };
 }
 
@@ -93,11 +145,36 @@ export function buildNasDryRunPlan(config) {
       shareName: t.shareName,
       remotePath: t.remotePath,
       enabled: t.enabled,
+      appAdapter: t.appAdapter,
+      adapterPlan: buildNasAppAdapterDryRunPlan(t, config.backupJobs || []),
     })),
     jobs: (config.backupJobs || []).map((j) => ({
       name: j.name,
       sourcePath: j.sourcePath,
     })),
+  };
+}
+
+/**
+ * Build an app adapter dry-run plan for a single NAS target.
+ * Returns null if the target has no appAdapter.
+ */
+export function buildNasAppAdapterDryRunPlan(target, jobs = []) {
+  if (!target.appAdapter) return null;
+  const steps = target.appAdapter.appId.endsWith('-files')
+    ? FILES_ADAPTER_STEPS
+    : BACKUP_ADAPTER_STEPS;
+
+  return {
+    mode: 'dry-run',
+    provider: target.provider,
+    appId: target.appAdapter.appId,
+    operation: target.appAdapter.operation,
+    wouldInvokeApp: false,
+    wouldConnect: false,
+    wouldWrite: false,
+    steps: [...steps],
+    jobCount: jobs.length,
   };
 }
 

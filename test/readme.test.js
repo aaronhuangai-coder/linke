@@ -72,6 +72,10 @@ describe('README — version coverage', () => {
   it('mentions V0.13 (Web NAS dry-run panel)', () => {
     assertReadmeContains(/V0\.13/, 'V0.13');
   });
+
+  it('mentions V0.14 (NAS app adapter dry-run)', () => {
+    assertReadmeContains(/V0\.14/, 'V0.14');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -171,6 +175,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /Web Console[\s\S]*NAS[\s\S]*dry-run[\s\S]*面板|POST \/api\/nas-dry-run[\s\S]*wouldConnect[\s\S]*wouldWrite|nasTargets[\s\S]*Web Console[\s\S]*不连接/i,
       'Web Console NAS dry-run panel',
+    );
+  });
+
+  it('documents NAS app adapter dry-run', () => {
+    assertReadmeContains(
+      /appAdapter[\s\S]*adapterPlan[\s\S]*wouldInvokeApp:false|NAS app adapter[\s\S]*dry-run[\s\S]*不调用/i,
+      'NAS app adapter dry-run docs',
     );
   });
 });

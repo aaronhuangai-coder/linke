@@ -7,6 +7,7 @@ import {
   validateNasTarget,
   buildNasDryRunPlan,
   runNasDryRunFromConfig,
+  buildNasAppAdapterDryRunPlan,
 } from '../src/nas.js';
 
 // ── validateNasTarget ──────────────────────────────────────────────
@@ -195,6 +196,114 @@ describe('validateNasTarget', () => {
       /credential|userinfo|user.*pass|not allowed|forbidden/i,
     );
   });
+
+  // ── appAdapter validation ─────────────────────────────────────
+
+  it('accepts a valid synology appAdapter', () => {
+    const result = validateNasTarget({
+      name: 'syno',
+      provider: 'synology',
+      endpoint: 'http://192.168.1.100:5000',
+      shareName: 'backup',
+      remotePath: '/volume1/backup',
+      appAdapter: {
+        appId: 'synology-backup',
+        operation: 'backup-plan',
+      },
+    });
+
+    assert.deepStrictEqual(result.appAdapter, {
+      appId: 'synology-backup',
+      operation: 'backup-plan',
+    });
+  });
+
+  it('accepts a valid ugreen appAdapter and defaults operation', () => {
+    const result = validateNasTarget({
+      name: 'ugreen',
+      provider: 'ugreen',
+      endpoint: 'https://192.168.1.200',
+      shareName: 'data',
+      remotePath: '/shares/data',
+      appAdapter: {
+        appId: 'ugreen-files',
+      },
+    });
+
+    assert.deepStrictEqual(result.appAdapter, {
+      appId: 'ugreen-files',
+      operation: 'backup-plan',
+    });
+  });
+
+  it('rejects appAdapter missing appId', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            operation: 'backup-plan',
+          },
+        }),
+      /appAdapter\.appId/,
+    );
+  });
+
+  it('rejects unknown appAdapter appId', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            appId: 'qnap-backup',
+          },
+        }),
+      /appAdapter\.appId|unsupported/i,
+    );
+  });
+
+  it('rejects provider/appAdapter mismatch', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            appId: 'ugreen-backup',
+          },
+        }),
+      /provider|mismatch|appAdapter/i,
+    );
+  });
+
+  it('rejects credential-like fields inside appAdapter', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            appId: 'synology-backup',
+            token: 'do-not-accept',
+          },
+        }),
+      /credential|not allowed|forbidden/i,
+    );
+  });
 });
 
 // ── buildNasDryRunPlan ─────────────────────────────────────────────
@@ -270,6 +379,57 @@ describe('buildNasDryRunPlan', () => {
     };
     const plan = buildNasDryRunPlan(config);
     assert.strictEqual(plan.targets.length, 0);
+  });
+
+  it('includes adapterPlan with dry-run flags for appAdapter targets', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'dev',
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            appId: 'synology-backup',
+            operation: 'backup-plan',
+          },
+        },
+      ],
+      backupJobs: [{ name: 'docs', sourcePath: '/Users/ah/Documents' }],
+    });
+
+    assert.strictEqual(plan.targets[0].adapterPlan.mode, 'dry-run');
+    assert.strictEqual(plan.targets[0].adapterPlan.appId, 'synology-backup');
+    assert.strictEqual(plan.targets[0].adapterPlan.operation, 'backup-plan');
+    assert.strictEqual(plan.targets[0].adapterPlan.wouldInvokeApp, false);
+    assert.strictEqual(plan.targets[0].adapterPlan.wouldConnect, false);
+    assert.strictEqual(plan.targets[0].adapterPlan.wouldWrite, false);
+    assert.deepStrictEqual(plan.targets[0].adapterPlan.steps, [
+      'validate-target',
+      'prepare-app-request',
+      'map-backup-jobs',
+      'preview-remote-destination',
+    ]);
+  });
+
+  it('sets adapterPlan to null when appAdapter is omitted', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'dev',
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+        },
+      ],
+      backupJobs: [{ name: 'docs', sourcePath: '/Users/ah/Documents' }],
+    });
+
+    assert.strictEqual(plan.targets[0].adapterPlan, null);
   });
 });
 
@@ -370,6 +530,63 @@ describe('runNasDryRunFromConfig', () => {
     await assert.rejects(
       () => runNasDryRunFromConfig(configPath),
       /provider/,
+    );
+  });
+});
+
+// ── buildNasAppAdapterDryRunPlan ────────────────────────────────────
+
+describe('buildNasAppAdapterDryRunPlan', () => {
+  it('returns backup adapter steps for synology-backup', () => {
+    const plan = buildNasAppAdapterDryRunPlan(
+      {
+        name: 'syno',
+        provider: 'synology',
+        appAdapter: {
+          appId: 'synology-backup',
+          operation: 'backup-plan',
+        },
+      },
+      [{ name: 'docs', sourcePath: '/Users/ah/Documents' }],
+    );
+
+    assert.strictEqual(plan.mode, 'dry-run');
+    assert.strictEqual(plan.provider, 'synology');
+    assert.strictEqual(plan.appId, 'synology-backup');
+    assert.strictEqual(plan.wouldInvokeApp, false);
+    assert.deepStrictEqual(plan.steps, [
+      'validate-target',
+      'prepare-app-request',
+      'map-backup-jobs',
+      'preview-remote-destination',
+    ]);
+  });
+
+  it('returns files adapter steps for ugreen-files', () => {
+    const plan = buildNasAppAdapterDryRunPlan(
+      {
+        name: 'ugreen',
+        provider: 'ugreen',
+        appAdapter: {
+          appId: 'ugreen-files',
+          operation: 'browse-plan',
+        },
+      },
+      [],
+    );
+
+    assert.deepStrictEqual(plan.steps, [
+      'validate-target',
+      'prepare-file-browser-request',
+      'map-share-and-path',
+      'preview-file-operation',
+    ]);
+  });
+
+  it('returns null when target has no appAdapter', () => {
+    assert.strictEqual(
+      buildNasAppAdapterDryRunPlan({ name: 'plain', provider: 'synology' }, []),
+      null,
     );
   });
 });

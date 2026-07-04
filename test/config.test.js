@@ -278,6 +278,120 @@ describe('Config module', () => {
     assert.deepStrictEqual(cfg.nasTargets, []);
   });
 
+  it('rejects appAdapter when null', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              appAdapter: null,
+            },
+          ],
+        }),
+      /appAdapter must be an object/,
+    );
+  });
+
+  it('rejects appAdapter when a string', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              appAdapter: 'synology-files',
+            },
+          ],
+        }),
+      /appAdapter must be an object/,
+    );
+  });
+
+  it('rejects appAdapter when a number', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              appAdapter: 42,
+            },
+          ],
+        }),
+      /appAdapter must be an object/,
+    );
+  });
+
+  it('rejects appAdapter when an array', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              appAdapter: [{ appId: 'synology-files' }],
+            },
+          ],
+        }),
+      /appAdapter must be an object/,
+    );
+  });
+
+  it('accepts nasTargets with valid appAdapter', () => {
+    const cfg = validateConfig({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'dev',
+      backupJobs: [{ name: 'docs', sourcePath: '/tmp/docs' }],
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          appAdapter: {
+            appId: 'synology-files',
+            operation: 'browse-plan',
+          },
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(cfg.nasTargets[0].appAdapter, {
+      appId: 'synology-files',
+      operation: 'browse-plan',
+    });
+  });
+
   // ── credential rejection in nasTargets ──────────────────────────
 
   const CREDENTIAL_FIELDS = [

@@ -142,7 +142,11 @@ node_modules</textarea>
       "endpoint": "http://192.168.1.100:5000",
       "shareName": "backup",
       "remotePath": "/volume1/backup",
-      "enabled": true
+      "enabled": true,
+      "appAdapter": {
+        "appId": "synology-backup",
+        "operation": "backup-plan"
+      }
     },
     {
       "name": "my-ugreen",
@@ -150,7 +154,11 @@ node_modules</textarea>
       "endpoint": "https://192.168.1.200",
       "shareName": "data",
       "remotePath": "/shares/data",
-      "enabled": false
+      "enabled": false,
+      "appAdapter": {
+        "appId": "ugreen-files",
+        "operation": "browse-plan"
+      }
     }
   ],
   "backupJobs": [
@@ -173,7 +181,7 @@ node_modules</textarea>
           <p class="placeholder">请粘贴配置 JSON 进行 NAS dry-run 预检</p>
         </div>
         <div class="nas-dry-run-safety-note" data-testid="nas-dry-run-safety-note">
-          <p>NAS dry-run 只做只读配置验证和计划预览，不连接 NAS、不发起 NAS 网络请求、不写入远端、不传输文件、不保存配置。</p>
+          <p>NAS dry-run 只做只读配置验证和计划预览，不调用 NAS app、不连接 NAS、不发起 NAS 网络请求、不写入远端、不传输文件、不保存配置。</p>
         </div>
       </section>
       <section class="panel snapshot-diff-panel" data-testid="snapshot-diff-panel">

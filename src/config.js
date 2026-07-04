@@ -142,6 +142,35 @@ export function validateConfig(config) {
       if (!t.remotePath || typeof t.remotePath !== 'string' || t.remotePath.trim() === '') {
         throw new Error('nasTargets[].remotePath must be a non-empty string');
       }
+
+      let appAdapter = null;
+      if (t.appAdapter !== undefined) {
+        if (!t.appAdapter || typeof t.appAdapter !== 'object' || Array.isArray(t.appAdapter)) {
+          throw new Error('nasTargets[].appAdapter must be an object');
+        }
+        assertNoCredentials(t.appAdapter);
+        if (!t.appAdapter.appId || typeof t.appAdapter.appId !== 'string' || t.appAdapter.appId.trim() === '') {
+          throw new Error('nasTargets[].appAdapter.appId must be a non-empty string');
+        }
+        const validApps = {
+          synology: ['synology-backup', 'synology-files'],
+          ugreen: ['ugreen-backup', 'ugreen-files'],
+        };
+        if (!validApps[t.provider].includes(t.appAdapter.appId)) {
+          throw new Error(
+            `nasTargets[].appAdapter.appId "${t.appAdapter.appId}" is not supported for provider "${t.provider}"`,
+          );
+        }
+        if (t.appAdapter.operation !== undefined
+          && (typeof t.appAdapter.operation !== 'string' || t.appAdapter.operation.trim() === '')) {
+          throw new Error('nasTargets[].appAdapter.operation must be a non-empty string');
+        }
+        appAdapter = {
+          appId: t.appAdapter.appId,
+          operation: t.appAdapter.operation || 'backup-plan',
+        };
+      }
+
       nasTargets.push({
         name: t.name,
         provider: t.provider,
@@ -149,6 +178,7 @@ export function validateConfig(config) {
         shareName: t.shareName,
         remotePath: t.remotePath,
         enabled: t.enabled !== undefined ? Boolean(t.enabled) : true,
+        appAdapter,
       });
     }
   }

@@ -656,6 +656,29 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
       item.appendChild(nameRow);
       item.appendChild(detail);
+
+      const adapter = doc.createElement('div');
+      adapter.className = 'nas-dry-run-adapter-plan';
+
+      if (target.adapterPlan) {
+        const adapterTitle = doc.createElement('div');
+        adapterTitle.className = 'nas-dry-run-adapter-title';
+        adapterTitle.textContent = `${target.adapterPlan.appId} · ${target.adapterPlan.operation} · wouldInvokeApp:false`;
+        adapter.appendChild(adapterTitle);
+
+        const steps = doc.createElement('ol');
+        steps.className = 'nas-dry-run-adapter-steps';
+        (target.adapterPlan.steps || []).forEach((step) => {
+          const stepItem = doc.createElement('li');
+          stepItem.textContent = step;
+          steps.appendChild(stepItem);
+        });
+        adapter.appendChild(steps);
+      } else {
+        adapter.textContent = '未配置应用适配器';
+      }
+
+      item.appendChild(adapter);
       list.appendChild(item);
     });
 

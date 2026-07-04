@@ -709,6 +709,26 @@ ul {
   font-size: 0.82rem;
 }
 
+.nas-dry-run-adapter-plan {
+  margin-top: 8px;
+  border-top: 1px solid #edf0f2;
+  padding-top: 8px;
+  color: #4b5563;
+  font-size: 0.75rem;
+}
+
+.nas-dry-run-adapter-title {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-weight: 800;
+  color: #2f5f8f;
+}
+
+.nas-dry-run-adapter-steps {
+  margin: 6px 0 0 18px;
+  display: grid;
+  gap: 2px;
+}
+
 .manifest-summary {
   display: grid;
   gap: 8px;
