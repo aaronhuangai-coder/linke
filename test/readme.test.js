@@ -68,6 +68,10 @@ describe('README — version coverage', () => {
   it('mentions V0.12 (Web backup preflight panel)', () => {
     assertReadmeContains(/V0\.12/, 'V0.12');
   });
+
+  it('mentions V0.13 (Web NAS dry-run panel)', () => {
+    assertReadmeContains(/V0\.13/, 'V0.13');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -160,6 +164,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /Web Console[\s\S]*备份预检[\s\S]*面板|backup-preflight-dry-run[\s\S]*Web Console[\s\S]*included[\s\S]*excluded|sourcePath[\s\S]*excludePatterns[\s\S]*面板/i,
       'Web Console backup preflight dry-run panel',
+    );
+  });
+
+  it('documents the Web Console NAS dry-run panel', () => {
+    assertReadmeContains(
+      /Web Console[\s\S]*NAS[\s\S]*dry-run[\s\S]*面板|POST \/api\/nas-dry-run[\s\S]*wouldConnect[\s\S]*wouldWrite|nasTargets[\s\S]*Web Console[\s\S]*不连接/i,
+      'Web Console NAS dry-run panel',
     );
   });
 });

@@ -571,6 +571,144 @@ ul {
   color: #6d4c00;
 }
 
+.nas-dry-run-panel {
+  grid-column: 2 / 4;
+}
+
+.nas-dry-run-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.nas-dry-run-controls label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #555;
+}
+
+.nas-dry-run-controls textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid #d6d6d6;
+  border-radius: 6px;
+  padding: 10px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: #202124;
+  background: #fbfbfb;
+}
+
+.nas-dry-run-controls button {
+  align-self: flex-start;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 14px;
+  background: #2f5f8f;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.nas-dry-run-stats {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.nas-dry-run-stat {
+  min-width: 92px;
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nas-dry-run-stat span:first-child {
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: #202124;
+}
+
+.nas-dry-run-stat span:last-child {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.nas-dry-run-target-list {
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.nas-dry-run-target-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #fff;
+}
+
+.nas-dry-run-target-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 800;
+}
+
+.nas-dry-run-target-detail {
+  margin-top: 4px;
+  color: #6b7280;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.nas-dry-run-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.nas-dry-run-badge.enabled {
+  background: #e6f6ef;
+  color: #0f6b43;
+}
+
+.nas-dry-run-badge.disabled {
+  background: #eeeeee;
+  color: #666;
+}
+
+.nas-dry-run-error {
+  border: 1px solid #f0b8b8;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #fff6f6;
+  color: #9b1c1c;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.nas-dry-run-safety-note {
+  margin-top: 12px;
+  border-left: 3px solid #c2932b;
+  background: #fff8e5;
+  color: #72520d;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+
 .manifest-summary {
   display: grid;
   gap: 8px;

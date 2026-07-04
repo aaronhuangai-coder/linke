@@ -55,6 +55,18 @@ export function parseBackupPreflightExcludePatterns(value) {
     .filter(Boolean);
 }
 
+export function parseNasDryRunConfig(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return { ok: false, error: '配置 JSON 不能为空' };
+  }
+  try {
+    return { ok: true, config: JSON.parse(raw) };
+  } catch (err) {
+    return { ok: false, error: 'JSON 格式错误: ' + err.message };
+  }
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
@@ -75,6 +87,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const backupPreflightIncludedCountEl = doc.getElementById('backup-preflight-included-count');
   const backupPreflightExcludedCountEl = doc.getElementById('backup-preflight-excluded-count');
   const backupPreflightResultEl = doc.getElementById('backup-preflight-result');
+  const nasDryRunConfigInput = doc.getElementById('nas-dry-run-config');
+  const nasDryRunRunButton = doc.getElementById('nas-dry-run-run');
+  const nasDryRunTargetCountEl = doc.getElementById('nas-dry-run-target-count');
+  const nasDryRunJobCountEl = doc.getElementById('nas-dry-run-job-count');
+  const nasDryRunResultEl = doc.getElementById('nas-dry-run-result');
   const snapshotDiffDeviceName = doc.getElementById('snapshot-diff-device-name');
   const snapshotDiffFromSelect = doc.getElementById('snapshot-diff-from');
   const snapshotDiffToSelect = doc.getElementById('snapshot-diff-to');
@@ -587,6 +604,103 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     );
   }
 
+  function setNasDryRunError(message) {
+    if (!nasDryRunResultEl) return;
+    clearElement(nasDryRunResultEl);
+    const error = doc.createElement('div');
+    error.className = 'nas-dry-run-error';
+    error.textContent = message;
+    nasDryRunResultEl.appendChild(error);
+  }
+
+  function renderNasDryRunPlan(plan) {
+    if (!nasDryRunResultEl) return;
+    const targets = Array.isArray(plan.targets) ? plan.targets : [];
+    const jobs = Array.isArray(plan.jobs) ? plan.jobs : [];
+
+    if (nasDryRunTargetCountEl) nasDryRunTargetCountEl.textContent = String(targets.length);
+    if (nasDryRunJobCountEl) nasDryRunJobCountEl.textContent = String(jobs.length);
+    clearElement(nasDryRunResultEl);
+
+    if (targets.length === 0) {
+      const placeholder = doc.createElement('p');
+      placeholder.className = 'placeholder';
+      placeholder.textContent = '未配置任何 NAS 目标';
+      nasDryRunResultEl.appendChild(placeholder);
+      return;
+    }
+
+    const list = doc.createElement('ul');
+    list.className = 'nas-dry-run-target-list';
+
+    targets.forEach(function (target) {
+      const item = doc.createElement('li');
+      item.className = 'nas-dry-run-target-item';
+
+      const nameRow = doc.createElement('div');
+      nameRow.className = 'nas-dry-run-target-name';
+
+      const name = doc.createElement('span');
+      name.textContent = (target.name || 'unnamed') + ' [' + (target.provider || 'unknown') + ']';
+
+      const badge = doc.createElement('span');
+      badge.className = 'nas-dry-run-badge ' + (target.enabled ? 'enabled' : 'disabled');
+      badge.textContent = target.enabled ? '已启用' : '已禁用';
+
+      nameRow.appendChild(name);
+      nameRow.appendChild(badge);
+
+      const detail = doc.createElement('div');
+      detail.className = 'nas-dry-run-target-detail';
+      detail.textContent = (target.endpoint || '') + ' · ' + (target.shareName || '') + ' · ' + (target.remotePath || '');
+
+      item.appendChild(nameRow);
+      item.appendChild(detail);
+      list.appendChild(item);
+    });
+
+    nasDryRunResultEl.appendChild(list);
+  }
+
+  async function fetchNasDryRunPlan() {
+    if (!nasDryRunResultEl) return;
+
+    const parsed = parseNasDryRunConfig(nasDryRunConfigInput ? nasDryRunConfigInput.value : '');
+    if (!parsed.ok) {
+      setNasDryRunError(parsed.error);
+      return;
+    }
+
+    clearElement(nasDryRunResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '加载中...';
+    nasDryRunResultEl.appendChild(loading);
+
+    try {
+      const res = await fetchImpl('/api/nas-dry-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.config),
+      });
+      if (!res.ok) {
+        let errBody;
+        try {
+          errBody = await res.json();
+        } catch (_) {
+          errBody = {};
+        }
+        throw new Error(errBody.error || 'HTTP ' + res.status);
+      }
+      const plan = await res.json();
+      renderNasDryRunPlan(plan);
+      logEvent('已加载 NAS dry-run 预检', 'info');
+    } catch (err) {
+      setNasDryRunError(err.message);
+      logEvent('加载 NAS dry-run 失败: ' + err.message, 'error');
+    }
+  }
+
   function setSnapshotDiffCounts(addedCount, removedCount, unchangedCount) {
     if (snapshotDiffAddedCountEl) snapshotDiffAddedCountEl.textContent = String(addedCount);
     if (snapshotDiffRemovedCountEl) snapshotDiffRemovedCountEl.textContent = String(removedCount);
@@ -835,6 +949,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   if (backupPreflightRunButton?.addEventListener) {
     backupPreflightRunButton.addEventListener('click', fetchBackupPreflightPlan);
+  }
+
+  if (nasDryRunRunButton?.addEventListener) {
+    nasDryRunRunButton.addEventListener('click', fetchNasDryRunPlan);
   }
 
   logEvent('Linke 控制台已启动', 'info');

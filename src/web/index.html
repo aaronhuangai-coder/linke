@@ -125,6 +125,57 @@ node_modules</textarea>
           <p>Backup preflight dry-run 只做只读预检，不创建快照、不复制文件、不写入 metadata 或仓库元数据。</p>
         </div>
       </section>
+      <section class="panel nas-dry-run-panel" data-testid="nas-dry-run-panel">
+        <h2>NAS dry-run 预检</h2>
+        <div class="nas-dry-run-controls">
+          <label for="nas-dry-run-config">配置 JSON</label>
+          <textarea
+            id="nas-dry-run-config"
+            data-testid="nas-dry-run-config"
+            rows="10"
+          >{
+  "deviceId": "web-console-dry-run",
+  "nasTargets": [
+    {
+      "name": "my-synology",
+      "provider": "synology",
+      "endpoint": "http://192.168.1.100:5000",
+      "shareName": "backup",
+      "remotePath": "/volume1/backup",
+      "enabled": true
+    },
+    {
+      "name": "my-ugreen",
+      "provider": "ugreen",
+      "endpoint": "https://192.168.1.200",
+      "shareName": "data",
+      "remotePath": "/shares/data",
+      "enabled": false
+    }
+  ],
+  "backupJobs": [
+    { "name": "documents", "sourcePath": "/Users/ah/Documents" }
+  ]
+}</textarea>
+          <button id="nas-dry-run-run" data-testid="nas-dry-run-run" type="button">预检 dry-run</button>
+        </div>
+        <div class="nas-dry-run-stats">
+          <div class="nas-dry-run-stat">
+            <span id="nas-dry-run-target-count" data-testid="nas-dry-run-target-count">0</span>
+            <span>NAS 目标</span>
+          </div>
+          <div class="nas-dry-run-stat">
+            <span id="nas-dry-run-job-count" data-testid="nas-dry-run-job-count">0</span>
+            <span>关联任务</span>
+          </div>
+        </div>
+        <div id="nas-dry-run-result" data-testid="nas-dry-run-result">
+          <p class="placeholder">请粘贴配置 JSON 进行 NAS dry-run 预检</p>
+        </div>
+        <div class="nas-dry-run-safety-note" data-testid="nas-dry-run-safety-note">
+          <p>NAS dry-run 只做只读配置验证和计划预览，不连接 NAS、不发起 NAS 网络请求、不写入远端、不传输文件、不保存配置。</p>
+        </div>
+      </section>
       <section class="panel snapshot-diff-panel" data-testid="snapshot-diff-panel">
         <h2>快照差异 dry-run <span id="snapshot-diff-device-name" class="device-name"></span></h2>
         <div class="snapshot-diff-controls">

@@ -15,6 +15,7 @@ import { buildRetentionDryRunPlan } from './retention.js';
 import { buildSnapshotDiffDryRunPlan } from './snapshot-diff.js';
 import { buildRestoreDryRunPlan, collectExistingTargetPaths } from './restore-dry-run.js';
 import { runBackupPreflightDryRun } from './backup-preflight.js';
+import { buildNasDryRunPlan } from './nas.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -42,7 +43,14 @@ function sendError(res, status, message) {
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  return JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+  const text = Buffer.concat(chunks).toString('utf-8') || '{}';
+  try {
+    return JSON.parse(text);
+  } catch {
+    const err = new Error('Invalid JSON body');
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 async function serveStatic(res, filePath) {
@@ -113,6 +121,26 @@ export function createServer({ dataDir, backupHooks } = {}) {
             return sendError(res, 400, err.message);
           }
           throw err;
+        }
+      }
+
+      // POST /api/nas-dry-run
+      if (method === 'POST' && pathname === '/api/nas-dry-run') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400) {
+            return sendError(res, 400, err.message);
+          }
+          throw err;
+        }
+
+        try {
+          const plan = buildNasDryRunPlan(body);
+          return sendJSON(res, 200, plan);
+        } catch (err) {
+          return sendError(res, 400, err.message);
         }
       }
 
