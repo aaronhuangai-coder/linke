@@ -1,8 +1,8 @@
-# Linke V0.15
+# Linke V0.16
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.15** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.16** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -22,11 +22,13 @@
 | V0.12 | Web backup preflight panel | Web Console 新增备份预检 dry-run 面板，可输入 sourcePath / excludePatterns 并查看 included / excluded |
 | V0.13 | Web NAS dry-run panel | Web Console 新增 NAS dry-run 面板，可粘贴 nasTargets 配置并查看 wouldConnect:false / wouldWrite:false 的计划 |
 | V0.14 | NAS app adapter dry-run | 为 Synology / Ugreen 目标生成应用嵌套调用计划，不调用 NAS app、不连接、不写入 |
-| V0.15 | 当前版本 | Web Console 新增只读设备详情面板，展示 deviceId / hostname / ipAddress / status / lastHeartbeatAt / lastBackupAt / snapshotCount |
+| V0.15 | 设备详情面板 | Web Console 新增只读设备详情面板，展示 deviceId / hostname / ipAddress / status / lastHeartbeatAt / lastBackupAt / snapshotCount |
+| V0.16 | 当前版本 | Web Console 设备面板新增搜索、状态过滤、排序和计数工具栏，纯前端只读派生视图 |
 
 ## 特性
 
 - **设备心跳** — 注册设备并跟踪在线状态
+- **设备列表控制** — Web Console 设备面板支持按名称 / Device ID / IP 搜索、按状态过滤（全部 / 在线 / 离线 / 未知）、按名称 / IP / 最后心跳 / 快照数排序，并实时显示可见 / 总数计数
 - **设备详情** — Web Console 可只读查看设备的 deviceId、hostname、IP 地址、状态、最后心跳、最后备份和快照数
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
@@ -220,6 +222,17 @@ V0.15 在 Web Console 中增加只读设备详情面板。点击设备列表中�
 - `snapshotCount`
 
 该面板只做统一管理视图展示，不新增设备详情 API、不写入设备元数据、不提供编辑、删除、远程命令、ping/probe 或 NAS 操作按钮。缺失字段会显示稳定 fallback，例如 `unknown`、`无心跳`、`无备份` 或 `0`。
+
+### Web Console 多设备列表控制
+
+V0.16 在 Web Console 设备面板中增加紧凑工具栏，支持：
+
+- 按名称 / Device ID / IP 搜索设备
+- 按状态过滤：全部 / 在线 / 离线 / 未知
+- 按名称、IP、最后心跳、快照数排序
+- 实时显示可见设备数 / 总数计数
+
+该功能仅前端只读派生视图，不新增写接口、不触发备份、不连接 NAS、不新增 API 路由。筛选状态不持久化，刷新页面后重置。如果筛选结果隐藏了已选设备，设备详情面板不会清空，只有当 `/api/devices` 中不再包含该设备时才清空详情。
 
 ### Web Console 保留计划面板
 

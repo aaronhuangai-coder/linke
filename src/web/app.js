@@ -75,6 +75,62 @@ export function parseNasDryRunConfig(value) {
   }
 }
 
+// ── V0.16 Device List Controls ────────────────────────────────────
+
+export function normalizeDeviceStatus(status) {
+  if (status === 'online' || status === 'offline') return status;
+  return 'unknown';
+}
+
+function normalizeSearchValue(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+export function matchesDeviceSearch(device, query) {
+  const normalizedQuery = normalizeSearchValue(query);
+  if (!normalizedQuery) return true;
+  return [
+    device?.hostname,
+    device?.deviceId,
+    device?.ipAddress,
+  ].some((value) => normalizeSearchValue(value).includes(normalizedQuery));
+}
+
+function getDeviceName(device) {
+  return String(device?.hostname || device?.deviceId || '').toLowerCase();
+}
+
+function getDeviceIp(device) {
+  return String(device?.ipAddress || '').toLowerCase();
+}
+
+function getDeviceHeartbeatTime(device) {
+  const value = Date.parse(device?.lastHeartbeatAt || '');
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function compareDevicesForSort(a, b, sortKey) {
+  if (sortKey === 'ip') {
+    return getDeviceIp(a).localeCompare(getDeviceIp(b)) || getDeviceName(a).localeCompare(getDeviceName(b));
+  }
+  if (sortKey === 'heartbeat') {
+    return getDeviceHeartbeatTime(b) - getDeviceHeartbeatTime(a) || getDeviceName(a).localeCompare(getDeviceName(b));
+  }
+  if (sortKey === 'snapshots') {
+    return (b?.snapshotCount || 0) - (a?.snapshotCount || 0) || getDeviceName(a).localeCompare(getDeviceName(b));
+  }
+  return getDeviceName(a).localeCompare(getDeviceName(b));
+}
+
+export function applyDeviceListControls(devices, controls) {
+  const status = controls?.status || 'all';
+  const sort = controls?.sort || 'name';
+  return [...devices]
+    .filter((device) => matchesDeviceSearch(device, controls?.query || ''))
+    .filter((device) => status === 'all' || normalizeDeviceStatus(device?.status) === status)
+    .sort((a, b) => compareDevicesForSort(a, b, sort));
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
@@ -123,6 +179,31 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let selectedSnapshotId = null;
   let cachedDevices = [];
 
+  const deviceSearchInput = doc.getElementById('device-search');
+  const deviceStatusFilter = doc.getElementById('device-status-filter');
+  const deviceSortSelect = doc.getElementById('device-sort');
+  const deviceFilterCountEl = doc.querySelector('[data-testid="device-filter-count"]');
+
+  function getDeviceControls() {
+    return {
+      query: deviceSearchInput?.value || '',
+      status: deviceStatusFilter?.value || 'all',
+      sort: deviceSortSelect?.value || 'name',
+    };
+  }
+
+  function renderDeviceFilterCount(visibleCount, totalCount) {
+    if (deviceFilterCountEl) {
+      deviceFilterCountEl.textContent = String(visibleCount) + ' / ' + String(totalCount);
+    }
+  }
+
+  function renderFilteredDevices() {
+    const visibleDevices = applyDeviceListControls(cachedDevices, getDeviceControls());
+    renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);
+    renderDevices(visibleDevices);
+  }
+
   if (retentionKeepLastInput && !retentionKeepLastInput.value) {
     retentionKeepLastInput.value = '3';
   }
@@ -151,7 +232,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       const selectedDevice = devices.find((d) => d.deviceId === selectedDeviceId) || null;
       if (!selectedDevice) selectedDeviceId = null;
       renderFleetSummary(devices);
-      renderDevices(devices);
+      renderFilteredDevices();
       renderDeviceDetail(selectedDevice);
       logEvent('已加载 ' + devices.length + ' 台设备', 'info');
     } catch (err) {
@@ -211,9 +292,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   function renderDevices(devices) {
-    deviceListEl.innerHTML = '';
+    clearElement(deviceListEl);
     if (devices.length === 0) {
-      deviceListEl.innerHTML = '<li class="placeholder">暂无设备</li>';
+      deviceListEl.innerHTML = '<li class="placeholder">无匹配设备</li>';
       return;
     }
     devices.forEach(function (device) {
@@ -252,7 +333,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         selectedDeviceId = device.deviceId;
         selectedSnapshotId = null;
         renderDeviceDetail(device);
-        renderDevices(devices);
+        renderFilteredDevices();
         fetchSnapshots(device.deviceId);
         fetchRetentionPlan(device.deviceId);
       });
@@ -1032,6 +1113,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   if (nasDryRunRunButton?.addEventListener) {
     nasDryRunRunButton.addEventListener('click', fetchNasDryRunPlan);
+  }
+
+  for (const control of [deviceSearchInput, deviceStatusFilter, deviceSortSelect]) {
+    if (control?.addEventListener) {
+      control.addEventListener('input', renderFilteredDevices);
+      control.addEventListener('change', renderFilteredDevices);
+    }
   }
 
   logEvent('Linke 控制台已启动', 'info');

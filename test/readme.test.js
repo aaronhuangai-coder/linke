@@ -80,6 +80,10 @@ describe('README — version coverage', () => {
   it('mentions V0.15 (device detail panel)', () => {
     assertReadmeContains(/V0\.15/, 'V0.15');
   });
+
+  it('mentions V0.16 (device list controls)', () => {
+    assertReadmeContains(/V0\.16/, 'V0.16');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -193,6 +197,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /设备详情[\s\S]*hostname[\s\S]*ipAddress[\s\S]*lastHeartbeatAt|device detail[\s\S]*hostname[\s\S]*ipAddress[\s\S]*snapshotCount/i,
       'Web Console device detail panel',
+    );
+  });
+
+  it('documents the Web Console device list controls', () => {
+    assertReadmeContains(
+      /设备列表控制[\s\S]*搜索[\s\S]*状态过滤[\s\S]*排序|device list controls[\s\S]*search[\s\S]*filter[\s\S]*sort/i,
+      'Web Console device list controls',
     );
   });
 });

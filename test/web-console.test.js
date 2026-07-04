@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
 import {
+  applyDeviceListControls,
+  compareDevicesForSort,
   computeFleetSummary,
   formatLastBackup,
   formatLastHeartbeat,
   formatSnapshotJobName,
   formatSnapshotMeta,
   initConsole,
+  matchesDeviceSearch,
+  normalizeDeviceStatus,
   parseBackupPreflightExcludePatterns,
   parseNasDryRunConfig,
 } from '../src/web/app.js';
@@ -763,6 +767,38 @@ describe('Web Console / API contract', () => {
     assert.ok(panelMatch, 'device-detail-panel section must exist');
     assert.ok(panelMatch[0].includes('请选择一个设备'), 'panel must ask user to select a device');
     assert.ok(!/编辑|保存|删除|远程执行|ping|probe|wake|shutdown/i.test(panelMatch[0]), 'panel must not expose management actions');
+  });
+
+  // ── V0.16 Device list controls HTML/source contract ─────────────
+
+  it('HTML contains V0.16 device list controls hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="device-search"'), 'must have device-search input');
+    assert.ok(html.includes('data-testid="device-status-filter"'), 'must have device-status-filter select');
+    assert.ok(html.includes('data-testid="device-sort"'), 'must have device-sort select');
+    assert.ok(html.includes('data-testid="device-filter-count"'), 'must have device-filter-count');
+  });
+
+  it('device controls are read-only and do not expose execution wording', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/<section class="panel devices-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'devices-panel section must exist');
+    assert.ok(/搜索|筛选|排序/.test(panelMatch[0]), 'controls must communicate search/filter/sort behavior');
+    assert.ok(!/执行备份|创建备份|删除快照|连接 NAS|远程传输/i.test(panelMatch[0]), 'controls must not expose real execution wording');
+  });
+
+  it('app.js wires V0.16 controls into device rendering', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('device-search'), 'app.js must reference device-search');
+    assert.ok(js.includes('device-status-filter'), 'app.js must reference device-status-filter');
+    assert.ok(js.includes('device-sort'), 'app.js must reference device-sort');
+    assert.ok(js.includes('applyDeviceListControls'), 'app.js must use applyDeviceListControls');
   });
 });
 
@@ -1903,5 +1939,133 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.match(text, /wouldInvokeApp:false|不调用/);
     assert.match(text, /prepare-app-request/);
     assert.match(text, /未配置应用适配器/);
+  });
+
+  it('search and status filter update device list and filter count', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'ipad-2', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' },
+      { deviceId: 'phone-3', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' },
+    ];
+    const mockFetch = async (url) => ({ ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) });
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Initial load: all 3 devices visible, count shows "3 / 3"
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+    assert.ok(countEl, 'device-filter-count element must exist');
+    assert.strictEqual(countEl.textContent, '3 / 3', 'initial count must show all 3 devices');
+
+    // Search for "ipad" → only 1 device visible
+    const searchInput = doc.getElementById('device-search');
+    assert.ok(searchInput, 'device-search input must exist');
+    searchInput.value = 'ipad';
+    assert.ok(searchInput._listeners.input || searchInput._listeners.change, 'search input must have input/change listener');
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    else searchInput._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 3', 'count must show 1 / 3 after iPad search');
+    const deviceListEl = doc.getElementById('device-list');
+    assert.ok(deviceListEl, 'device-list must exist');
+    const visibleItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(visibleItems.length, 1, 'only 1 device item visible after iPad search');
+    assert.match(visibleItems[0].textContent, /ipad|iPad/i, 'visible device must be the iPad');
+
+    // Switch to status=unknown, clear search → only phone-3 visible
+    searchInput.value = '';
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    else searchInput._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const statusFilter = doc.getElementById('device-status-filter');
+    assert.ok(statusFilter, 'device-status-filter must exist');
+    statusFilter.value = 'unknown';
+    assert.ok(statusFilter._listeners.input || statusFilter._listeners.change, 'status filter must have input/change listener');
+    if (statusFilter._listeners.change) statusFilter._listeners.change();
+    else statusFilter._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 3', 'count must show 1 / 3 for unknown status');
+    const unknownItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(unknownItems.length, 1, 'only 1 device item visible for unknown status');
+    assert.match(unknownItems[0].textContent, /phone-3|TestPhone/, 'visible device must be the unknown-status phone');
+  });
+});
+
+describe('V0.16 device list controls helpers', () => {
+  const devices = [
+    {
+      deviceId: 'mac-alpha',
+      hostname: 'Aaron-Mac',
+      ipAddress: '10.0.0.20',
+      status: 'online',
+      lastHeartbeatAt: '2026-07-04T10:00:00.000Z',
+      snapshotCount: 2,
+    },
+    {
+      deviceId: 'ipad-beta',
+      hostname: 'Design-iPad',
+      ipAddress: '10.0.0.5',
+      status: 'offline',
+      lastHeartbeatAt: '2026-07-04T09:00:00.000Z',
+      snapshotCount: 8,
+    },
+    {
+      deviceId: 'phone-gamma',
+      hostname: '',
+      ipAddress: '192.168.31.9',
+      status: '',
+      lastHeartbeatAt: '',
+      snapshotCount: 0,
+    },
+  ];
+
+  it('normalizes missing device status to unknown', () => {
+    assert.strictEqual(normalizeDeviceStatus('online'), 'online');
+    assert.strictEqual(normalizeDeviceStatus('offline'), 'offline');
+    assert.strictEqual(normalizeDeviceStatus(''), 'unknown');
+    assert.strictEqual(normalizeDeviceStatus(undefined), 'unknown');
+  });
+
+  it('matches device search across hostname, device id, and IP address', () => {
+    assert.strictEqual(matchesDeviceSearch(devices[0], 'aaron'), true);
+    assert.strictEqual(matchesDeviceSearch(devices[1], 'ipad-beta'), true);
+    assert.strictEqual(matchesDeviceSearch(devices[2], '192.168'), true);
+    assert.strictEqual(matchesDeviceSearch(devices[2], 'missing'), false);
+  });
+
+  it('applies search, status filter, and snapshot sort without mutating input', () => {
+    const result = applyDeviceListControls(devices, {
+      query: '10.0.0',
+      status: 'all',
+      sort: 'snapshots',
+    });
+
+    assert.deepStrictEqual(result.map((device) => device.deviceId), ['ipad-beta', 'mac-alpha']);
+    assert.deepStrictEqual(devices.map((device) => device.deviceId), ['mac-alpha', 'ipad-beta', 'phone-gamma']);
+  });
+
+  it('filters offline and unknown statuses separately', () => {
+    const offline = applyDeviceListControls(devices, { query: '', status: 'offline', sort: 'name' });
+    const unknown = applyDeviceListControls(devices, { query: '', status: 'unknown', sort: 'name' });
+
+    assert.deepStrictEqual(offline.map((device) => device.deviceId), ['ipad-beta']);
+    assert.deepStrictEqual(unknown.map((device) => device.deviceId), ['phone-gamma']);
+  });
+
+  it('sorts devices by latest heartbeat first', () => {
+    const result = applyDeviceListControls(devices, { query: '', status: 'all', sort: 'heartbeat' });
+
+    assert.deepStrictEqual(result.map((device) => device.deviceId), ['mac-alpha', 'ipad-beta', 'phone-gamma']);
+  });
+
+  it('falls back to name sort for unsupported sort keys', () => {
+    const result = [...devices].sort((a, b) => compareDevicesForSort(a, b, 'unsupported'));
+
+    assert.deepStrictEqual(result.map((device) => device.deviceId), ['mac-alpha', 'ipad-beta', 'phone-gamma']);
   });
 });
