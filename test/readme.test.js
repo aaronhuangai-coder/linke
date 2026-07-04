@@ -84,6 +84,10 @@ describe('README — version coverage', () => {
   it('mentions V0.16 (device list controls)', () => {
     assertReadmeContains(/V0\.16/, 'V0.16');
   });
+
+  it('mentions V0.17 (backup jobs overview)', () => {
+    assertReadmeContains(/V0\.17/, 'V0.17');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -204,6 +208,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /设备列表控制[\s\S]*搜索[\s\S]*状态过滤[\s\S]*排序|device list controls[\s\S]*search[\s\S]*filter[\s\S]*sort/i,
       'Web Console device list controls',
+    );
+  });
+
+  it('documents the Web Console backup jobs overview panel', () => {
+    assertReadmeContains(
+      /备份任务概览[\s\S]*jobName[\s\S]*sourcePath[\s\S]*快照数|backup jobs overview[\s\S]*jobName[\s\S]*sourcePath[\s\S]*snapshot/i,
+      'Web Console backup jobs overview panel',
     );
   });
 });

@@ -1,8 +1,8 @@
-# Linke V0.16
+# Linke V0.17
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.16** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.17** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -23,16 +23,18 @@
 | V0.13 | Web NAS dry-run panel | Web Console 新增 NAS dry-run 面板，可粘贴 nasTargets 配置并查看 wouldConnect:false / wouldWrite:false 的计划 |
 | V0.14 | NAS app adapter dry-run | 为 Synology / Ugreen 目标生成应用嵌套调用计划，不调用 NAS app、不连接、不写入 |
 | V0.15 | 设备详情面板 | Web Console 新增只读设备详情面板，展示 deviceId / hostname / ipAddress / status / lastHeartbeatAt / lastBackupAt / snapshotCount |
-| V0.16 | 当前版本 | Web Console 设备面板新增搜索、状态过滤、排序和计数工具栏，纯前端只读派生视图 |
+| V0.16 | 设备列表控制 | Web Console 设备面板新增搜索、状态过滤、排序和计数工具栏，纯前端只读派生视图 |
+| V0.17 | 当前版本 | Web Console 新增只读备份任务概览面板，从现有 snapshot 元数据按 jobName/sourcePath 聚合任务视图 |
 
 ## 特性
 
 - **设备心跳** — 注册设备并跟踪在线状态
 - **设备列表控制** — Web Console 设备面板支持按名称 / Device ID / IP 搜索、按状态过滤（全部 / 在线 / 离线 / 未知）、按名称 / IP / 最后心跳 / 快照数排序，并实时显示可见 / 总数计数
+- **备份任务概览** — Web Console 只读备份任务概览面板，从现有 snapshot 元数据按 jobName / sourcePath 聚合，展示任务数、快照总数、最近备份时间和每个任务的详情
 - **设备详情** — Web Console 可只读查看设备的 deviceId、hostname、IP 地址、状态、最后心跳、最后备份和快照数
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板
+- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板 / 备份任务概览
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
@@ -234,6 +236,17 @@ V0.16 在 Web Console 设备面板中增加紧凑工具栏，支持：
 
 该功能仅前端只读派生视图，不新增写接口、不触发备份、不连接 NAS、不新增 API 路由。筛选状态不持久化，刷新页面后重置。如果筛选结果隐藏了已选设备，设备详情面板不会清空，只有当 `/api/devices` 中不再包含该设备时才清空详情。
 
+### Web Console 备份任务概览
+
+V0.17 在 Web Console 中增加只读备份任务概览面板。选中设备后，控制台复用现有 `/api/devices/:deviceId/snapshots` 响应，从 snapshot 元数据推导备份任务：
+
+- 优先按 `jobName` 聚合
+- 缺失 `jobName` 时按 `sourcePath` 聚合
+- 展示任务数、快照总数、最近备份时间
+- 每个任务展示任务名、源路径、快照数、最近备份时间和最近文件数
+
+该面板只读展示历史快照中可确认存在的任务，不新增 API 路由、不写入 metadata、不触发备份、不创建快照、不连接 NAS、不调用 NAS app、不执行远程传输。尚未执行过、没有历史 snapshot 的配置任务不会出现在 V0.17 概览中。
+
 ### Web Console 保留计划面板
 
 V0.7 在 Web Console 中增加只读保留计划面板。选中设备后，控制台会请求该设备的 `retention-dry-run` 计划，并显示：
@@ -364,7 +377,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板。
 
 ## 技术约束
 

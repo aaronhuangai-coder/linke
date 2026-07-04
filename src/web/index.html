@@ -104,6 +104,29 @@
           <li class="placeholder">请选择一个设备</li>
         </ul>
       </section>
+      <section class="panel backup-jobs-panel" data-testid="backup-jobs-panel">
+        <h2>备份任务概览 <span id="backup-jobs-device-name" class="device-name" data-testid="backup-jobs-device-name"></span></h2>
+        <div class="backup-jobs-stats">
+          <div class="backup-jobs-stat">
+            <span id="backup-jobs-total-count" data-testid="backup-jobs-total-count">0</span>
+            <span>任务数</span>
+          </div>
+          <div class="backup-jobs-stat">
+            <span id="backup-jobs-snapshot-count" data-testid="backup-jobs-snapshot-count">0</span>
+            <span>快照数</span>
+          </div>
+          <div class="backup-jobs-stat">
+            <span id="backup-jobs-last-backup" data-testid="backup-jobs-last-backup">无备份</span>
+            <span>最近备份</span>
+          </div>
+        </div>
+        <ul id="backup-jobs-list" data-testid="backup-jobs-list">
+          <li class="placeholder">请选择一个设备</li>
+        </ul>
+        <div class="backup-jobs-safety-note" data-testid="backup-jobs-safety-note">
+          <p>备份任务概览为只读派生视图，只读取现有 snapshot 元数据，不触发备份、不创建快照、不写入元数据、不连接 NAS。</p>
+        </div>
+      </section>
       <section class="panel events-panel">
         <h2>事件日志</h2>
         <div data-testid="event-log" id="event-log"></div>

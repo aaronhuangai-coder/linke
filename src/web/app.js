@@ -75,6 +75,81 @@ export function parseNasDryRunConfig(value) {
   }
 }
 
+// ── V0.17 Backup Job Overview ──────────────────────────────────────
+
+function normalizeBackupJobName(value) {
+  const name = String(value || '').trim();
+  return name || '未命名任务';
+}
+
+function normalizeSourcePath(value) {
+  const sourcePath = String(value || '').trim();
+  return sourcePath || 'unknown';
+}
+
+function getSnapshotCreatedAtTime(snapshot) {
+  const value = Date.parse(snapshot?.createdAt || '');
+  return Number.isFinite(value) ? value : 0;
+}
+
+function getSnapshotFileCount(snapshot) {
+  return Number.isFinite(snapshot?.fileCount) ? snapshot.fileCount : 0;
+}
+
+export function buildBackupJobOverview(snapshots) {
+  const safeSnapshots = Array.isArray(snapshots) ? snapshots : [];
+  const groups = new Map();
+  let latestBackupAt = null;
+  let latestBackupTime = 0;
+
+  for (const snapshot of safeSnapshots) {
+    const rawJobName = String(snapshot?.jobName || '').trim();
+    const sourcePath = normalizeSourcePath(snapshot?.sourcePath);
+    const key = rawJobName ? 'job:' + rawJobName : 'source:' + sourcePath;
+    const createdAtTime = getSnapshotCreatedAtTime(snapshot);
+
+    if (createdAtTime > latestBackupTime) {
+      latestBackupAt = snapshot.createdAt;
+      latestBackupTime = createdAtTime;
+    }
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        jobName: normalizeBackupJobName(rawJobName),
+        sourcePath,
+        snapshotCount: 0,
+        latestSnapshotId: null,
+        latestCreatedAt: '',
+        latestFileCount: 0,
+        latestTime: 0,
+      });
+    }
+
+    const group = groups.get(key);
+    group.snapshotCount += 1;
+
+    if (createdAtTime >= group.latestTime) {
+      group.sourcePath = sourcePath;
+      group.latestSnapshotId = snapshot?.snapshotId || null;
+      group.latestCreatedAt = snapshot?.createdAt || '';
+      group.latestFileCount = getSnapshotFileCount(snapshot);
+      group.latestTime = createdAtTime;
+    }
+  }
+
+  const jobs = [...groups.values()]
+    .sort((a, b) => b.latestTime - a.latestTime || a.jobName.localeCompare(b.jobName))
+    .map(({ latestTime, ...job }) => job);
+
+  return {
+    jobCount: jobs.length,
+    snapshotCount: safeSnapshots.length,
+    latestBackupAt,
+    jobs,
+  };
+}
+
 // ── V0.16 Device List Controls ────────────────────────────────────
 
 export function normalizeDeviceStatus(status) {
@@ -170,6 +245,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const retentionKeepCountEl = doc.getElementById('retention-keep-count');
   const retentionDeleteCountEl = doc.getElementById('retention-delete-count');
   const retentionPlanListEl = doc.getElementById('retention-plan-list');
+  const backupJobsDeviceName = doc.getElementById('backup-jobs-device-name');
+  const backupJobsTotalCountEl = doc.getElementById('backup-jobs-total-count');
+  const backupJobsSnapshotCountEl = doc.getElementById('backup-jobs-snapshot-count');
+  const backupJobsLastBackupEl = doc.getElementById('backup-jobs-last-backup');
+  const backupJobsListEl = doc.getElementById('backup-jobs-list');
   const fleetTotalEl = doc.querySelector('[data-testid="fleet-total"]');
   const fleetOnlineEl = doc.querySelector('[data-testid="fleet-online"]');
   const fleetOfflineEl = doc.querySelector('[data-testid="fleet-offline"]');
@@ -342,19 +422,84 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     });
   }
 
+  function setBackupJobsCounts(jobCount, snapshotCount, latestBackupAt) {
+    if (backupJobsTotalCountEl) backupJobsTotalCountEl.textContent = String(jobCount);
+    if (backupJobsSnapshotCountEl) backupJobsSnapshotCountEl.textContent = String(snapshotCount);
+    if (backupJobsLastBackupEl) backupJobsLastBackupEl.textContent = formatLastBackup(latestBackupAt);
+  }
+
+  function setBackupJobsPlaceholder(message) {
+    clearElement(backupJobsListEl);
+    setBackupJobsCounts(0, 0, null);
+    if (!backupJobsListEl) return;
+    const item = doc.createElement('li');
+    item.className = 'placeholder';
+    item.textContent = message;
+    backupJobsListEl.appendChild(item);
+  }
+
+  function renderBackupJobsOverview(snapshots, deviceId) {
+    if (!backupJobsListEl) return;
+    if (backupJobsDeviceName) backupJobsDeviceName.textContent = '— ' + deviceId;
+
+    const overview = buildBackupJobOverview(snapshots);
+    setBackupJobsCounts(overview.jobCount, overview.snapshotCount, overview.latestBackupAt);
+    clearElement(backupJobsListEl);
+
+    if (overview.jobs.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '暂无备份任务';
+      backupJobsListEl.appendChild(item);
+      return;
+    }
+
+    overview.jobs.forEach(function (job) {
+      const item = doc.createElement('li');
+      item.className = 'backup-job-item';
+      item.setAttribute('data-testid', 'backup-job-item');
+
+      const name = doc.createElement('span');
+      name.className = 'backup-job-name';
+      name.setAttribute('data-testid', 'backup-job-name');
+      name.textContent = job.jobName;
+
+      const source = doc.createElement('span');
+      source.className = 'backup-job-source';
+      source.setAttribute('data-testid', 'backup-job-source');
+      source.textContent = job.sourcePath;
+
+      const meta = doc.createElement('span');
+      meta.className = 'backup-job-meta';
+      meta.setAttribute('data-testid', 'backup-job-meta');
+      meta.textContent = String(job.snapshotCount) + ' 快照 · 最近 '
+        + formatLastBackup(job.latestCreatedAt) + ' · '
+        + String(job.latestFileCount || 0) + ' files';
+
+      item.appendChild(name);
+      item.appendChild(source);
+      item.appendChild(meta);
+      backupJobsListEl.appendChild(item);
+    });
+  }
+
   async function fetchSnapshots(deviceId) {
     snapshotDeviceName.textContent = '— ' + deviceId;
     snapshotListEl.innerHTML = '<li class="placeholder">加载中…</li>';
+    if (backupJobsDeviceName) backupJobsDeviceName.textContent = '— ' + deviceId;
+    setBackupJobsPlaceholder('加载中…');
 
     try {
       const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snapshots = await res.json();
       renderSnapshots(snapshots, deviceId);
+      renderBackupJobsOverview(snapshots, deviceId);
       renderSnapshotDiffControls(snapshots, deviceId);
       logEvent('已加载 ' + snapshots.length + ' 个快照 (' + deviceId + ')', 'info');
     } catch (err) {
       snapshotListEl.innerHTML = '<li class="placeholder">加载失败</li>';
+      setBackupJobsPlaceholder('加载失败');
       setSnapshotDiffPlaceholder('加载失败');
       setRestoreDryRunPlaceholder('加载失败');
       logEvent('加载快照失败: ' + err.message, 'error');

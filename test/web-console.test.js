@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
 import {
   applyDeviceListControls,
+  buildBackupJobOverview,
   compareDevicesForSort,
   computeFleetSummary,
   formatLastBackup,
@@ -800,6 +801,41 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('device-sort'), 'app.js must reference device-sort');
     assert.ok(js.includes('applyDeviceListControls'), 'app.js must use applyDeviceListControls');
   });
+
+  // ── V0.17 Backup jobs overview HTML/source contract ─────────────
+
+  it('HTML contains V0.17 backup jobs overview panel hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="backup-jobs-panel"'), 'must have backup-jobs-panel');
+    assert.ok(html.includes('data-testid="backup-jobs-device-name"'), 'must have backup-jobs-device-name');
+    assert.ok(html.includes('data-testid="backup-jobs-total-count"'), 'must have backup-jobs-total-count');
+    assert.ok(html.includes('data-testid="backup-jobs-snapshot-count"'), 'must have backup-jobs-snapshot-count');
+    assert.ok(html.includes('data-testid="backup-jobs-last-backup"'), 'must have backup-jobs-last-backup');
+    assert.ok(html.includes('data-testid="backup-jobs-list"'), 'must have backup-jobs-list');
+    assert.ok(html.includes('data-testid="backup-jobs-safety-note"'), 'must have backup-jobs-safety-note');
+  });
+
+  it('backup jobs overview panel is read-only and has no execution button', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="backup-jobs-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'backup-jobs-panel section must exist');
+    assert.ok(!panelMatch[0].includes('<button'), 'backup jobs panel must not contain action buttons');
+    assert.ok(/只读|概览|不触发|不创建|不连接 NAS/.test(panelMatch[0]), 'panel must communicate read-only behavior');
+    assert.ok(!/执行备份|创建备份|删除|编辑|重试|远程传输/i.test(panelMatch[0]), 'panel must not expose execution wording');
+  });
+
+  it('app.js wires backup jobs overview into snapshot loading', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('buildBackupJobOverview'), 'app.js must reference buildBackupJobOverview');
+    assert.ok(js.includes('backup-jobs-list'), 'app.js must reference backup-jobs-list');
+    assert.ok(js.includes('renderBackupJobsOverview'), 'app.js must render backup jobs overview');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -989,6 +1025,86 @@ describe('parseNasDryRunConfig', () => {
 
     assert.strictEqual(result.ok, false);
     assert.match(result.error, /JSON 格式错误/);
+  });
+});
+
+// ── V0.17 buildBackupJobOverview ────────────────────────────────────
+
+describe('buildBackupJobOverview', () => {
+  it('groups snapshots by jobName and sorts jobs by latest backup first', () => {
+    const result = buildBackupJobOverview([
+      {
+        snapshotId: '11111111-1111-1111-1111-111111111111',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-04T10:00:00.000Z',
+        fileCount: 4,
+      },
+      {
+        snapshotId: '22222222-2222-2222-2222-222222222222',
+        jobName: 'photos',
+        sourcePath: '/Users/ah/Pictures',
+        createdAt: '2026-07-04T12:00:00.000Z',
+        fileCount: 9,
+      },
+      {
+        snapshotId: '33333333-3333-3333-3333-333333333333',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-04T11:00:00.000Z',
+        fileCount: 7,
+      },
+    ]);
+
+    assert.strictEqual(result.jobCount, 2);
+    assert.strictEqual(result.snapshotCount, 3);
+    assert.strictEqual(result.latestBackupAt, '2026-07-04T12:00:00.000Z');
+    assert.deepStrictEqual(result.jobs.map((job) => job.jobName), ['photos', 'documents']);
+    assert.strictEqual(result.jobs[1].snapshotCount, 2);
+    assert.strictEqual(result.jobs[1].latestSnapshotId, '33333333-3333-3333-3333-333333333333');
+    assert.strictEqual(result.jobs[1].latestFileCount, 7);
+  });
+
+  it('groups unnamed snapshots by sourcePath with stable fallbacks', () => {
+    const result = buildBackupJobOverview([
+      {
+        snapshotId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        sourcePath: '/Users/ah/Desktop',
+        createdAt: 'not-a-date',
+      },
+      {
+        snapshotId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        jobName: '',
+        sourcePath: '/Users/ah/Desktop',
+        createdAt: '2026-07-04T13:00:00.000Z',
+        fileCount: 3,
+      },
+      {
+        snapshotId: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        sourcePath: '',
+        createdAt: '',
+      },
+    ]);
+
+    assert.strictEqual(result.jobCount, 2);
+    assert.strictEqual(result.snapshotCount, 3);
+    assert.strictEqual(result.jobs[0].jobName, '未命名任务');
+    assert.strictEqual(result.jobs[0].sourcePath, '/Users/ah/Desktop');
+    assert.strictEqual(result.jobs[0].snapshotCount, 2);
+    assert.strictEqual(result.jobs[0].latestFileCount, 3);
+    assert.strictEqual(result.jobs[1].sourcePath, 'unknown');
+    assert.doesNotMatch(JSON.stringify(result), /undefined|null|Invalid Date/);
+  });
+
+  it('returns an empty overview for an empty snapshot list', () => {
+    const result = buildBackupJobOverview([]);
+
+    assert.deepStrictEqual(result, {
+      jobCount: 0,
+      snapshotCount: 0,
+      latestBackupAt: null,
+      jobs: [],
+    });
   });
 });
 
@@ -1993,6 +2109,147 @@ describe('initConsole DOM data-testid hooks', () => {
     const unknownItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
     assert.strictEqual(unknownItems.length, 1, 'only 1 device item visible for unknown status');
     assert.match(unknownItems[0].textContent, /phone-3|TestPhone/, 'visible device must be the unknown-status phone');
+  });
+
+  // ── V0.17 Backup jobs overview DOM interaction ──────────────────
+
+  it('renders backup jobs overview when a device is clicked', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      {
+        deviceId: 'd4',
+        hostname: 'host-four',
+        status: 'online',
+        ipAddress: '10.0.0.4',
+        snapshotCount: 2,
+        lastHeartbeatAt: '2026-07-04T10:00:00.000Z',
+      },
+    ];
+    const snapshots = [
+      {
+        snapshotId: '11111111-1111-1111-1111-111111111111',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-04T10:00:00.000Z',
+        fileCount: 4,
+      },
+      {
+        snapshotId: '22222222-2222-2222-2222-222222222222',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-04T12:00:00.000Z',
+        fileCount: 8,
+      },
+    ];
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? snapshots : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const deviceItem = doc._created.find((el) => el.className && el.className.includes('device-item'));
+    assert.ok(deviceItem, 'device-item must exist');
+    deviceItem._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(doc.getElementById('backup-jobs-total-count').textContent, '1');
+    assert.strictEqual(doc.getElementById('backup-jobs-snapshot-count').textContent, '2');
+    const overviewText = doc.getElementById('backup-jobs-list').textContent;
+    assert.match(overviewText, /documents/);
+    assert.match(overviewText, /\/Users\/ah\/Documents/);
+    assert.match(overviewText, /2 快照/);
+    assert.match(overviewText, /8 files/);
+    assert.doesNotMatch(overviewText, /undefined|null|Invalid Date/);
+  });
+
+  it('clears stale backup-jobs overview immediately when switching to a device with pending snapshots', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      {
+        deviceId: 'dev-A',
+        hostname: 'Alpha',
+        status: 'online',
+        ipAddress: '10.0.0.10',
+        snapshotCount: 1,
+        lastHeartbeatAt: '2026-07-04T10:00:00.000Z',
+      },
+      {
+        deviceId: 'dev-B',
+        hostname: 'Beta',
+        status: 'online',
+        ipAddress: '10.0.0.11',
+        snapshotCount: 1,
+        lastHeartbeatAt: '2026-07-04T10:00:00.000Z',
+      },
+    ];
+    const snapshotsA = [
+      {
+        snapshotId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        jobName: 'alpha-job',
+        sourcePath: '/alpha/data',
+        createdAt: '2026-07-04T10:00:00.000Z',
+        fileCount: 3,
+      },
+    ];
+
+    // Deferred promise for device B's snapshots — stays pending until resolved manually
+    let resolveSnapshotsB;
+    const snapshotsBPromise = new Promise((resolve) => { resolveSnapshotsB = resolve; });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      if (url.includes('/snapshots')) {
+        if (url.includes('dev-A')) {
+          return { ok: true, status: 200, json: async () => snapshotsA };
+        }
+        if (url.includes('dev-B')) {
+          // Hang until we explicitly resolve
+          const data = await snapshotsBPromise;
+          return { ok: true, status: 200, json: async () => data };
+        }
+      }
+      return { ok: true, status: 200, json: async () => devices };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Click device A — snapshots resolve immediately
+    const deviceItems = doc._created.filter((el) => el.className && el.className.includes('device-item'));
+    assert.ok(deviceItems.length >= 2, 'must have at least 2 device items');
+    deviceItems[0]._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Verify backup-jobs shows device A data
+    assert.strictEqual(doc.getElementById('backup-jobs-device-name').textContent, '— dev-A');
+    assert.strictEqual(doc.getElementById('backup-jobs-total-count').textContent, '1');
+    const overviewTextA = doc.getElementById('backup-jobs-list').textContent;
+    assert.match(overviewTextA, /alpha-job/);
+
+    // Click device B — snapshots request is still pending
+    deviceItems[1]._listeners.click();
+    // Do NOT await — check immediately (synchronously after microtask)
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Backup-jobs must NOT show stale data from device A
+    assert.strictEqual(doc.getElementById('backup-jobs-device-name').textContent, '— dev-B');
+    assert.strictEqual(doc.getElementById('backup-jobs-total-count').textContent, '0');
+    assert.strictEqual(doc.getElementById('backup-jobs-snapshot-count').textContent, '0');
+    const overviewTextB = doc.getElementById('backup-jobs-list').textContent;
+    assert.doesNotMatch(overviewTextB, /alpha-job/, 'must not contain stale job name from device A');
+    assert.doesNotMatch(overviewTextB, /\/alpha\/data/, 'must not contain stale source path from device A');
+
+    // Clean up: resolve the pending promise so the test can finish
+    resolveSnapshotsB([]);
+    await new Promise((r) => setTimeout(r, 20));
   });
 });
 
