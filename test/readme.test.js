@@ -88,6 +88,55 @@ describe('README — version coverage', () => {
   it('mentions V0.17 (backup jobs overview)', () => {
     assertReadmeContains(/V0\.17/, 'V0.17');
   });
+
+  it('mentions V0.18 (backup job detail timeline)', () => {
+    assertReadmeContains(/V0\.18/, 'V0.18');
+  });
+});
+
+// ── V0.18 documentation ────────────────────────────────────────────
+
+describe('README — V0.18 backup job detail timeline', () => {
+  it('title says V0.18', () => {
+    assert.match(readme, /^# Linke V0\.18/m);
+  });
+
+  it('version badge says 当前版本：V0.18', () => {
+    assert.match(readme, /当前版本：V0\.18/);
+  });
+
+  it('version table has V0.18 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.18 \| 当前版本 \|/);
+  });
+
+  it('version table has V0.17 row with 备份任务概览 milestone', () => {
+    assert.match(readme, /\| V0\.17 \| 备份任务概览 \|/);
+  });
+
+  it('documents 备份任务详情时间线 as read-only derived view', () => {
+    assert.match(readme, /备份任务详情时间线/);
+    assert.match(readme, /只读派生视图/);
+  });
+
+  it('states 不触发备份 in backup job detail timeline section', () => {
+    assert.match(readme, /不触发备份/);
+  });
+
+  it('states 不执行恢复 in backup job detail timeline section', () => {
+    assert.match(readme, /不执行恢复/);
+  });
+
+  it('states 不连接 NAS in backup job detail timeline section', () => {
+    assert.match(readme, /不连接 NAS/);
+  });
+
+  it('states 不写入 metadata in backup job detail timeline section', () => {
+    assert.match(readme, /不写入 metadata/);
+  });
+
+  it('documents test coverage includes 备份任务详情时间线面板', () => {
+    assert.match(readme, /备份任务详情时间线面板/);
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -217,6 +266,20 @@ describe('README — Web Console', () => {
       'Web Console backup jobs overview panel',
     );
   });
+
+  it('documents the Web Console backup job detail timeline panel', () => {
+    assertReadmeContains(
+      /备份任务详情时间线[\s\S]*只读|backup job detail timeline[\s\S]*read.only/i,
+      'Web Console backup job detail timeline panel',
+    );
+  });
+
+  it('documents backup job detail timeline shows snapshot history', () => {
+    assertReadmeContains(
+      /snapshot ID[\s\S]*创建时间[\s\S]*文件数量|snapshot.*ID[\s\S]*createdAt[\s\S]*file.*count/i,
+      'backup job detail timeline snapshot history',
+    );
+  });
 });
 
 // ── Default binding: localhost / 127.0.0.1 ──────────────────────────
@@ -312,6 +375,27 @@ describe('README — security boundaries', () => {
     assertReadmeContains(
       /backup-preflight.*不.*复制|backup-preflight.*不.*写|备份预检.*不.*复制|备份预检.*不.*写|不写入.*metadata|不修改.*metadata/i,
       'backup-preflight-dry-run does not copy files or write metadata',
+    );
+  });
+
+  it('states backup job detail timeline is read-only and does NOT trigger backup', () => {
+    assertReadmeContains(
+      /备份任务详情时间线[\s\S]*不触发备份|backup job detail timeline[\s\S]*does not trigger backup/i,
+      'backup job detail timeline does not trigger backup',
+    );
+  });
+
+  it('states backup job detail timeline does NOT execute restore', () => {
+    assertReadmeContains(
+      /备份任务详情时间线[\s\S]*不执行恢复|backup job detail timeline[\s\S]*does not execute restore/i,
+      'backup job detail timeline does not execute restore',
+    );
+  });
+
+  it('states backup job detail timeline does NOT connect to NAS', () => {
+    assertReadmeContains(
+      /备份任务详情时间线[\s\S]*不连接.*NAS|backup job detail timeline[\s\S]*does not connect.*NAS/i,
+      'backup job detail timeline does not connect to NAS',
     );
   });
 });

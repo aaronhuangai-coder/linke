@@ -390,6 +390,93 @@ ul {
   font-size: 0.78rem;
 }
 
+.backup-job-detail-panel {
+  grid-column: 2 / 4;
+  max-height: 420px;
+}
+
+.backup-job-item {
+  cursor: pointer;
+}
+
+.backup-job-item.selected {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.backup-job-detail-summary {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.backup-job-detail-stat {
+  min-width: 92px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #e5e5e5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.backup-job-detail-stat span:first-child {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #222;
+  overflow-wrap: anywhere;
+}
+
+.backup-job-detail-source {
+  margin-bottom: 10px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+  color: #4b5563;
+  overflow-wrap: anywhere;
+}
+
+.backup-job-detail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backup-job-timeline-item {
+  padding: 9px 10px;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  display: grid;
+  gap: 3px;
+}
+
+.backup-job-timeline-id {
+  font-weight: 700;
+  font-size: 0.86rem;
+  color: #222;
+  overflow-wrap: anywhere;
+}
+
+.backup-job-timeline-created,
+.backup-job-timeline-file-count,
+.backup-job-timeline-source {
+  font-size: 0.76rem;
+  color: #6b7280;
+  overflow-wrap: anywhere;
+}
+
+.backup-job-timeline-source {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.backup-job-detail-safety-note {
+  margin-top: 10px;
+  color: #6b7280;
+  font-size: 0.78rem;
+}
+
 .snapshot-detail-panel {
   grid-column: 2 / 4;
   max-height: 420px;

@@ -127,6 +127,30 @@
           <p>备份任务概览为只读派生视图，只读取现有 snapshot 元数据，不触发备份、不创建快照、不写入元数据、不连接 NAS。</p>
         </div>
       </section>
+      <section class="panel backup-job-detail-panel" data-testid="backup-job-detail-panel">
+        <h2>备份任务详情 <span id="backup-job-detail-device-name" class="device-name" data-testid="backup-job-detail-device-name"></span></h2>
+        <div class="backup-job-detail-summary">
+          <div class="backup-job-detail-stat">
+            <span id="backup-job-detail-title" data-testid="backup-job-detail-title">未选择</span>
+            <span>任务</span>
+          </div>
+          <div class="backup-job-detail-stat">
+            <span id="backup-job-detail-count" data-testid="backup-job-detail-count">0</span>
+            <span>快照数</span>
+          </div>
+          <div class="backup-job-detail-stat">
+            <span id="backup-job-detail-latest" data-testid="backup-job-detail-latest">无备份</span>
+            <span>最近备份</span>
+          </div>
+        </div>
+        <div id="backup-job-detail-source" class="backup-job-detail-source" data-testid="backup-job-detail-source">sourcePath: —</div>
+        <ul id="backup-job-detail-list" class="backup-job-detail-list" data-testid="backup-job-detail-list">
+          <li class="placeholder" data-testid="backup-job-detail-empty">请选择一个备份任务</li>
+        </ul>
+        <div class="backup-job-detail-safety-note" data-testid="backup-job-detail-safety-note">
+          <p>备份任务详情时间线为只读派生视图，只读取现有 snapshot 元数据，不触发备份、不执行恢复、不写入元数据、不连接 NAS。</p>
+        </div>
+      </section>
       <section class="panel events-panel">
         <h2>事件日志</h2>
         <div data-testid="event-log" id="event-log"></div>

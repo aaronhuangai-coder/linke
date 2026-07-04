@@ -96,6 +96,12 @@ function getSnapshotFileCount(snapshot) {
   return Number.isFinite(snapshot?.fileCount) ? snapshot.fileCount : 0;
 }
 
+function getBackupJobKey(snapshot) {
+  const rawJobName = String(snapshot?.jobName || '').trim();
+  const sourcePath = normalizeSourcePath(snapshot?.sourcePath);
+  return rawJobName ? 'job:' + rawJobName : 'source:' + sourcePath;
+}
+
 export function buildBackupJobOverview(snapshots) {
   const safeSnapshots = Array.isArray(snapshots) ? snapshots : [];
   const groups = new Map();
@@ -105,7 +111,7 @@ export function buildBackupJobOverview(snapshots) {
   for (const snapshot of safeSnapshots) {
     const rawJobName = String(snapshot?.jobName || '').trim();
     const sourcePath = normalizeSourcePath(snapshot?.sourcePath);
-    const key = rawJobName ? 'job:' + rawJobName : 'source:' + sourcePath;
+    const key = getBackupJobKey(snapshot);
     const createdAtTime = getSnapshotCreatedAtTime(snapshot);
 
     if (createdAtTime > latestBackupTime) {
@@ -147,6 +153,41 @@ export function buildBackupJobOverview(snapshots) {
     snapshotCount: safeSnapshots.length,
     latestBackupAt,
     jobs,
+  };
+}
+
+export function buildBackupJobTimeline(snapshots, jobKey) {
+  const safeSnapshots = Array.isArray(snapshots) ? snapshots : [];
+  const selectedKey = String(jobKey || '').trim();
+  if (!selectedKey) return null;
+
+  const matchingSnapshots = safeSnapshots
+    .filter((snapshot) => getBackupJobKey(snapshot) === selectedKey)
+    .map((snapshot) => ({
+      snapshotId: snapshot?.snapshotId || '',
+      createdAt: snapshot?.createdAt || '',
+      sourcePath: normalizeSourcePath(snapshot?.sourcePath),
+      fileCount: getSnapshotFileCount(snapshot),
+      createdAtTime: getSnapshotCreatedAtTime(snapshot),
+    }))
+    .sort((a, b) => b.createdAtTime - a.createdAtTime || a.snapshotId.localeCompare(b.snapshotId));
+
+  if (matchingSnapshots.length === 0) return null;
+
+  const latestSnapshot = matchingSnapshots[0];
+  const rawJobName = String(safeSnapshots.find((snapshot) => getBackupJobKey(snapshot) === selectedKey)?.jobName || '').trim();
+  const sourcePath = latestSnapshot.sourcePath;
+  const timelineSnapshots = matchingSnapshots.map(({ createdAtTime, ...snapshot }) => snapshot);
+
+  return {
+    key: selectedKey,
+    jobName: normalizeBackupJobName(rawJobName),
+    sourcePath,
+    snapshotCount: timelineSnapshots.length,
+    latestSnapshotId: latestSnapshot.snapshotId || null,
+    latestCreatedAt: latestSnapshot.createdAt,
+    latestFileCount: latestSnapshot.fileCount,
+    snapshots: timelineSnapshots,
   };
 }
 
@@ -250,6 +291,12 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const backupJobsSnapshotCountEl = doc.getElementById('backup-jobs-snapshot-count');
   const backupJobsLastBackupEl = doc.getElementById('backup-jobs-last-backup');
   const backupJobsListEl = doc.getElementById('backup-jobs-list');
+  const backupJobDetailDeviceName = doc.getElementById('backup-job-detail-device-name');
+  const backupJobDetailTitleEl = doc.getElementById('backup-job-detail-title');
+  const backupJobDetailSourceEl = doc.getElementById('backup-job-detail-source');
+  const backupJobDetailCountEl = doc.getElementById('backup-job-detail-count');
+  const backupJobDetailLatestEl = doc.getElementById('backup-job-detail-latest');
+  const backupJobDetailListEl = doc.getElementById('backup-job-detail-list');
   const fleetTotalEl = doc.querySelector('[data-testid="fleet-total"]');
   const fleetOnlineEl = doc.querySelector('[data-testid="fleet-online"]');
   const fleetOfflineEl = doc.querySelector('[data-testid="fleet-offline"]');
@@ -257,6 +304,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   let selectedDeviceId = null;
   let selectedSnapshotId = null;
+  let selectedBackupJobKey = null;
+  let cachedSnapshots = [];
   let cachedDevices = [];
 
   const deviceSearchInput = doc.getElementById('device-search');
@@ -412,6 +461,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       li.addEventListener('click', function () {
         selectedDeviceId = device.deviceId;
         selectedSnapshotId = null;
+        selectedBackupJobKey = null;
+        cachedSnapshots = [];
+        setBackupJobDetailPlaceholder('加载中…', device.deviceId);
         renderDeviceDetail(device);
         renderFilteredDevices();
         fetchSnapshots(device.deviceId);
@@ -438,6 +490,72 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     backupJobsListEl.appendChild(item);
   }
 
+  function setBackupJobDetailSummary(title, sourcePath, snapshotCount, latestBackupAt) {
+    if (backupJobDetailTitleEl) backupJobDetailTitleEl.textContent = title;
+    if (backupJobDetailSourceEl) backupJobDetailSourceEl.textContent = 'sourcePath: ' + sourcePath;
+    if (backupJobDetailCountEl) backupJobDetailCountEl.textContent = String(snapshotCount);
+    if (backupJobDetailLatestEl) backupJobDetailLatestEl.textContent = formatLastBackup(latestBackupAt);
+  }
+
+  function setBackupJobDetailPlaceholder(message, deviceId) {
+    if (backupJobDetailDeviceName) backupJobDetailDeviceName.textContent = deviceId ? '— ' + deviceId : '';
+    setBackupJobDetailSummary('未选择', '—', 0, null);
+    clearElement(backupJobDetailListEl);
+    if (!backupJobDetailListEl) return;
+
+    const item = doc.createElement('li');
+    item.className = 'placeholder';
+    item.setAttribute('data-testid', 'backup-job-detail-empty');
+    item.textContent = message;
+    backupJobDetailListEl.appendChild(item);
+  }
+
+  function renderBackupJobDetail(jobKey, snapshots, deviceId) {
+    if (backupJobDetailDeviceName) backupJobDetailDeviceName.textContent = deviceId ? '— ' + deviceId : '';
+
+    const timeline = buildBackupJobTimeline(snapshots, jobKey);
+    if (!timeline) {
+      setBackupJobDetailPlaceholder('请选择一个备份任务', deviceId);
+      return;
+    }
+
+    setBackupJobDetailSummary(timeline.jobName, timeline.sourcePath, timeline.snapshotCount, timeline.latestCreatedAt);
+    clearElement(backupJobDetailListEl);
+    if (!backupJobDetailListEl) return;
+
+    timeline.snapshots.forEach(function (snapshot) {
+      const item = doc.createElement('li');
+      item.className = 'backup-job-timeline-item';
+      item.setAttribute('data-testid', 'backup-job-timeline-item');
+
+      const id = doc.createElement('span');
+      id.className = 'backup-job-timeline-id';
+      id.setAttribute('data-testid', 'backup-job-timeline-id');
+      id.textContent = snapshot.snapshotId ? snapshot.snapshotId.slice(0, 8) + '…' : 'unknown';
+
+      const created = doc.createElement('span');
+      created.className = 'backup-job-timeline-created';
+      created.setAttribute('data-testid', 'backup-job-timeline-created');
+      created.textContent = '创建时间 ' + formatLastBackup(snapshot.createdAt);
+
+      const fileCount = doc.createElement('span');
+      fileCount.className = 'backup-job-timeline-file-count';
+      fileCount.setAttribute('data-testid', 'backup-job-timeline-file-count');
+      fileCount.textContent = String(snapshot.fileCount || 0) + ' files';
+
+      const source = doc.createElement('span');
+      source.className = 'backup-job-timeline-source';
+      source.setAttribute('data-testid', 'backup-job-timeline-source');
+      source.textContent = snapshot.sourcePath;
+
+      item.appendChild(id);
+      item.appendChild(created);
+      item.appendChild(fileCount);
+      item.appendChild(source);
+      backupJobDetailListEl.appendChild(item);
+    });
+  }
+
   function renderBackupJobsOverview(snapshots, deviceId) {
     if (!backupJobsListEl) return;
     if (backupJobsDeviceName) backupJobsDeviceName.textContent = '— ' + deviceId;
@@ -456,8 +574,14 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
     overview.jobs.forEach(function (job) {
       const item = doc.createElement('li');
-      item.className = 'backup-job-item';
+      item.className = 'backup-job-item' + (job.key === selectedBackupJobKey ? ' selected' : '');
       item.setAttribute('data-testid', 'backup-job-item');
+      item.dataset.backupJobKey = job.key;
+      item.addEventListener('click', function () {
+        selectedBackupJobKey = job.key;
+        renderBackupJobsOverview(cachedSnapshots, deviceId);
+        renderBackupJobDetail(selectedBackupJobKey, cachedSnapshots, deviceId);
+      });
 
       const name = doc.createElement('span');
       name.className = 'backup-job-name';
@@ -486,20 +610,28 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   async function fetchSnapshots(deviceId) {
     snapshotDeviceName.textContent = '— ' + deviceId;
     snapshotListEl.innerHTML = '<li class="placeholder">加载中…</li>';
+    selectedBackupJobKey = null;
+    cachedSnapshots = [];
     if (backupJobsDeviceName) backupJobsDeviceName.textContent = '— ' + deviceId;
     setBackupJobsPlaceholder('加载中…');
+    setBackupJobDetailPlaceholder('加载中…', deviceId);
 
     try {
       const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snapshots = await res.json();
-      renderSnapshots(snapshots, deviceId);
-      renderBackupJobsOverview(snapshots, deviceId);
-      renderSnapshotDiffControls(snapshots, deviceId);
-      logEvent('已加载 ' + snapshots.length + ' 个快照 (' + deviceId + ')', 'info');
+      cachedSnapshots = Array.isArray(snapshots) ? snapshots : [];
+      renderSnapshots(cachedSnapshots, deviceId);
+      renderBackupJobsOverview(cachedSnapshots, deviceId);
+      renderBackupJobDetail(null, cachedSnapshots, deviceId);
+      renderSnapshotDiffControls(cachedSnapshots, deviceId);
+      logEvent('已加载 ' + cachedSnapshots.length + ' 个快照 (' + deviceId + ')', 'info');
     } catch (err) {
+      cachedSnapshots = [];
+      selectedBackupJobKey = null;
       snapshotListEl.innerHTML = '<li class="placeholder">加载失败</li>';
       setBackupJobsPlaceholder('加载失败');
+      setBackupJobDetailPlaceholder('加载失败', deviceId);
       setSnapshotDiffPlaceholder('加载失败');
       setRestoreDryRunPlaceholder('加载失败');
       logEvent('加载快照失败: ' + err.message, 'error');
