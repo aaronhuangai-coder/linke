@@ -1,8 +1,8 @@
-# Linke V0.18
+# Linke V0.19
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.18** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.19** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -25,7 +25,8 @@
 | V0.15 | 设备详情面板 | Web Console 新增只读设备详情面板，展示 deviceId / hostname / ipAddress / status / lastHeartbeatAt / lastBackupAt / snapshotCount |
 | V0.16 | 设备列表控制 | Web Console 设备面板新增搜索、状态过滤、排序和计数工具栏，纯前端只读派生视图 |
 | V0.17 | 备份任务概览 | Web Console 新增只读备份任务概览面板，从现有 snapshot 元数据按 jobName/sourcePath 聚合任务视图 |
-| V0.18 | 当前版本 | Web Console 新增只读备份任务详情时间线，从既有 snapshot 元数据展示单个任务的历史版本 |
+| V0.18 | 备份任务详情时间线 | Web Console 新增只读备份任务详情时间线，从既有 snapshot 元数据展示单个任务的历史版本 |
+| V0.19 | 当前版本 | Web Console 备份任务时间线 snapshot 联动，可点击任务历史版本并复用快照清单详情与恢复预检 dry-run |
 
 ## 特性
 
@@ -33,10 +34,11 @@
 - **设备列表控制** — Web Console 设备面板支持按名称 / Device ID / IP 搜索、按状态过滤（全部 / 在线 / 离线 / 未知）、按名称 / IP / 最后心跳 / 快照数排序，并实时显示可见 / 总数计数
 - **备份任务概览** — Web Console 只读备份任务概览面板，从现有 snapshot 元数据按 jobName / sourcePath 聚合，展示任务数、快照总数、最近备份时间和每个任务的详情
 - **备份任务详情时间线** — Web Console 可从备份任务概览中选择一个任务，只读查看该任务的历史快照时间线、源路径、快照数量和最近备份时间
+- **备份任务时间线 snapshot 联动** — Web Console 可从备份任务详情时间线中选择单个历史 snapshot，并复用快照清单详情与恢复预检 dry-run 面板查看版本内容和恢复影响预览
 - **设备详情** — Web Console 可只读查看设备的 deviceId、hostname、IP 地址、状态、最后心跳、最后备份和快照数
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线
+- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线 / 备份任务时间线 snapshot 联动
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
@@ -261,6 +263,16 @@ V0.18 在 Web Console 中增加只读备份任务详情时间线。选中设备�
 
 该面板是只读派生视图，不新增 API 路由、不写入 metadata、不触发备份、不执行恢复、不创建快照、不删除快照、不连接 NAS、不调用 NAS app、不执行远程传输。时间线行在 V0.18 中不联动 manifest detail 或 restore dry-run。尚未执行过、没有历史 snapshot 的配置任务不会出现在详情时间线中。
 
+### Web Console 备份任务时间线 snapshot 联动
+
+V0.19 在 V0.18 的备份任务详情时间线上增加只读 snapshot 联动。选中设备并选择一个备份任务后，可以点击该任务时间线中的某个历史 snapshot。控制台会复用现有快照清单详情和恢复预检 dry-run 面板：
+
+- 快照清单详情显示该 snapshot 的 manifest、sourcePath、createdAt 和文件列表
+- 恢复预检 dry-run 使用当前目标目录输入，显示 would-create / would-overwrite 预览
+- 时间线行会显示选中态，帮助确认当前查看的历史版本
+
+该联动只读取既有 snapshot、manifest 和 restore-dry-run 结果，不新增 API 路由、不写入 metadata、不执行恢复、不复制文件、不覆盖文件、不创建目录、不删除快照、不连接 NAS、不调用 NAS app、不执行远程传输。点击备份任务本身不会自动选择 snapshot；只有点击具体时间线行才会加载 manifest detail 和 restore dry-run。
+
 ### Web Console 保留计划面板
 
 V0.7 在 Web Console 中增加只读保留计划面板。选中设备后，控制台会请求该设备的 `retention-dry-run` 计划，并显示：
@@ -364,6 +376,12 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 - 纯只读操作：读取 `sourcePath` 的目录项并应用 `excludePatterns`
 - 当前版本仍允许调用方传入服务端本机 `sourcePath`，不提供生产级路径沙箱
 
+### 备份任务时间线 snapshot 联动安全保证
+
+- 备份任务时间线 snapshot 联动只调用既有 manifest detail 与 restore-dry-run 读取接口，不执行恢复、不写入 metadata、不连接 NAS。
+- 不新增 API 路由、不复制文件、不覆盖文件、不创建目录、不删除快照、不调用 NAS app、不执行远程传输。
+- 纯只读操作：复用现有快照清单详情和恢复预检 dry-run 面板展示历史版本内容和恢复影响预览。
+
 ### NAS 实现现状
 
 > **重要**：当前 NAS 实现仅为 **dry-run provider 骨架**。它只负责验证配置结构和输出计划，**不会建立真实 NAS 连接**，不会执行真实远程备份。真实 NAS 传输功能尚未实现。
@@ -391,7 +409,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动。
 
 ## 技术约束
 

@@ -525,8 +525,22 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
     timeline.snapshots.forEach(function (snapshot) {
       const item = doc.createElement('li');
-      item.className = 'backup-job-timeline-item';
+      item.className = 'backup-job-timeline-item'
+        + (snapshot.snapshotId && snapshot.snapshotId === selectedSnapshotId ? ' selected' : '');
       item.setAttribute('data-testid', 'backup-job-timeline-item');
+      item.dataset.snapshotId = snapshot.snapshotId;
+      item.addEventListener('click', function () {
+        const safeSnapshotId = String(snapshot.snapshotId || '').trim();
+        if (!safeSnapshotId) return;
+        const siblings = backupJobDetailListEl.children || [];
+        for (let i = 0; i < siblings.length; i++) {
+          if (siblings[i].className && siblings[i].className.indexOf('backup-job-timeline-item') === 0) {
+            siblings[i].className = 'backup-job-timeline-item';
+          }
+        }
+        item.className = 'backup-job-timeline-item selected';
+        selectSnapshotForDetail(deviceId, safeSnapshotId);
+      });
 
       const id = doc.createElement('span');
       id.className = 'backup-job-timeline-id';
@@ -638,6 +652,17 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function selectSnapshotForDetail(deviceId, snapshotId) {
+    const safeSnapshotId = String(snapshotId || '').trim();
+    if (!deviceId || !safeSnapshotId) return;
+    selectedSnapshotId = safeSnapshotId;
+    if (selectedBackupJobKey) {
+      renderBackupJobDetail(selectedBackupJobKey, cachedSnapshots, deviceId);
+    }
+    fetchSnapshotManifest(deviceId, safeSnapshotId);
+    fetchRestoreDryRunPlan(deviceId, safeSnapshotId);
+  }
+
   function renderSnapshots(snapshots, deviceId) {
     snapshotListEl.innerHTML = '';
     if (snapshots.length === 0) {
@@ -650,9 +675,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       li.setAttribute('data-testid', 'snapshot-item');
       li.dataset.snapshotId = snap.snapshotId;
       li.addEventListener('click', function () {
-        selectedSnapshotId = snap.snapshotId;
-        fetchSnapshotManifest(deviceId, snap.snapshotId);
-        fetchRestoreDryRunPlan(deviceId, snap.snapshotId);
+        selectSnapshotForDetail(deviceId, snap.snapshotId);
       });
 
       const id = doc.createElement('span');

@@ -873,6 +873,8 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('buildBackupJobTimeline'), 'app.js must reference buildBackupJobTimeline');
     assert.ok(js.includes('backup-job-detail-list'), 'app.js must reference backup-job-detail-list');
     assert.ok(js.includes('renderBackupJobDetail'), 'app.js must render backup job detail');
+    assert.ok(js.includes('selectSnapshotForDetail'), 'app.js must share snapshot detail selection logic');
+    assert.ok(js.includes('dataset.snapshotId'), 'timeline rows must store snapshot id for selection');
   });
 });
 
@@ -2614,6 +2616,188 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.doesNotMatch(detailTextB, /alpha-job/, 'must not contain stale job name from device A');
     assert.doesNotMatch(detailTextB, /aaaaaaaa/, 'must not contain stale snapshot ID from device A');
     assert.doesNotMatch(detailTextB, /\/alpha\/data/, 'must not contain stale source path from device A');
+  });
+
+  // ── V0.19 Timeline snapshot selection ────────────────────────────
+
+  it('clicking a backup job timeline snapshot loads manifest detail and restore dry-run', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const devices = [
+      {
+        deviceId: 'd5',
+        hostname: 'host-five',
+        status: 'online',
+        ipAddress: '10.0.0.5',
+        snapshotCount: 2,
+        lastHeartbeatAt: '2026-07-05T10:00:00.000Z',
+      },
+    ];
+    const snapshots = [
+      {
+        snapshotId: 'timeline-1111',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-05T10:00:00.000Z',
+        fileCount: 3,
+      },
+      {
+        snapshotId: 'timeline-2222',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-05T11:00:00.000Z',
+        fileCount: 5,
+      },
+    ];
+    const manifest = {
+      snapshotId: 'timeline-2222',
+      deviceId: 'd5',
+      createdAt: '2026-07-05T11:00:00.000Z',
+      sourcePath: '/Users/ah/Documents',
+      files: ['new.txt', 'nested/version.md'],
+    };
+    const restorePlan = {
+      mode: 'dry-run',
+      wouldWrite: false,
+      summary: { totalFiles: 2, wouldCreateCount: 1, wouldOverwriteCount: 1 },
+      files: [
+        { sourceRelativePath: 'new.txt', targetPath: '/tmp/linke/new.txt', action: 'would-create' },
+        { sourceRelativePath: 'nested/version.md', targetPath: '/tmp/linke/nested/version.md', action: 'would-overwrite' },
+      ],
+    };
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url.includes('/restore-dry-run')) {
+        return { ok: true, status: 200, json: async () => restorePlan };
+      }
+      if (url.includes('/manifest')) {
+        return { ok: true, status: 200, json: async () => manifest };
+      }
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? snapshots : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('restore-dry-run-target').value = '/tmp/linke';
+
+    const deviceItem = doc._created.find((el) => el.className && el.className.includes('device-item'));
+    deviceItem._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const backupJob = doc._created.find((el) => el.className && el.className.includes('backup-job-item'));
+    backupJob._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const timelineRows = doc._created.filter((el) => el.className && el.className.includes('backup-job-timeline-item'));
+    const newestRow = timelineRows.find((el) => el.dataset.snapshotId === 'timeline-2222');
+    assert.ok(newestRow, 'newest timeline row must expose data-snapshot-id');
+    assert.ok(newestRow._listeners.click, 'timeline row must have click handler');
+    newestRow._listeners.click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.ok(
+      calls.includes('/api/devices/d5/snapshots/timeline-2222/manifest'),
+      `must fetch manifest endpoint, got calls: ${calls.join(', ')}`,
+    );
+    assert.ok(
+      calls.includes('/api/devices/d5/snapshots/timeline-2222/restore-dry-run?targetPath=%2Ftmp%2Flinke'),
+      `must fetch restore dry-run endpoint, got calls: ${calls.join(', ')}`,
+    );
+    assert.match(newestRow.className, /selected/);
+    assert.match(doc.getElementById('snapshot-detail-content').textContent, /nested\/version\.md/);
+    assert.match(doc.getElementById('restore-dry-run-result').textContent, /would-overwrite/);
+  });
+
+  it('clears selected backup job timeline snapshot when switching devices', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'dev-A', hostname: 'A', status: 'online', ipAddress: '10.0.0.10', snapshotCount: 1 },
+      { deviceId: 'dev-B', hostname: 'B', status: 'online', ipAddress: '10.0.0.11', snapshotCount: 0 },
+    ];
+    const snapshotsA = [
+      {
+        snapshotId: 'dev-a-snap',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-05T10:00:00.000Z',
+        fileCount: 2,
+      },
+    ];
+    const calls = [];
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      if (url.includes('/manifest')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            snapshotId: 'dev-a-snap',
+            deviceId: 'dev-A',
+            sourcePath: '/Users/ah/Documents',
+            createdAt: '2026-07-05T10:00:00.000Z',
+            files: ['a.txt'],
+          }),
+        };
+      }
+      if (url.includes('/restore-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            wouldWrite: false,
+            summary: { totalFiles: 0, wouldCreateCount: 0, wouldOverwriteCount: 0 },
+            files: [],
+          }),
+        };
+      }
+      if (url.includes('/api/devices/dev-A/snapshots')) {
+        return { ok: true, status: 200, json: async () => snapshotsA };
+      }
+      if (url.includes('/api/devices/dev-B/snapshots')) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => devices };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const deviceA = doc._created.find((el) => el.dataset.deviceId === 'dev-A');
+    const deviceB = doc._created.find((el) => el.dataset.deviceId === 'dev-B');
+
+    deviceA._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const backupJob = doc._created.find((el) => el.className && el.className.includes('backup-job-item'));
+    backupJob._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const timelineRow = doc._created.find((el) => el.className && el.className.includes('backup-job-timeline-item'));
+    timelineRow._listeners.click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.match(timelineRow.className, /selected/);
+
+    deviceB._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.doesNotMatch(doc.getElementById('backup-job-detail-list').textContent, /dev-a-snap/);
+    assert.strictEqual(doc.getElementById('backup-job-detail-title').textContent, '未选择');
+    calls.length = 0;
+
+    doc.getElementById('restore-dry-run-target')._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(!calls.some((url) => String(url).includes('dev-a-snap')), 'old selected snapshot must not be reused after device switch');
   });
 });
 

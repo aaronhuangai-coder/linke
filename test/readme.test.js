@@ -92,25 +92,29 @@ describe('README — version coverage', () => {
   it('mentions V0.18 (backup job detail timeline)', () => {
     assertReadmeContains(/V0\.18/, 'V0.18');
   });
+
+  it('mentions V0.19 (backup job timeline snapshot linking)', () => {
+    assertReadmeContains(/V0\.19/, 'V0.19');
+  });
 });
 
-// ── V0.18 documentation ────────────────────────────────────────────
+// ── V0.19 documentation ────────────────────────────────────────────
 
-describe('README — V0.18 backup job detail timeline', () => {
-  it('title says V0.18', () => {
-    assert.match(readme, /^# Linke V0\.18/m);
+describe('README — V0.19 backup job timeline snapshot linking', () => {
+  it('title says V0.19', () => {
+    assert.match(readme, /^# Linke V0\.19/m);
   });
 
-  it('version badge says 当前版本：V0.18', () => {
-    assert.match(readme, /当前版本：V0\.18/);
+  it('version badge says 当前版本：V0.19', () => {
+    assert.match(readme, /当前版本：V0\.19/);
   });
 
-  it('version table has V0.18 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.18 \| 当前版本 \|/);
+  it('version table has V0.19 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.19 \| 当前版本 \|/);
   });
 
-  it('version table has V0.17 row with 备份任务概览 milestone', () => {
-    assert.match(readme, /\| V0\.17 \| 备份任务概览 \|/);
+  it('version table has V0.18 row with 备份任务详情时间线 milestone', () => {
+    assert.match(readme, /\| V0\.18 \| 备份任务详情时间线 \|/);
   });
 
   it('documents 备份任务详情时间线 as read-only derived view', () => {
@@ -136,6 +140,23 @@ describe('README — V0.18 backup job detail timeline', () => {
 
   it('documents test coverage includes 备份任务详情时间线面板', () => {
     assert.match(readme, /备份任务详情时间线面板/);
+  });
+
+  it('documents timeline snapshot linking to manifest detail and restore dry-run', () => {
+    assert.match(readme, /时间线 snapshot 联动/);
+    assert.match(readme, /manifest detail|快照清单详情/);
+    assert.match(readme, /restore dry-run|恢复预检/);
+  });
+
+  it('states timeline snapshot linking remains read-only and does not execute restore', () => {
+    assert.match(readme, /时间线 snapshot 联动[\s\S]*只读/);
+    assert.match(readme, /时间线 snapshot 联动[\s\S]*不执行恢复/);
+    assert.match(readme, /时间线 snapshot 联动[\s\S]*不写入 metadata/);
+    assert.match(readme, /时间线 snapshot 联动[\s\S]*不连接 NAS/);
+  });
+
+  it('documents test coverage includes 备份任务时间线 snapshot 联动', () => {
+    assert.match(readme, /备份任务时间线 snapshot 联动/);
   });
 });
 

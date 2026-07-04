@@ -450,6 +450,12 @@ ul {
   margin-bottom: 6px;
   display: grid;
   gap: 3px;
+  cursor: pointer;
+}
+
+.backup-job-timeline-item.selected {
+  border-color: #2563eb;
+  background: #eff6ff;
 }
 
 .backup-job-timeline-id {
