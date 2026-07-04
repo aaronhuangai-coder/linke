@@ -876,6 +876,36 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('selectSnapshotForDetail'), 'app.js must share snapshot detail selection logic');
     assert.ok(js.includes('dataset.snapshotId'), 'timeline rows must store snapshot id for selection');
   });
+
+  // ── V0.20 Event Log panel HTML contract ─────────────────────────
+
+  it('HTML contains V0.20 Event Log panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="event-log-panel"'), 'must have event-log-panel');
+    assert.ok(html.includes('data-testid="event-total-count"'), 'must have event-total-count');
+    assert.ok(html.includes('data-testid="event-info-count"'), 'must have event-info-count');
+    assert.ok(html.includes('data-testid="event-error-count"'), 'must have event-error-count');
+    assert.ok(html.includes('data-testid="event-latest-message"'), 'must have event-latest-message');
+    assert.ok(html.includes('data-testid="event-log-safety-note"'), 'must have event-log-safety-note');
+  });
+
+  it('V0.20 Event Log panel is read-only, has no button, and contains safety note', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/<section class="panel events-panel" data-testid="event-log-panel">([\s\S]*?)<\/section>/);
+
+    assert.ok(panelMatch, 'event-log-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(!content.includes('<button'), 'event log panel must not contain any button');
+    assert.ok(content.includes('前端内存'), 'must mention 前端内存');
+    assert.ok(content.includes('只读'), 'must mention 只读');
+    assert.ok(content.includes('不写入 metadata'), 'must mention 不写入 metadata');
+    assert.ok(content.includes('不触发备份'), 'must mention 不触发备份');
+    assert.ok(content.includes('不执行恢复'), 'must mention 不执行恢复');
+    assert.ok(content.includes('不连接 NAS'), 'must mention 不连接 NAS');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -1301,13 +1331,32 @@ function buildMockDoc() {
   const elements = {};
   const createdElements = [];
 
+  function normalizeKey(key) {
+    if (typeof key !== 'string') return key;
+    let k = key.trim();
+    if (k.startsWith('#')) {
+      k = k.slice(1);
+    }
+    const match = k.match(/^\[data-testid=["']([^"']+)["']\]$/);
+    if (match) {
+      k = match[1];
+    }
+    return k;
+  }
+
   function getOrCreate(id) {
-    if (!elements[id]) {
-      elements[id] = {
+    const norm = normalizeKey(id);
+    if (!elements[norm]) {
+      elements[norm] = {
         textContent: '',
         innerHTML: '',
         value: '',
-        prepend: () => {},
+        prepend(c) {
+          this.children.unshift(c);
+          if (c.textContent) {
+            this.textContent = c.textContent + this.textContent;
+          }
+        },
         className: '',
         dataset: {},
         children: [],
@@ -1318,10 +1367,37 @@ function buildMockDoc() {
           if (c.textContent) this.textContent += c.textContent;
         },
         addEventListener(type, fn) { this._listeners[type] = fn; },
-        setAttribute(k, v) { this._attrs[k] = v; this[k] = v; },
+        setAttribute(k, v) {
+          this._attrs[k] = v;
+          this[k] = v;
+          if (k.startsWith('data-')) {
+            const camel = k.slice(5).replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+            this.dataset[camel] = v;
+          }
+        },
+        getAttribute(k) { return this._attrs[k] || null; },
+        get lastChild() { return this.children[this.children.length - 1] || null; },
+        removeChild(c) {
+          const idx = this.children.indexOf(c);
+          if (idx !== -1) {
+            this.children.splice(idx, 1);
+          }
+          this.textContent = this.children.map(child => child.textContent || '').join('');
+          return c;
+        },
+        querySelector(sel) {
+          const norm = normalizeKey(sel);
+          return this.children.find(c => {
+            if (c._attrs?.['data-testid'] === norm) return true;
+            if (c._attrs?.['id'] === norm) return true;
+            if (c.id === norm) return true;
+            if (typeof sel === 'string' && sel.startsWith('.') && c.className?.includes(sel.slice(1))) return true;
+            return false;
+          }) || null;
+        }
       };
     }
-    return elements[id];
+    return elements[norm];
   }
 
   const doc = {
@@ -1342,8 +1418,39 @@ function buildMockDoc() {
           if (child.textContent) this.textContent += child.textContent;
         },
         addEventListener(type, fn) { this._listeners[type] = fn; },
-        setAttribute(k, v) { this._attrs[k] = v; },
-        prepend() {},
+        setAttribute(k, v) {
+          this._attrs[k] = v;
+          if (k.startsWith('data-')) {
+            const camel = k.slice(5).replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+            this.dataset[camel] = v;
+          }
+        },
+        getAttribute(k) { return this._attrs[k] || null; },
+        prepend(c) {
+          this.children.unshift(c);
+          if (c.textContent) {
+            this.textContent = c.textContent + this.textContent;
+          }
+        },
+        get lastChild() { return this.children[this.children.length - 1] || null; },
+        removeChild(c) {
+          const idx = this.children.indexOf(c);
+          if (idx !== -1) {
+            this.children.splice(idx, 1);
+          }
+          this.textContent = this.children.map(child => child.textContent || '').join('');
+          return c;
+        },
+        querySelector(sel) {
+          const norm = normalizeKey(sel);
+          return this.children.find(c => {
+            if (c._attrs?.['data-testid'] === norm) return true;
+            if (c._attrs?.['id'] === norm) return true;
+            if (c.id === norm) return true;
+            if (typeof sel === 'string' && sel.startsWith('.') && c.className?.includes(sel.slice(1))) return true;
+            return false;
+          }) || null;
+        }
       };
       createdElements.push(el);
       return el;
@@ -2872,5 +2979,149 @@ describe('V0.16 device list controls helpers', () => {
     const result = [...devices].sort((a, b) => compareDevicesForSort(a, b, 'unsupported'));
 
     assert.deepStrictEqual(result.map((device) => device.deviceId), ['mac-alpha', 'ipad-beta', 'phone-gamma']);
+  });
+});
+
+// ── V0.20 Event Log Panel unit tests ───────────────────────────────────
+
+describe('V0.20 Event Log Panel unit tests', () => {
+  it('initConsole() renders structured event entries with child hooks', async () => {
+    const doc = buildMockDoc();
+    const devices = [];
+    const mockFetch = async () => ({ ok: true, status: 200, json: async () => devices });
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const eventLogEl = doc.getElementById('event-log');
+    assert.ok(eventLogEl, 'event-log element must exist');
+
+    const entries = eventLogEl.children.filter(
+      (el) => el._attrs?.['data-testid'] === 'event-entry'
+    );
+    assert.ok(entries.length > 0, 'must render event-entry element(s)');
+
+    const entry = entries.find(el => el.textContent.includes('Linke 控制台已启动')) || entries[0];
+    assert.strictEqual(entry._attrs['data-event-type'], 'info');
+
+    // Check child hooks
+    const timeEl = entry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-time');
+    const typeEl = entry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-type');
+    const messageEl = entry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-message');
+
+    assert.ok(timeEl, 'must have event-entry-time child hook');
+    assert.ok(typeEl, 'must have event-entry-type child hook');
+    assert.ok(messageEl, 'must have event-entry-message child hook');
+
+    assert.strictEqual(typeEl.textContent, 'info', 'typeEl textContent must be info');
+    assert.ok(messageEl.textContent.includes('Linke 控制台已启动'), 'message hook must contain the logged message');
+  });
+
+  it('Device load failure renders an error event as text', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async () => {
+      throw new Error('Connection refused');
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const eventLogEl = doc.getElementById('event-log');
+    const entries = eventLogEl.children.filter(
+      (el) => el._attrs?.['data-testid'] === 'event-entry'
+    );
+
+    const errorEntry = entries.find((el) => el._attrs?.['data-event-type'] === 'error');
+    assert.ok(errorEntry, 'must log an error event on load failure');
+
+    const typeEl = errorEntry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-type');
+    const messageEl = errorEntry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-message');
+    assert.ok(typeEl, 'must have event-entry-type hook');
+    assert.ok(messageEl, 'must have event-entry-message hook');
+    assert.strictEqual(typeEl.textContent, 'error', 'typeEl textContent must be error');
+    assert.ok(messageEl.textContent.includes('Connection refused'), 'must render error message as text');
+  });
+
+  it('Newest event appears first', async () => {
+    const doc = buildMockDoc();
+    const devices = [];
+    let fetchCount = 0;
+    const mockFetch = async () => {
+      fetchCount++;
+      if (fetchCount === 1) {
+        return { ok: true, status: 200, json: async () => devices };
+      } else {
+        throw new Error('Failure ' + fetchCount);
+      }
+    };
+    let intervalCallback;
+    const mockInterval = (fn) => {
+      intervalCallback = fn;
+      return 123;
+    };
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(intervalCallback, 'should register interval callback');
+    await intervalCallback();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const eventLogEl = doc.getElementById('event-log');
+    const entries = eventLogEl.children.filter(
+      (el) => el._attrs?.['data-testid'] === 'event-entry'
+    );
+
+    assert.ok(entries.length >= 2, 'should have at least two entries');
+    const firstEntry = entries[0];
+    assert.strictEqual(firstEntry._attrs['data-event-type'], 'error', 'newest event must be error');
+    const firstMsgEl = firstEntry.children.find((el) => el._attrs?.['data-testid'] === 'event-entry-message');
+    assert.ok(firstMsgEl.textContent.includes('Failure 2'), 'first entry must be the newest message');
+  });
+
+  it('Visible event entries are capped at 50, and cumulative counts are not reduced', async () => {
+    const doc = buildMockDoc();
+    const devices = [];
+    let fetchCount = 0;
+    const mockFetch = async () => {
+      fetchCount++;
+      if (fetchCount <= 30) {
+        return { ok: true, status: 200, json: async () => devices };
+      } else {
+        throw new Error('Simulated failure ' + fetchCount);
+      }
+    };
+    let intervalCallback;
+    const mockInterval = (fn) => {
+      intervalCallback = fn;
+      return 123;
+    };
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    for (let i = 0; i < 59; i++) {
+      await intervalCallback();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    const eventLogEl = doc.getElementById('event-log');
+    const entries = eventLogEl.children.filter(
+      (el) => el._attrs?.['data-testid'] === 'event-entry'
+    );
+
+    assert.strictEqual(entries.length, 50, 'visible entries must be capped at 50');
+
+    const totalCountEl = doc.getElementById('event-total-count');
+    const infoCountEl = doc.getElementById('event-info-count');
+    const errorCountEl = doc.getElementById('event-error-count');
+    const latestMessageEl = doc.getElementById('event-latest-message');
+
+    assert.strictEqual(totalCountEl.textContent, '61', 'cumulative total count must show 61');
+    assert.strictEqual(infoCountEl.textContent, '31', 'cumulative info count must show 31');
+    assert.strictEqual(errorCountEl.textContent, '30', 'cumulative error count must show 30');
+    assert.ok(latestMessageEl.textContent.includes('Simulated failure 60'), 'latest message must show latest log content');
   });
 });

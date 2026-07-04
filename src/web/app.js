@@ -281,6 +281,15 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const snapshotDiffUnchangedCountEl = doc.getElementById('snapshot-diff-unchanged-count');
   const snapshotDiffResultEl = doc.getElementById('snapshot-diff-result');
   const eventLogEl = doc.getElementById('event-log');
+  const eventTotalCountEl = doc.getElementById('event-total-count');
+  const eventInfoCountEl = doc.getElementById('event-info-count');
+  const eventErrorCountEl = doc.getElementById('event-error-count');
+  const eventLatestMessageEl = doc.getElementById('event-latest-message');
+
+  const EVENT_LOG_VISIBLE_LIMIT = 50;
+  let eventTotalCount = 0;
+  let eventInfoCount = 0;
+  let eventErrorCount = 0;
   const retentionDeviceName = doc.getElementById('retention-device-name');
   const retentionKeepLastInput = doc.getElementById('retention-keep-last');
   const retentionKeepCountEl = doc.getElementById('retention-keep-count');
@@ -344,12 +353,72 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   function logEvent(msg, type) {
-    type = type || 'info';
+    if (!eventLogEl) return;
+    const eventMessage = String(msg || '');
+
+    let eventType = type;
+    if (eventType !== 'info' && eventType !== 'error') {
+      eventType = 'info';
+    }
+
+    eventTotalCount++;
+    if (eventType === 'info') {
+      eventInfoCount++;
+    } else if (eventType === 'error') {
+      eventErrorCount++;
+    }
+
+    if (eventTotalCountEl) {
+      eventTotalCountEl.textContent = String(eventTotalCount);
+    }
+    if (eventInfoCountEl) {
+      eventInfoCountEl.textContent = String(eventInfoCount);
+    }
+    if (eventErrorCountEl) {
+      eventErrorCountEl.textContent = String(eventErrorCount);
+    }
+    if (eventLatestMessageEl) {
+      eventLatestMessageEl.textContent = eventMessage;
+    }
+
     const entry = doc.createElement('div');
-    entry.className = 'event-entry event-' + type;
-    const ts = new Date().toLocaleTimeString();
-    entry.textContent = '[' + ts + '] ' + msg;
+    entry.className = 'event-entry event-' + eventType;
+    entry.setAttribute('data-testid', 'event-entry');
+    entry.setAttribute('data-event-type', eventType);
+
+    const timeEl = doc.createElement('span');
+    timeEl.className = 'event-entry-time';
+    timeEl.setAttribute('data-testid', 'event-entry-time');
+    timeEl.textContent = '[' + new Date().toLocaleTimeString() + '] ';
+
+    const typeEl = doc.createElement('span');
+    typeEl.className = 'event-entry-type';
+    typeEl.setAttribute('data-testid', 'event-entry-type');
+    typeEl.textContent = eventType;
+
+    const messageEl = doc.createElement('span');
+    messageEl.className = 'event-entry-message';
+    messageEl.setAttribute('data-testid', 'event-entry-message');
+    messageEl.textContent = eventMessage;
+
+    entry.appendChild(timeEl);
+    entry.appendChild(typeEl);
+    entry.appendChild(messageEl);
+
     eventLogEl.prepend(entry);
+
+    if (eventLogEl.children) {
+      while (eventLogEl.children.length > EVENT_LOG_VISIBLE_LIMIT) {
+        if (eventLogEl.removeChild && eventLogEl.lastChild) {
+          eventLogEl.removeChild(eventLogEl.lastChild);
+        } else {
+          eventLogEl.children.pop();
+          if (typeof eventLogEl.textContent === 'string') {
+            eventLogEl.textContent = eventLogEl.children.map(c => c.textContent || '').join('');
+          }
+        }
+      }
+    }
   }
 
   async function fetchDevices() {

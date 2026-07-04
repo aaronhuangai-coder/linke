@@ -96,21 +96,29 @@ describe('README — version coverage', () => {
   it('mentions V0.19 (backup job timeline snapshot linking)', () => {
     assertReadmeContains(/V0\.19/, 'V0.19');
   });
+
+  it('mentions V0.20 (event log panel enhancement)', () => {
+    assertReadmeContains(/V0\.20/, 'V0.20');
+  });
 });
 
-// ── V0.19 documentation ────────────────────────────────────────────
+// ── V0.20 documentation ────────────────────────────────────────────
 
-describe('README — V0.19 backup job timeline snapshot linking', () => {
-  it('title says V0.19', () => {
-    assert.match(readme, /^# Linke V0\.19/m);
+describe('README — V0.20 event log panel enhancement', () => {
+  it('title says V0.20', () => {
+    assert.match(readme, /^# Linke V0\.20/m);
   });
 
-  it('version badge says 当前版本：V0.19', () => {
-    assert.match(readme, /当前版本：V0\.19/);
+  it('version badge says 当前版本：V0.20', () => {
+    assert.match(readme, /当前版本：V0\.20/);
   });
 
-  it('version table has V0.19 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.19 \| 当前版本 \|/);
+  it('version table has V0.20 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.20 \| 当前版本 \|/);
+  });
+
+  it('version table has V0.19 row with 备份任务时间线 snapshot 联动 milestone', () => {
+    assert.match(readme, /\| V0\.19 \| 备份任务时间线 snapshot 联动 \|/);
   });
 
   it('version table has V0.18 row with 备份任务详情时间线 milestone', () => {
@@ -157,6 +165,29 @@ describe('README — V0.19 backup job timeline snapshot linking', () => {
 
   it('documents test coverage includes 备份任务时间线 snapshot 联动', () => {
     assert.match(readme, /备份任务时间线 snapshot 联动/);
+  });
+
+  it('documents event logs are front-end memory only, read-only, reset on refresh, cap at 50, page-lifecycle cumulative count', () => {
+    assert.match(readme, /前端内存|前端内存态/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /刷新|重置/);
+    assert.match(readme, /50\s*(条|个)/);
+    assert.match(readme, /累计计数|页面生命周期/);
+  });
+
+  it('asserts safety docs for event log panel enhancement', () => {
+    assert.match(readme, /事件日志面板增强安全保证/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不触发备份|不进行备份/);
+    assert.match(readme, /不执行恢复|不进行恢复/);
+    assert.match(readme, /不删除快照|不进行删除/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不调用 NAS app|不调用 NAS 应用/);
+    assert.match(readme, /不执行远程传输|不进行远程文件传输/);
+  });
+
+  it('documents test coverage includes 事件日志面板增强', () => {
+    assert.match(readme, /事件日志面板增强/);
   });
 });
 

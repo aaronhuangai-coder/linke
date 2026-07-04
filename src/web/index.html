@@ -151,9 +151,30 @@
           <p>备份任务详情时间线为只读派生视图，只读取现有 snapshot 元数据，不触发备份、不执行恢复、不写入元数据、不连接 NAS。</p>
         </div>
       </section>
-      <section class="panel events-panel">
-        <h2>事件日志</h2>
+      <section class="panel events-panel" data-testid="event-log-panel">
+        <h2>事件日志 (只读)</h2>
+        <div class="event-summary">
+          <div class="event-summary-stat">
+            <span id="event-total-count" data-testid="event-total-count">0</span>
+            <span>总事件</span>
+          </div>
+          <div class="event-summary-stat">
+            <span id="event-info-count" data-testid="event-info-count">0</span>
+            <span>信息</span>
+          </div>
+          <div class="event-summary-stat">
+            <span id="event-error-count" data-testid="event-error-count">0</span>
+            <span>错误</span>
+          </div>
+        </div>
+        <div class="event-latest">
+          <span class="event-latest-label">最新消息:</span>
+          <span id="event-latest-message" data-testid="event-latest-message" class="event-latest-message">无事件</span>
+        </div>
         <div data-testid="event-log" id="event-log"></div>
+        <div class="event-log-safety-note" data-testid="event-log-safety-note">
+          <p>事件日志仅保存在当前页面前端内存中，只读展示本页面生命周期内的控制台事件；不写入 metadata、不触发备份、不执行恢复、不连接 NAS。</p>
+        </div>
       </section>
       <section class="panel snapshot-detail-panel" data-testid="snapshot-detail-panel">
         <h2>快照清单详情 <span id="snapshot-detail-title" class="device-name"></span></h2>

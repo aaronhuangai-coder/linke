@@ -300,12 +300,82 @@ ul {
 }
 
 /* Event log */
+.event-summary {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.event-summary-stat {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #e5e5e5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.event-summary-stat span:first-child {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #222;
+}
+
+.event-latest {
+  margin-bottom: 12px;
+  font-size: 0.78rem;
+  padding: 8px 10px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  display: flex;
+  gap: 6px;
+}
+
+.event-latest-label {
+  font-weight: 600;
+  color: #4b5563;
+}
+
+.event-latest-message {
+  color: #111827;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow-wrap: anywhere;
+}
+
+.event-log-safety-note {
+  margin-top: 12px;
+  background: #fff8e1;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border-left: 3px solid #ffa000;
+  font-size: 0.82rem;
+  color: #6d4c00;
+}
+
 .event-entry {
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 0.8rem;
   margin-bottom: 4px;
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.event-entry-time {
+  color: #6b7280;
+  margin-right: 4px;
+}
+
+.event-entry-type {
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.event-entry-message {
+  color: #111827;
 }
 
 .event-info {
