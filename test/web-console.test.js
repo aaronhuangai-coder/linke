@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
 import {
   computeFleetSummary,
+  formatLastBackup,
   formatLastHeartbeat,
   formatSnapshotJobName,
   formatSnapshotMeta,
@@ -735,6 +736,34 @@ describe('Web Console / API contract', () => {
     assert.ok(panelMatch[0].includes('ugreen-files'), 'sample must include ugreen-files');
     assert.ok(!/password|token|apiKey|secret|accessKey|refreshToken/.test(panelMatch[0]), 'sample must not include credential fields');
   });
+
+  // ── V0.15 Device detail Web Console panel ───────────────────────
+
+  it('HTML contains device detail panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="device-detail-panel"'), 'must have device-detail-panel');
+    assert.ok(html.includes('data-testid="device-detail-content"'), 'must have device-detail-content');
+    assert.ok(html.includes('data-testid="device-detail-placeholder"'), 'must have device-detail-placeholder');
+    assert.ok(html.includes('data-testid="device-detail-device-id"'), 'must have device-detail-device-id');
+    assert.ok(html.includes('data-testid="device-detail-hostname"'), 'must have device-detail-hostname');
+    assert.ok(html.includes('data-testid="device-detail-ip"'), 'must have device-detail-ip');
+    assert.ok(html.includes('data-testid="device-detail-status"'), 'must have device-detail-status');
+    assert.ok(html.includes('data-testid="device-detail-heartbeat"'), 'must have device-detail-heartbeat');
+    assert.ok(html.includes('data-testid="device-detail-backup"'), 'must have device-detail-backup');
+    assert.ok(html.includes('data-testid="device-detail-snapshots"'), 'must have device-detail-snapshots');
+  });
+
+  it('device detail panel starts with a select-device placeholder', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="device-detail-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'device-detail-panel section must exist');
+    assert.ok(panelMatch[0].includes('请选择一个设备'), 'panel must ask user to select a device');
+    assert.ok(!/编辑|保存|删除|远程执行|ping|probe|wake|shutdown/i.test(panelMatch[0]), 'panel must not expose management actions');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -810,6 +839,26 @@ describe('formatLastHeartbeat', () => {
       const result = formatLastHeartbeat(input);
       assert.ok(!result.includes('Invalid Date'), `got "Invalid Date" for input: ${input}`);
     }
+  });
+});
+
+describe('formatLastBackup', () => {
+  it('returns "无备份" for nullish or empty values', () => {
+    assert.strictEqual(formatLastBackup(null), '无备份');
+    assert.strictEqual(formatLastBackup(undefined), '无备份');
+    assert.strictEqual(formatLastBackup(''), '无备份');
+  });
+
+  it('returns "无备份" for invalid dates', () => {
+    assert.strictEqual(formatLastBackup('not-a-date'), '无备份');
+  });
+
+  it('returns a locale string for valid ISO date', () => {
+    const result = formatLastBackup('2025-01-15T10:00:00Z');
+
+    assert.ok(result.length > 0);
+    assert.notStrictEqual(result, 'Invalid Date');
+    assert.notStrictEqual(result, '无备份');
   });
 });
 
@@ -1048,6 +1097,114 @@ describe('initConsole DOM data-testid hooks', () => {
     const meta = doc._created.find((el) => el.className && el.className.includes('device-meta'));
     assert.ok(meta, 'device-meta element must be created');
     assert.strictEqual(meta._attrs['data-testid'], 'device-heartbeat');
+  });
+
+  it('renders selected device detail fields when a device is clicked', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      {
+        deviceId: 'd1',
+        hostname: 'host-one',
+        status: 'online',
+        ipAddress: '1.2.3.4',
+        snapshotCount: 7,
+        lastHeartbeatAt: '2025-01-15T10:00:00Z',
+        lastBackupAt: '2025-01-15T11:00:00Z',
+      },
+    ];
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const deviceItem = doc._created.find((el) => el.className && el.className.includes('device-item'));
+    assert.ok(deviceItem, 'device-item must exist');
+    deviceItem._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detailText = doc.getElementById('device-detail-content').textContent;
+    assert.match(detailText, /d1/);
+    assert.match(detailText, /host-one/);
+    assert.match(detailText, /1\.2\.3\.4/);
+    assert.match(detailText, /online/);
+    assert.match(detailText, /7/);
+    assert.doesNotMatch(detailText, /undefined|null|Invalid Date/);
+  });
+
+  it('renders device detail fallbacks for missing fields', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      {
+        deviceId: 'd2',
+        status: '',
+        lastHeartbeatAt: 'not-a-date',
+        lastBackupAt: 'also-not-a-date',
+      },
+    ];
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const deviceItem = doc._created.find((el) => el.className && el.className.includes('device-item'));
+    assert.ok(deviceItem, 'device-item must exist');
+    deviceItem._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detailText = doc.getElementById('device-detail-content').textContent;
+    assert.match(detailText, /d2/);
+    assert.match(detailText, /unknown/);
+    assert.match(detailText, /无心跳/);
+    assert.match(detailText, /无备份/);
+    assert.match(detailText, /0/);
+    assert.doesNotMatch(detailText, /undefined|null|Invalid Date/);
+  });
+
+  it('keeps existing device click behavior while rendering details', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const devices = [
+      {
+        deviceId: 'd3',
+        hostname: 'host-three',
+        status: 'online',
+        ipAddress: '10.0.0.3',
+        snapshotCount: 1,
+        lastHeartbeatAt: '2025-01-15T10:00:00Z',
+      },
+    ];
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 1, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const deviceItem = doc._created.find((el) => el.className && el.className.includes('device-item'));
+    assert.ok(deviceItem, 'device-item must exist');
+    deviceItem._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(calls.includes('/api/devices/d3/snapshots'), 'click must still fetch snapshots');
+    assert.ok(calls.includes('/api/devices/d3/retention-dry-run?keepLast=3'), 'click must still fetch retention dry-run');
+    assert.match(doc.getElementById('device-detail-content').textContent, /host-three/);
   });
 
   it('sets data-testid="snapshot-jobname" on job name element', async () => {

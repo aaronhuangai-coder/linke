@@ -38,6 +38,45 @@
         <h2>设备</h2>
         <ul data-testid="device-list" id="device-list"></ul>
       </section>
+      <section class="panel device-detail-panel" data-testid="device-detail-panel">
+        <h2>设备详情</h2>
+        <div id="device-detail-content" data-testid="device-detail-content">
+          <p class="placeholder" data-testid="device-detail-placeholder">请选择一个设备</p>
+          <dl class="device-detail-grid">
+            <div class="device-detail-row">
+              <dt>Device ID</dt>
+              <dd data-testid="device-detail-device-id">unknown</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>Hostname</dt>
+              <dd data-testid="device-detail-hostname">unknown</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>IP 地址</dt>
+              <dd data-testid="device-detail-ip">unknown</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>状态</dt>
+              <dd data-testid="device-detail-status">unknown</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>最后心跳</dt>
+              <dd data-testid="device-detail-heartbeat">无心跳</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>最后备份</dt>
+              <dd data-testid="device-detail-backup">无备份</dd>
+            </div>
+            <div class="device-detail-row">
+              <dt>快照数</dt>
+              <dd data-testid="device-detail-snapshots">0</dd>
+            </div>
+          </dl>
+        </div>
+        <div class="device-detail-safety-note" data-testid="device-detail-safety-note">
+          <p>设备详情面板为只读视图，仅展示现有设备状态，不修改设备、不写入元数据、不触发任何远程操作。</p>
+        </div>
+      </section>
       <section class="panel snapshots-panel">
         <h2>快照 <span id="snapshots-device-name" class="device-name"></span></h2>
         <ul data-testid="snapshot-list" id="snapshot-list">

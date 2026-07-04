@@ -1,8 +1,8 @@
-# Linke V0.14
+# Linke V0.15
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.14** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.15** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -21,14 +21,16 @@
 | V0.11 | 备份预检 dry-run | `backup-preflight-dry-run`：预览 sourcePath + excludePatterns 的 included / excluded，不创建快照、不复制、不写入 |
 | V0.12 | Web backup preflight panel | Web Console 新增备份预检 dry-run 面板，可输入 sourcePath / excludePatterns 并查看 included / excluded |
 | V0.13 | Web NAS dry-run panel | Web Console 新增 NAS dry-run 面板，可粘贴 nasTargets 配置并查看 wouldConnect:false / wouldWrite:false 的计划 |
-| V0.14 | 当前版本 | NAS app adapter dry-run：为 Synology / Ugreen 目标生成应用嵌套调用计划，不调用 NAS app、不连接、不写入 |
+| V0.14 | NAS app adapter dry-run | 为 Synology / Ugreen 目标生成应用嵌套调用计划，不调用 NAS app、不连接、不写入 |
+| V0.15 | 当前版本 | Web Console 新增只读设备详情面板，展示 deviceId / hostname / ipAddress / status / lastHeartbeatAt / lastBackupAt / snapshotCount |
 
 ## 特性
 
 - **设备心跳** — 注册设备并跟踪在线状态
+- **设备详情** — Web Console 可只读查看设备的 deviceId、hostname、IP 地址、状态、最后心跳、最后备份和快照数
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板
+- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志 / 保留计划面板
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
@@ -205,6 +207,20 @@ V0.14 在 NAS dry-run 中增加应用适配器计划。`nasTargets[]` 可声明�
 
 dry-run 输出会在对应 target 上增加 `adapterPlan`，包含 `wouldInvokeApp:false`、`wouldConnect:false`、`wouldWrite:false` 和计划步骤。该功能只生成应用嵌套调用预览，不调用 NAS app、不发起认证、不 ping/probe、不连接 NAS、不写入远端、不保存配置。`appAdapter` 内出现 credential 字段会被拒绝，provider 与 appId 不匹配也会被拒绝。
 
+### Web Console 设备详情面板
+
+V0.15 在 Web Console 中增加只读设备详情面板。点击设备列表中的任意设备后，面板会复用现有 `/api/devices` 数据显示：
+
+- `deviceId`
+- `hostname`
+- `ipAddress`
+- `status`
+- `lastHeartbeatAt`
+- `lastBackupAt`
+- `snapshotCount`
+
+该面板只做统一管理视图展示，不新增设备详情 API、不写入设备元数据、不提供编辑、删除、远程命令、ping/probe 或 NAS 操作按钮。缺失字段会显示稳定 fallback，例如 `unknown`、`无心跳`、`无备份` 或 `0`。
+
 ### Web Console 保留计划面板
 
 V0.7 在 Web Console 中增加只读保留计划面板。选中设备后，控制台会请求该设备的 `retention-dry-run` 计划，并显示：
@@ -335,7 +351,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板。
 
 ## 技术约束
 

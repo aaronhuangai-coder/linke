@@ -76,6 +76,10 @@ describe('README — version coverage', () => {
   it('mentions V0.14 (NAS app adapter dry-run)', () => {
     assertReadmeContains(/V0\.14/, 'V0.14');
   });
+
+  it('mentions V0.15 (device detail panel)', () => {
+    assertReadmeContains(/V0\.15/, 'V0.15');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -182,6 +186,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /appAdapter[\s\S]*adapterPlan[\s\S]*wouldInvokeApp:false|NAS app adapter[\s\S]*dry-run[\s\S]*不调用/i,
       'NAS app adapter dry-run docs',
+    );
+  });
+
+  it('documents the Web Console device detail panel', () => {
+    assertReadmeContains(
+      /设备详情[\s\S]*hostname[\s\S]*ipAddress[\s\S]*lastHeartbeatAt|device detail[\s\S]*hostname[\s\S]*ipAddress[\s\S]*snapshotCount/i,
+      'Web Console device detail panel',
     );
   });
 });

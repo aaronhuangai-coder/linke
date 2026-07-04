@@ -167,6 +167,44 @@ ul {
   color: #888;
 }
 
+.device-detail-panel {
+  align-content: start;
+}
+
+.device-detail-grid {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.device-detail-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 140px) 1fr;
+  gap: 12px;
+  align-items: baseline;
+  border-bottom: 1px solid #edf0f2;
+  padding: 7px 0;
+}
+
+.device-detail-row dt {
+  color: #6b7280;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.device-detail-row dd {
+  margin: 0;
+  color: #111827;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+
+.device-detail-safety-note {
+  margin-top: 10px;
+  color: #6b7280;
+  font-size: 0.78rem;
+}
+
 /* Snapshot list */
 .snapshot-item {
   padding: 10px 12px;

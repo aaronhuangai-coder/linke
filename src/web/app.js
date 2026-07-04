@@ -19,9 +19,17 @@ function isValidDate(value) {
   return !isNaN(d.getTime());
 }
 
-export function formatLastHeartbeat(value) {
-  if (!value || !isValidDate(value)) return '无心跳';
+function formatDateOrFallback(value, fallback) {
+  if (!value || !isValidDate(value)) return fallback;
   return new Date(value).toLocaleString();
+}
+
+export function formatLastHeartbeat(value) {
+  return formatDateOrFallback(value, '无心跳');
+}
+
+export function formatLastBackup(value) {
+  return formatDateOrFallback(value, '无备份');
 }
 
 export function formatSnapshotJobName(snapshot) {
@@ -71,6 +79,7 @@ export function parseNasDryRunConfig(value) {
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
   const deviceListEl = doc.getElementById('device-list');
+  const deviceDetailContentEl = doc.getElementById('device-detail-content');
   const snapshotListEl = doc.getElementById('snapshot-list');
   const snapshotDeviceName = doc.getElementById('snapshots-device-name');
   const snapshotDetailTitle = doc.getElementById('snapshot-detail-title');
@@ -139,12 +148,58 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const devices = await res.json();
       cachedDevices = devices;
+      const selectedDevice = devices.find((d) => d.deviceId === selectedDeviceId) || null;
+      if (!selectedDevice) selectedDeviceId = null;
       renderFleetSummary(devices);
       renderDevices(devices);
+      renderDeviceDetail(selectedDevice);
       logEvent('已加载 ' + devices.length + ' 台设备', 'info');
     } catch (err) {
       logEvent('加载设备失败: ' + err.message, 'error');
     }
+  }
+
+  function appendDeviceDetailRow(parent, testId, label, value) {
+    const row = doc.createElement('div');
+    row.className = 'device-detail-row';
+
+    const term = doc.createElement('dt');
+    term.textContent = label;
+
+    const detail = doc.createElement('dd');
+    detail.setAttribute('data-testid', testId);
+    detail.textContent = value;
+
+    row.appendChild(term);
+    row.appendChild(detail);
+    parent.appendChild(row);
+  }
+
+  function renderDeviceDetail(device) {
+    clearElement(deviceDetailContentEl);
+    if (!deviceDetailContentEl) return;
+
+    if (!device) {
+      const placeholder = doc.createElement('p');
+      placeholder.className = 'placeholder';
+      placeholder.setAttribute('data-testid', 'device-detail-placeholder');
+      placeholder.textContent = '请选择一个设备';
+      deviceDetailContentEl.appendChild(placeholder);
+      return;
+    }
+
+    const grid = doc.createElement('dl');
+    grid.className = 'device-detail-grid';
+
+    appendDeviceDetailRow(grid, 'device-detail-device-id', 'Device ID', device.deviceId || 'unknown');
+    appendDeviceDetailRow(grid, 'device-detail-hostname', 'Hostname', device.hostname || 'unknown');
+    appendDeviceDetailRow(grid, 'device-detail-ip', 'IP 地址', device.ipAddress || 'unknown');
+    appendDeviceDetailRow(grid, 'device-detail-status', '状态', device.status || 'unknown');
+    appendDeviceDetailRow(grid, 'device-detail-heartbeat', '最后心跳', formatLastHeartbeat(device.lastHeartbeatAt));
+    appendDeviceDetailRow(grid, 'device-detail-backup', '最后备份', formatLastBackup(device.lastBackupAt));
+    appendDeviceDetailRow(grid, 'device-detail-snapshots', '快照数', String(device.snapshotCount || 0));
+
+    deviceDetailContentEl.appendChild(grid);
   }
 
   function renderFleetSummary(devices) {
@@ -196,6 +251,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       li.addEventListener('click', function () {
         selectedDeviceId = device.deviceId;
         selectedSnapshotId = null;
+        renderDeviceDetail(device);
         renderDevices(devices);
         fetchSnapshots(device.deviceId);
         fetchRetentionPlan(device.deviceId);
