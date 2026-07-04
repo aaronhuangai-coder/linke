@@ -85,6 +85,46 @@
           <p>Restore dry-run 只做恢复预检，不复制文件、不覆盖文件、不创建目录、不写入目标目录。</p>
         </div>
       </section>
+      <section class="panel backup-preflight-panel" data-testid="backup-preflight-panel">
+        <h2>备份预检 dry-run</h2>
+        <div class="backup-preflight-controls">
+          <label for="backup-preflight-source">源路径</label>
+          <input
+            id="backup-preflight-source"
+            data-testid="backup-preflight-source"
+            type="text"
+            placeholder="/Users/ah/Documents"
+          >
+          <label for="backup-preflight-excludes">排除规则</label>
+          <textarea
+            id="backup-preflight-excludes"
+            data-testid="backup-preflight-excludes"
+            rows="3"
+          >*.tmp
+node_modules</textarea>
+          <button id="backup-preflight-run" data-testid="backup-preflight-run" type="button">预检 dry-run</button>
+        </div>
+        <div class="backup-preflight-stats">
+          <div class="backup-preflight-stat">
+            <span id="backup-preflight-total-count" data-testid="backup-preflight-total-count">0</span>
+            <span>总文件</span>
+          </div>
+          <div class="backup-preflight-stat">
+            <span id="backup-preflight-included-count" data-testid="backup-preflight-included-count">0</span>
+            <span>拟包含</span>
+          </div>
+          <div class="backup-preflight-stat">
+            <span id="backup-preflight-excluded-count" data-testid="backup-preflight-excluded-count">0</span>
+            <span>拟排除</span>
+          </div>
+        </div>
+        <div id="backup-preflight-result" data-testid="backup-preflight-result">
+          <p class="placeholder">请输入源路径进行备份预检</p>
+        </div>
+        <div class="backup-preflight-safety-note" data-testid="backup-preflight-safety-note">
+          <p>Backup preflight dry-run 只做只读预检，不创建快照、不复制文件、不写入 metadata 或仓库元数据。</p>
+        </div>
+      </section>
       <section class="panel snapshot-diff-panel" data-testid="snapshot-diff-panel">
         <h2>快照差异 dry-run <span id="snapshot-diff-device-name" class="device-name"></span></h2>
         <div class="snapshot-diff-controls">
@@ -167,7 +207,7 @@
           <h3>备份预检 Dry-Run 命令</h3>
           <code data-testid="backup-preflight-dry-run-command">node src/agent.js backup-preflight-dry-run --source ./important-docs --exclude "*.tmp" --exclude node_modules</code>
         </div>
-        <div class="agent-section" data-testid="backup-preflight-safety-note">
+        <div class="agent-section" data-testid="backup-preflight-command-safety-note">
           <p>⚠️ 备份预检 dry-run 只扫描 sourcePath — 不创建快照、不复制文件、不写入 metadata 或仓库元数据</p>
         </div>
         <div class="agent-section" data-testid="agent-safety-note">

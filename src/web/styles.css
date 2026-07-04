@@ -450,6 +450,127 @@ ul {
   color: #6d4c00;
 }
 
+.backup-preflight-panel {
+  grid-column: 2 / 4;
+  max-height: 500px;
+}
+
+.backup-preflight-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.backup-preflight-controls input,
+.backup-preflight-controls textarea {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.backup-preflight-controls textarea {
+  resize: vertical;
+}
+
+.backup-preflight-controls button {
+  grid-column: 2;
+  justify-self: start;
+  padding: 6px 12px;
+  border: 1px solid #4a4ae8;
+  border-radius: 4px;
+  background: #4a4ae8;
+  color: #fff;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.backup-preflight-stats {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.backup-preflight-stat {
+  min-width: 92px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #e5e5e5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.backup-preflight-stat span:first-child {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #222;
+}
+
+.backup-preflight-group {
+  margin-bottom: 10px;
+}
+
+.backup-preflight-group h3 {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #555;
+}
+
+.backup-preflight-file-list {
+  border: 1px solid #eee;
+  border-radius: 6px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.backup-preflight-file {
+  padding: 7px 10px;
+  border-bottom: 1px solid #f0f0f0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.78rem;
+}
+
+.backup-preflight-file:last-child {
+  border-bottom: 0;
+}
+
+.backup-preflight-path,
+.backup-preflight-pattern {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow-wrap: anywhere;
+}
+
+.backup-preflight-pattern {
+  color: #8a5b00;
+  background: #fff3d0;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 0.7rem;
+}
+
+.backup-preflight-safety-note {
+  margin-top: 12px;
+  background: #fff8e1;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border-left: 3px solid #ffa000;
+  font-size: 0.82rem;
+  color: #6d4c00;
+}
+
 .manifest-summary {
   display: grid;
   gap: 8px;

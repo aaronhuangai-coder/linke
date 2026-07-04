@@ -64,6 +64,10 @@ describe('README — version coverage', () => {
   it('mentions V0.11 (backup preflight dry-run)', () => {
     assertReadmeContains(/V0\.11/, 'V0.11');
   });
+
+  it('mentions V0.12 (Web backup preflight panel)', () => {
+    assertReadmeContains(/V0\.12/, 'V0.12');
+  });
 });
 
 // ── Agent CLI commands ──────────────────────────────────────────────
@@ -149,6 +153,13 @@ describe('README — Web Console', () => {
     assertReadmeContains(
       /备份预检[\s\S]*dry-run|backup-preflight-dry-run|sourcePath[\s\S]*excludePatterns/i,
       'Web Console backup preflight dry-run hint',
+    );
+  });
+
+  it('documents the Web Console backup preflight dry-run panel', () => {
+    assertReadmeContains(
+      /Web Console[\s\S]*备份预检[\s\S]*面板|backup-preflight-dry-run[\s\S]*Web Console[\s\S]*included[\s\S]*excluded|sourcePath[\s\S]*excludePatterns[\s\S]*面板/i,
+      'Web Console backup preflight dry-run panel',
     );
   });
 });

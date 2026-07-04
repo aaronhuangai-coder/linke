@@ -48,6 +48,13 @@ export function parseRetentionKeepLast(value) {
   return Number(raw);
 }
 
+export function parseBackupPreflightExcludePatterns(value) {
+  return String(value || '')
+    .split(/[\n,]/)
+    .map((pattern) => pattern.trim())
+    .filter(Boolean);
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
@@ -61,6 +68,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const restoreDryRunCreateCountEl = doc.getElementById('restore-dry-run-create-count');
   const restoreDryRunOverwriteCountEl = doc.getElementById('restore-dry-run-overwrite-count');
   const restoreDryRunResultEl = doc.getElementById('restore-dry-run-result');
+  const backupPreflightSourceInput = doc.getElementById('backup-preflight-source');
+  const backupPreflightExcludesInput = doc.getElementById('backup-preflight-excludes');
+  const backupPreflightRunButton = doc.getElementById('backup-preflight-run');
+  const backupPreflightTotalCountEl = doc.getElementById('backup-preflight-total-count');
+  const backupPreflightIncludedCountEl = doc.getElementById('backup-preflight-included-count');
+  const backupPreflightExcludedCountEl = doc.getElementById('backup-preflight-excluded-count');
+  const backupPreflightResultEl = doc.getElementById('backup-preflight-result');
   const snapshotDiffDeviceName = doc.getElementById('snapshot-diff-device-name');
   const snapshotDiffFromSelect = doc.getElementById('snapshot-diff-from');
   const snapshotDiffToSelect = doc.getElementById('snapshot-diff-to');
@@ -88,6 +102,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (restoreDryRunTargetInput && !restoreDryRunTargetInput.value) {
     restoreDryRunTargetInput.value = './restore-preview';
+  }
+  if (backupPreflightExcludesInput && !backupPreflightExcludesInput.value) {
+    backupPreflightExcludesInput.value = '*.tmp\nnode_modules';
   }
 
   function logEvent(msg, type) {
@@ -424,6 +441,152 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     restoreDryRunResultEl.appendChild(list);
   }
 
+  function setBackupPreflightCounts(totalCount, includedCount, excludedCount) {
+    if (backupPreflightTotalCountEl) backupPreflightTotalCountEl.textContent = String(totalCount);
+    if (backupPreflightIncludedCountEl) backupPreflightIncludedCountEl.textContent = String(includedCount);
+    if (backupPreflightExcludedCountEl) backupPreflightExcludedCountEl.textContent = String(excludedCount);
+  }
+
+  function setBackupPreflightPlaceholder(message) {
+    clearElement(backupPreflightResultEl);
+    setBackupPreflightCounts(0, 0, 0);
+    if (!backupPreflightResultEl) return;
+    const item = doc.createElement('p');
+    item.className = 'placeholder';
+    item.textContent = message;
+    backupPreflightResultEl.appendChild(item);
+  }
+
+  function getBackupPreflightSourcePath() {
+    return String(backupPreflightSourceInput?.value || '').trim();
+  }
+
+  function getBackupPreflightExcludePatterns() {
+    return parseBackupPreflightExcludePatterns(backupPreflightExcludesInput?.value || '');
+  }
+
+  async function readErrorMessage(res) {
+    try {
+      const body = await res.json();
+      if (body?.error) return body.error;
+    } catch {
+      // Ignore malformed error bodies and fall back to HTTP status.
+    }
+    return 'HTTP ' + res.status;
+  }
+
+  async function fetchBackupPreflightPlan() {
+    if (!backupPreflightResultEl) return;
+
+    const sourcePath = getBackupPreflightSourcePath();
+    if (!sourcePath) {
+      setBackupPreflightPlaceholder('请输入源路径');
+      return;
+    }
+
+    const params = new URLSearchParams({ sourcePath });
+    for (const pattern of getBackupPreflightExcludePatterns()) {
+      params.append('exclude', pattern);
+    }
+
+    setBackupPreflightPlaceholder('加载中...');
+
+    try {
+      const res = await fetchImpl('/api/backup-preflight-dry-run?' + params.toString());
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const plan = await res.json();
+      renderBackupPreflightPlan(plan);
+      logEvent('已加载备份预检 (' + sourcePath + ')', 'info');
+    } catch (err) {
+      setBackupPreflightPlaceholder('加载失败: ' + err.message);
+      logEvent('加载备份预检失败: ' + err.message, 'error');
+    }
+  }
+
+  function appendBackupPreflightGroup(parent, title, files, className, renderItem) {
+    const group = doc.createElement('div');
+    group.className = 'backup-preflight-group ' + className;
+
+    const heading = doc.createElement('h3');
+    heading.textContent = title;
+    group.appendChild(heading);
+
+    const list = doc.createElement('ul');
+    list.className = 'backup-preflight-file-list';
+
+    if (files.length === 0) {
+      const empty = doc.createElement('li');
+      empty.className = 'placeholder';
+      empty.textContent = '无';
+      list.appendChild(empty);
+    } else {
+      files.forEach(function (file) {
+        list.appendChild(renderItem(file));
+      });
+    }
+
+    group.appendChild(list);
+    parent.appendChild(group);
+  }
+
+  function renderIncludedPreflightFile(pathValue) {
+    const item = doc.createElement('li');
+    item.className = 'backup-preflight-file backup-preflight-included-file';
+
+    const path = doc.createElement('span');
+    path.className = 'backup-preflight-path';
+    path.textContent = pathValue || 'unknown';
+
+    item.appendChild(path);
+    return item;
+  }
+
+  function renderExcludedPreflightFile(file) {
+    const item = doc.createElement('li');
+    item.className = 'backup-preflight-file backup-preflight-excluded-file';
+
+    const path = doc.createElement('span');
+    path.className = 'backup-preflight-path';
+    path.textContent = file?.sourceRelativePath || 'unknown';
+
+    const pattern = doc.createElement('span');
+    pattern.className = 'backup-preflight-pattern';
+    pattern.textContent = file?.matchedPattern || 'unknown';
+
+    item.appendChild(path);
+    item.appendChild(pattern);
+    return item;
+  }
+
+  function renderBackupPreflightPlan(plan) {
+    clearElement(backupPreflightResultEl);
+    if (!backupPreflightResultEl) return;
+
+    const included = Array.isArray(plan?.included) ? plan.included : [];
+    const excluded = Array.isArray(plan?.excluded) ? plan.excluded : [];
+
+    setBackupPreflightCounts(
+      Number.isFinite(plan?.summary?.totalFiles) ? plan.summary.totalFiles : included.length + excluded.length,
+      Number.isFinite(plan?.summary?.includedCount) ? plan.summary.includedCount : included.length,
+      Number.isFinite(plan?.summary?.excludedCount) ? plan.summary.excludedCount : excluded.length,
+    );
+
+    appendBackupPreflightGroup(
+      backupPreflightResultEl,
+      '拟包含',
+      included,
+      'backup-preflight-included',
+      renderIncludedPreflightFile,
+    );
+    appendBackupPreflightGroup(
+      backupPreflightResultEl,
+      '拟排除',
+      excluded,
+      'backup-preflight-excluded',
+      renderExcludedPreflightFile,
+    );
+  }
+
   function setSnapshotDiffCounts(addedCount, removedCount, unchangedCount) {
     if (snapshotDiffAddedCountEl) snapshotDiffAddedCountEl.textContent = String(addedCount);
     if (snapshotDiffRemovedCountEl) snapshotDiffRemovedCountEl.textContent = String(removedCount);
@@ -668,6 +831,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         setRestoreDryRunPlaceholder('请选择一个快照进行恢复预检');
       }
     });
+  }
+
+  if (backupPreflightRunButton?.addEventListener) {
+    backupPreflightRunButton.addEventListener('click', fetchBackupPreflightPlan);
   }
 
   logEvent('Linke 控制台已启动', 'info');

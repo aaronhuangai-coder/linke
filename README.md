@@ -1,8 +1,8 @@
-# Linke V0.11
+# Linke V0.12
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.11** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.12** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -18,21 +18,22 @@
 | V0.8 | Manifest detail | Web Console 新增只读快照清单详情面板，可查看 snapshot manifest 文件列表 |
 | V0.9 | 快照差异 dry-run | `diff-dry-run`：按 manifest 文件路径比较两个快照，输出 added / removed / unchanged |
 | V0.10 | 恢复预检 dry-run | `restore-dry-run`：预览恢复到目标目录的 would-create / would-overwrite，不复制、不覆盖、不写入 |
-| V0.11 | 当前版本 | `backup-preflight-dry-run`：预览 sourcePath + excludePatterns 的 included / excluded，不创建快照、不复制、不写入 |
+| V0.11 | 备份预检 dry-run | `backup-preflight-dry-run`：预览 sourcePath + excludePatterns 的 included / excluded，不创建快照、不复制、不写入 |
+| V0.12 | 当前版本 | Web Console 新增备份预检 dry-run 面板，可输入 sourcePath / excludePatterns 并查看 included / excluded |
 
 ## 特性
 
 - **设备心跳** — 注册设备并跟踪在线状态
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 快照列表 / 快照清单详情 / 恢复预检 / 快照差异预览 / 事件日志 / 保留计划面板
+- **Web Console** — 管理界面：设备列表 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / 快照差异预览 / 事件日志 / 保留计划面板
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
 - **快照清单详情** — Web Console 可只读查看 snapshot manifest 的源路径、创建时间和文件清单
 - **快照差异预览** — Web Console 可按 manifest 文件路径比较两个快照的 added / removed / unchanged
 - **恢复预检** — API、CLI 与 Web Console 可预览 restore-dry-run 计划，显示 would-create / would-overwrite，不执行复制或覆盖
-- **备份预检** — API 与 CLI 可预览 backup-preflight-dry-run 计划，显示 included / excluded，不创建快照、不复制文件、不写 metadata
+- **备份预检** — API、CLI 与 Web Console 可预览 backup-preflight-dry-run 计划，显示 included / excluded，不创建快照、不复制文件、不写 metadata
 
 ## 快速开始
 
@@ -160,7 +161,13 @@ backup-preflight-dry-run **不会创建快照、不会复制文件、不会写�
 
 ### Web Console 备份预检 dry-run
 
-V0.11 在 Web Console 的 Agent 配置区域增加 backup-preflight-dry-run 命令提示，用于说明 `sourcePath` 和 `excludePatterns` 的预检用法。当前版本只提供命令和安全提示，**不提供真实备份按钮**，不会创建快照、不会复制文件、不会写入 metadata。
+V0.12 在 Web Console 中增加备份预检 dry-run 面板。输入 `sourcePath` 和可选 `excludePatterns` 后，控制台会调用 `backup-preflight-dry-run` 并显示：
+
+- 总文件数、拟包含数量、拟排除数量
+- `included`：会进入备份的相对路径列表
+- `excluded`：被排除的相对路径和 `matchedPattern`
+
+该面板只做备份预检，**没有真实备份执行按钮**，不会创建快照、不会复制文件、不会写入 metadata。当前版本仍不提供生产级 `sourcePath` 沙箱。
 
 ### Web Console 保留计划面板
 
@@ -291,7 +298,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检命令提示与快照差异预览面板。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、备份预检命令提示与快照差异预览面板。
 
 ## 技术约束
 

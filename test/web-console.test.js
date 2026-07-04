@@ -10,6 +10,7 @@ import {
   formatSnapshotJobName,
   formatSnapshotMeta,
   initConsole,
+  parseBackupPreflightExcludePatterns,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -174,8 +175,8 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    const noteMatch = html.match(/data-testid="backup-preflight-safety-note"[^>]*>([\s\S]*?)<\/(?:div|section|p)>/);
-    assert.ok(noteMatch, 'backup-preflight-safety-note must exist');
+    const noteMatch = html.match(/data-testid="backup-preflight-command-safety-note"[^>]*>([\s\S]*?)<\/(?:div|section|p)>/);
+    assert.ok(noteMatch, 'backup-preflight-command-safety-note must exist');
     const noteText = noteMatch[1];
 
     assert.ok(/dry-run|预检/.test(noteText), 'must mention dry-run/preflight');
@@ -302,6 +303,47 @@ describe('Web Console / API contract', () => {
       /dry-run|只读|预检|不复制|不覆盖|不写入/.test(panelMatch[0]),
       'restore dry-run panel must communicate read-only preview behavior',
     );
+  });
+
+  // ── V0.12 Backup preflight dry-run Web Console panel ─────────────
+
+  it('HTML contains backup preflight dry-run panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="backup-preflight-panel"'), 'must have backup-preflight-panel');
+    assert.ok(html.includes('data-testid="backup-preflight-source"'), 'must have backup-preflight-source input');
+    assert.ok(html.includes('data-testid="backup-preflight-excludes"'), 'must have backup-preflight-excludes textarea');
+    assert.ok(html.includes('data-testid="backup-preflight-run"'), 'must have backup-preflight-run button');
+    assert.ok(html.includes('data-testid="backup-preflight-total-count"'), 'must have backup-preflight-total-count');
+    assert.ok(html.includes('data-testid="backup-preflight-included-count"'), 'must have backup-preflight-included-count');
+    assert.ok(html.includes('data-testid="backup-preflight-excluded-count"'), 'must have backup-preflight-excluded-count');
+    assert.ok(html.includes('data-testid="backup-preflight-result"'), 'must have backup-preflight-result');
+    assert.ok(html.includes('data-testid="backup-preflight-safety-note"'), 'must have backup-preflight-safety-note');
+  });
+
+  it('backup preflight safety note testids are unique by purpose', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    const panelNoteMatches = html.match(/data-testid="backup-preflight-safety-note"/g) || [];
+    const commandNoteMatches = html.match(/data-testid="backup-preflight-command-safety-note"/g) || [];
+
+    assert.strictEqual(panelNoteMatches.length, 1, 'panel backup-preflight-safety-note must be unique');
+    assert.strictEqual(commandNoteMatches.length, 1, 'command safety note must use its own unique hook');
+  });
+
+  it('backup preflight Web panel is dry-run only and has no real backup execution control', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="backup-preflight-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'backup-preflight-panel section must exist');
+    assert.ok(/dry-run|预检|只读/.test(panelMatch[0]), 'panel must communicate dry-run/read-only behavior');
+    assert.ok(/不创建.*快照|不.*snapshot/.test(panelMatch[0]), 'panel must state no snapshot is created');
+    assert.ok(/不复制|no copy/i.test(panelMatch[0]), 'panel must state no files are copied');
+    assert.ok(/不写入|metadata/i.test(panelMatch[0]), 'panel must state no metadata is written');
+    assert.ok(!/创建备份|执行备份|real backup|run backup/i.test(panelMatch[0]), 'panel must not expose real backup execution wording');
   });
 
   // ── V0.3 app.js rendering hooks ─────────────────────────────────
@@ -589,6 +631,17 @@ describe('formatSnapshotMeta', () => {
       const result = formatSnapshotMeta({ createdAt: d, fileCount: 1 });
       assert.ok(!result.includes('Invalid Date'), `got "Invalid Date" for createdAt: ${d}`);
     }
+  });
+});
+
+describe('parseBackupPreflightExcludePatterns', () => {
+  it('splits newline and comma separated patterns, trims whitespace, and drops empty entries', () => {
+    const result = parseBackupPreflightExcludePatterns(' *.tmp, node_modules\n\n.DS_Store ');
+    assert.deepStrictEqual(result, ['*.tmp', 'node_modules', '.DS_Store']);
+  });
+
+  it('returns an empty array for empty input', () => {
+    assert.deepStrictEqual(parseBackupPreflightExcludePatterns('   \n , '), []);
   });
 });
 
@@ -897,6 +950,128 @@ describe('initConsole DOM data-testid hooks', () => {
     await new Promise((r) => setTimeout(r, 20));
     const afterInvalid = calls.filter((url) => url.includes('/retention-dry-run')).length;
     assert.strictEqual(afterInvalid, beforeInvalid, 'invalid keepLast must not trigger retention fetch');
+  });
+
+  it('blocks backup preflight fetch when sourcePath is empty', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const mockFetch = async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+    calls.length = 0;
+
+    doc.getElementById('backup-preflight-source').value = '   ';
+    doc.getElementById('backup-preflight-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(!calls.some((url) => String(url).includes('/api/backup-preflight-dry-run')), 'empty sourcePath must not call backup preflight API');
+    assert.ok(doc.getElementById('backup-preflight-result').textContent.includes('请输入源路径'), 'must show sourcePath validation message');
+  });
+
+  it('calls backup preflight API with repeated exclude query parameters', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const plan = {
+      mode: 'dry-run',
+      wouldWrite: false,
+      sourcePath: '/tmp/source',
+      excludePatterns: ['*.tmp', 'node_modules', '.DS_Store'],
+      summary: { totalFiles: 3, includedCount: 1, excludedCount: 2 },
+      included: ['keep.txt'],
+      excluded: [
+        { sourceRelativePath: 'skip.tmp', matchedPattern: '*.tmp' },
+        { sourceRelativePath: 'node_modules/pkg.js', matchedPattern: 'node_modules' },
+      ],
+    };
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (String(url).includes('/api/backup-preflight-dry-run')) {
+        return { ok: true, status: 200, json: async () => plan };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+    calls.length = 0;
+
+    doc.getElementById('backup-preflight-source').value = '/tmp/source';
+    doc.getElementById('backup-preflight-excludes').value = '*.tmp, node_modules\n.DS_Store';
+    doc.getElementById('backup-preflight-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const url = calls.find((entry) => String(entry).includes('/api/backup-preflight-dry-run'));
+    assert.ok(url, 'must call backup preflight API');
+    const params = new URLSearchParams(String(url).split('?')[1]);
+    assert.strictEqual(params.get('sourcePath'), '/tmp/source');
+    assert.deepStrictEqual(params.getAll('exclude'), ['*.tmp', 'node_modules', '.DS_Store']);
+  });
+
+  it('renders backup preflight counts, included paths, excluded paths, and matched patterns', async () => {
+    const doc = buildMockDoc();
+    const plan = {
+      mode: 'dry-run',
+      wouldWrite: false,
+      sourcePath: '/tmp/source',
+      excludePatterns: ['*.tmp'],
+      summary: { totalFiles: 2, includedCount: 1, excludedCount: 1 },
+      included: ['keep.txt'],
+      excluded: [
+        { sourceRelativePath: 'skip.tmp', matchedPattern: '*.tmp' },
+      ],
+    };
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/backup-preflight-dry-run')) {
+        return { ok: true, status: 200, json: async () => plan };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('backup-preflight-source').value = '/tmp/source';
+    doc.getElementById('backup-preflight-excludes').value = '*.tmp';
+    doc.getElementById('backup-preflight-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(doc.getElementById('backup-preflight-total-count').textContent, '2');
+    assert.strictEqual(doc.getElementById('backup-preflight-included-count').textContent, '1');
+    assert.strictEqual(doc.getElementById('backup-preflight-excluded-count').textContent, '1');
+    const resultText = doc.getElementById('backup-preflight-result').textContent;
+    assert.ok(resultText.includes('keep.txt'), 'must render included path');
+    assert.ok(resultText.includes('skip.tmp'), 'must render excluded path');
+    assert.ok(resultText.includes('*.tmp'), 'must render matchedPattern');
+  });
+
+  it('renders backup preflight API errors', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/backup-preflight-dry-run')) {
+        return { ok: false, status: 400, json: async () => ({ error: 'Source path does not exist: /missing' }) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('backup-preflight-source').value = '/missing';
+    doc.getElementById('backup-preflight-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(
+      doc.getElementById('backup-preflight-result').textContent.includes('Source path does not exist'),
+      'must render API error message',
+    );
   });
 
   it('fetches and renders snapshot manifest details when selecting a snapshot', async () => {
