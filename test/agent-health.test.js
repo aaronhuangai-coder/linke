@@ -6,6 +6,7 @@ import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
+import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const exec = promisify(execFile);
 
@@ -37,7 +38,7 @@ describe('Agent health CLI', () => {
     const body = JSON.parse(stdout);
     assert.strictEqual(body.status, 'ok');
     assert.strictEqual(body.service, 'linke');
-    assert.strictEqual(body.version, 'V0.48');
+    assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
     assert.strictEqual(body.checks.http, 'ok');
     assert.strictEqual(body.checks.dataDirReadable, 'ok');
     assert.ok(Number.isFinite(Date.parse(body.timestamp)));

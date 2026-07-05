@@ -1,8 +1,8 @@
-# Linke V0.48
+# Linke V0.49
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.48** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.49** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -55,7 +55,8 @@
 | V0.45 | 历史版本 | 设备筛选计数指标：设备筛选计数增加只读 data-visible-count 与 data-total-count 属性以展示可见数与总数 |
 | V0.46 | 历史版本 | 发布健康检查：提供 release health 接口 GET /api/health，输出只读系统状态 |
 | V0.47 | 历史版本 | 发布健康检查 CLI：提供 agent CLI health 命令获取只读健康状态，不影响元数据或 NAS，安全隔离 |
-| V0.48 | 当前版本 | 发布健康检查面板：Web Console 增加发布健康检查面板，通过 GET /api/health 手动刷新只读状态，不自动轮询 |
+| V0.48 | 历史版本 | 发布健康检查面板：Web Console 增加发布健康检查面板，通过 GET /api/health 手动刷新只读状态，不自动轮询 |
+| V0.49 | 当前版本 | 发布版本一致性守卫：以 `src/version.js` 作为当前发布版本单一来源，并用测试校验 README、`/api/health` 和 Agent health 输出一致 |
 
 ## 特性
 
@@ -103,6 +104,7 @@
 - **备份预检** — API、CLI 与 Web Console 可预览 backup-preflight-dry-run 计划，显示 included / excluded，不创建快照、不复制文件、不写 metadata
 - **NAS dry-run** — API、CLI 与 Web Console 可验证 Synology / Ugreen 目标配置并输出计划，不连接 NAS、不写远端、不保存凭证
 - **NAS app adapter dry-run** — 为 Synology / Ugreen 目标生成 `adapterPlan`，显示 `wouldInvokeApp:false`，不调用 NAS app、不连接、不写远端
+- **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 
 ## 快速开始
 
@@ -725,7 +727,7 @@ V0.45 为设备列表的设备筛选计数（`device-filter-count`）增加只�
 V0.46 实现了发布健康检查端点 `/api/health`。
 
 - 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
-- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.48"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.49"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
 - 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
 
 ### 发布健康检查安全边界
@@ -778,6 +780,16 @@ V0.48 在 Web Console 中新增发布健康检查面板。
 - **不连接 NAS**：不建立真实 NAS 连接，不调用 NAS app。
 - **不执行远程命令**：不执行任何本地或远程命令。
 - **不自动轮询**：V0.48 不做健康检查重试循环。
+
+### 发布版本一致性守卫
+
+V0.49 新增发布版本一致性守卫。
+
+- `src/version.js` 导出 `LINKE_RELEASE_VERSION`，作为当前 Linke 里程碑版本的代码单一来源。
+- `/api/health` 的 `version` 字段来自 `LINKE_RELEASE_VERSION`。
+- Agent CLI `health` 命令保持纯客户端透传，输出 server health payload 中的版本号，不持有第二份版本常量。
+- 测试会校验 README 标题、当前版本 badge、版本表当前行、`buildHealthResponse()`、Agent health 输出和 Web Console release-health 测试示例与 `LINKE_RELEASE_VERSION` 一致。
+- `package.json` 的 npm semver 与 Linke 里程碑版本相互独立，V0.x 里程碑不自动映射到 npm 包版本。
 
 ### Web Console 设备筛选摘要状态
 
@@ -1023,7 +1035,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫。
 
 ## 技术约束
 

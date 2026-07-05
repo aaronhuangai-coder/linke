@@ -4,6 +4,7 @@ import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, buildHealthResponse } from '../src/server.js';
+import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 describe('Release health response', () => {
   it('buildHealthResponse returns the current release liveness payload without path disclosure', () => {
@@ -13,7 +14,7 @@ describe('Release health response', () => {
     }), {
       status: 'ok',
       service: 'linke',
-      version: 'V0.48',
+      version: LINKE_RELEASE_VERSION,
       checks: {
         http: 'ok',
         dataDirReadable: 'ok',
@@ -29,7 +30,7 @@ describe('Release health response', () => {
     }), {
       status: 'degraded',
       service: 'linke',
-      version: 'V0.48',
+      version: LINKE_RELEASE_VERSION,
       checks: {
         http: 'ok',
         dataDirReadable: 'unavailable',
@@ -62,7 +63,7 @@ describe('GET /api/health', () => {
     const body = await res.json();
     assert.strictEqual(body.status, 'ok');
     assert.strictEqual(body.service, 'linke');
-    assert.strictEqual(body.version, 'V0.48');
+    assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
     assert.strictEqual(body.checks.http, 'ok');
     assert.strictEqual(body.checks.dataDirReadable, 'ok');
     assert.ok(Number.isFinite(Date.parse(body.timestamp)));

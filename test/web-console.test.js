@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
+import { LINKE_RELEASE_VERSION } from '../src/version.js';
 import {
   applyDeviceListControls,
   buildBackupJobOverview,
@@ -6089,10 +6090,10 @@ describe('V0.45 DOM test: device filter count rendering and reset behavior', () 
   });
 });
 
-describe('V0.48 release health pure functions', () => {
+describe('Release health pure functions', () => {
   it('buildReleaseHealthViewModel formats ok status and masks/omits absolute dataDir', () => {
     const rawData = {
-      version: 'V0.48',
+      version: LINKE_RELEASE_VERSION,
       checks: {
         http: 'ok',
         dataDirReadable: 'ok',
@@ -6104,7 +6105,7 @@ describe('V0.48 release health pure functions', () => {
     const result = buildReleaseHealthViewModel(rawData);
     assert.strictEqual(result.statusKey, 'ok');
     assert.strictEqual(result.statusText, '正常');
-    assert.strictEqual(result.versionText, 'V0.48');
+    assert.strictEqual(result.versionText, LINKE_RELEASE_VERSION);
     assert.strictEqual(result.dataDirText, '可读');
     assert.strictEqual(result.timestampText, '2026-07-05T12:00:00Z');
     assert.strictEqual(result.messageText, 'GET /api/health 成功');
@@ -6115,7 +6116,7 @@ describe('V0.48 release health pure functions', () => {
 
   it('buildReleaseHealthViewModel formats degraded status', () => {
     const rawData = {
-      version: 'V0.48',
+      version: LINKE_RELEASE_VERSION,
       checks: {
         http: 'ok',
         dataDirReadable: 'unavailable',
@@ -6127,7 +6128,7 @@ describe('V0.48 release health pure functions', () => {
     const result = buildReleaseHealthViewModel(rawData);
     assert.strictEqual(result.statusKey, 'degraded');
     assert.strictEqual(result.statusText, '降级');
-    assert.strictEqual(result.versionText, 'V0.48');
+    assert.strictEqual(result.versionText, LINKE_RELEASE_VERSION);
     assert.strictEqual(result.dataDirText, '不可用');
     assert.strictEqual(result.timestampText, '2026-07-05T12:00:00Z');
     assert.ok(result.messageText.includes('降级') || result.messageText.includes('checks'));
@@ -6190,7 +6191,7 @@ describe('V0.48 release health pure functions', () => {
   });
 });
 
-describe('V0.48 DOM test: release health panel interactions', () => {
+describe('DOM test: release health panel interactions', () => {
   it('does not request /api/health on initialization', async () => {
     const doc = buildMockDoc();
     let healthFetchCount = 0;
@@ -6215,7 +6216,7 @@ describe('V0.48 DOM test: release health panel interactions', () => {
           ok: true,
           status: 200,
           json: async () => ({
-            version: 'V0.48',
+            version: LINKE_RELEASE_VERSION,
             checks: {
               http: 'ok',
               dataDirReadable: 'ok',
@@ -6252,7 +6253,7 @@ describe('V0.48 DOM test: release health panel interactions', () => {
 
     assert.strictEqual(panel._attrs['data-status'], 'ok');
     assert.strictEqual(statusEl.textContent, '正常');
-    assert.strictEqual(versionEl.textContent, 'V0.48');
+    assert.strictEqual(versionEl.textContent, LINKE_RELEASE_VERSION);
     assert.strictEqual(dataDirEl.textContent, '可读');
     assert.strictEqual(timestampEl.textContent, '2026-07-05T12:00:00Z');
     assert.ok(messageEl.textContent.includes('成功'));
@@ -6334,7 +6335,7 @@ describe('V0.48 DOM test: release health panel interactions', () => {
           ok: true,
           status: 200,
           json: async () => ({
-            version: 'V0.48',
+            version: LINKE_RELEASE_VERSION,
             checks: {
               http: 'ok',
               dataDirReadable: 'unavailable',

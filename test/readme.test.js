@@ -2,6 +2,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
@@ -37,7 +38,7 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.4/, 'V0.4');
   });
 
-  it('mentions V0.5 (current version)', () => {
+  it('mentions V0.5', () => {
     assertReadmeContains(/V0\.5/, 'V0.5');
   });
 
@@ -211,6 +212,11 @@ describe('README — version coverage', () => {
 
   it('mentions V0.48 (release health Web panel)', () => {
     assertReadmeContains(/V0\.48/, 'V0.48');
+  });
+
+  it('mentions LINKE_RELEASE_VERSION', () => {
+    const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
+    assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
   });
 });
 
@@ -1101,13 +1107,16 @@ describe('README — V0.47 release health CLI', () => {
 });
 
 describe('README — V0.48 release health Web panel', () => {
-  it('title and badge say V0.48', () => {
-    assert.match(readme, /^# Linke V0\.48/m);
-    assert.match(readme, /当前版本：V0\.48/);
+  it('title no longer claims V0.48 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.48/m);
   });
 
-  it('version table has V0.48 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.48 \| 当前版本 \|[^|]*(发布健康检查面板|release health Web panel)/i);
+  it('version badge no longer says 当前版本：V0.48', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.48/);
+  });
+
+  it('version table has V0.48 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.48 \| 历史版本 \|[^|]*(发布健康检查面板|release health Web panel)/i);
   });
 
   it('documents release health Web panel features', () => {
@@ -1127,5 +1136,18 @@ describe('README — V0.48 release health Web panel', () => {
 
   it('documents testing coverage includes release health Web panel', () => {
     assert.match(readme, /测试覆盖：.*发布健康检查面板/);
+  });
+});
+
+describe('README — current release consistency', () => {
+  it('title and badge say LINKE_RELEASE_VERSION', () => {
+    const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
+    assert.match(readme, new RegExp(`^# Linke ${escapedVersion}`, 'm'));
+    assert.match(readme, new RegExp(`当前版本：${escapedVersion}`));
+  });
+
+  it('version table has LINKE_RELEASE_VERSION row with 当前版本 milestone', () => {
+    const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
+    assert.match(readme, new RegExp(`\\| ${escapedVersion} \\| 当前版本 \\|`, 'i'));
   });
 });

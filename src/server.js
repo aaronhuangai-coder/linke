@@ -17,6 +17,7 @@ import { buildSnapshotDiffDryRunPlan } from './snapshot-diff.js';
 import { buildRestoreDryRunPlan, collectExistingTargetPaths } from './restore-dry-run.js';
 import { runBackupPreflightDryRun } from './backup-preflight.js';
 import { buildNasDryRunPlan } from './nas.js';
+import { LINKE_RELEASE_VERSION } from './version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,8 +69,6 @@ async function serveStatic(res, filePath) {
     res.end('Not Found');
   }
 }
-
-const LINKE_RELEASE_VERSION = 'V0.48';
 
 export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) {
   const readable = Boolean(dataDirReadable);
