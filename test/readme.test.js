@@ -108,41 +108,45 @@ describe('README — version coverage', () => {
   it('mentions V0.22 (backup version consistency panel)', () => {
     assertReadmeContains(/V0\.22/, 'V0.22');
   });
+
+  it('mentions V0.23 (version consistency snapshot linking)', () => {
+    assertReadmeContains(/V0\.23/, 'V0.23');
+  });
 });
 
-// ── V0.22 documentation ────────────────────────────────────────────
+// ── V0.23 documentation ────────────────────────────────────────────
 
-describe('README — V0.22 backup version consistency panel', () => {
-  it('title says V0.22', () => {
-    assert.match(readme, /^# Linke V0\.22/m);
+describe('README — V0.23 version consistency snapshot linking', () => {
+  it('title says V0.23', () => {
+    assert.match(readme, /^# Linke V0\.23/m);
   });
 
-  it('version badge says 当前版本：V0.22', () => {
-    assert.match(readme, /当前版本：V0\.22/);
+  it('version badge says 当前版本：V0.23', () => {
+    assert.match(readme, /当前版本：V0\.23/);
   });
 
-  it('version table has V0.22 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.22 \| 当前版本 \|[^|]*版本一致性/);
+  it('version table has V0.23 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.23 \| 当前版本 \|[^|]*snapshot 联动/);
   });
 
-  it('version table keeps V0.21 as 设备备份健康 milestone', () => {
-    assert.match(readme, /\| V0\.21 \| 设备备份健康 \|/);
+  it('version table keeps V0.22 as 备份版本一致性 milestone', () => {
+    assert.match(readme, /\| V0\.22 \| 备份版本一致性 \|/);
   });
 
-  it('documents backup version consistency as front-end read-only derived view', () => {
-    assert.match(readme, /备份版本一致性/);
-    assert.match(readme, /前端.*只读.*派生视图|只读.*前端.*派生视图/);
+  it('documents version consistency snapshot linking as read-only drill-down', () => {
+    assert.match(readme, /版本一致性.*snapshot 联动|snapshot 联动.*版本一致性/);
+    assert.match(readme, /只读.*联动|只读.*drill-down|drill-down.*只读/);
   });
 
-  it('documents backup version consistency statuses and reasons', () => {
-    assert.match(readme, /一致/);
-    assert.match(readme, /版本不一致/);
-    assert.match(readme, /单设备/);
-    assert.match(readme, /最新版本不同|最新版本一致/);
+  it('documents clicking a version consistency device row loads existing snapshot detail views', () => {
+    assert.match(readme, /设备版本行|版本行/);
+    assert.match(readme, /快照清单详情|snapshot manifest|manifest/);
+    assert.match(readme, /恢复预检|restore-dry-run/);
+    assert.match(readme, /设备详情|快照列表|保留计划/);
   });
 
-  it('asserts safety docs for backup version consistency panel', () => {
-    assert.match(readme, /备份版本一致性安全保证/);
+  it('asserts safety docs for version consistency snapshot linking', () => {
+    assert.match(readme, /版本一致性 snapshot 联动安全保证/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
     assert.match(readme, /不触发备份|不进行备份/);
@@ -154,8 +158,8 @@ describe('README — V0.22 backup version consistency panel', () => {
     assert.match(readme, /不执行远程传输|不进行远程文件传输/);
   });
 
-  it('documents test coverage includes backup version consistency panel', () => {
-    assert.match(readme, /备份版本一致性面板/);
+  it('documents test coverage includes version consistency snapshot linking', () => {
+    assert.match(readme, /版本一致性 snapshot 联动/);
   });
 });
 

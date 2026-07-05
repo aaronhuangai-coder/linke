@@ -970,6 +970,16 @@ describe('Web Console / API contract', () => {
     assert.ok(/不执行恢复/.test(content), 'must state no restore execution');
     assert.ok(/不连接 NAS/.test(content), 'must state no NAS connection');
   });
+
+  it('app.js wires V0.23 version consistency device rows to existing snapshot detail loaders', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('selectVersionConsistencySnapshot'), 'app.js must expose a version consistency click path');
+    assert.ok(js.includes('data-snapshot-id'), 'version device rows must expose snapshot id');
+    assert.ok(js.includes('fetchSnapshotManifest'), 'click path must reuse manifest detail loader');
+    assert.ok(js.includes('fetchRestoreDryRunPlan'), 'click path must reuse restore dry-run loader');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3468,6 +3478,94 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.strictEqual(item.innerHTML || '', '');
     assert.strictEqual(item.querySelector('[data-testid="version-consistency-name"]').textContent, '<script>alert(1)</script>');
     assert.strictEqual(item.querySelector('[data-testid="version-consistency-source"]').textContent, '/tmp/<unsafe>');
+  });
+
+  it('clicking a version consistency device row loads that snapshot manifest and restore dry-run', async () => {
+    const doc = buildMockDoc();
+    doc.getElementById('restore-dry-run-target').value = '/tmp/linke';
+    const calls = [];
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', status: 'online', snapshotCount: 1 },
+      { deviceId: 'mac-b', hostname: 'Mac B', status: 'online', snapshotCount: 1 },
+    ];
+    const snapshotsByDevice = {
+      'mac-a': [{
+        snapshotId: 'a-docs-new',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-05T10:00:00.000Z',
+        fileCount: 10,
+      }],
+      'mac-b': [{
+        snapshotId: 'b-docs-stale',
+        jobName: 'documents',
+        sourcePath: '/Users/ah/Documents',
+        createdAt: '2026-07-05T09:00:00.000Z',
+        fileCount: 9,
+      }],
+    };
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      if (String(url).includes('/manifest')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            snapshotId: 'b-docs-stale',
+            sourcePath: '/Users/ah/Documents',
+            createdAt: '2026-07-05T09:00:00.000Z',
+            files: ['doc.txt'],
+          }),
+        };
+      }
+      if (String(url).includes('/restore-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ summary: { wouldCreateCount: 1, wouldOverwriteCount: 0 }, files: [] }),
+        };
+      }
+      if (String(url).includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 1, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      const snapshotMatch = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (snapshotMatch) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => snapshotsByDevice[decodeURIComponent(snapshotMatch[1])] || [],
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const versionDevices = doc._created.filter((el) => el._attrs?.['data-testid'] === 'version-consistency-device');
+    const macBRow = versionDevices.find((el) => el.textContent.includes('Mac B'));
+    assert.ok(macBRow, 'Mac B version row must be rendered');
+    assert.strictEqual(macBRow.dataset.deviceId, 'mac-b');
+    assert.strictEqual(macBRow.dataset.snapshotId, 'b-docs-stale');
+    assert.strictEqual(macBRow.dataset.versionState, 'stale');
+    assert.ok(macBRow._listeners.click, 'version device row must be clickable');
+
+    macBRow._listeners.click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.ok(calls.includes('/api/devices/mac-b/snapshots'), 'must refresh clicked device snapshots');
+    assert.ok(calls.some((url) => String(url).includes('/api/devices/mac-b/retention-dry-run')), 'must refresh retention dry-run');
+    assert.ok(calls.includes('/api/devices/mac-b/snapshots/b-docs-stale/manifest'), 'must load selected snapshot manifest');
+    assert.ok(
+      calls.includes('/api/devices/mac-b/snapshots/b-docs-stale/restore-dry-run?targetPath=%2Ftmp%2Flinke'),
+      'must load selected snapshot restore dry-run',
+    );
+    assert.strictEqual(doc.querySelector('[data-testid="device-detail-device-id"]').textContent, 'mac-b');
+    assert.strictEqual(doc.querySelector('[data-testid="manifest-snapshot-id"]').textContent, 'b-docs-stale');
+    assert.strictEqual(doc.querySelector('[data-testid="restore-dry-run-create-count"]').textContent, '1');
   });
 });
 

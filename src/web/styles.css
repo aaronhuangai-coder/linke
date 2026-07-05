@@ -1405,6 +1405,11 @@ ul {
   border-radius: 4px;
   background: #f8fafc;
   font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.version-consistency-device:hover {
+  outline: 1px solid #2563eb;
 }
 
 .version-state-stale {

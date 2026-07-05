@@ -835,6 +835,29 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     return field;
   }
 
+  function selectVersionConsistencySnapshot(deviceId, snapshotId) {
+    const safeDeviceId = String(deviceId || '').trim();
+    const safeSnapshotId = String(snapshotId || '').trim();
+    if (!safeDeviceId || !safeSnapshotId) return;
+
+    const sourceDevice = cachedDevices.find((device) => device.deviceId === safeDeviceId) || {
+      deviceId: safeDeviceId,
+      hostname: safeDeviceId,
+    };
+
+    selectedDeviceId = safeDeviceId;
+    selectedSnapshotId = safeSnapshotId;
+    selectedBackupJobKey = null;
+    cachedSnapshots = [];
+    setBackupJobDetailPlaceholder('加载中…', safeDeviceId);
+    renderDeviceDetail(sourceDevice);
+    renderFilteredDevices();
+    fetchSnapshots(safeDeviceId);
+    fetchRetentionPlan(safeDeviceId);
+    fetchSnapshotManifest(safeDeviceId, safeSnapshotId);
+    fetchRestoreDryRunPlan(safeDeviceId, safeSnapshotId);
+  }
+
   function renderBackupVersionConsistency(devices, snapshotsByDevice) {
     const consistency = buildBackupVersionConsistency(devices, snapshotsByDevice);
     setVersionConsistencyCounts(consistency.summary);
@@ -869,6 +892,15 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         const deviceField = doc.createElement('span');
         deviceField.className = 'version-consistency-device version-state-' + device.versionState;
         deviceField.setAttribute('data-testid', 'version-consistency-device');
+        deviceField.setAttribute('data-device-id', device.deviceId);
+        deviceField.setAttribute('data-snapshot-id', device.latestSnapshotId);
+        deviceField.setAttribute('data-version-state', device.versionState);
+        deviceField.dataset.deviceId = device.deviceId;
+        deviceField.dataset.snapshotId = device.latestSnapshotId;
+        deviceField.dataset.versionState = device.versionState;
+        deviceField.addEventListener('click', function () {
+          selectVersionConsistencySnapshot(device.deviceId, device.latestSnapshotId);
+        });
         deviceField.textContent = device.hostname + ' · ' + device.versionState + ' · '
           + formatLastBackup(device.latestCreatedAt) + ' · '
           + String(device.latestFileCount || 0) + ' files';
