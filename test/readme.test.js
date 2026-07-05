@@ -168,6 +168,10 @@ describe('README — version coverage', () => {
   it('mentions V0.37 (management-state summary scoped counts)', () => {
     assertReadmeContains(/V0\.37/, 'V0.37');
   });
+
+  it('mentions V0.38 (management-state decision hints)', () => {
+    assertReadmeContains(/V0\.38/, 'V0.38');
+  });
 });
 
 
@@ -335,16 +339,12 @@ describe('README — V0.36 accessible active management-state summary controls',
 // ── V0.37 documentation ────────────────────────────────────────────
 
 describe('README — V0.37 management-state summary scoped counts', () => {
-  it('title says V0.37', () => {
-    assert.match(readme, /^# Linke V0\.37/m);
+  it('mentions V0.37', () => {
+    assert.match(readme, /V0\.37/);
   });
 
-  it('version badge says 当前版本：V0.37', () => {
-    assert.match(readme, /当前版本：V0\.37/);
-  });
-
-  it('version table has V0.37 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.37 \| 当前版本 \|[^|]*(作用域|搜索|状态|scoped)/i);
+  it('version table has V0.37 historical row', () => {
+    assert.match(readme, /\| V0\.37 \|[^|]*(作用域|搜索|状态|scoped)/i);
   });
 
   it('version table keeps V0.36 as historical milestone', () => {
@@ -368,6 +368,47 @@ describe('README — V0.37 management-state summary scoped counts', () => {
 
   it('documents testing coverage includes scoped summary counts', () => {
     assert.match(readme, /测试覆盖：.*管理态分桶作用域/);
+  });
+});
+
+// ── V0.38 documentation ────────────────────────────────────────────
+
+describe('README — V0.38 management-state decision hints', () => {
+  it('title says V0.38', () => {
+    assert.match(readme, /^# Linke V0\.38/m);
+  });
+
+  it('version badge says 当前版本：V0.38', () => {
+    assert.match(readme, /当前版本：V0\.38/);
+  });
+
+  it('version table has V0.38 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.38 \| 当前版本 \|[^|]*(管理态提示|判定提示|处理提示|hint)/i);
+  });
+
+  it('version table keeps V0.37 as historical milestone', () => {
+    assert.match(readme, /\| V0\.37 \|[^|]*(作用域|搜索|状态|scoped)/i);
+  });
+
+  it('documents management-state hint behavior', () => {
+    assert.match(readme, /管理态.*(判定提示|处理提示|hint)|device-management-hint/i);
+    assert.match(readme, /在线且 IP 可用|缺少可用 IP|设备离线|状态未知/);
+    assert.match(readme, /device-management-hint/);
+    assert.match(readme, /device-detail-management-hint/);
+  });
+
+  it('asserts safety docs for management-state hints', () => {
+    assert.match(readme, /管理态.*(判定提示|处理提示).*安全(保证|边界)|安全(保证|边界).*管理态.*(判定提示|处理提示)/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不触发备份|不进行备份/);
+  });
+
+  it('documents testing coverage includes management-state hints', () => {
+    assert.match(readme, /测试覆盖：.*管理态判定提示/);
   });
 });
 

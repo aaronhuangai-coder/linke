@@ -274,6 +274,18 @@ ul {
   color: #888;
 }
 
+.device-management-state {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #374151;
+}
+
+.device-management-hint {
+  font-size: 0.74rem;
+  color: #6b7280;
+  line-height: 1.35;
+}
+
 .device-detail-panel {
   align-content: start;
 }

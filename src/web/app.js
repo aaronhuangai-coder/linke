@@ -223,9 +223,21 @@ const MANAGEMENT_STATE_LABELS = {
   'unknown': '未知待确认',
 };
 
+const MANAGEMENT_STATE_HINTS = {
+  'visible': '在线且 IP 可用，可纳入统一管理',
+  'missing-ip': '设备在线但缺少可用 IP，需补充 IP 信息',
+  'offline-retained': '设备离线，保留历史记录和备份上下文',
+  'unknown': '状态未知，需确认设备心跳',
+};
+
 export function getDeviceManagementState(device) {
   const key = getDeviceManagementStateKey(device);
   return MANAGEMENT_STATE_LABELS[key] || '未知待确认';
+}
+
+export function getDeviceManagementHint(device) {
+  const key = getDeviceManagementStateKey(device);
+  return MANAGEMENT_STATE_HINTS[key] || MANAGEMENT_STATE_HINTS.unknown;
 }
 
 export function buildDeviceManagementSummary(devices) {
@@ -1047,6 +1059,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     appendDeviceDetailRow(grid, 'device-detail-ip', 'IP 地址', device.ipAddress || 'unknown');
     appendDeviceDetailRow(grid, 'device-detail-status', '状态', device.status || 'unknown');
     appendDeviceDetailRow(grid, 'device-detail-management-state', '管理状态', getDeviceManagementState(device));
+    appendDeviceDetailRow(grid, 'device-detail-management-hint', '管理提示', getDeviceManagementHint(device));
     appendDeviceDetailRow(grid, 'device-detail-heartbeat', '最后心跳', formatLastHeartbeat(device.lastHeartbeatAt));
     appendDeviceDetailRow(grid, 'device-detail-backup', '最后备份', formatLastBackup(device.lastBackupAt));
     appendDeviceDetailRow(grid, 'device-detail-snapshots', '快照数', String(device.snapshotCount || 0));
@@ -1419,6 +1432,12 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       managementState.setAttribute('data-testid', 'device-management-state');
       managementState.textContent = getDeviceManagementState(device);
       li.appendChild(managementState);
+
+      const managementHint = doc.createElement('span');
+      managementHint.className = 'device-management-hint';
+      managementHint.setAttribute('data-testid', 'device-management-hint');
+      managementHint.textContent = getDeviceManagementHint(device);
+      li.appendChild(managementHint);
 
       li.addEventListener('click', function () {
         selectDevice(device);

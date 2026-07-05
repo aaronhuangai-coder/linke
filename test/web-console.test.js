@@ -18,6 +18,7 @@ import {
   formatSnapshotJobName,
   formatSnapshotMeta,
   getDeviceBackupHealthStatus,
+  getDeviceManagementHint,
   getDeviceManagementState,
   getDeviceManagementStateKey,
   buildDeviceManagementSummary,
@@ -1100,6 +1101,16 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('setDeviceManagementSummaryActive'), 'app.js must render active summary state');
     assert.ok(js.includes('aria-pressed'), 'app.js must update aria-pressed');
     assert.ok(js.includes('data-active'), 'app.js must update data-active');
+  });
+
+  // ── V0.38 device-management-hint source contract ─────────────────
+
+  it('app.js source contract expects device management hint rendering', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('getDeviceManagementHint'), 'app.js must expose getDeviceManagementHint');
+    assert.ok(js.includes('device-management-hint'), 'app.js must render list management hint hook');
+    assert.ok(js.includes('device-detail-management-hint'), 'app.js must render detail management hint hook');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3120,7 +3131,7 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.ok(!calls.some((url) => String(url).includes('dev-a-snap')), 'old selected snapshot must not be reused after device switch');
   });
 
-  it('renders device-management-state in list items and device-detail-management-state in selected device detail', async () => {
+  it('renders device-management-state and V0.38 device-management-hint in list items and selected device detail', async () => {
     const doc = buildMockDoc();
     const devices = [
       { deviceId: 'd1', hostname: 'host-one', status: 'online', ipAddress: '1.2.3.4', snapshotCount: 0 },
@@ -3152,16 +3163,28 @@ describe('initConsole DOM data-testid hooks', () => {
     const stateEl2 = item2.querySelector('[data-testid="device-management-state"]');
     const stateEl3 = item3.querySelector('[data-testid="device-management-state"]');
     const stateEl4 = item4.querySelector('[data-testid="device-management-state"]');
+    const hintEl1 = item1.querySelector('[data-testid="device-management-hint"]');
+    const hintEl2 = item2.querySelector('[data-testid="device-management-hint"]');
+    const hintEl3 = item3.querySelector('[data-testid="device-management-hint"]');
+    const hintEl4 = item4.querySelector('[data-testid="device-management-hint"]');
 
     assert.ok(stateEl1, 'd1 list item must render device-management-state element');
     assert.ok(stateEl2, 'd2 list item must render device-management-state element');
     assert.ok(stateEl3, 'd3 list item must render device-management-state element');
     assert.ok(stateEl4, 'd4 list item must render device-management-state element');
+    assert.ok(hintEl1, 'd1 list item must render device-management-hint element');
+    assert.ok(hintEl2, 'd2 list item must render device-management-hint element');
+    assert.ok(hintEl3, 'd3 list item must render device-management-hint element');
+    assert.ok(hintEl4, 'd4 list item must render device-management-hint element');
 
     assert.strictEqual(stateEl1.textContent.trim(), '在线可见');
     assert.strictEqual(stateEl2.textContent.trim(), '在线缺 IP');
     assert.strictEqual(stateEl3.textContent.trim(), '离线保留');
     assert.strictEqual(stateEl4.textContent.trim(), '未知待确认');
+    assert.strictEqual(hintEl1.textContent.trim(), '在线且 IP 可用，可纳入统一管理');
+    assert.strictEqual(hintEl2.textContent.trim(), '设备在线但缺少可用 IP，需补充 IP 信息');
+    assert.strictEqual(hintEl3.textContent.trim(), '设备离线，保留历史记录和备份上下文');
+    assert.strictEqual(hintEl4.textContent.trim(), '状态未知，需确认设备心跳');
 
     function querySelectorDeep(el, testId) {
       if (!el) return null;
@@ -3182,16 +3205,22 @@ describe('initConsole DOM data-testid hooks', () => {
     await new Promise((r) => setTimeout(r, 20));
 
     const detailEl = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-state');
+    const detailHintEl = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-hint');
     assert.ok(detailEl, 'selected device detail must render device-detail-management-state element');
+    assert.ok(detailHintEl, 'selected device detail must render device-detail-management-hint element');
     assert.strictEqual(detailEl.textContent.trim(), '在线可见');
+    assert.strictEqual(detailHintEl.textContent.trim(), '在线且 IP 可用，可纳入统一管理');
 
     // Click d2 to check detail view
     item2._listeners.click();
     await new Promise((r) => setTimeout(r, 20));
 
     const detailEl2 = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-state');
+    const detailHintEl2 = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-hint');
     assert.ok(detailEl2, 'selected device detail must render device-detail-management-state element');
+    assert.ok(detailHintEl2, 'selected device detail must render device-detail-management-hint element');
     assert.strictEqual(detailEl2.textContent.trim(), '在线缺 IP');
+    assert.strictEqual(detailHintEl2.textContent.trim(), '设备在线但缺少可用 IP，需补充 IP 信息');
   });
 
   it('DOM test: changing device-management-filter updates device list and device-filter-count without refetching /api/devices', async () => {
@@ -5302,5 +5331,21 @@ describe('V0.37 device management summary scoped counts pure functions', () => {
       offlineRetained: 0,
       unknown: 0
     });
+  });
+});
+
+describe('V0.38 device management hint pure functions', () => {
+  it('explains visible devices without mutating input', () => {
+    const device = { status: 'online', ipAddress: '192.168.1.100' };
+    const copy = { ...device };
+    assert.strictEqual(getDeviceManagementHint(device), '在线且 IP 可用，可纳入统一管理');
+    assert.deepStrictEqual(device, copy, 'should not mutate input');
+  });
+
+  it('explains missing IP, offline retained, and unknown devices', () => {
+    assert.strictEqual(getDeviceManagementHint({ status: 'online', ipAddress: '' }), '设备在线但缺少可用 IP，需补充 IP 信息');
+    assert.strictEqual(getDeviceManagementHint({ status: 'offline', ipAddress: '192.168.1.100' }), '设备离线，保留历史记录和备份上下文');
+    assert.strictEqual(getDeviceManagementHint({ status: 'unknown', ipAddress: '192.168.1.100' }), '状态未知，需确认设备心跳');
+    assert.strictEqual(getDeviceManagementHint(null), '状态未知，需确认设备心跳');
   });
 });
