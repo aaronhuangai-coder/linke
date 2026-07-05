@@ -198,6 +198,23 @@ export function normalizeDeviceStatus(status) {
   return 'unknown';
 }
 
+export function getDeviceManagementState(device) {
+  if (!device) return '未知待确认';
+  const status = normalizeDeviceStatus(device.status);
+  const rawIp = device.ipAddress === null || device.ipAddress === undefined ? '' : device.ipAddress;
+  const ip = String(rawIp).trim().toLowerCase();
+  if (status === 'online') {
+    if (ip === '' || ip === 'unknown') {
+      return '在线缺 IP';
+    }
+    return '在线可见';
+  }
+  if (status === 'offline') {
+    return '离线保留';
+  }
+  return '未知待确认';
+}
+
 function normalizeSearchValue(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -936,6 +953,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     appendDeviceDetailRow(grid, 'device-detail-hostname', 'Hostname', device.hostname || 'unknown');
     appendDeviceDetailRow(grid, 'device-detail-ip', 'IP 地址', device.ipAddress || 'unknown');
     appendDeviceDetailRow(grid, 'device-detail-status', '状态', device.status || 'unknown');
+    appendDeviceDetailRow(grid, 'device-detail-management-state', '管理状态', getDeviceManagementState(device));
     appendDeviceDetailRow(grid, 'device-detail-heartbeat', '最后心跳', formatLastHeartbeat(device.lastHeartbeatAt));
     appendDeviceDetailRow(grid, 'device-detail-backup', '最后备份', formatLastBackup(device.lastBackupAt));
     appendDeviceDetailRow(grid, 'device-detail-snapshots', '快照数', String(device.snapshotCount || 0));
@@ -1302,6 +1320,12 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
       li.appendChild(nameRow);
       li.appendChild(meta);
+
+      const managementState = doc.createElement('span');
+      managementState.className = 'device-management-state';
+      managementState.setAttribute('data-testid', 'device-management-state');
+      managementState.textContent = getDeviceManagementState(device);
+      li.appendChild(managementState);
 
       li.addEventListener('click', function () {
         selectDevice(device);

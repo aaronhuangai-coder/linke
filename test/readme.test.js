@@ -148,24 +148,29 @@ describe('README — version coverage', () => {
   it('mentions V0.32 (version unobservable coverage filter)', () => {
     assertReadmeContains(/V0\.32/, 'V0.32');
   });
+
+  it('mentions V0.33 (device/IP management state view)', () => {
+    assertReadmeContains(/V0\.33/, 'V0.33');
+  });
 });
 
-// ── V0.32 documentation ────────────────────────────────────────────
 
-describe('README — V0.32 version unobservable coverage filter', () => {
-  it('title says V0.32', () => {
-    assert.match(readme, /^# Linke V0\.32/m);
+// ── V0.33 documentation ────────────────────────────────────────────
+
+describe('README — V0.33 device/IP management state view', () => {
+  it('title says V0.33', () => {
+    assert.match(readme, /^# Linke V0\.33/m);
   });
 
-  it('version badge says 当前版本：V0.32', () => {
-    assert.match(readme, /当前版本：V0\.32/);
+  it('version badge says 当前版本：V0.33', () => {
+    assert.match(readme, /当前版本：V0\.33/);
   });
 
-  it('version table has V0.32 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.32 \| 当前版本 \|[^|]*(无可观测设备筛选|filter)/i);
+  it('version table has V0.33 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.33 \| 当前版本 \|[^|]*(统一管理态|device-management-state)/i);
   });
 
-  it('version table keeps V0.22 through V0.31 as historical milestones', () => {
+  it('version table keeps V0.22 through V0.32 as historical milestones', () => {
     assert.match(readme, /\| V0\.22 \| 备份版本一致性 \|/);
     assert.match(readme, /\| V0\.23 \| 版本一致性 snapshot 联动 \|/);
     assert.match(readme, /\| V0\.24 \| 版本一致性筛选与搜索 \|/);
@@ -176,67 +181,39 @@ describe('README — V0.32 version unobservable coverage filter', () => {
     assert.match(readme, /\| V0\.29 \| 版本一致性覆盖缺口排序 \|/);
     assert.match(readme, /\| V0\.30 \| 版本一致性覆盖率显示 \|/);
     assert.match(readme, /\| V0\.31 \| 版本一致性无可观测设备回退 \|/);
+    assert.match(readme, /\| V0\.32 \| 无可观测设备筛选 \|/);
   });
 
-  it('documents version consistency search, status, coverage filtering, coverage gap sorting, coverage ratio display, and unobservable coverage filter', () => {
-    assert.match(readme, /版本一致性.*筛选|筛选.*版本一致性/);
-    assert.match(readme, /搜索.*jobName|jobName.*搜索/);
-    assert.match(readme, /sourcePath/);
-    assert.match(readme, /deviceId|Device ID/);
-    assert.match(readme, /hostname|Hostname/);
-    assert.match(readme, /IP/);
-    assert.match(readme, /版本不一致/);
-    assert.match(readme, /单设备/);
-    assert.match(readme, /一致/);
-    assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
-    assert.match(readme, /覆盖率显示|覆盖率/);
-    assert.match(readme, /无可观测设备筛选|无可观测设备/);
+  it('documents device/IP management state feature docs for 统一管理态', () => {
+    assert.match(readme, /统一管理态/);
+    assert.match(readme, /在线可见|在线缺 IP|离线保留|未知待确认/);
   });
 
-  it('documents controls and summary as read-only in-memory derived view', () => {
-    assert.match(readme, /前端只读派生视图|只读.*派生视图/);
-    assert.match(readme, /内存|不重新请求 API|不新增 API/);
-    assert.match(readme, /可见.*总数|总数.*可见/);
-  });
-
-  it('documents version consistency coverage filter, coverage gap sort, coverage ratio display, and unobservable coverage filter', () => {
-    assert.match(readme, /版本一致性覆盖筛选|coverage filter|覆盖过滤/i);
-    assert.match(readme, /all|gap|full|unobservable/);
-    assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
-    assert.match(readme, /覆盖率显示|覆盖率/);
-    assert.match(readme, /无可观测设备筛选|无可观测设备/);
-  });
-
-  it('asserts safety docs for version consistency coverage filter, sort, ratio display, and unobservable coverage filter', () => {
-    assert.match(readme, /版本一致性.*安全(保证|边界)/);
+  it('asserts safety docs for device/IP management state', () => {
+    assert.match(readme, /统一管理态.*安全(保证|边界)|安全(保证|边界).*统一管理态/);
+    assert.match(readme, /只读/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
     assert.match(readme, /不触发备份|不进行备份/);
-    assert.match(readme, /不执行同步|不进行同步/);
-    assert.match(readme, /不执行恢复|不进行恢复/);
-    assert.match(readme, /不删除快照|不进行删除/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
     assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
-    assert.match(readme, /不调用 NAS app|不调用 NAS 应用/);
-    assert.match(readme, /不执行远程传输|不进行远程文件传输/);
+    assert.match(readme, /不进行(任何)?修改|无批量操作|无修复操作/);
   });
 
-  it('documents test coverage includes version consistency coverage filter, sort, ratio display, and unobservable coverage filter', () => {
-    assert.match(readme, /版本一致性覆盖筛选|coverage filter|覆盖过滤/i);
-    assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
-    assert.match(readme, /覆盖率显示|覆盖率/);
-    assert.match(readme, /无可观测设备筛选|无可观测设备/);
+  it('documents testing coverage includes device/IP management state', () => {
+    assert.match(readme, /测试覆盖：.*统一管理态/);
   });
 
-  it('asserts README contains a V0.32 unobservable coverage filter feature bullet', () => {
-    assert.match(readme, /-\s+\*\*版本一致性无可观测设备筛选\*\*/i);
+  it('asserts README contains a V0.33 统一管理态 feature bullet', () => {
+    assert.match(readme, /-\s+\*\*统一管理态\*\*/i);
   });
 
-  it('asserts Web Console combined feature list includes 版本一致性无可观测设备筛选', () => {
-    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性无可观测设备筛选/);
+  it('asserts Web Console combined feature list includes 统一管理态', () => {
+    assert.match(readme, /Web Console\*\* — 管理界面：.*统一管理态/);
   });
 
-  it('asserts testing coverage sentence includes 版本一致性无可观测设备筛选', () => {
-    assert.match(readme, /测试覆盖：.*版本一致性无可观测设备筛选/);
+  it('asserts testing coverage sentence includes 统一管理态', () => {
+    assert.match(readme, /测试覆盖：.*统一管理态/);
   });
 });
 

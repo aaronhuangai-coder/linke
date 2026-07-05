@@ -18,6 +18,7 @@ import {
   formatSnapshotJobName,
   formatSnapshotMeta,
   getDeviceBackupHealthStatus,
+  getDeviceManagementState,
   initConsole,
   matchesDeviceSearch,
   normalizeDeviceStatus,
@@ -1029,6 +1030,14 @@ describe('Web Console / API contract', () => {
     const html = await res.text();
     assert.ok(html.includes('data-testid="version-consistency-sort"'), 'must have version-consistency-sort');
     assert.ok(html.includes('value="coverage-gap"'), 'sort must include coverage-gap option');
+  });
+
+  it('GET /app.js source contract expects device-management-state and device-detail-management-state hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    assert.strictEqual(res.status, 200);
+    const js = await res.text();
+    assert.ok(js.includes('device-management-state'), 'app.js must reference device-management-state');
+    assert.ok(js.includes('device-detail-management-state'), 'app.js must reference device-detail-management-state');
   });
 });
 
@@ -3049,6 +3058,80 @@ describe('initConsole DOM data-testid hooks', () => {
 
     assert.ok(!calls.some((url) => String(url).includes('dev-a-snap')), 'old selected snapshot must not be reused after device switch');
   });
+
+  it('renders device-management-state in list items and device-detail-management-state in selected device detail', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'd1', hostname: 'host-one', status: 'online', ipAddress: '1.2.3.4', snapshotCount: 0 },
+      { deviceId: 'd2', hostname: 'host-two', status: 'online', ipAddress: '', snapshotCount: 0 },
+      { deviceId: 'd3', hostname: 'host-three', status: 'offline', ipAddress: '1.2.3.4', snapshotCount: 0 },
+      { deviceId: 'd4', hostname: 'host-four', status: 'unknown', ipAddress: '1.2.3.4', snapshotCount: 0 },
+    ];
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Verify list items management state hooks and text contents
+    const listItems = doc._created.filter((el) => el.className && el.className.includes('device-item'));
+    assert.strictEqual(listItems.length, 4);
+
+    const item1 = listItems.find((el) => el.dataset.deviceId === 'd1');
+    const item2 = listItems.find((el) => el.dataset.deviceId === 'd2');
+    const item3 = listItems.find((el) => el.dataset.deviceId === 'd3');
+    const item4 = listItems.find((el) => el.dataset.deviceId === 'd4');
+
+    const stateEl1 = item1.querySelector('[data-testid="device-management-state"]');
+    const stateEl2 = item2.querySelector('[data-testid="device-management-state"]');
+    const stateEl3 = item3.querySelector('[data-testid="device-management-state"]');
+    const stateEl4 = item4.querySelector('[data-testid="device-management-state"]');
+
+    assert.ok(stateEl1, 'd1 list item must render device-management-state element');
+    assert.ok(stateEl2, 'd2 list item must render device-management-state element');
+    assert.ok(stateEl3, 'd3 list item must render device-management-state element');
+    assert.ok(stateEl4, 'd4 list item must render device-management-state element');
+
+    assert.strictEqual(stateEl1.textContent.trim(), '在线可见');
+    assert.strictEqual(stateEl2.textContent.trim(), '在线缺 IP');
+    assert.strictEqual(stateEl3.textContent.trim(), '离线保留');
+    assert.strictEqual(stateEl4.textContent.trim(), '未知待确认');
+
+    function querySelectorDeep(el, testId) {
+      if (!el) return null;
+      if (el._attrs?.['data-testid'] === testId || el.id === testId || el._attrs?.['id'] === testId) {
+        return el;
+      }
+      if (el.children) {
+        for (const child of el.children) {
+          const found = querySelectorDeep(child, testId);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    // Click d1 to check detail view
+    item1._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detailEl = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-state');
+    assert.ok(detailEl, 'selected device detail must render device-detail-management-state element');
+    assert.strictEqual(detailEl.textContent.trim(), '在线可见');
+
+    // Click d2 to check detail view
+    item2._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const detailEl2 = querySelectorDeep(doc.getElementById('device-detail-content'), 'device-detail-management-state');
+    assert.ok(detailEl2, 'selected device detail must render device-detail-management-state element');
+    assert.strictEqual(detailEl2.textContent.trim(), '在线缺 IP');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -4723,5 +4806,35 @@ describe('V0.22 backup version consistency pure functions', () => {
       }
     });
     assert.deepStrictEqual(result.groups, []);
+  });
+});
+
+describe('V0.33 device management state pure functions', () => {
+  it('covers online + real IP => 在线可见', () => {
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: '192.168.1.100' }), '在线可见');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: '10.0.0.1' }), '在线可见');
+  });
+
+  it('covers online + missing/empty/null/unknown IP => 在线缺 IP', () => {
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: '' }), '在线缺 IP');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: null }), '在线缺 IP');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: undefined }), '在线缺 IP');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: 'unknown' }), '在线缺 IP');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: '   ' }), '在线缺 IP');
+    assert.strictEqual(getDeviceManagementState({ status: 'online', ipAddress: ' UNKNOWN ' }), '在线缺 IP');
+  });
+
+  it('covers offline => 离线保留', () => {
+    assert.strictEqual(getDeviceManagementState({ status: 'offline', ipAddress: '192.168.1.100' }), '离线保留');
+    assert.strictEqual(getDeviceManagementState({ status: 'offline', ipAddress: '' }), '离线保留');
+    assert.strictEqual(getDeviceManagementState({ status: 'offline' }), '离线保留');
+  });
+
+  it('covers unknown/missing status/null device => 未知待确认', () => {
+    assert.strictEqual(getDeviceManagementState({ status: 'unknown', ipAddress: '1.2.3.4' }), '未知待确认');
+    assert.strictEqual(getDeviceManagementState({ status: '', ipAddress: '1.2.3.4' }), '未知待确认');
+    assert.strictEqual(getDeviceManagementState({ status: null }), '未知待确认');
+    assert.strictEqual(getDeviceManagementState({}), '未知待确认');
+    assert.strictEqual(getDeviceManagementState(null), '未知待确认');
   });
 });
