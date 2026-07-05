@@ -1,5 +1,6 @@
 import { createServer as createHttpServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { readFile, access } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -68,6 +69,33 @@ async function serveStatic(res, filePath) {
   }
 }
 
+const LINKE_RELEASE_VERSION = 'V0.46';
+
+export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) {
+  const readable = Boolean(dataDirReadable);
+  const timestamp = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+
+  return {
+    status: readable ? 'ok' : 'degraded',
+    service: 'linke',
+    version: LINKE_RELEASE_VERSION,
+    checks: {
+      http: 'ok',
+      dataDirReadable: readable ? 'ok' : 'unavailable',
+    },
+    timestamp,
+  };
+}
+
+async function isDataDirReadable(dataDir) {
+  try {
+    await access(dataDir, constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function createServer({ dataDir, backupHooks } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
 
@@ -77,6 +105,12 @@ export function createServer({ dataDir, backupHooks } = {}) {
 
     try {
       // ── API Routes ──────────────────────────────────────────
+
+      // GET /api/health
+      if (method === 'GET' && pathname === '/api/health') {
+        const dataDirReadable = await isDataDirReadable(dataDir);
+        return sendJSON(res, 200, buildHealthResponse({ dataDirReadable }));
+      }
 
       // POST /api/heartbeat
       if (method === 'POST' && pathname === '/api/heartbeat') {

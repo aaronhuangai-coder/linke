@@ -1,8 +1,8 @@
-# Linke V0.45
+# Linke V0.46
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.45** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.46** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -52,7 +52,8 @@
 | V0.42 | 设备筛选摘要 | 设备筛选摘要：无筛选时展示默认筛选，有筛选时展示包含各筛选状态的当前筛选摘要 |
 | V0.43 | 设备筛选摘要状态 | 设备筛选摘要增加只读 data-active 状态与 aria-atomic 可访问性支持 |
 | V0.44 | 设备筛选计数状态 | 设备筛选计数状态：设备筛选计数增加只读 data-filtered 属性以指示列表是否被过滤收窄 |
-| V0.45 | 当前版本 | 设备筛选计数指标：设备筛选计数增加只读 data-visible-count 与 data-total-count 属性以展示可见数与总数 |
+| V0.45 | 历史版本 | 设备筛选计数指标：设备筛选计数增加只读 data-visible-count 与 data-total-count 属性以展示可见数与总数 |
+| V0.46 | 当前版本 | 发布健康检查：提供 release health 接口 GET /api/health，输出只读系统状态 |
 
 ## 特性
 
@@ -714,6 +715,24 @@ V0.45 为设备列表的设备筛选计数（`device-filter-count`）增加只�
 - 不连接 NAS。
 - 不执行远程命令。
 
+### 发布健康检查
+
+V0.46 实现了发布健康检查端点 `/api/health`。
+
+- 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、版本号 `"V0.46"`、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
+
+### 发布健康检查安全边界
+
+发布健康检查接口具备以下安全保证：
+- **只读端点**：仅响应 GET 请求，不接受 POST、PUT、PATCH 或 DELETE 请求。
+- **不写入任何元数据**：该接口完全是只读的，不会对本地、NAS 写入任何 metadata 或其他数据。
+- **无路径泄露**：返回值完全匿名，不会暴露本机路径或 `DATA_DIR` 环境变量等任何敏感路径信息（no path disclosure）。
+- **不连接 NAS**：该检查仅在本机数据目录进行，不建立任何真实 NAS 连接。
+- **不执行远程命令**：该检查不涉及也不执行任何远程命令。
+- **无认证/生产承诺**：此端点不提供任何安全认证，不包含任何适合生产部署的承诺。
+
 ### Web Console 设备筛选摘要状态
 
 V0.43 为设备筛选摘要（`device-active-filter-summary`）增加只读 `data-active` 状态与 `aria-atomic="true"` 可访问性支持。
@@ -946,6 +965,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 | GET    | /api/devices/:deviceId/snapshots/:snapshotId/restore-dry-run | 恢复预检 dry-run |
 | GET    | /api/devices/:deviceId/snapshots/diff-dry-run | 快照差异 dry-run   |
 | GET    | /api/devices/:deviceId/retention-dry-run    | 快照保留 dry-run   |
+| GET    | /api/health                                 | 发布健康检查       |
 | POST   | /api/heartbeat                              | 记录心跳           |
 | POST   | /api/backups                                | 创建备份快照       |
 | POST   | /api/nas-dry-run                            | NAS 预检 dry-run   |
@@ -957,7 +977,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查。
 
 ## 技术约束
 

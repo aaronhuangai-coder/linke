@@ -29,7 +29,7 @@
 - Expects `buildHealthResponse({ dataDirReadable, now }): { status, service, version, checks, timestamp }`.
 - Expects `GET /api/health` JSON endpoint.
 
-- [ ] **Step 1: Add failing pure helper test**
+- [x] **Step 1: Add failing pure helper test**
 
 Create `test/health.test.js`:
 
@@ -76,7 +76,7 @@ describe('Release health response', () => {
 });
 ```
 
-- [ ] **Step 2: Add failing HTTP endpoint tests**
+- [x] **Step 2: Add failing HTTP endpoint tests**
 
 Append to `test/health.test.js`:
 
@@ -153,7 +153,7 @@ describe('GET /api/health with missing dataDir', () => {
 });
 ```
 
-- [ ] **Step 3: Add failing README tests**
+- [x] **Step 3: Add failing README tests**
 
 In `test/readme.test.js`:
 
@@ -192,7 +192,7 @@ describe('README — V0.46 release health endpoint', () => {
 });
 ```
 
-- [ ] **Step 4: Verify RED**
+- [x] **Step 4: Verify RED**
 
 Run:
 
@@ -212,7 +212,7 @@ Expected: FAIL because `buildHealthResponse`, `/api/health`, and V0.46 README do
 - Produces: `buildHealthResponse({ dataDirReadable, now }): object`.
 - Produces: `GET /api/health`.
 
-- [ ] **Step 1: Add pure helper**
+- [x] **Step 1: Add pure helper**
 
 In `src/server.js`, export:
 
@@ -250,7 +250,7 @@ async function isDataDirReadable(dataDir) {
 
 Import `access` from `node:fs/promises` and `constants` from `node:fs`.
 
-- [ ] **Step 2: Add route**
+- [x] **Step 2: Add route**
 
 Inside `createServer()` before mutating API routes:
 
@@ -264,7 +264,7 @@ if (method === 'GET' && pathname === '/api/health') {
 
 Do not add a `POST /api/health` branch.
 
-- [ ] **Step 3: Update README**
+- [x] **Step 3: Update README**
 
 Update README:
 
@@ -277,7 +277,7 @@ Update README:
 
 Add feature/API/safety/testing text for `/api/health`. The text must state: read-only, `status:"ok"` for readable dataDir, `status:"degraded"` when the dataDir is unavailable, no metadata writes, no path disclosure, no NAS connection, no remote command, no production-ready/auth claim.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run:
 
@@ -289,29 +289,29 @@ Expected: PASS.
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/health.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full suite**
+- [x] **Step 2: Run full suite**
 
 ```bash
 node --test --test-reporter=dot test/*.test.js
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Run Qwen diff review**
+- [x] **Step 4: Run Qwen diff review**
 
 Ask Qwen to check blockers for endpoint mutability, data path disclosure, method scope, README over-claims, tests, and Gold release usefulness.
 
-- [ ] **Step 5: Run HTTP smoke**
+- [x] **Step 5: Run HTTP smoke**
 
 Start a local server and verify:
 
@@ -322,7 +322,7 @@ GET / still serves the Web Console.
 GET /api/devices still returns an array.
 ```
 
-- [ ] **Step 6: Run ZAI final verifier**
+- [x] **Step 6: Run ZAI final verifier**
 
 Use strict English evidence-only prompt. If ZAI returns tool errors, empty output, missing status fields, or `I don't have a specific response`, record `INCONCLUSIVE` and do not use it as primary acceptance evidence.
 
@@ -333,3 +333,20 @@ git add README.md src/server.js test/health.test.js test/readme.test.js docs/sup
 git commit -m "feat: add release health endpoint"
 git push
 ```
+
+## Execution Notes
+
+- RED confirmed with `node --test test/health.test.js test/readme.test.js`: failed before implementation because `buildHealthResponse`, `/api/health`, and V0.46 README docs were missing.
+- AGY implemented GREEN in `src/server.js`, `README.md`, and README tests. A narrow AGY follow-up for stronger V0.45 historical assertions exited with no output and no file changes (`EXITED_NO_OUTPUT`); PM applied the small test-strengthening integration fix.
+- PM verification passed:
+  - `node --test test/health.test.js test/readme.test.js` => 180 tests passed.
+  - `npm test` => 568 tests passed.
+  - `git diff --check` => passed.
+- Sandbox note: direct sandboxed `node --test` runs that open local HTTP listeners can fail with `EPERM` and Node v24.14.0 native assertion; PM reran the target command with approved `node --test` execution and verified it passed.
+- Qwen adversarial review returned `DONE`, no blocking findings.
+- HTTP smoke on `127.0.0.1:3010` passed:
+  - `GET /api/health` returned `status:"ok"`, `service:"linke"`, `version:"V0.46"`, `checks.http:"ok"`, `checks.dataDirReadable:"ok"` without dataDir path disclosure.
+  - `POST /api/health` returned 404.
+  - `GET /` returned 200 Web Console HTML.
+  - `GET /api/devices` returned 200 with an array.
+- ZAI auxiliary verifier returned final `Status: DONE` and no blocking findings. PM treated ZAI as auxiliary because its transcript included tool-path errors before the final structured verdict.

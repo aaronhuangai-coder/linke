@@ -200,6 +200,10 @@ describe('README — version coverage', () => {
   it('mentions V0.45 (device filter count metrics)', () => {
     assertReadmeContains(/V0\.45/, 'V0.45');
   });
+
+  it('mentions V0.46 (release health endpoint)', () => {
+    assertReadmeContains(/V0\.46/, 'V0.46');
+  });
 });
 
 
@@ -638,16 +642,16 @@ describe('README — V0.44 device filter count state', () => {
 });
 
 describe('README — V0.45 device filter count metrics', () => {
-  it('title says V0.45', () => {
-    assert.match(readme, /^# Linke V0\.45/m);
+  it('title no longer claims V0.45 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.45/m);
   });
 
-  it('version badge says 当前版本：V0.45', () => {
-    assert.match(readme, /当前版本：V0\.45/);
+  it('version badge no longer says 当前版本：V0.45', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.45/);
   });
 
-  it('version table has V0.45 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.45 \| 当前版本 \|[^|]*(设备筛选计数指标|device-filter-count|data-visible-count|data-total-count)/i);
+  it('version table has V0.45 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.45 \| 历史版本 \|[^|]*(设备筛选计数指标|device-filter-count|data-visible-count|data-total-count)/i);
   });
 
   it('documents device filter count metrics behavior and attributes', () => {
@@ -1024,5 +1028,30 @@ describe('README — no over-promises', () => {
       !/后台常驻|自动.*后台|background.*daemon|always.?running|常驻.*运行/i.test(readme),
       'README should not claim background daemon',
     );
+  });
+});
+
+describe('README — V0.46 release health endpoint', () => {
+  it('title and badge say V0.46', () => {
+    assert.match(readme, /^# Linke V0\.46/m);
+    assert.match(readme, /当前版本：V0\.46/);
+  });
+
+  it('version table has V0.46 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.46 \| 当前版本 \|[^|]*(发布健康检查|release health|\/api\/health)/i);
+  });
+
+  it('documents the health endpoint and safety boundary', () => {
+    assert.match(readme, /\/api\/health/);
+    assert.match(readme, /status.*ok|ok.*status/i);
+    assert.match(readme, /degraded|dataDirReadable|unavailable/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不暴露(本机)?路径|不暴露 DATA_DIR|no path disclosure/i);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+  });
+
+  it('documents testing coverage includes release health endpoint', () => {
+    assert.match(readme, /测试覆盖：.*发布健康检查/);
   });
 });
