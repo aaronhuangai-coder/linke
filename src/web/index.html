@@ -98,6 +98,33 @@
           <p>设备详情面板为只读视图，仅展示现有设备状态，不修改设备、不写入元数据、不触发任何远程操作。</p>
         </div>
       </section>
+      <section class="panel device-health-panel" data-testid="device-health-panel">
+        <h2>设备备份健康</h2>
+        <div class="device-health-summary">
+          <div class="device-health-stat health-healthy">
+            <span id="device-health-healthy-count" data-testid="device-health-healthy-count">0</span>
+            <span>健康</span>
+          </div>
+          <div class="device-health-stat health-attention">
+            <span id="device-health-attention-count" data-testid="device-health-attention-count">0</span>
+            <span>需关注</span>
+          </div>
+          <div class="device-health-stat health-offline">
+            <span id="device-health-offline-count" data-testid="device-health-offline-count">0</span>
+            <span>离线</span>
+          </div>
+          <div class="device-health-stat health-unknown">
+            <span id="device-health-unknown-count" data-testid="device-health-unknown-count">0</span>
+            <span>未知</span>
+          </div>
+        </div>
+        <ul id="device-health-list" class="device-health-list" data-testid="device-health-list">
+          <li class="placeholder">暂无设备健康数据</li>
+        </ul>
+        <div class="device-health-safety-note" data-testid="device-health-safety-note">
+          <p>设备备份健康面板为前端只读派生视图，只读取现有设备状态，不写入 metadata、不触发备份、不执行恢复、不连接 NAS。</p>
+        </div>
+      </section>
       <section class="panel snapshots-panel">
         <h2>快照 <span id="snapshots-device-name" class="device-name"></span></h2>
         <ul data-testid="snapshot-list" id="snapshot-list">

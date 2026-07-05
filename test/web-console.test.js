@@ -8,12 +8,14 @@ import {
   applyDeviceListControls,
   buildBackupJobOverview,
   buildBackupJobTimeline,
+  buildDeviceBackupHealth,
   compareDevicesForSort,
   computeFleetSummary,
   formatLastBackup,
   formatLastHeartbeat,
   formatSnapshotJobName,
   formatSnapshotMeta,
+  getDeviceBackupHealthStatus,
   initConsole,
   matchesDeviceSearch,
   normalizeDeviceStatus,
@@ -906,6 +908,36 @@ describe('Web Console / API contract', () => {
     assert.ok(content.includes('不执行恢复'), 'must mention 不执行恢复');
     assert.ok(content.includes('不连接 NAS'), 'must mention 不连接 NAS');
   });
+
+  // ── V0.21 Device Backup Health panel HTML contract ────────────────
+
+  it('HTML contains V0.21 device backup health panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="device-health-panel"'), 'must have device-health-panel');
+    assert.ok(html.includes('data-testid="device-health-healthy-count"'), 'must have device-health-healthy-count');
+    assert.ok(html.includes('data-testid="device-health-attention-count"'), 'must have device-health-attention-count');
+    assert.ok(html.includes('data-testid="device-health-offline-count"'), 'must have device-health-offline-count');
+    assert.ok(html.includes('data-testid="device-health-unknown-count"'), 'must have device-health-unknown-count');
+    assert.ok(html.includes('data-testid="device-health-list"'), 'must have device-health-list');
+    assert.ok(html.includes('data-testid="device-health-safety-note"'), 'must have device-health-safety-note');
+  });
+
+  it('V0.21 device backup health panel is read-only and has no execution controls', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="device-health-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'device-health-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(!content.includes('<button'), 'health panel must not contain buttons');
+    assert.ok(/只读|派生视图/.test(content), 'must state read-only derived behavior');
+    assert.ok(/不写入 metadata/.test(content), 'must state no metadata writes');
+    assert.ok(/不触发备份/.test(content), 'must state no backup execution');
+    assert.ok(/不执行恢复/.test(content), 'must state no restore execution');
+    assert.ok(/不连接 NAS/.test(content), 'must state no NAS connection');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -1403,7 +1435,26 @@ function buildMockDoc() {
   const doc = {
     _created: createdElements,
     getElementById: (id) => getOrCreate(id),
-    querySelector: (sel) => getOrCreate(sel),
+    querySelector: (sel) => {
+      const norm = normalizeKey(sel);
+      if (elements[norm]) return elements[norm];
+      function findIn(el) {
+        if (el._attrs?.['data-testid'] === norm || el.id === norm || el._attrs?.['id'] === norm) return el;
+        if (typeof sel === 'string' && sel.startsWith('.') && el.className?.includes(sel.slice(1))) return el;
+        if (el.children) {
+          for (const child of el.children) {
+            const found = findIn(child);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+      for (const el of createdElements) {
+        const found = findIn(el);
+        if (found) return found;
+      }
+      return getOrCreate(sel);
+    },
     createElement: (tag) => {
       const el = {
         tagName: tag,
@@ -3123,5 +3174,301 @@ describe('V0.20 Event Log Panel unit tests', () => {
     assert.strictEqual(infoCountEl.textContent, '31', 'cumulative info count must show 31');
     assert.strictEqual(errorCountEl.textContent, '30', 'cumulative error count must show 30');
     assert.ok(latestMessageEl.textContent.includes('Simulated failure 60'), 'latest message must show latest log content');
+  });
+});
+
+describe('V0.21 Device Backup Health Panel unit tests', () => {
+  it('initConsole() renders health summary and health items after devices load', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      {
+        deviceId: 'attention-device',
+        hostname: 'Attention',
+        ipAddress: '10.0.0.2',
+        status: 'online',
+        snapshotCount: 0,
+        lastHeartbeatAt: '2025-07-05T11:00:00.000Z',
+        lastBackupAt: '',
+      },
+      {
+        deviceId: 'healthy-device',
+        hostname: 'Healthy',
+        ipAddress: '10.0.0.1',
+        status: 'online',
+        snapshotCount: 2,
+        lastHeartbeatAt: '2025-07-05T11:00:00.000Z',
+        lastBackupAt: '2025-07-05T10:00:00.000Z',
+      },
+      {
+        deviceId: 'future-device',
+        hostname: 'FutureBackup',
+        ipAddress: '10.0.0.3',
+        status: 'online',
+        snapshotCount: 1,
+        lastHeartbeatAt: '2025-07-05T11:00:00.000Z',
+        lastBackupAt: '2999-01-01T00:00:00.000Z',
+      },
+    ];
+    const mockFetch = async (url) => {
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-healthy-count"]').textContent, '1');
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-attention-count"]').textContent, '2');
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-offline-count"]').textContent, '0');
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-unknown-count"]').textContent, '0');
+
+    const items = doc._created.filter((el) => el._attrs?.['data-testid'] === 'device-health-item');
+    assert.strictEqual(items.length, 3);
+    assert.strictEqual(items[0].dataset.healthStatus, 'attention');
+    assert.strictEqual(items[0].querySelector('[data-testid="device-health-reason"]').textContent, '缺少有效备份');
+    assert.strictEqual(items[1].dataset.healthStatus, 'attention');
+    assert.strictEqual(items[1].querySelector('[data-testid="device-health-name"]').textContent, 'FutureBackup');
+    assert.strictEqual(items[1].querySelector('[data-testid="device-health-reason"]').textContent, '缺少有效备份');
+    assert.strictEqual(items[2].dataset.healthStatus, 'healthy');
+  });
+
+  it('clicking a health item reuses the existing device selection load path', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const devices = [{
+      deviceId: 'health-click-device',
+      hostname: 'ClickDevice',
+      ipAddress: '10.0.0.8',
+      status: 'online',
+      snapshotCount: 1,
+      lastHeartbeatAt: '2025-07-05T11:00:00.000Z',
+      lastBackupAt: '2025-07-05T10:00:00.000Z',
+    }];
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => ({ keepCount: 0, wouldDeleteCount: 0, snapshots: [] }) };
+      }
+      if (url.includes('/snapshots')) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => devices };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const item = doc._created.find((el) => el._attrs?.['data-testid'] === 'device-health-item');
+    assert.ok(item, 'device-health-item must be rendered');
+    item._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(calls.some((url) => url.includes('/api/devices/health-click-device/snapshots')));
+    assert.ok(calls.some((url) => url.includes('/api/devices/health-click-device/retention-dry-run')));
+    assert.strictEqual(doc.querySelector('[data-testid="device-detail-device-id"]').textContent, 'health-click-device');
+  });
+
+  it('second device load replaces health counts instead of accumulating old results', async () => {
+    const doc = buildMockDoc();
+    const intervalCallbacks = [];
+    let callCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/snapshots') || url.includes('/retention-dry-run')) {
+        return { ok: true, status: 200, json: async () => (url.includes('retention') ? { keepCount: 0, wouldDeleteCount: 0, snapshots: [] } : []) };
+      }
+      callCount += 1;
+      if (callCount === 1) {
+        return { ok: true, status: 200, json: async () => ([{
+          deviceId: 'first',
+          status: 'online',
+          snapshotCount: 1,
+          lastBackupAt: '2025-07-05T10:00:00.000Z',
+        }]) };
+      }
+      return { ok: true, status: 200, json: async () => ([{
+        deviceId: 'second',
+        status: 'offline',
+        snapshotCount: 0,
+        lastBackupAt: '',
+      }]) };
+    };
+
+    initConsole(doc, mockFetch, (fn) => {
+      intervalCallbacks.push(fn);
+      return 0;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-healthy-count"]').textContent, '1');
+
+    await intervalCallbacks[0]();
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-healthy-count"]').textContent, '0');
+    assert.strictEqual(doc.querySelector('[data-testid="device-health-offline-count"]').textContent, '1');
+  });
+
+  it('renders device health text as textContent without innerHTML injection', async () => {
+    const doc = buildMockDoc();
+    const devices = [{
+      deviceId: '<script>alert(1)</script>',
+      hostname: '<b>Injected</b>',
+      ipAddress: '10.0.0.9',
+      status: 'online',
+      snapshotCount: 0,
+      lastHeartbeatAt: '',
+      lastBackupAt: '',
+    }];
+    const mockFetch = async (url) => ({ ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : devices) });
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const item = doc._created.find((el) => el._attrs?.['data-testid'] === 'device-health-item');
+    assert.ok(item, 'device-health-item must be rendered');
+    assert.strictEqual(item.innerHTML || '', '');
+    assert.strictEqual(item.querySelector('[data-testid="device-health-name"]').textContent, '<b>Injected</b>');
+    assert.strictEqual(item.querySelector('[data-testid="device-health-device-id"]').textContent, '<script>alert(1)</script>');
+  });
+});
+
+describe('V0.21 device backup health pure functions', () => {
+  const now = new Date('2026-07-05T12:00:00.000Z');
+
+  it('classifies online devices with valid backups as healthy', () => {
+    const status = getDeviceBackupHealthStatus({
+      deviceId: 'healthy-mac',
+      status: 'online',
+      snapshotCount: 2,
+      lastBackupAt: '2026-07-05T11:00:00.000Z',
+    }, now);
+
+    assert.strictEqual(status, 'healthy');
+  });
+
+  it('classifies online devices without valid backup records as attention', () => {
+    assert.strictEqual(getDeviceBackupHealthStatus({
+      deviceId: 'no-snapshots',
+      status: 'online',
+      snapshotCount: 0,
+      lastBackupAt: '2026-07-05T11:00:00.000Z',
+    }, now), 'attention');
+
+    assert.strictEqual(getDeviceBackupHealthStatus({
+      deviceId: 'missing-backup',
+      status: 'online',
+      snapshotCount: 1,
+      lastBackupAt: '',
+    }, now), 'attention');
+
+    assert.strictEqual(getDeviceBackupHealthStatus({
+      deviceId: 'future-backup',
+      status: 'online',
+      snapshotCount: 1,
+      lastBackupAt: '2026-07-06T00:00:00.000Z',
+    }, now), 'attention');
+  });
+
+  it('classifies offline and unknown devices separately', () => {
+    assert.strictEqual(getDeviceBackupHealthStatus({
+      deviceId: 'offline-mac',
+      status: 'offline',
+      snapshotCount: 5,
+      lastBackupAt: '2026-07-05T10:00:00.000Z',
+    }, now), 'offline');
+
+    assert.strictEqual(getDeviceBackupHealthStatus({
+      deviceId: 'weird-mac',
+      status: 'sleeping',
+      snapshotCount: 5,
+      lastBackupAt: '2026-07-05T10:00:00.000Z',
+    }, now), 'unknown');
+  });
+
+  it('builds summary counts, stable labels, reasons, fallbacks, and sort order', () => {
+    const result = buildDeviceBackupHealth([
+      {
+        deviceId: 'healthy-device',
+        hostname: 'Zulu',
+        ipAddress: '10.0.0.4',
+        status: 'online',
+        snapshotCount: 4,
+        lastHeartbeatAt: '2026-07-05T11:55:00.000Z',
+        lastBackupAt: '2026-07-05T11:30:00.000Z',
+      },
+      {
+        deviceId: 'needs-attention',
+        hostname: 'Alpha',
+        ipAddress: '10.0.0.1',
+        status: 'online',
+        snapshotCount: 0,
+        lastHeartbeatAt: '2026-07-05T11:50:00.000Z',
+        lastBackupAt: '',
+      },
+      {
+        deviceId: 'offline-device',
+        hostname: 'Beta',
+        ipAddress: '10.0.0.2',
+        status: 'offline',
+        snapshotCount: 3,
+        lastHeartbeatAt: '2026-07-05T09:00:00.000Z',
+        lastBackupAt: '2026-07-05T08:00:00.000Z',
+      },
+      {
+        deviceId: 'unknown-device',
+        hostname: '',
+        ipAddress: '',
+        status: 'sleeping',
+        snapshotCount: -2,
+        lastHeartbeatAt: 'invalid',
+        lastBackupAt: 'invalid',
+      },
+      {
+        hostname: '',
+        ipAddress: '',
+        status: 'sleeping',
+        snapshotCount: 0,
+        lastHeartbeatAt: 'invalid',
+        lastBackupAt: 'invalid',
+      },
+    ], now);
+
+    assert.deepStrictEqual(result.summary, {
+      healthy: 1,
+      attention: 1,
+      offline: 1,
+      unknown: 2,
+      total: 5,
+    });
+
+    assert.deepStrictEqual(result.items.map((item) => item.healthStatus), [
+      'attention',
+      'offline',
+      'unknown',
+      'unknown',
+      'healthy',
+    ]);
+    assert.strictEqual(result.items[0].healthLabel, '需关注');
+    assert.strictEqual(result.items[0].healthReason, '缺少有效备份');
+    assert.strictEqual(result.items[2].hostname, 'unknown');
+    assert.strictEqual(result.items[2].ipAddress, 'unknown');
+    assert.strictEqual(result.items[2].snapshotCount, 0);
+    assert.strictEqual(result.items[3].hostname, 'unknown-device');
+    assert.strictEqual(result.items[3].ipAddress, 'unknown');
+    assert.strictEqual(result.items[3].snapshotCount, 0);
+  });
+
+  it('treats non-array input as an empty health result', () => {
+    assert.deepStrictEqual(buildDeviceBackupHealth(null, now), {
+      summary: {
+        healthy: 0,
+        attention: 0,
+        offline: 0,
+        unknown: 0,
+        total: 0,
+      },
+      items: [],
+    });
+
+    assert.deepStrictEqual(buildDeviceBackupHealth({ bad: true }, now).items, []);
   });
 });

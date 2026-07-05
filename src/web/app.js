@@ -247,6 +247,96 @@ export function applyDeviceListControls(devices, controls) {
     .sort((a, b) => compareDevicesForSort(a, b, sort));
 }
 
+const DEVICE_HEALTH_LABELS = {
+  healthy: '健康',
+  attention: '需关注',
+  offline: '离线',
+  unknown: '未知',
+};
+
+const DEVICE_HEALTH_REASONS = {
+  healthy: '最近备份有效',
+  attention: '缺少有效备份',
+  offline: '设备离线',
+  unknown: '状态未知',
+};
+
+const DEVICE_HEALTH_SORT_ORDER = {
+  attention: 0,
+  offline: 1,
+  unknown: 2,
+  healthy: 3,
+};
+
+function getValidDateTime(value) {
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function normalizeDeviceText(value) {
+  const text = String(value || '').trim();
+  return text || 'unknown';
+}
+
+function normalizeSnapshotCount(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getDeviceDisplayName(device) {
+  return normalizeDeviceText(device?.hostname || device?.deviceId);
+}
+
+export function getDeviceBackupHealthStatus(device, now = new Date()) {
+  const status = device?.status;
+  if (status === 'offline') return 'offline';
+  if (status !== 'online') return 'unknown';
+
+  const snapshotCount = normalizeSnapshotCount(device?.snapshotCount);
+  const backupTime = getValidDateTime(device?.lastBackupAt);
+  const nowTime = now instanceof Date ? now.getTime() : Date.parse(now);
+
+  if (snapshotCount > 0 && backupTime > 0 && backupTime <= nowTime) {
+    return 'healthy';
+  }
+  return 'attention';
+}
+
+export function buildDeviceBackupHealth(devices, now = new Date()) {
+  const summary = {
+    healthy: 0,
+    attention: 0,
+    offline: 0,
+    unknown: 0,
+    total: 0,
+  };
+
+  const safeDevices = Array.isArray(devices) ? devices : [];
+  const items = safeDevices.map((device) => {
+    const healthStatus = getDeviceBackupHealthStatus(device, now);
+    summary[healthStatus] += 1;
+    summary.total += 1;
+
+    return {
+      deviceId: normalizeDeviceText(device?.deviceId),
+      hostname: getDeviceDisplayName(device),
+      ipAddress: normalizeDeviceText(device?.ipAddress),
+      status: normalizeDeviceStatus(device?.status),
+      healthStatus,
+      healthLabel: DEVICE_HEALTH_LABELS[healthStatus],
+      healthReason: DEVICE_HEALTH_REASONS[healthStatus],
+      snapshotCount: normalizeSnapshotCount(device?.snapshotCount),
+      lastHeartbeatAt: device?.lastHeartbeatAt || '',
+      lastBackupAt: device?.lastBackupAt || '',
+    };
+  }).sort((a, b) => (
+    DEVICE_HEALTH_SORT_ORDER[a.healthStatus] - DEVICE_HEALTH_SORT_ORDER[b.healthStatus]
+    || a.hostname.localeCompare(b.hostname)
+    || a.deviceId.localeCompare(b.deviceId)
+  ));
+
+  return { summary, items };
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
@@ -285,6 +375,12 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const eventInfoCountEl = doc.getElementById('event-info-count');
   const eventErrorCountEl = doc.getElementById('event-error-count');
   const eventLatestMessageEl = doc.getElementById('event-latest-message');
+
+  const deviceHealthHealthyCountEl = doc.getElementById('device-health-healthy-count');
+  const deviceHealthAttentionCountEl = doc.getElementById('device-health-attention-count');
+  const deviceHealthOfflineCountEl = doc.getElementById('device-health-offline-count');
+  const deviceHealthUnknownCountEl = doc.getElementById('device-health-unknown-count');
+  const deviceHealthListEl = doc.getElementById('device-health-list');
 
   const EVENT_LOG_VISIBLE_LIMIT = 50;
   let eventTotalCount = 0;
@@ -432,8 +528,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       renderFleetSummary(devices);
       renderFilteredDevices();
       renderDeviceDetail(selectedDevice);
+      renderDeviceBackupHealth(devices);
       logEvent('已加载 ' + devices.length + ' 台设备', 'info');
     } catch (err) {
+      renderDeviceBackupHealth([]);
       logEvent('加载设备失败: ' + err.message, 'error');
     }
   }
@@ -489,6 +587,87 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     fleetSnapshotsEl.textContent = summary.totalSnapshots;
   }
 
+  function selectDevice(device) {
+    selectedDeviceId = device.deviceId;
+    selectedSnapshotId = null;
+    selectedBackupJobKey = null;
+    cachedSnapshots = [];
+    setBackupJobDetailPlaceholder('加载中…', device.deviceId);
+    renderDeviceDetail(device);
+    renderFilteredDevices();
+    fetchSnapshots(device.deviceId);
+    fetchRetentionPlan(device.deviceId);
+  }
+
+  function setDeviceHealthCounts(summary) {
+    if (deviceHealthHealthyCountEl) deviceHealthHealthyCountEl.textContent = String(summary.healthy);
+    if (deviceHealthAttentionCountEl) deviceHealthAttentionCountEl.textContent = String(summary.attention);
+    if (deviceHealthOfflineCountEl) deviceHealthOfflineCountEl.textContent = String(summary.offline);
+    if (deviceHealthUnknownCountEl) deviceHealthUnknownCountEl.textContent = String(summary.unknown);
+  }
+
+  function appendDeviceHealthField(parent, testId, value) {
+    const field = doc.createElement('span');
+    field.setAttribute('data-testid', testId);
+    field.textContent = value;
+    parent.appendChild(field);
+    return field;
+  }
+
+  function renderDeviceBackupHealth(devices) {
+    const health = buildDeviceBackupHealth(devices);
+    setDeviceHealthCounts(health.summary);
+    clearElement(deviceHealthListEl);
+    if (!deviceHealthListEl) return;
+
+    if (health.items.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '暂无设备健康数据';
+      if (typeof deviceHealthListEl.appendChild === 'function') {
+        deviceHealthListEl.appendChild(item);
+      }
+      return;
+    }
+
+    health.items.forEach(function (item) {
+      const row = doc.createElement('li');
+      row.className = 'device-health-item device-health-' + item.healthStatus
+        + (item.deviceId === selectedDeviceId ? ' selected' : '');
+      row.setAttribute('data-testid', 'device-health-item');
+      row.setAttribute('data-device-id', item.deviceId);
+      row.setAttribute('data-health-status', item.healthStatus);
+      row.dataset.deviceId = item.deviceId;
+
+      const sourceDevice = cachedDevices.find((device) => device.deviceId === item.deviceId) || {
+        deviceId: item.deviceId,
+        hostname: item.hostname,
+        ipAddress: item.ipAddress,
+        status: item.status,
+        snapshotCount: item.snapshotCount,
+        lastHeartbeatAt: item.lastHeartbeatAt,
+        lastBackupAt: item.lastBackupAt,
+      };
+
+      row.addEventListener('click', function () {
+        selectDevice(sourceDevice);
+      });
+
+      appendDeviceHealthField(row, 'device-health-name', item.hostname);
+      appendDeviceHealthField(row, 'device-health-device-id', item.deviceId);
+      appendDeviceHealthField(row, 'device-health-ip', item.ipAddress);
+      appendDeviceHealthField(row, 'device-health-status', item.healthLabel);
+      appendDeviceHealthField(row, 'device-health-reason', item.healthReason);
+      appendDeviceHealthField(row, 'device-health-snapshots', String(item.snapshotCount) + ' 快照');
+      appendDeviceHealthField(row, 'device-health-heartbeat', formatLastHeartbeat(item.lastHeartbeatAt));
+      appendDeviceHealthField(row, 'device-health-backup', formatLastBackup(item.lastBackupAt));
+
+      if (typeof deviceHealthListEl.appendChild === 'function') {
+        deviceHealthListEl.appendChild(row);
+      }
+    });
+  }
+
   function renderDevices(devices) {
     clearElement(deviceListEl);
     if (devices.length === 0) {
@@ -528,15 +707,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       li.appendChild(meta);
 
       li.addEventListener('click', function () {
-        selectedDeviceId = device.deviceId;
-        selectedSnapshotId = null;
-        selectedBackupJobKey = null;
-        cachedSnapshots = [];
-        setBackupJobDetailPlaceholder('加载中…', device.deviceId);
-        renderDeviceDetail(device);
-        renderFilteredDevices();
-        fetchSnapshots(device.deviceId);
-        fetchRetentionPlan(device.deviceId);
+        selectDevice(device);
       });
 
       deviceListEl.appendChild(li);

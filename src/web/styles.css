@@ -1263,3 +1263,87 @@ ul {
   font-size: 0.85rem;
   color: #6d4c00;
 }
+
+.device-health-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.device-health-stat {
+  border: 1px solid #d8dee9;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.device-health-stat span:first-child {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.device-health-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.device-health-item {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.2fr) minmax(100px, 1fr) minmax(90px, 0.8fr) minmax(90px, 0.8fr);
+  gap: 6px 10px;
+  border: 1px solid #d8dee9;
+  border-left: 4px solid #94a3b8;
+  border-radius: 6px;
+  padding: 10px;
+  cursor: pointer;
+  background: #ffffff;
+}
+
+.device-health-item:hover,
+.device-health-item.selected {
+  border-color: #2563eb;
+}
+
+.device-health-healthy {
+  border-left-color: #16a34a;
+}
+
+.device-health-attention {
+  border-left-color: #d97706;
+}
+
+.device-health-offline {
+  border-left-color: #64748b;
+}
+
+.device-health-unknown {
+  border-left-color: #7c3aed;
+}
+
+.device-health-item span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-testid="device-health-name"] {
+  font-weight: 700;
+}
+
+[data-testid="device-health-status"] {
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .device-health-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .device-health-item {
+    grid-template-columns: 1fr;
+  }
+}
