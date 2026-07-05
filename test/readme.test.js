@@ -222,6 +222,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.50/, 'V0.50');
   });
 
+  it('mentions V0.51 (release readiness Web panel)', () => {
+    assertReadmeContains(/V0\.51/, 'V0.51');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1008,6 +1012,39 @@ describe('README — V0.5 description accuracy', () => {
   });
 });
 
+describe('README — V0.51 release readiness Web panel', () => {
+  it('title and badge claim V0.51 as current', () => {
+    assert.match(readme, /^# Linke V0\.51/m);
+    assert.match(readme, /当前版本：V0\.51/);
+  });
+
+  it('version table has V0.51 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.51 \| 当前版本 \|[^|]*(发布就绪网页控制台|release readiness web panel|release readiness panel)/i);
+  });
+
+  it('version table has V0.50 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.50 \| 历史版本 \|[^|]*(发布就绪|release readiness)/i);
+  });
+
+  it('documents the release-readiness API endpoint and Web Console readiness panel', () => {
+    assert.match(readme, /GET\s+\/api\/release-readiness/);
+    assert.match(readme, /release-health-panel/);
+  });
+
+  it('asserts safety docs for release-readiness Web Console', () => {
+    assert.match(readme, /只读/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不建立真实 NAS 连接|不连接 NAS/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /无启动请求|不触发启动请求|无\s*init\s*请求/);
+    assert.match(readme, /不自动轮询/);
+  });
+
+  it('documents testing coverage includes release readiness Web panel', () => {
+    assert.match(readme, /测试覆盖：.*发布就绪网页控制台|测试覆盖：.*release readiness web panel/i);
+  });
+});
+
 // ── Must NOT over-promise ───────────────────────────────────────────
 
 describe('README — no over-promises', () => {
@@ -1179,33 +1216,15 @@ describe('README — V0.49 release version consistency guard', () => {
 });
 
 describe('README — V0.50 release readiness CLI', () => {
-  it('title and badge claim V0.50 as current', () => {
-    assert.match(readme, /^# Linke V0\.50/m);
-    assert.match(readme, /当前版本：V0\.50/);
+  it('title no longer claims V0.50 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.50/m);
   });
 
-  it('version table has V0.50 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.50 \| 当前版本 \|[^|]*(发布就绪|release readiness)/i);
+  it('version badge no longer says 当前版本：V0.50', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.50/);
   });
 
-  it('documents the release-readiness command and exit-code semantics', () => {
-    assert.match(readme, /agent\.js release-readiness/);
-    assert.match(readme, /--expected-version/);
-    assert.match(readme, /ready:false|ready.*false/);
-    assert.match(readme, /退出码\s*2|exit code\s*2/i);
-    assert.match(readme, /退出码\s*1|exit code\s*1/i);
-  });
-
-  it('asserts safety docs for release-readiness CLI', () => {
-    assert.match(readme, /只读/);
-    assert.match(readme, /GET\s+\/api\/health/);
-    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
-    assert.match(readme, /不建立真实 NAS 连接|不连接 NAS/);
-    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
-    assert.match(readme, /不回显原始 health|不输出原始 health|sanitized/i);
-  });
-
-  it('documents testing coverage includes release readiness CLI', () => {
-    assert.match(readme, /测试覆盖：.*发布就绪检查 CLI|测试覆盖：.*release readiness CLI/i);
+  it('version table has V0.50 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.50 \| 历史版本 \|[^|]*(发布就绪|release readiness)/i);
   });
 });

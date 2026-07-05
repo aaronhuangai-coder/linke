@@ -1,8 +1,8 @@
-# Linke V0.50
+# Linke V0.51
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.50** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.51** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -57,7 +57,8 @@
 | V0.47 | 历史版本 | 发布健康检查 CLI：提供 agent CLI health 命令获取只读健康状态，不影响元数据或 NAS，安全隔离 |
 | V0.48 | 历史版本 | 发布健康检查面板：Web Console 增加发布健康检查面板，通过 GET /api/health 手动刷新只读状态，不自动轮询 |
 | V0.49 | 历史版本 | 发布版本一致性守卫：以 `src/version.js` 作为当前发布版本单一来源，并用测试校验 README、`/api/health` 和 Agent health 输出一致 |
-| V0.50 | 当前版本 | 发布就绪检查 CLI：`release-readiness` 基于 `/api/health` 输出 sanitized readiness report，并用退出码 0/2/1 区分 ready、not ready 和请求错误 |
+| V0.50 | 历史版本 | 发布就绪检查 CLI：`release-readiness` 基于 `/api/health` 输出 sanitized readiness report，并用退出码 0/2/1 区分 ready、not ready 和请求错误 |
+| V0.51 | 当前版本 | 发布就绪网页控制台：新增 GET `/api/release-readiness` 与 `release-health-panel` 内的 release readiness panel，手动检查发布就绪状态 |
 
 ## 特性
 
@@ -107,6 +108,7 @@
 - **NAS app adapter dry-run** — 为 Synology / Ugreen 目标生成 `adapterPlan`，显示 `wouldInvokeApp:false`，不调用 NAS app、不连接、不写远端
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
+- **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
 
 ## 快速开始
 
@@ -166,7 +168,7 @@ node src/agent.js health --server http://localhost:3000
 
 # release-readiness：发布就绪检查 CLI（只读 GET /api/health，输出 sanitized JSON）
 node src/agent.js release-readiness --server http://localhost:3000
-node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.50
+node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.51
 ```
 
 ### run-once
@@ -733,7 +735,7 @@ V0.45 为设备列表的设备筛选计数（`device-filter-count`）增加只�
 V0.46 实现了发布健康检查端点 `/api/health`。
 
 - 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
-- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.50"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.51"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
 - 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
 
 ### 发布健康检查安全边界
@@ -804,7 +806,7 @@ V0.50 新增发布就绪检查命令 `agent.js release-readiness`。
 - **命令示例**：
   ```bash
   node src/agent.js release-readiness --server http://localhost:3000
-  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.50
+  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.51
   ```
 - **说明**：此命令执行一次只读 `GET /api/health`，根据固定 health schema、`status`、`service`、版本号、`checks.http`、`checks.dataDirReadable` 和 `timestamp` 生成 sanitized readiness report。
 - **版本期望**：默认使用当前 `LINKE_RELEASE_VERSION`；滚动更新或外部部署检查可通过 `--expected-version` 显式指定期望版本。
@@ -823,6 +825,24 @@ V0.50 新增发布就绪检查命令 `agent.js release-readiness`。
 - **不执行任何远程命令**：不涉及任何远程或本地的其他命令执行。
 - **不需要设备参数**：不需要 `--device`、`--source`、`--target`、`--snapshot` 或 `--config`。
 - **不输出原始 health**：readiness report 只包含 sanitized 字段和 check 结果，不回显路径类字段值。
+
+### 发布就绪检查 API 与 Web Console 面板
+
+V0.51 新增只读 GET /api/release-readiness 端点，并在 Web Console 的 `release-health-panel` 内增加发布就绪网页控制台区块。
+
+- **API 说明**：GET /api/release-readiness 复用 `buildHealthResponse()` 与 `buildReleaseReadinessReport()`，返回 sanitized readiness report。
+- **面板说明**：Web Console 只在用户点击“检查就绪”时手动请求 GET /api/release-readiness，展示 ready / 未就绪状态、期望版本、实际版本、失败项数量、检查时间和每项 check 结果。
+- **无启动请求**：控制台初始化时不请求 `/api/release-readiness`。
+- **不自动轮询**：发布就绪网页控制台不会定时轮询或自动重试。
+
+### 发布就绪网页控制台安全边界
+
+发布就绪网页控制台具备以下安全保证：
+- **只读**：仅手动 GET `/api/release-readiness`。
+- **不写入任何元数据**：不会写入 metadata、设备数据、快照数据或本地配置。
+- **不连接 NAS**：不建立真实 NAS 连接，不调用 NAS app。
+- **不执行远程命令**：不执行任何本地或远程命令。
+- **不触发备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照。
 
 ### Web Console 设备筛选摘要状态
 
@@ -1057,6 +1077,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 | GET    | /api/devices/:deviceId/snapshots/diff-dry-run | 快照差异 dry-run   |
 | GET    | /api/devices/:deviceId/retention-dry-run    | 快照保留 dry-run   |
 | GET    | /api/health                                 | 发布健康检查       |
+| GET    | /api/release-readiness                      | 发布就绪检查       |
 | POST   | /api/heartbeat                              | 记录心跳           |
 | POST   | /api/backups                                | 创建备份快照       |
 | POST   | /api/nas-dry-run                            | NAS 预检 dry-run   |
@@ -1068,7 +1089,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台。
 
 ## 技术约束
 

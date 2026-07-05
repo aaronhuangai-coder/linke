@@ -53,6 +53,31 @@
         <p class="release-health-safety-note" data-testid="release-health-safety-note">
           发布健康检查面板为只读视图，仅手动 GET /api/health，不自动后台轮询、不写入 metadata、不连接 NAS、不执行远程命令、不新增后端接口。
         </p>
+        <section id="release-readiness-panel" class="release-readiness-panel" data-testid="release-readiness-panel" data-status="unknown">
+          <header class="release-readiness-header">
+            <h3>发布就绪检查</h3>
+            <button id="release-readiness-refresh" data-testid="release-readiness-refresh" type="button" class="release-health-refresh" aria-disabled="false">检查就绪</button>
+          </header>
+          <dl class="release-readiness-grid">
+            <dt>状态</dt>
+            <dd id="release-readiness-status" data-testid="release-readiness-status">未检查</dd>
+            <dt>期望版本</dt>
+            <dd id="release-readiness-expected-version" data-testid="release-readiness-expected-version">—</dd>
+            <dt>实际版本</dt>
+            <dd id="release-readiness-actual-version" data-testid="release-readiness-actual-version">—</dd>
+            <dt>失败项</dt>
+            <dd id="release-readiness-failed-count" data-testid="release-readiness-failed-count">—</dd>
+            <dt>时间戳</dt>
+            <dd id="release-readiness-timestamp" data-testid="release-readiness-timestamp">—</dd>
+          </dl>
+          <ul id="release-readiness-checklist" class="release-readiness-checklist" data-testid="release-readiness-checklist">
+            <li class="placeholder">尚未检查</li>
+          </ul>
+          <p id="release-readiness-message" class="release-readiness-message" data-testid="release-readiness-message">点击检查就绪获取 /api/release-readiness</p>
+          <p class="release-readiness-safety-note" data-testid="release-readiness-safety-note">
+            发布就绪检查为只读视图，仅手动 GET /api/release-readiness，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行远程命令。
+          </p>
+        </section>
       </section>
       <section class="panel devices-panel">
         <div class="panel-title-row">

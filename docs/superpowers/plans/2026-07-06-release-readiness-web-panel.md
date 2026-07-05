@@ -18,49 +18,53 @@ Implement Linke V0.51 release-readiness API and Web Console readiness subsection
 
 ## Task 1: RED Tests
 
-- [ ] Add endpoint tests for `GET /api/release-readiness`.
-- [ ] Add endpoint/CLI/helper consistency tests using a temp server.
-- [ ] Add non-GET method tests for `/api/release-readiness`.
-- [ ] Add Web Console HTML/source contract tests for readiness hooks inside the release health panel.
-- [ ] Add pure view model tests for ready/not-ready/error/unknown states.
-- [ ] Add DOM tests: no init request, manual refresh once, button busy state, not-ready render, error render.
-- [ ] Add README/version tests for V0.51.
-- [ ] Run target tests and confirm RED failures.
+- [x] Add endpoint tests for `GET /api/release-readiness`.
+- [x] Add endpoint/CLI/helper consistency tests using a temp server.
+- [x] Add non-GET method tests for `/api/release-readiness`.
+- [x] Add Web Console HTML/source contract tests for readiness hooks inside the release health panel.
+- [x] Add pure view model tests for ready/not-ready/error/unknown states.
+- [x] Add DOM tests: no init request, manual refresh once, button busy state, not-ready render, error render.
+- [x] Add README/version tests for V0.51.
+- [x] Run target tests and confirm RED failures.
 
 ## Task 2: GREEN Implementation
 
-- [ ] Update `src/version.js` to `V0.51`.
-- [ ] Update `src/server.js`:
+- [x] Update `src/version.js` to `V0.51`.
+- [x] Update `src/server.js`:
   - import `buildReleaseReadinessReport`
   - add `GET /api/release-readiness`
   - keep non-GET methods falling through to `404`
-- [ ] Update `src/web/index.html`:
+- [x] Update `src/web/index.html`:
   - add readiness subsection inside `release-health-panel`
   - add readiness button, status, expected/actual version, failed count, check list, message, and safety note hooks
-- [ ] Update `src/web/app.js`:
+- [x] Update `src/web/app.js`:
   - add `buildReleaseReadinessViewModel`
   - wire DOM references
   - add manual fetch with in-flight guard
   - render unknown/ready/not-ready/error states
-- [ ] Update `src/web/styles.css` for readiness states and check list.
-- [ ] Update README to V0.51 current with endpoint and Web Console readiness docs.
+- [x] Update `src/web/styles.css` for readiness states and check list.
+- [x] Update README to V0.51 current with endpoint and Web Console readiness docs.
 
 ## Task 3: Verification
 
-- [ ] `git diff --check`
-- [ ] Target tests for endpoint, Web Console, README, version, health, CLI.
-- [ ] `npm test`
-- [ ] Real HTTP smoke:
+- [x] `git diff --check`
+- [x] Target tests for endpoint, Web Console, README, version, health, CLI.
+- [x] `npm test`
+- [x] Real HTTP smoke:
 
 ```bash
 curl -s http://127.0.0.1:<port>/api/release-readiness
 ```
 
-- [ ] Qwen implementation review.
-- [ ] ZAI auxiliary verification with strict English PASS/FAIL schema.
-- [ ] Commit and push.
+- [x] Qwen implementation review.
+- [x] ZAI auxiliary verification with strict English PASS/FAIL schema.
+- [x] Commit and push.
 
 ## Execution Record
 
 - Qwen design review returned `DONE_WITH_CONCERNS`.
 - PM accepted shared-helper, merged-panel, non-GET 404, and endpoint/helper consistency test requirements before implementation.
+- AGY produced RED tests and PM confirmed target RED failures before GREEN implementation.
+- Qwen implementation review returned `DONE_WITH_CONCERNS` with no blockers; PM added duplicate in-flight refresh and long-string truncation regression tests.
+- Verification passed: target tests 484/484, full `npm test` 651/651, `git diff --check`, and HTTP smoke `GET /api/release-readiness` returned `ready:true` for V0.51.
+- ZAI first strict verifier attempt was invalid because its file tool failed and it returned `I don't have a specific response`; PM did not accept it. ZAI no-tools auxiliary verifier then returned `Status: PASS` based on PM evidence.

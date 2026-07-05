@@ -158,6 +158,65 @@ export function buildReleaseHealthViewModel(payload, errorMessage = '') {
   };
 }
 
+function formatReadinessDisplayValue(value) {
+  if (value === undefined || value === null || value === '') return '—';
+  const text = String(value);
+  if (text.includes('/') || text.includes('\\')) return '[redacted]';
+  return text;
+}
+
+export function buildReleaseReadinessViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      expectedVersionText: '—',
+      actualVersionText: '—',
+      failedCountText: '—',
+      timestampText: '—',
+      checks: [],
+      messageText: '发布就绪检查失败: ' + errorMessage,
+    };
+  }
+
+  if (!payload || typeof payload !== 'object' || typeof payload.ready !== 'boolean') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      expectedVersionText: '—',
+      actualVersionText: '—',
+      failedCountText: '—',
+      timestampText: '—',
+      checks: [],
+      messageText: '点击检查就绪获取 /api/release-readiness',
+    };
+  }
+
+  const checks = Array.isArray(payload.checks)
+    ? payload.checks.map((check) => ({
+      id: formatReadinessDisplayValue(check?.id),
+      ok: check?.ok === true,
+      expected: formatReadinessDisplayValue(check?.expected),
+      actual: formatReadinessDisplayValue(check?.actual),
+    }))
+    : [];
+  const failedCount = checks.filter((check) => !check.ok).length;
+  const ready = payload.ready === true;
+
+  return {
+    statusKey: ready ? 'ready' : 'not-ready',
+    statusText: ready ? '已就绪' : '未就绪',
+    expectedVersionText: formatReadinessDisplayValue(payload.expectedVersion),
+    actualVersionText: formatReadinessDisplayValue(payload.actualVersion),
+    failedCountText: String(failedCount),
+    timestampText: formatReadinessDisplayValue(payload.checkedAt),
+    checks,
+    messageText: ready
+      ? 'GET /api/release-readiness 成功，发布就绪'
+      : 'GET /api/release-readiness 成功，存在 ' + String(failedCount) + ' 项未就绪',
+  };
+}
+
 // ── V0.17 Backup Job Overview ──────────────────────────────────────
 
 function normalizeBackupJobName(value) {
@@ -917,6 +976,15 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const releaseHealthTimestampEl = doc.getElementById('release-health-timestamp');
   const releaseHealthMessageEl = doc.getElementById('release-health-message');
   const releaseHealthRefreshButton = doc.getElementById('release-health-refresh');
+  const releaseReadinessPanelEl = doc.getElementById('release-readiness-panel');
+  const releaseReadinessStatusEl = doc.getElementById('release-readiness-status');
+  const releaseReadinessExpectedVersionEl = doc.getElementById('release-readiness-expected-version');
+  const releaseReadinessActualVersionEl = doc.getElementById('release-readiness-actual-version');
+  const releaseReadinessFailedCountEl = doc.getElementById('release-readiness-failed-count');
+  const releaseReadinessTimestampEl = doc.getElementById('release-readiness-timestamp');
+  const releaseReadinessChecklistEl = doc.getElementById('release-readiness-checklist');
+  const releaseReadinessMessageEl = doc.getElementById('release-readiness-message');
+  const releaseReadinessRefreshButton = doc.getElementById('release-readiness-refresh');
 
   const deviceListEl = doc.getElementById('device-list');
   const deviceDetailContentEl = doc.getElementById('device-detail-content');
@@ -2639,6 +2707,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   let releaseHealthInFlight = false;
+  let releaseReadinessInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
@@ -2693,10 +2762,95 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderReleaseReadinessCheckList(checks) {
+    clearElement(releaseReadinessChecklistEl);
+    if (!releaseReadinessChecklistEl) return;
+
+    const safeChecks = Array.isArray(checks) ? checks : [];
+    if (safeChecks.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '尚未检查';
+      if (typeof releaseReadinessChecklistEl.appendChild === 'function') {
+        releaseReadinessChecklistEl.appendChild(item);
+      }
+      return;
+    }
+
+    safeChecks.forEach(function (check) {
+      const item = doc.createElement('li');
+      item.className = 'release-readiness-check ' + (check.ok ? 'is-ready' : 'is-blocked');
+      item.setAttribute('data-testid', 'release-readiness-check');
+      item.setAttribute('data-check-id', check.id);
+      item.setAttribute('data-ok', check.ok ? 'true' : 'false');
+      item.textContent = check.id + ': ' + (check.ok ? '通过' : '未通过')
+        + ' (expected ' + check.expected + ', actual ' + check.actual + ')';
+      if (typeof releaseReadinessChecklistEl.appendChild === 'function') {
+        releaseReadinessChecklistEl.appendChild(item);
+      }
+    });
+  }
+
+  function renderReleaseReadiness(viewModel) {
+    const state = viewModel || buildReleaseReadinessViewModel(null);
+    if (releaseReadinessPanelEl?.setAttribute) {
+      releaseReadinessPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (releaseReadinessStatusEl) releaseReadinessStatusEl.textContent = state.statusText;
+    if (releaseReadinessExpectedVersionEl) releaseReadinessExpectedVersionEl.textContent = state.expectedVersionText;
+    if (releaseReadinessActualVersionEl) releaseReadinessActualVersionEl.textContent = state.actualVersionText;
+    if (releaseReadinessFailedCountEl) releaseReadinessFailedCountEl.textContent = state.failedCountText;
+    if (releaseReadinessTimestampEl) releaseReadinessTimestampEl.textContent = state.timestampText;
+    if (releaseReadinessMessageEl) releaseReadinessMessageEl.textContent = state.messageText;
+    renderReleaseReadinessCheckList(state.checks);
+  }
+
+  function setReleaseReadinessRefreshBusy(busy) {
+    if (!releaseReadinessRefreshButton) return;
+    releaseReadinessRefreshButton.disabled = Boolean(busy);
+    if (releaseReadinessRefreshButton.setAttribute) {
+      releaseReadinessRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchReleaseReadiness() {
+    if (releaseReadinessInFlight) return;
+    releaseReadinessInFlight = true;
+    setReleaseReadinessRefreshBusy(true);
+    try {
+      const res = await fetchImpl('/api/release-readiness');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderReleaseReadiness(buildReleaseReadinessViewModel(payload));
+      logEvent('已刷新发布就绪检查', 'info');
+    } catch (err) {
+      renderReleaseReadiness(buildReleaseReadinessViewModel(null, err.message));
+      logEvent('发布就绪检查失败: ' + err.message, 'error');
+    } finally {
+      releaseReadinessInFlight = false;
+      setReleaseReadinessRefreshBusy(false);
+    }
+  }
+
   renderReleaseHealth(buildReleaseHealthViewModel(null));
+  renderReleaseReadiness(buildReleaseReadinessViewModel(null));
 
   if (releaseHealthRefreshButton?.addEventListener) {
     releaseHealthRefreshButton.addEventListener('click', fetchReleaseHealth);
+  }
+  if (releaseReadinessRefreshButton?.addEventListener) {
+    releaseReadinessRefreshButton.addEventListener('click', fetchReleaseReadiness);
   }
 
   logEvent('Linke 控制台已启动', 'info');

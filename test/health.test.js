@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, buildHealthResponse } from '../src/server.js';
 import { LINKE_RELEASE_VERSION } from '../src/version.js';
+import { buildReleaseReadinessReport } from '../src/release-readiness.js';
 
 describe('Release health response', () => {
   it('buildHealthResponse returns the current release liveness payload without path disclosure', () => {
@@ -104,5 +105,43 @@ describe('GET /api/health with missing dataDir', () => {
     assert.strictEqual(body.checks.dataDirReadable, 'unavailable');
     await assert.rejects(() => readdir(dataDir), /ENOENT/);
     assert.ok(!JSON.stringify(body).includes(dataDir));
+  });
+});
+
+describe('GET /api/release-readiness', () => {
+  let server, dataDir, port;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'linke-readiness-'));
+    server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    port = server.address().port;
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('returns 200 JSON readiness data matching helper report', async () => {
+    const res = await fetch(`http://localhost:${port}/api/release-readiness`);
+    assert.strictEqual(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /application\/json/);
+    const body = await res.json();
+
+    const expectedReport = buildReleaseReadinessReport(
+      buildHealthResponse({ dataDirReadable: true, now: new Date(body.checkedAt) }),
+      { expectedVersion: LINKE_RELEASE_VERSION, now: new Date(body.checkedAt) }
+    );
+
+    assert.deepStrictEqual(body, expectedReport);
+  });
+
+  it('does not implement mutating methods for /api/release-readiness', async () => {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      const res = await fetch(`http://localhost:${port}/api/release-readiness`, { method });
+      assert.strictEqual(res.status, 404, `${method} /api/release-readiness must return 404`);
+      assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
+    }
   });
 });

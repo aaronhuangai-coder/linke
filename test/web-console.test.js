@@ -1289,6 +1289,63 @@ describe('Web Console / API contract', () => {
     assert.ok(css.includes('[data-status="degraded"]'), 'styles.css must contain [data-status="degraded"]');
     assert.ok(css.includes('[data-status="error"]'), 'styles.css must contain [data-status="error"]');
   });
+
+  // ── V0.51 Release Readiness HTML/source contract ────────────────
+
+  it('HTML contains V0.51 release readiness subsection with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="release-readiness-status"'), 'must have release-readiness-status');
+    assert.ok(html.includes('data-testid="release-readiness-refresh"'), 'must have release-readiness-refresh');
+    assert.ok(html.includes('data-testid="release-readiness-expected-version"'), 'must have release-readiness-expected-version');
+    assert.ok(html.includes('data-testid="release-readiness-actual-version"'), 'must have release-readiness-actual-version');
+    assert.ok(html.includes('data-testid="release-readiness-failed-count"'), 'must have release-readiness-failed-count');
+    assert.ok(html.includes('data-testid="release-readiness-checklist"'), 'must have release-readiness-checklist');
+    assert.ok(html.includes('data-testid="release-readiness-message"'), 'must have release-readiness-message');
+    assert.ok(html.includes('data-testid="release-readiness-safety-note"'), 'must have release-readiness-safety-note');
+  });
+
+  it('V0.51 release readiness safety note documents security boundaries and avoids prohibited words', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="release-health-panel"[\s\S]*?<\/(?:section|div)>/);
+
+    assert.ok(panelMatch, 'release-health-panel section/div must exist');
+    const content = panelMatch[0];
+    assert.ok(content.includes('只读'), 'must contain 只读');
+    assert.ok(content.includes('GET /api/release-readiness'), 'must contain GET /api/release-readiness');
+    assert.ok(/不写入\s*metadata|不写入\s*元数据/i.test(content), 'must contain 不写入 metadata');
+    assert.ok(/不连接\s*NAS/i.test(content), 'must contain 不连接 NAS');
+    assert.ok(content.includes('不执行远程命令'), 'must contain 不执行远程命令');
+    assert.ok(content.includes('无启动请求') || content.includes('不触发启动请求') || content.includes('无 init 请求'), 'must mention no startup request');
+    assert.ok(content.includes('不自动轮询'), 'must mention no auto polling');
+
+    assert.ok(!content.includes('执行备份'), 'must not contain 执行备份');
+    assert.ok(!content.includes('创建备份'), 'must not contain 创建备份');
+    assert.ok(!content.includes('执行恢复'), 'must not contain 执行恢复');
+    assert.ok(!content.includes('删除快照'), 'must not contain 删除快照');
+    assert.ok(!content.includes('连接 NAS 设备') && !content.includes('连接NAS设备'), 'must not contain 连接 NAS 设备');
+    assert.ok(!content.includes('远程传输'), 'must not contain 远程传输');
+  });
+
+  it('app.js wires release readiness rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/release-readiness'), 'app.js must reference /api/release-readiness');
+    assert.ok(js.includes('release-readiness-refresh'), 'app.js must reference release-readiness-refresh');
+    assert.ok(js.includes('buildReleaseReadinessViewModel'), 'app.js must reference buildReleaseReadinessViewModel');
+  });
+
+  it('styles.css contains V0.51 release readiness selectors', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.release-readiness-panel[data-status="ready"]') || css.includes('[data-status="ready"]'), 'styles.css must contain ready status styling');
+    assert.ok(css.includes('[data-status="not-ready"]'), 'styles.css must contain not-ready status styling');
+    assert.ok(css.includes('[data-status="error"]'), 'styles.css must contain error status styling');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
@@ -6382,5 +6439,339 @@ describe('DOM test: release health panel interactions', () => {
     assert.ok(ariaDisabledAfter === 'false' || ariaDisabledAfter === false || ariaDisabledAfter === null || ariaDisabledAfter === undefined, 'aria-disabled must be false or removed after request');
 
     assert.strictEqual(panel._attrs['data-status'], 'degraded');
+  });
+});
+
+describe('Release readiness pure functions', () => {
+  it('buildReleaseReadinessViewModel formats ready status', async () => {
+    const app = await import('../src/web/app.js');
+    const buildReleaseReadinessViewModel = app.buildReleaseReadinessViewModel;
+    if (!buildReleaseReadinessViewModel) {
+      throw new Error('buildReleaseReadinessViewModel is not defined in src/web/app.js');
+    }
+
+    const rawData = {
+      ready: true,
+      service: 'linke',
+      expectedVersion: LINKE_RELEASE_VERSION,
+      actualVersion: LINKE_RELEASE_VERSION,
+      status: 'ok',
+      checkedAt: '2026-07-06T12:00:00Z',
+      checks: [
+        { id: 'health.status', ok: true, expected: 'ok', actual: 'ok' },
+        { id: 'release.version', ok: true, expected: LINKE_RELEASE_VERSION, actual: LINKE_RELEASE_VERSION }
+      ]
+    };
+    const result = buildReleaseReadinessViewModel(rawData);
+    assert.strictEqual(result.statusKey, 'ready');
+    assert.strictEqual(result.statusText, '已就绪');
+    assert.strictEqual(result.expectedVersionText, LINKE_RELEASE_VERSION);
+    assert.strictEqual(result.actualVersionText, LINKE_RELEASE_VERSION);
+    assert.strictEqual(result.failedCountText, '0');
+    assert.strictEqual(result.timestampText, '2026-07-06T12:00:00Z');
+    assert.ok(result.messageText.includes('就绪'));
+  });
+
+  it('buildReleaseReadinessViewModel formats not-ready status with failed count', async () => {
+    const app = await import('../src/web/app.js');
+    const buildReleaseReadinessViewModel = app.buildReleaseReadinessViewModel;
+    if (!buildReleaseReadinessViewModel) {
+      throw new Error('buildReleaseReadinessViewModel is not defined in src/web/app.js');
+    }
+
+    const rawData = {
+      ready: false,
+      service: 'linke',
+      expectedVersion: LINKE_RELEASE_VERSION,
+      actualVersion: 'V0.0',
+      status: 'degraded',
+      checkedAt: '2026-07-06T12:00:00Z',
+      checks: [
+        { id: 'health.status', ok: false, expected: 'ok', actual: 'degraded' },
+        { id: 'release.version', ok: false, expected: LINKE_RELEASE_VERSION, actual: 'V0.0' }
+      ]
+    };
+    const result = buildReleaseReadinessViewModel(rawData);
+    assert.strictEqual(result.statusKey, 'not-ready');
+    assert.strictEqual(result.statusText, '未就绪');
+    assert.strictEqual(result.expectedVersionText, LINKE_RELEASE_VERSION);
+    assert.strictEqual(result.actualVersionText, 'V0.0');
+    assert.strictEqual(result.failedCountText, '2');
+    assert.strictEqual(result.timestampText, '2026-07-06T12:00:00Z');
+  });
+
+  it('buildReleaseReadinessViewModel formats error status', async () => {
+    const app = await import('../src/web/app.js');
+    const buildReleaseReadinessViewModel = app.buildReleaseReadinessViewModel;
+    if (!buildReleaseReadinessViewModel) {
+      throw new Error('buildReleaseReadinessViewModel is not defined in src/web/app.js');
+    }
+
+    const result = buildReleaseReadinessViewModel(null, 'HTTP 500');
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.strictEqual(result.expectedVersionText, '—');
+    assert.strictEqual(result.actualVersionText, '—');
+    assert.strictEqual(result.failedCountText, '—');
+    assert.strictEqual(result.timestampText, '—');
+    assert.ok(result.messageText.includes('HTTP 500'));
+  });
+
+  it('buildReleaseReadinessViewModel handles unknown or invalid inputs', async () => {
+    const app = await import('../src/web/app.js');
+    const buildReleaseReadinessViewModel = app.buildReleaseReadinessViewModel;
+    if (!buildReleaseReadinessViewModel) {
+      throw new Error('buildReleaseReadinessViewModel is not defined in src/web/app.js');
+    }
+
+    const resultNull = buildReleaseReadinessViewModel(null);
+    assert.strictEqual(resultNull.statusKey, 'unknown');
+    assert.strictEqual(resultNull.statusText, '未检查');
+    assert.strictEqual(resultNull.expectedVersionText, '—');
+    assert.strictEqual(resultNull.actualVersionText, '—');
+    assert.strictEqual(resultNull.failedCountText, '—');
+    assert.strictEqual(resultNull.timestampText, '—');
+  });
+});
+
+describe('DOM test: release readiness panel interactions', () => {
+  it('does not request /api/release-readiness on initialization', async () => {
+    const doc = buildMockDoc();
+    let readinessFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) readinessFetchCount++;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(readinessFetchCount, 0, 'should not call /api/release-readiness on init');
+  });
+
+  it('requests /api/release-readiness only once and renders ready status when refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let readinessFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) {
+        readinessFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ready: true,
+            service: 'linke',
+            expectedVersion: LINKE_RELEASE_VERSION,
+            actualVersion: LINKE_RELEASE_VERSION,
+            status: 'ok',
+            checkedAt: '2026-07-06T12:00:00Z',
+            checks: [
+              { id: 'health.status', ok: true, expected: 'ok', actual: 'ok' },
+              { id: 'release.version', ok: true, expected: LINKE_RELEASE_VERSION, actual: LINKE_RELEASE_VERSION }
+            ]
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-readiness-refresh"]') || doc.getElementById('release-readiness-refresh');
+    const panel = doc.querySelector('[data-testid="release-readiness-panel"]') || doc.getElementById('release-readiness-panel');
+    const statusEl = doc.querySelector('[data-testid="release-readiness-status"]') || doc.getElementById('release-readiness-status');
+    const expectedEl = doc.querySelector('[data-testid="release-readiness-expected-version"]') || doc.getElementById('release-readiness-expected-version');
+    const actualEl = doc.querySelector('[data-testid="release-readiness-actual-version"]') || doc.getElementById('release-readiness-actual-version');
+    const failedEl = doc.querySelector('[data-testid="release-readiness-failed-count"]') || doc.getElementById('release-readiness-failed-count');
+    const messageEl = doc.querySelector('[data-testid="release-readiness-message"]') || doc.getElementById('release-readiness-message');
+
+    assert.ok(refreshBtn, 'refresh button must exist');
+    assert.ok(panel, 'release readiness panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(readinessFetchCount, 1, 'should request /api/release-readiness exactly once');
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'ready');
+    assert.strictEqual(statusEl.textContent, '已就绪');
+    assert.strictEqual(expectedEl.textContent, LINKE_RELEASE_VERSION);
+    assert.strictEqual(actualEl.textContent, LINKE_RELEASE_VERSION);
+    assert.strictEqual(failedEl.textContent, '0');
+    assert.ok(messageEl.textContent.includes('就绪'));
+  });
+
+  it('renders not-ready status and fails when release-readiness returns false for ready', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ready: false,
+            service: 'linke',
+            expectedVersion: LINKE_RELEASE_VERSION,
+            actualVersion: 'V0.0',
+            status: 'degraded',
+            checkedAt: '2026-07-06T12:00:00Z',
+            checks: [
+              { id: 'health.status', ok: false, expected: 'ok', actual: 'degraded' },
+              { id: 'release.version', ok: false, expected: LINKE_RELEASE_VERSION, actual: 'V0.0' }
+            ]
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-readiness-refresh"]');
+    const panel = doc.querySelector('[data-testid="release-readiness-panel"]');
+    const statusEl = doc.querySelector('[data-testid="release-readiness-status"]');
+    const failedEl = doc.querySelector('[data-testid="release-readiness-failed-count"]');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'not-ready');
+    assert.strictEqual(statusEl.textContent, '未就绪');
+    assert.strictEqual(failedEl.textContent, '2');
+  });
+
+  it('renders error on non-2xx response from release-readiness', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ status: 'error', message: 'HTTP 500' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-readiness-refresh"]');
+    const panel = doc.querySelector('[data-testid="release-readiness-panel"]');
+    const statusEl = doc.querySelector('[data-testid="release-readiness-status"]');
+    const messageEl = doc.querySelector('[data-testid="release-readiness-message"]');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
+    assert.strictEqual(statusEl.textContent, '检查失败');
+    assert.ok(messageEl.textContent.includes('失败') || messageEl.textContent.includes('500'));
+  });
+
+  it('disables release-readiness refresh button during active request and restores afterwards', async () => {
+    const doc = buildMockDoc();
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) {
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ready: true,
+            service: 'linke',
+            expectedVersion: LINKE_RELEASE_VERSION,
+            actualVersion: LINKE_RELEASE_VERSION,
+            status: 'ok',
+            checkedAt: '2026-07-06T12:00:00Z',
+            checks: []
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-readiness-refresh"]');
+    let clickPromise;
+    if (refreshBtn._listeners.click) {
+      clickPromise = refreshBtn._listeners.click();
+    }
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const isDisabled = refreshBtn.disabled === true || refreshBtn.getAttribute('disabled') === 'true' || refreshBtn.getAttribute('disabled') === true;
+    assert.strictEqual(isDisabled, true, 'button.disabled must be true during request');
+
+    const ariaDisabledDuring = refreshBtn.getAttribute('aria-disabled');
+    assert.ok(ariaDisabledDuring === 'true' || ariaDisabledDuring === true, 'aria-disabled must be true during request');
+
+    resolveRequest();
+    if (clickPromise) {
+      await clickPromise;
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    const isDisabledAfter = refreshBtn.disabled === false || refreshBtn.getAttribute('disabled') === 'false' || refreshBtn.getAttribute('disabled') === false || refreshBtn.getAttribute('disabled') === null;
+    assert.strictEqual(isDisabledAfter, true, 'button.disabled must be false after request');
+  });
+
+  it('does not start a second release-readiness request while one is in flight', async () => {
+    const doc = buildMockDoc();
+    let readinessFetchCount = 0;
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/release-readiness')) {
+        readinessFetchCount++;
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ready: true,
+            service: 'linke',
+            expectedVersion: LINKE_RELEASE_VERSION,
+            actualVersion: LINKE_RELEASE_VERSION,
+            status: 'ok',
+            checkedAt: '2026-07-06T12:00:00Z',
+            checks: []
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-readiness-refresh"]');
+    const firstClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+    const secondClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.strictEqual(readinessFetchCount, 1, 'in-flight guard must block duplicate release-readiness fetches');
+
+    resolveRequest();
+    await firstClick;
+    await secondClick;
   });
 });

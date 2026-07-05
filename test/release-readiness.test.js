@@ -84,4 +84,17 @@ describe('Release readiness report', () => {
     assert.match(getCheck(report, 'health.schema').actual, /dataDir/);
     assert.ok(!serialized.includes(leakedPath), 'readiness report must not echo leaked path values');
   });
+
+  it('truncates overlong string values in sanitized report fields', () => {
+    const longVersion = 'V' + '1'.repeat(120);
+    const report = buildReleaseReadinessReport(currentHealth({
+      version: longVersion,
+    }));
+
+    assert.strictEqual(report.ready, false);
+    assert.strictEqual(report.actualVersion.length, 80);
+    assert.ok(report.actualVersion.endsWith('...'));
+    assert.ok(!JSON.stringify(report).includes(longVersion));
+    assert.strictEqual(getCheck(report, 'release.version').actual, report.actualVersion);
+  });
 });

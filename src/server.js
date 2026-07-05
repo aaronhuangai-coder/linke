@@ -18,6 +18,7 @@ import { buildRestoreDryRunPlan, collectExistingTargetPaths } from './restore-dr
 import { runBackupPreflightDryRun } from './backup-preflight.js';
 import { buildNasDryRunPlan } from './nas.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
+import { buildReleaseReadinessReport } from './release-readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -109,6 +110,14 @@ export function createServer({ dataDir, backupHooks } = {}) {
       if (method === 'GET' && pathname === '/api/health') {
         const dataDirReadable = await isDataDirReadable(dataDir);
         return sendJSON(res, 200, buildHealthResponse({ dataDirReadable }));
+      }
+
+      // GET /api/release-readiness
+      if (method === 'GET' && pathname === '/api/release-readiness') {
+        const dataDirReadable = await isDataDirReadable(dataDir);
+        const checkedAt = new Date();
+        const health = buildHealthResponse({ dataDirReadable, now: checkedAt });
+        return sendJSON(res, 200, buildReleaseReadinessReport(health, { now: checkedAt }));
       }
 
       // POST /api/heartbeat
