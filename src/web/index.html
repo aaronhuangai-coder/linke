@@ -49,6 +49,14 @@
             <option value="offline">离线</option>
             <option value="unknown">未知</option>
           </select>
+          <label for="device-management-filter">管理态</label>
+          <select id="device-management-filter" data-testid="device-management-filter">
+            <option value="all">所有管理状态</option>
+            <option value="visible">在线可见</option>
+            <option value="missing-ip">在线缺 IP</option>
+            <option value="offline-retained">离线保留</option>
+            <option value="unknown">未知待确认</option>
+          </select>
           <label for="device-sort">排序</label>
           <select id="device-sort" data-testid="device-sort">
             <option value="name">名称</option>

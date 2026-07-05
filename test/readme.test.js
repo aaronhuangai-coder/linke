@@ -152,22 +152,22 @@ describe('README — version coverage', () => {
   it('mentions V0.33 (device/IP management state view)', () => {
     assertReadmeContains(/V0\.33/, 'V0.33');
   });
+
+  it('mentions V0.34 (management-state filter and count)', () => {
+    assertReadmeContains(/V0\.34/, 'V0.34');
+  });
 });
 
 
 // ── V0.33 documentation ────────────────────────────────────────────
 
 describe('README — V0.33 device/IP management state view', () => {
-  it('title says V0.33', () => {
-    assert.match(readme, /^# Linke V0\.33/m);
+  it('mentions V0.33', () => {
+    assert.match(readme, /V0\.33/);
   });
 
-  it('version badge says 当前版本：V0.33', () => {
-    assert.match(readme, /当前版本：V0\.33/);
-  });
-
-  it('version table has V0.33 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.33 \| 当前版本 \|[^|]*(统一管理态|device-management-state)/i);
+  it('version table has V0.33 row', () => {
+    assert.match(readme, /\| V0\.33 \|[^|]*(统一管理态|device-management-state)/i);
   });
 
   it('version table keeps V0.22 through V0.32 as historical milestones', () => {
@@ -214,6 +214,46 @@ describe('README — V0.33 device/IP management state view', () => {
 
   it('asserts testing coverage sentence includes 统一管理态', () => {
     assert.match(readme, /测试覆盖：.*统一管理态/);
+  });
+});
+
+
+// ── V0.34 documentation ────────────────────────────────────────────
+
+describe('README — V0.34 management-state filter and count', () => {
+  it('title says V0.34', () => {
+    assert.match(readme, /^# Linke V0\.34/m);
+  });
+
+  it('version badge says 当前版本：V0.34', () => {
+    assert.match(readme, /当前版本：V0\.34/);
+  });
+
+  it('version table has V0.34 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.34 \| 当前版本 \|[^|]*(管理态筛选|device-management-filter)/i);
+  });
+
+  it('version table keeps V0.33 as historical milestone', () => {
+    assert.match(readme, /\| V0\.33 \|[^|]*(统一管理态|device-management-state)/i);
+  });
+
+  it('documents management-state filter feature docs for 管理态筛选', () => {
+    assert.match(readme, /管理态筛选/);
+    assert.match(readme, /visible|missing-ip|offline-retained|unknown/);
+  });
+
+  it('asserts safety docs for management-state filter', () => {
+    assert.match(readme, /管理态筛选.*安全(保证|边界)|安全(保证|边界).*管理态筛选/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不进行(任何)?修改|无批量操作|无修复操作/);
+  });
+
+  it('documents testing coverage includes management-state filter', () => {
+    assert.match(readme, /测试覆盖：.*管理态筛选/);
   });
 });
 

@@ -19,6 +19,7 @@ import {
   formatSnapshotMeta,
   getDeviceBackupHealthStatus,
   getDeviceManagementState,
+  getDeviceManagementStateKey,
   initConsole,
   matchesDeviceSearch,
   normalizeDeviceStatus,
@@ -1039,8 +1040,26 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('device-management-state'), 'app.js must reference device-management-state');
     assert.ok(js.includes('device-detail-management-state'), 'app.js must reference device-detail-management-state');
   });
-});
 
+  // ── V0.34 device-management-filter HTML/source contract ─────────────
+
+  it('HTML contains V0.34 device management filter with required option values', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="device-management-filter"'), 'must have device-management-filter select');
+    assert.ok(html.includes('value="all"'), 'management filter must include all option');
+    assert.ok(html.includes('value="visible"'), 'management filter must include visible option');
+    assert.ok(html.includes('value="missing-ip"'), 'management filter must include missing-ip option');
+    assert.ok(html.includes('value="offline-retained"'), 'management filter must include offline-retained option');
+    assert.ok(html.includes('value="unknown"'), 'management filter must include unknown option');
+  });
+
+  it('app.js source contract expects device-management-filter reference', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('device-management-filter'), 'app.js must reference device-management-filter');
+  });
+});
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
 describe('computeFleetSummary', () => {
@@ -3132,6 +3151,62 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.ok(detailEl2, 'selected device detail must render device-detail-management-state element');
     assert.strictEqual(detailEl2.textContent.trim(), '在线缺 IP');
   });
+
+  it('DOM test: changing device-management-filter updates device list and device-filter-count without refetching /api/devices', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' }, // visible
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' }, // missing-ip
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' }, // offline-retained
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' }, // unknown
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        fetchCount++;
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'should fetch devices once initially');
+
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+    assert.ok(countEl, 'device-filter-count element must exist');
+    assert.strictEqual(countEl.textContent, '4 / 4', 'initial count must show all 4 devices');
+
+    const managementFilter = doc.getElementById('device-management-filter');
+    assert.ok(managementFilter, 'device-management-filter select element must exist');
+
+    // Filter by 'visible'
+    managementFilter.value = 'visible';
+    if (managementFilter._listeners.change) managementFilter._listeners.change();
+    else if (managementFilter._listeners.input) managementFilter._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 4', 'count must show 1 / 4 for visible management filter');
+    const deviceListEl = doc.getElementById('device-list');
+    const visibleItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(visibleItems.length, 1);
+    assert.match(visibleItems[0].textContent, /Aaron-Mac/);
+
+    // Filter by 'missing-ip'
+    managementFilter.value = 'missing-ip';
+    if (managementFilter._listeners.change) managementFilter._listeners.change();
+    else if (managementFilter._listeners.input) managementFilter._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 4', 'count must show 1 / 4 for missing-ip management filter');
+    const missingIpItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(missingIpItems.length, 1);
+    assert.match(missingIpItems[0].textContent, /Beta-Mac/);
+
+    assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices during filter changes');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -3205,6 +3280,48 @@ describe('V0.16 device list controls helpers', () => {
     const result = [...devices].sort((a, b) => compareDevicesForSort(a, b, 'unsupported'));
 
     assert.deepStrictEqual(result.map((device) => device.deviceId), ['mac-alpha', 'ipad-beta', 'phone-gamma']);
+  });
+
+  it('V0.34 applyDeviceListControls supports controls.management filters and combines them with status and query', () => {
+    const localDevices = [
+      { deviceId: 'd1', status: 'online', ipAddress: '192.168.1.1', hostname: 'A-PC-One' },
+      { deviceId: 'd2', status: 'online', ipAddress: '', hostname: 'B-PC-Two' },
+      { deviceId: 'd3', status: 'offline', ipAddress: '192.168.1.3', hostname: 'C-PC-Three' },
+      { deviceId: 'd4', status: 'unknown', ipAddress: '192.168.1.4', hostname: 'D-PC-Four' },
+      { deviceId: 'd5', status: 'online', ipAddress: '192.168.1.5', hostname: 'E-Laptop' },
+    ];
+
+    // management = 'all'
+    const resAll = applyDeviceListControls(localDevices, { query: '', status: 'all', management: 'all', sort: 'name' });
+    assert.deepStrictEqual(resAll.map(d => d.deviceId), ['d1', 'd2', 'd3', 'd4', 'd5']);
+
+    // management = 'visible'
+    const resVisible = applyDeviceListControls(localDevices, { query: '', status: 'all', management: 'visible', sort: 'name' });
+    assert.deepStrictEqual(resVisible.map(d => d.deviceId), ['d1', 'd5']);
+
+    // management = 'missing-ip'
+    const resMissing = applyDeviceListControls(localDevices, { query: '', status: 'all', management: 'missing-ip', sort: 'name' });
+    assert.deepStrictEqual(resMissing.map(d => d.deviceId), ['d2']);
+
+    // management = 'offline-retained'
+    const resOffline = applyDeviceListControls(localDevices, { query: '', status: 'all', management: 'offline-retained', sort: 'name' });
+    assert.deepStrictEqual(resOffline.map(d => d.deviceId), ['d3']);
+
+    // management = 'unknown'
+    const resUnknown = applyDeviceListControls(localDevices, { query: '', status: 'all', management: 'unknown', sort: 'name' });
+    assert.deepStrictEqual(resUnknown.map(d => d.deviceId), ['d4']);
+
+    // combining: query = 'PC', status = 'online', management = 'visible' -> matches d1
+    const resCombined1 = applyDeviceListControls(localDevices, { query: 'PC', status: 'online', management: 'visible', sort: 'name' });
+    assert.deepStrictEqual(resCombined1.map(d => d.deviceId), ['d1']);
+
+    // combining: query = 'PC', status = 'online', management = 'missing-ip' -> matches d2
+    const resCombined2 = applyDeviceListControls(localDevices, { query: 'PC', status: 'online', management: 'missing-ip', sort: 'name' });
+    assert.deepStrictEqual(resCombined2.map(d => d.deviceId), ['d2']);
+
+    // verify no mutation
+    assert.strictEqual(localDevices.length, 5);
+    assert.strictEqual(localDevices[0].deviceId, 'd1');
   });
 });
 
@@ -4836,5 +4953,35 @@ describe('V0.33 device management state pure functions', () => {
     assert.strictEqual(getDeviceManagementState({ status: null }), '未知待确认');
     assert.strictEqual(getDeviceManagementState({}), '未知待确认');
     assert.strictEqual(getDeviceManagementState(null), '未知待确认');
+  });
+});
+
+describe('V0.34 device management state key pure functions', () => {
+  it('covers online + valid IP => visible', () => {
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: '192.168.1.100' }), 'visible');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: '10.0.0.1' }), 'visible');
+  });
+
+  it('covers online + null/empty/whitespace/unknown/UNKNOWN => missing-ip', () => {
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: '' }), 'missing-ip');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: null }), 'missing-ip');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: undefined }), 'missing-ip');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: 'unknown' }), 'missing-ip');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: '   ' }), 'missing-ip');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'online', ipAddress: ' UNKNOWN ' }), 'missing-ip');
+  });
+
+  it('covers offline => offline-retained', () => {
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'offline', ipAddress: '192.168.1.100' }), 'offline-retained');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'offline', ipAddress: '' }), 'offline-retained');
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'offline' }), 'offline-retained');
+  });
+
+  it('covers unknown/missing/null device => unknown', () => {
+    assert.strictEqual(getDeviceManagementStateKey({ status: 'unknown', ipAddress: '1.2.3.4' }), 'unknown');
+    assert.strictEqual(getDeviceManagementStateKey({ status: '', ipAddress: '1.2.3.4' }), 'unknown');
+    assert.strictEqual(getDeviceManagementStateKey({ status: null }), 'unknown');
+    assert.strictEqual(getDeviceManagementStateKey({}), 'unknown');
+    assert.strictEqual(getDeviceManagementStateKey(null), 'unknown');
   });
 });

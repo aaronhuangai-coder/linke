@@ -198,21 +198,34 @@ export function normalizeDeviceStatus(status) {
   return 'unknown';
 }
 
-export function getDeviceManagementState(device) {
-  if (!device) return '未知待确认';
+export function getDeviceManagementStateKey(device) {
+  if (!device) return 'unknown';
   const status = normalizeDeviceStatus(device.status);
+  if (status === 'unknown') return 'unknown';
   const rawIp = device.ipAddress === null || device.ipAddress === undefined ? '' : device.ipAddress;
   const ip = String(rawIp).trim().toLowerCase();
   if (status === 'online') {
-    if (ip === '' || ip === 'unknown') {
-      return '在线缺 IP';
+    if (ip === '' || ip === 'null' || ip === 'undefined' || ip === 'unknown') {
+      return 'missing-ip';
     }
-    return '在线可见';
+    return 'visible';
   }
   if (status === 'offline') {
-    return '离线保留';
+    return 'offline-retained';
   }
-  return '未知待确认';
+  return 'unknown';
+}
+
+const MANAGEMENT_STATE_LABELS = {
+  'visible': '在线可见',
+  'missing-ip': '在线缺 IP',
+  'offline-retained': '离线保留',
+  'unknown': '未知待确认',
+};
+
+export function getDeviceManagementState(device) {
+  const key = getDeviceManagementStateKey(device);
+  return MANAGEMENT_STATE_LABELS[key] || '未知待确认';
 }
 
 function normalizeSearchValue(value) {
@@ -257,10 +270,12 @@ export function compareDevicesForSort(a, b, sortKey) {
 
 export function applyDeviceListControls(devices, controls) {
   const status = controls?.status || 'all';
+  const management = controls?.management || 'all';
   const sort = controls?.sort || 'name';
   return [...devices]
     .filter((device) => matchesDeviceSearch(device, controls?.query || ''))
     .filter((device) => status === 'all' || normalizeDeviceStatus(device?.status) === status)
+    .filter((device) => management === 'all' || getDeviceManagementStateKey(device) === management)
     .sort((a, b) => compareDevicesForSort(a, b, sort));
 }
 
@@ -785,6 +800,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   const deviceSearchInput = doc.getElementById('device-search');
   const deviceStatusFilter = doc.getElementById('device-status-filter');
+  const deviceManagementFilter = doc.getElementById('device-management-filter');
   const deviceSortSelect = doc.getElementById('device-sort');
   const deviceFilterCountEl = doc.querySelector('[data-testid="device-filter-count"]');
 
@@ -792,6 +808,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     return {
       query: deviceSearchInput?.value || '',
       status: deviceStatusFilter?.value || 'all',
+      management: deviceManagementFilter?.value || 'all',
       sort: deviceSortSelect?.value || 'name',
     };
   }
@@ -2276,7 +2293,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     nasDryRunRunButton.addEventListener('click', fetchNasDryRunPlan);
   }
 
-  for (const control of [deviceSearchInput, deviceStatusFilter, deviceSortSelect]) {
+  for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredDevices);
       control.addEventListener('change', renderFilteredDevices);
