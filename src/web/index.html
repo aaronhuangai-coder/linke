@@ -125,6 +125,33 @@
           <p>设备备份健康面板为前端只读派生视图，只读取现有设备状态，不写入 metadata、不触发备份、不执行恢复、不连接 NAS。</p>
         </div>
       </section>
+      <section class="panel version-consistency-panel" data-testid="version-consistency-panel">
+        <h2>备份版本一致性</h2>
+        <div class="version-consistency-summary">
+          <div class="version-consistency-stat consistency-synced">
+            <span id="version-consistency-synced-count" data-testid="version-consistency-synced-count">0</span>
+            <span>一致</span>
+          </div>
+          <div class="version-consistency-stat consistency-drifted">
+            <span id="version-consistency-drifted-count" data-testid="version-consistency-drifted-count">0</span>
+            <span>不一致</span>
+          </div>
+          <div class="version-consistency-stat consistency-single">
+            <span id="version-consistency-single-count" data-testid="version-consistency-single-count">0</span>
+            <span>单设备</span>
+          </div>
+          <div class="version-consistency-stat consistency-total">
+            <span id="version-consistency-total-count" data-testid="version-consistency-total-count">0</span>
+            <span>任务组</span>
+          </div>
+        </div>
+        <ul id="version-consistency-list" class="version-consistency-list" data-testid="version-consistency-list">
+          <li class="placeholder">暂无版本一致性数据</li>
+        </ul>
+        <div class="version-consistency-safety-note" data-testid="version-consistency-safety-note">
+          <p>备份版本一致性面板为前端只读派生视图，只读取现有 snapshot 元数据，不写入 metadata、不触发备份、不执行同步、不执行恢复、不连接 NAS。</p>
+        </div>
+      </section>
       <section class="panel snapshots-panel">
         <h2>快照 <span id="snapshots-device-name" class="device-name"></span></h2>
         <ul data-testid="snapshot-list" id="snapshot-list">

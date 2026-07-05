@@ -8,6 +8,7 @@ import {
   applyDeviceListControls,
   buildBackupJobOverview,
   buildBackupJobTimeline,
+  buildBackupVersionConsistency,
   buildDeviceBackupHealth,
   compareDevicesForSort,
   computeFleetSummary,
@@ -935,6 +936,37 @@ describe('Web Console / API contract', () => {
     assert.ok(/只读|派生视图/.test(content), 'must state read-only derived behavior');
     assert.ok(/不写入 metadata/.test(content), 'must state no metadata writes');
     assert.ok(/不触发备份/.test(content), 'must state no backup execution');
+    assert.ok(/不执行恢复/.test(content), 'must state no restore execution');
+    assert.ok(/不连接 NAS/.test(content), 'must state no NAS connection');
+  });
+
+  // ── V0.22 Backup version consistency panel HTML contract ─────────
+
+  it('HTML contains V0.22 backup version consistency panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="version-consistency-panel"'), 'must have version-consistency-panel');
+    assert.ok(html.includes('data-testid="version-consistency-synced-count"'), 'must have version-consistency-synced-count');
+    assert.ok(html.includes('data-testid="version-consistency-drifted-count"'), 'must have version-consistency-drifted-count');
+    assert.ok(html.includes('data-testid="version-consistency-single-count"'), 'must have version-consistency-single-count');
+    assert.ok(html.includes('data-testid="version-consistency-total-count"'), 'must have version-consistency-total-count');
+    assert.ok(html.includes('data-testid="version-consistency-list"'), 'must have version-consistency-list');
+    assert.ok(html.includes('data-testid="version-consistency-safety-note"'), 'must have version-consistency-safety-note');
+  });
+
+  it('V0.22 backup version consistency panel is read-only and has no execution controls', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="version-consistency-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'version-consistency-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(!content.includes('<button'), 'version consistency panel must not contain buttons');
+    assert.ok(/只读|派生视图/.test(content), 'must state read-only derived behavior');
+    assert.ok(/不写入 metadata/.test(content), 'must state no metadata writes');
+    assert.ok(/不触发备份/.test(content), 'must state no backup execution');
+    assert.ok(/不执行同步/.test(content), 'must state no sync execution');
     assert.ok(/不执行恢复/.test(content), 'must state no restore execution');
     assert.ok(/不连接 NAS/.test(content), 'must state no NAS connection');
   });
@@ -3331,6 +3363,114 @@ describe('V0.21 Device Backup Health Panel unit tests', () => {
   });
 });
 
+describe('V0.22 Backup Version Consistency Panel unit tests', () => {
+  it('initConsole() renders version consistency summary and groups after devices load', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', status: 'online', snapshotCount: 3 },
+      { deviceId: 'mac-b', hostname: 'Mac B', status: 'online', snapshotCount: 2 },
+    ];
+    const snapshotsByDevice = {
+      'mac-a': [
+        {
+          snapshotId: 'a-docs-new',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T10:00:00.000Z',
+          fileCount: 10,
+        },
+        {
+          snapshotId: 'a-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+        {
+          snapshotId: 'a-photos',
+          jobName: 'photos',
+          sourcePath: '/Users/ah/Pictures',
+          createdAt: '2026-07-05T07:00:00.000Z',
+          fileCount: 20,
+        },
+      ],
+      'mac-b': [
+        {
+          snapshotId: 'b-docs-stale',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T09:00:00.000Z',
+          fileCount: 9,
+        },
+        {
+          snapshotId: 'b-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+      ],
+    };
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      const match = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (match) {
+        return { ok: true, status: 200, json: async () => snapshotsByDevice[decodeURIComponent(match[1])] || [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-synced-count"]').textContent, '1');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-drifted-count"]').textContent, '1');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-single-count"]').textContent, '1');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-total-count"]').textContent, '3');
+
+    const groups = doc._created.filter((el) => el._attrs?.['data-testid'] === 'version-consistency-item');
+    assert.strictEqual(groups.length, 3);
+    assert.strictEqual(groups[0].dataset.versionStatus, 'drifted');
+    assert.strictEqual(groups[0].querySelector('[data-testid="version-consistency-name"]').textContent, 'documents');
+    assert.strictEqual(groups[0].querySelector('[data-testid="version-consistency-status"]').textContent, '版本不一致');
+    assert.match(groups[0].querySelector('[data-testid="version-consistency-reason"]').textContent, /2 台设备/);
+    assert.strictEqual(groups[1].dataset.versionStatus, 'single-device');
+    assert.strictEqual(groups[2].dataset.versionStatus, 'synced');
+  });
+
+  it('renders version consistency text as textContent without innerHTML injection', async () => {
+    const doc = buildMockDoc();
+    const devices = [{ deviceId: 'mac-x', hostname: '<b>Mac</b>', status: 'online', snapshotCount: 1 }];
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ([{
+          snapshotId: 'x-1',
+          jobName: '<script>alert(1)</script>',
+          sourcePath: '/tmp/<unsafe>',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 1,
+        }]),
+      };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const item = doc._created.find((el) => el._attrs?.['data-testid'] === 'version-consistency-item');
+    assert.ok(item, 'version-consistency-item must be rendered');
+    assert.strictEqual(item.innerHTML || '', '');
+    assert.strictEqual(item.querySelector('[data-testid="version-consistency-name"]').textContent, '<script>alert(1)</script>');
+    assert.strictEqual(item.querySelector('[data-testid="version-consistency-source"]').textContent, '/tmp/<unsafe>');
+  });
+});
+
 describe('V0.21 device backup health pure functions', () => {
   const now = new Date('2026-07-05T12:00:00.000Z');
 
@@ -3470,5 +3610,89 @@ describe('V0.21 device backup health pure functions', () => {
     });
 
     assert.deepStrictEqual(buildDeviceBackupHealth({ bad: true }, now).items, []);
+  });
+});
+
+describe('V0.22 backup version consistency pure functions', () => {
+  it('groups latest snapshots across devices and classifies synced, drifted, and single-device groups', () => {
+    const result = buildBackupVersionConsistency(
+      [
+        { deviceId: 'mac-a', hostname: 'Mac A' },
+        { deviceId: 'mac-b', hostname: 'Mac B' },
+      ],
+      {
+        'mac-a': [
+          {
+            snapshotId: 'a-docs-new',
+            jobName: 'documents',
+            sourcePath: '/Users/ah/Documents',
+            createdAt: '2026-07-05T10:00:00.000Z',
+            fileCount: 10,
+          },
+          {
+            snapshotId: 'a-docs-old',
+            jobName: 'documents',
+            sourcePath: '/Users/ah/Documents',
+            createdAt: '2026-07-05T08:00:00.000Z',
+            fileCount: 8,
+          },
+          {
+            snapshotId: 'a-config',
+            jobName: 'configs',
+            sourcePath: '/Users/ah/.config',
+            createdAt: '2026-07-05T07:00:00.000Z',
+            fileCount: 5,
+          },
+          {
+            snapshotId: 'a-photos',
+            jobName: 'photos',
+            sourcePath: '/Users/ah/Pictures',
+            createdAt: '2026-07-05T06:00:00.000Z',
+            fileCount: 20,
+          },
+        ],
+        'mac-b': [
+          {
+            snapshotId: 'b-docs',
+            jobName: 'documents',
+            sourcePath: '/Users/ah/Documents',
+            createdAt: '2026-07-05T09:00:00.000Z',
+            fileCount: 9,
+          },
+          {
+            snapshotId: 'b-config',
+            jobName: 'configs',
+            sourcePath: '/Users/ah/.config',
+            createdAt: '2026-07-05T07:00:00.000Z',
+            fileCount: 5,
+          },
+        ],
+      },
+    );
+
+    assert.deepStrictEqual(result.summary, {
+      synced: 1,
+      drifted: 1,
+      singleDevice: 1,
+      total: 3,
+    });
+    assert.strictEqual(result.groups[0].status, 'drifted');
+    assert.strictEqual(result.groups[0].jobName, 'documents');
+    assert.strictEqual(result.groups[0].devices[0].deviceId, 'mac-a');
+    assert.strictEqual(result.groups[0].devices[0].versionState, 'latest');
+    assert.strictEqual(result.groups[0].devices[1].versionState, 'stale');
+    assert.strictEqual(result.groups[1].status, 'single-device');
+    assert.strictEqual(result.groups[2].status, 'synced');
+  });
+
+  it('returns empty summary for non-array devices and non-object snapshots', () => {
+    const result = buildBackupVersionConsistency(null, null);
+    assert.deepStrictEqual(result.summary, {
+      synced: 0,
+      drifted: 0,
+      singleDevice: 0,
+      total: 0,
+    });
+    assert.deepStrictEqual(result.groups, []);
   });
 });

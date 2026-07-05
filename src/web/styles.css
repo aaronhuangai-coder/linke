@@ -1338,12 +1338,100 @@ ul {
   font-weight: 700;
 }
 
+.version-consistency-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.version-consistency-stat {
+  border: 1px solid #d8dee9;
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.version-consistency-stat span:first-child {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.version-consistency-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.version-consistency-item {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.1fr) minmax(120px, 1.4fr) minmax(90px, 0.8fr);
+  gap: 6px 10px;
+  border: 1px solid #d8dee9;
+  border-left: 4px solid #94a3b8;
+  border-radius: 6px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.version-consistency-drifted {
+  border-left-color: #dc2626;
+}
+
+.version-consistency-single-device {
+  border-left-color: #d97706;
+}
+
+.version-consistency-synced {
+  border-left-color: #16a34a;
+}
+
+.version-consistency-item span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+[data-testid="version-consistency-name"],
+[data-testid="version-consistency-status"] {
+  font-weight: 700;
+}
+
+.version-consistency-device {
+  grid-column: 1 / -1;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #f8fafc;
+  font-size: 0.78rem;
+}
+
+.version-state-stale {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.version-state-latest,
+.version-state-single {
+  background: #ecfdf5;
+  color: #166534;
+}
+
+.version-consistency-safety-note {
+  margin-top: 10px;
+  color: #6b7280;
+  font-size: 0.78rem;
+}
+
 @media (max-width: 760px) {
-  .device-health-summary {
+  .device-health-summary,
+  .version-consistency-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .device-health-item {
+  .device-health-item,
+  .version-consistency-item {
     grid-template-columns: 1fr;
   }
 }

@@ -268,6 +268,24 @@ const DEVICE_HEALTH_SORT_ORDER = {
   healthy: 3,
 };
 
+const VERSION_CONSISTENCY_LABELS = {
+  drifted: '版本不一致',
+  'single-device': '单设备',
+  synced: '一致',
+};
+
+const VERSION_CONSISTENCY_REASONS = {
+  drifted: '多台设备最新版本不同',
+  'single-device': '仅一台设备有该任务快照',
+  synced: '多台设备最新版本一致',
+};
+
+const VERSION_CONSISTENCY_SORT_ORDER = {
+  drifted: 0,
+  'single-device': 1,
+  synced: 2,
+};
+
 function getValidDateTime(value) {
   const timestamp = Date.parse(value || '');
   return Number.isFinite(timestamp) ? timestamp : 0;
@@ -337,6 +355,120 @@ export function buildDeviceBackupHealth(devices, now = new Date()) {
   return { summary, items };
 }
 
+function getSnapshotDeviceMap(snapshotsByDevice) {
+  return snapshotsByDevice && typeof snapshotsByDevice === 'object' ? snapshotsByDevice : {};
+}
+
+function getVersionState(status, row, latestTime, latestFileCount) {
+  if (status === 'single-device') return 'single';
+  if (status === 'synced') return 'latest';
+  return row.latestTime === latestTime && row.latestFileCount === latestFileCount ? 'latest' : 'stale';
+}
+
+export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
+  const summary = {
+    synced: 0,
+    drifted: 0,
+    singleDevice: 0,
+    total: 0,
+  };
+  const safeDevices = Array.isArray(devices) ? devices : [];
+  const snapshotMap = getSnapshotDeviceMap(snapshotsByDevice);
+  const groups = new Map();
+
+  for (const device of safeDevices) {
+    const deviceId = normalizeDeviceText(device?.deviceId);
+    if (deviceId === 'unknown') continue;
+
+    const snapshots = Array.isArray(snapshotMap[deviceId]) ? snapshotMap[deviceId] : [];
+    for (const snapshot of snapshots) {
+      const key = getBackupJobKey(snapshot);
+      if (!groups.has(key)) {
+        const rawJobName = String(snapshot?.jobName || '').trim();
+        groups.set(key, {
+          key,
+          jobName: normalizeBackupJobName(rawJobName),
+          sourcePath: normalizeSourcePath(snapshot?.sourcePath),
+          devices: new Map(),
+          snapshotCount: 0,
+        });
+      }
+
+      const group = groups.get(key);
+      const latestTime = getSnapshotCreatedAtTime(snapshot);
+      const latestFileCount = getSnapshotFileCount(snapshot);
+      const current = group.devices.get(deviceId);
+
+      group.snapshotCount += 1;
+      if (!current || latestTime >= current.latestTime) {
+        group.devices.set(deviceId, {
+          deviceId,
+          hostname: getDeviceDisplayName(device),
+          latestSnapshotId: snapshot?.snapshotId || '',
+          latestCreatedAt: snapshot?.createdAt || '',
+          latestTime,
+          latestFileCount,
+          snapshotCount: (current?.snapshotCount || 0) + 1,
+        });
+      } else if (current) {
+        current.snapshotCount += 1;
+      }
+    }
+  }
+
+  const versionGroups = [...groups.values()].map((group) => {
+    const rows = [...group.devices.values()].sort((a, b) => (
+      b.latestTime - a.latestTime
+      || a.hostname.localeCompare(b.hostname)
+      || a.deviceId.localeCompare(b.deviceId)
+    ));
+    const latestTime = rows.reduce((max, row) => Math.max(max, row.latestTime), 0);
+    const latestFileCount = rows.find((row) => row.latestTime === latestTime)?.latestFileCount || 0;
+
+    let status = 'single-device';
+    if (rows.length > 1) {
+      const allSame = rows.every((row) => row.latestTime === latestTime && row.latestFileCount === latestFileCount);
+      status = allSame ? 'synced' : 'drifted';
+    }
+
+    if (status === 'synced') summary.synced += 1;
+    if (status === 'drifted') summary.drifted += 1;
+    if (status === 'single-device') summary.singleDevice += 1;
+    summary.total += 1;
+
+    return {
+      key: group.key,
+      jobName: group.jobName,
+      sourcePath: group.sourcePath,
+      status,
+      statusLabel: VERSION_CONSISTENCY_LABELS[status],
+      reason: rows.length > 1
+        ? String(rows.length) + ' 台设备 · ' + VERSION_CONSISTENCY_REASONS[status]
+        : VERSION_CONSISTENCY_REASONS[status],
+      deviceCount: rows.length,
+      snapshotCount: group.snapshotCount,
+      latestCreatedAt: rows[0]?.latestCreatedAt || '',
+      latestFileCount: latestFileCount,
+      devices: rows.map((row) => ({
+        deviceId: row.deviceId,
+        hostname: row.hostname,
+        latestSnapshotId: row.latestSnapshotId,
+        latestCreatedAt: row.latestCreatedAt,
+        latestFileCount: row.latestFileCount,
+        snapshotCount: row.snapshotCount,
+        versionState: getVersionState(status, row, latestTime, latestFileCount),
+      })),
+    };
+  }).sort((a, b) => (
+    VERSION_CONSISTENCY_SORT_ORDER[a.status] - VERSION_CONSISTENCY_SORT_ORDER[b.status]
+    || getValidDateTime(b.latestCreatedAt) - getValidDateTime(a.latestCreatedAt)
+    || a.jobName.localeCompare(b.jobName)
+    || a.sourcePath.localeCompare(b.sourcePath)
+  ));
+
+  return { summary, groups: versionGroups };
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
@@ -381,6 +513,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const deviceHealthOfflineCountEl = doc.getElementById('device-health-offline-count');
   const deviceHealthUnknownCountEl = doc.getElementById('device-health-unknown-count');
   const deviceHealthListEl = doc.getElementById('device-health-list');
+  const versionConsistencySyncedCountEl = doc.getElementById('version-consistency-synced-count');
+  const versionConsistencyDriftedCountEl = doc.getElementById('version-consistency-drifted-count');
+  const versionConsistencySingleCountEl = doc.getElementById('version-consistency-single-count');
+  const versionConsistencyTotalCountEl = doc.getElementById('version-consistency-total-count');
+  const versionConsistencyListEl = doc.getElementById('version-consistency-list');
 
   const EVENT_LOG_VISIBLE_LIMIT = 50;
   let eventTotalCount = 0;
@@ -410,6 +547,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let selectedDeviceId = null;
   let selectedSnapshotId = null;
   let selectedBackupJobKey = null;
+  let versionConsistencyRequestId = 0;
   let cachedSnapshots = [];
   let cachedDevices = [];
 
@@ -529,9 +667,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       renderFilteredDevices();
       renderDeviceDetail(selectedDevice);
       renderDeviceBackupHealth(devices);
+      fetchBackupVersionConsistency(devices);
       logEvent('已加载 ' + devices.length + ' 台设备', 'info');
     } catch (err) {
       renderDeviceBackupHealth([]);
+      renderBackupVersionConsistency([], {});
       logEvent('加载设备失败: ' + err.message, 'error');
     }
   }
@@ -666,6 +806,116 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         deviceHealthListEl.appendChild(row);
       }
     });
+  }
+
+  function setVersionConsistencyCounts(summary) {
+    if (versionConsistencySyncedCountEl) versionConsistencySyncedCountEl.textContent = String(summary.synced);
+    if (versionConsistencyDriftedCountEl) versionConsistencyDriftedCountEl.textContent = String(summary.drifted);
+    if (versionConsistencySingleCountEl) versionConsistencySingleCountEl.textContent = String(summary.singleDevice);
+    if (versionConsistencyTotalCountEl) versionConsistencyTotalCountEl.textContent = String(summary.total);
+  }
+
+  function setVersionConsistencyPlaceholder(message) {
+    clearElement(versionConsistencyListEl);
+    setVersionConsistencyCounts({ synced: 0, drifted: 0, singleDevice: 0, total: 0 });
+    if (!versionConsistencyListEl) return;
+    const item = doc.createElement('li');
+    item.className = 'placeholder';
+    item.textContent = message;
+    if (typeof versionConsistencyListEl.appendChild === 'function') {
+      versionConsistencyListEl.appendChild(item);
+    }
+  }
+
+  function appendVersionConsistencyField(parent, testId, value) {
+    const field = doc.createElement('span');
+    field.setAttribute('data-testid', testId);
+    field.textContent = value;
+    parent.appendChild(field);
+    return field;
+  }
+
+  function renderBackupVersionConsistency(devices, snapshotsByDevice) {
+    const consistency = buildBackupVersionConsistency(devices, snapshotsByDevice);
+    setVersionConsistencyCounts(consistency.summary);
+    clearElement(versionConsistencyListEl);
+    if (!versionConsistencyListEl) return;
+
+    if (consistency.groups.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '暂无版本一致性数据';
+      if (typeof versionConsistencyListEl.appendChild === 'function') {
+        versionConsistencyListEl.appendChild(item);
+      }
+      return;
+    }
+
+    consistency.groups.forEach(function (group) {
+      const row = doc.createElement('li');
+      row.className = 'version-consistency-item version-consistency-' + group.status;
+      row.setAttribute('data-testid', 'version-consistency-item');
+      row.setAttribute('data-version-status', group.status);
+      row.dataset.versionStatus = group.status;
+
+      appendVersionConsistencyField(row, 'version-consistency-name', group.jobName);
+      appendVersionConsistencyField(row, 'version-consistency-source', group.sourcePath);
+      appendVersionConsistencyField(row, 'version-consistency-status', group.statusLabel);
+      appendVersionConsistencyField(row, 'version-consistency-reason', group.reason);
+      appendVersionConsistencyField(row, 'version-consistency-latest', formatLastBackup(group.latestCreatedAt));
+      appendVersionConsistencyField(row, 'version-consistency-snapshots', String(group.snapshotCount) + ' 快照');
+
+      group.devices.forEach(function (device) {
+        const deviceField = doc.createElement('span');
+        deviceField.className = 'version-consistency-device version-state-' + device.versionState;
+        deviceField.setAttribute('data-testid', 'version-consistency-device');
+        deviceField.textContent = device.hostname + ' · ' + device.versionState + ' · '
+          + formatLastBackup(device.latestCreatedAt) + ' · '
+          + String(device.latestFileCount || 0) + ' files';
+        row.appendChild(deviceField);
+      });
+
+      if (typeof versionConsistencyListEl.appendChild === 'function') {
+        versionConsistencyListEl.appendChild(row);
+      }
+    });
+  }
+
+  async function fetchBackupVersionConsistency(devices) {
+    const safeDevices = Array.isArray(devices) ? devices : [];
+    const requestId = ++versionConsistencyRequestId;
+
+    if (safeDevices.length === 0) {
+      renderBackupVersionConsistency([], {});
+      return;
+    }
+
+    setVersionConsistencyPlaceholder('加载中...');
+
+    const entries = await Promise.all(safeDevices.map(async function (device) {
+      const deviceId = String(device?.deviceId || '').trim();
+      if (!deviceId) return null;
+      try {
+        const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const snapshots = await res.json();
+        return [deviceId, Array.isArray(snapshots) ? snapshots : []];
+      } catch (err) {
+        logEvent('加载版本一致性快照失败 (' + deviceId + '): ' + err.message, 'error');
+        return [deviceId, []];
+      }
+    }));
+
+    if (requestId !== versionConsistencyRequestId) return;
+
+    const snapshotsByDevice = {};
+    entries.forEach(function (entry) {
+      if (!entry) return;
+      snapshotsByDevice[entry[0]] = entry[1];
+    });
+    renderBackupVersionConsistency(safeDevices, snapshotsByDevice);
+    const consistency = buildBackupVersionConsistency(safeDevices, snapshotsByDevice);
+    logEvent('已加载版本一致性 ' + consistency.summary.total + ' 个任务组', 'info');
   }
 
   function renderDevices(devices) {

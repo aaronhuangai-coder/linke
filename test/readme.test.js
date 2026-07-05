@@ -104,45 +104,49 @@ describe('README — version coverage', () => {
   it('mentions V0.21 (device backup health panel)', () => {
     assertReadmeContains(/V0\.21/, 'V0.21');
   });
+
+  it('mentions V0.22 (backup version consistency panel)', () => {
+    assertReadmeContains(/V0\.22/, 'V0.22');
+  });
 });
 
-// ── V0.21 documentation ────────────────────────────────────────────
+// ── V0.22 documentation ────────────────────────────────────────────
 
-describe('README — V0.21 device backup health panel', () => {
-  it('title says V0.21', () => {
-    assert.match(readme, /^# Linke V0\.21/m);
+describe('README — V0.22 backup version consistency panel', () => {
+  it('title says V0.22', () => {
+    assert.match(readme, /^# Linke V0\.22/m);
   });
 
-  it('version badge says 当前版本：V0.21', () => {
-    assert.match(readme, /当前版本：V0\.21/);
+  it('version badge says 当前版本：V0.22', () => {
+    assert.match(readme, /当前版本：V0\.22/);
   });
 
-  it('version table has V0.21 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.21 \| 当前版本 \|[^|]*设备备份健康/);
+  it('version table has V0.22 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.22 \| 当前版本 \|[^|]*版本一致性/);
   });
 
-  it('version table keeps V0.20 as 事件日志面板增强 milestone', () => {
-    assert.match(readme, /\| V0\.20 \| 事件日志面板增强 \|/);
+  it('version table keeps V0.21 as 设备备份健康 milestone', () => {
+    assert.match(readme, /\| V0\.21 \| 设备备份健康 \|/);
   });
 
-  it('documents device backup health as front-end read-only derived view', () => {
-    assert.match(readme, /设备备份健康/);
+  it('documents backup version consistency as front-end read-only derived view', () => {
+    assert.match(readme, /备份版本一致性/);
     assert.match(readme, /前端.*只读.*派生视图|只读.*前端.*派生视图/);
   });
 
-  it('documents device backup health statuses and reasons', () => {
-    assert.match(readme, /健康/);
-    assert.match(readme, /需关注/);
-    assert.match(readme, /离线/);
-    assert.match(readme, /未知/);
-    assert.match(readme, /缺少有效备份|最近备份有效/);
+  it('documents backup version consistency statuses and reasons', () => {
+    assert.match(readme, /一致/);
+    assert.match(readme, /版本不一致/);
+    assert.match(readme, /单设备/);
+    assert.match(readme, /最新版本不同|最新版本一致/);
   });
 
-  it('asserts safety docs for device backup health panel', () => {
-    assert.match(readme, /设备备份健康安全保证/);
+  it('asserts safety docs for backup version consistency panel', () => {
+    assert.match(readme, /备份版本一致性安全保证/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
     assert.match(readme, /不触发备份|不进行备份/);
+    assert.match(readme, /不执行同步|不进行同步/);
     assert.match(readme, /不执行恢复|不进行恢复/);
     assert.match(readme, /不删除快照|不进行删除/);
     assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
@@ -150,8 +154,8 @@ describe('README — V0.21 device backup health panel', () => {
     assert.match(readme, /不执行远程传输|不进行远程文件传输/);
   });
 
-  it('documents test coverage includes device backup health panel', () => {
-    assert.match(readme, /设备备份健康面板/);
+  it('documents test coverage includes backup version consistency panel', () => {
+    assert.match(readme, /备份版本一致性面板/);
   });
 });
 
