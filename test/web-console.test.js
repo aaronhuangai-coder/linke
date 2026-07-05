@@ -1080,6 +1080,26 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('device-management-summary'), 'app.js must reference device-management-summary');
     assert.ok(js.includes('buildDeviceManagementSummary'), 'app.js must reference buildDeviceManagementSummary');
   });
+
+  // ── V0.36 device-management-summary active accessible controls ─────
+
+  it('HTML contains V0.36 accessible device management summary buttons', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('<button type="button" data-testid="device-management-summary-all"'), 'all summary control must be a button');
+    assert.ok(html.includes('<button type="button" data-testid="device-management-summary-visible"'), 'visible summary control must be a button');
+    assert.ok(html.includes('data-management-filter-value="all"'), 'all summary button must declare filter value');
+    assert.ok(html.includes('data-management-filter-value="visible"'), 'visible summary button must declare filter value');
+    assert.ok(html.includes('aria-pressed="true"'), 'initial active summary button must expose aria-pressed');
+  });
+
+  it('app.js source contract expects active summary state rendering', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('setDeviceManagementSummaryActive'), 'app.js must render active summary state');
+    assert.ok(js.includes('aria-pressed'), 'app.js must update aria-pressed');
+    assert.ok(js.includes('data-active'), 'app.js must update data-active');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
@@ -3300,6 +3320,64 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.strictEqual(countEl.textContent, '4 / 4');
 
     assert.strictEqual(fetchCount, 1, 'fetch count should remain 1');
+  });
+
+  it('DOM test: V0.36 device-management-summary active aria state follows bucket clicks and manual filter changes without refetching /api/devices', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' },
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const allSummary = doc.querySelector('[data-testid="device-management-summary-all"]');
+    const visibleSummary = doc.querySelector('[data-testid="device-management-summary-visible"]');
+    const missingIpSummary = doc.querySelector('[data-testid="device-management-summary-missing-ip"]');
+    const unknownSummary = doc.querySelector('[data-testid="device-management-summary-unknown"]');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+
+    assert.strictEqual(allSummary.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(allSummary.getAttribute('data-active'), 'true');
+    assert.match(allSummary.className, /is-active/);
+    assert.strictEqual(visibleSummary.getAttribute('aria-pressed'), 'false');
+
+    visibleSummary._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(managementFilter.value, 'visible');
+    assert.strictEqual(allSummary.getAttribute('aria-pressed'), 'false');
+    assert.strictEqual(visibleSummary.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(visibleSummary.getAttribute('data-active'), 'true');
+    assert.match(visibleSummary.className, /is-active/);
+    assert.strictEqual(countEl.textContent, '1 / 4');
+
+    managementFilter.value = 'missing-ip';
+    managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(missingIpSummary.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(visibleSummary.getAttribute('aria-pressed'), 'false');
+    assert.strictEqual(countEl.textContent, '1 / 4');
+
+    managementFilter.value = 'unknown';
+    managementFilter._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(unknownSummary.getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(missingIpSummary.getAttribute('aria-pressed'), 'false');
+    assert.strictEqual(countEl.textContent, '1 / 4');
+    assert.strictEqual(fetchCount, 1, 'active state changes must not refetch /api/devices');
   });
 });
 

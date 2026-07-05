@@ -838,6 +838,14 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const summaryOfflineRetained = doc.querySelector('[data-testid="device-management-summary-offline-retained"]');
   const summaryUnknown = doc.querySelector('[data-testid="device-management-summary-unknown"]');
 
+  const deviceManagementSummaryBuckets = [
+    { el: summaryAll, filterValue: 'all', countKey: 'all', label: '全部' },
+    { el: summaryVisible, filterValue: 'visible', countKey: 'visible', label: '在线可见' },
+    { el: summaryMissingIp, filterValue: 'missing-ip', countKey: 'missingIp', label: '在线缺 IP' },
+    { el: summaryOfflineRetained, filterValue: 'offline-retained', countKey: 'offlineRetained', label: '离线保留' },
+    { el: summaryUnknown, filterValue: 'unknown', countKey: 'unknown', label: '未知待确认' },
+  ];
+
   function getDeviceControls() {
     return {
       query: deviceSearchInput?.value || '',
@@ -854,18 +862,30 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   function renderFilteredDevices() {
+    renderDeviceManagementSummary(cachedDevices);
     const visibleDevices = applyDeviceListControls(cachedDevices, getDeviceControls());
     renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);
     renderDevices(visibleDevices);
   }
 
+  function setDeviceManagementSummaryActive(summaryEl, active) {
+    if (!summaryEl) return;
+    const activeValue = active ? 'true' : 'false';
+    if (summaryEl.setAttribute) {
+      summaryEl.setAttribute('aria-pressed', activeValue);
+      summaryEl.setAttribute('data-active', activeValue);
+    }
+    summaryEl.className = active ? 'summary-bucket is-active' : 'summary-bucket';
+  }
+
   function renderDeviceManagementSummary(devices) {
     const summary = buildDeviceManagementSummary(devices);
-    if (summaryAll) summaryAll.textContent = '全部: ' + summary.all;
-    if (summaryVisible) summaryVisible.textContent = '在线可见: ' + summary.visible;
-    if (summaryMissingIp) summaryMissingIp.textContent = '在线缺 IP: ' + summary.missingIp;
-    if (summaryOfflineRetained) summaryOfflineRetained.textContent = '离线保留: ' + summary.offlineRetained;
-    if (summaryUnknown) summaryUnknown.textContent = '未知待确认: ' + summary.unknown;
+    const activeManagement = getDeviceControls().management;
+    for (const bucket of deviceManagementSummaryBuckets) {
+      if (!bucket.el) continue;
+      bucket.el.textContent = bucket.label + ': ' + String(summary[bucket.countKey] || 0);
+      setDeviceManagementSummaryActive(bucket.el, activeManagement === bucket.filterValue);
+    }
   }
 
   if (retentionKeepLastInput && !retentionKeepLastInput.value) {
@@ -965,7 +985,6 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       const selectedDevice = devices.find((d) => d.deviceId === selectedDeviceId) || null;
       if (!selectedDevice) selectedDeviceId = null;
       renderFleetSummary(devices);
-      renderDeviceManagementSummary(devices);
       renderFilteredDevices();
       renderDeviceDetail(selectedDevice);
       renderDeviceBackupHealth(devices);

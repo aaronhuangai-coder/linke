@@ -164,6 +164,7 @@ body {
 }
 
 .summary-bucket {
+  appearance: none;
   flex: 1;
   min-width: 100px;
   padding: 6px 10px;
@@ -172,9 +173,11 @@ body {
   border-radius: 4px;
   cursor: pointer;
   font-size: 0.78rem;
+  font-family: inherit;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  text-align: left;
   transition: all 0.15s ease-in-out;
   user-select: none;
 }
@@ -182,6 +185,19 @@ body {
 .summary-bucket:hover {
   border-color: #0066cc;
   background: #f0f7ff;
+}
+
+.summary-bucket:focus-visible {
+  outline: 2px solid #0066cc;
+  outline-offset: 2px;
+}
+
+.summary-bucket.is-active,
+.summary-bucket[data-active="true"] {
+  border-color: #0066cc;
+  background: #eaf3ff;
+  color: #0f3b68;
+  font-weight: 700;
 }
 
 .summary-bucket .count {

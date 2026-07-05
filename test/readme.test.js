@@ -160,6 +160,10 @@ describe('README — version coverage', () => {
   it('mentions V0.35 (read-only management-state bucket summary and quick switching)', () => {
     assertReadmeContains(/V0\.35/, 'V0.35');
   });
+
+  it('mentions V0.36 (accessible active management-state summary controls)', () => {
+    assertReadmeContains(/V0\.36/, 'V0.36');
+  });
 });
 
 
@@ -256,16 +260,12 @@ describe('README — V0.34 management-state filter and count', () => {
 // ── V0.35 documentation ────────────────────────────────────────────
 
 describe('README — V0.35 management-state bucket summary and quick switching', () => {
-  it('title says V0.35', () => {
-    assert.match(readme, /^# Linke V0\.35/m);
+  it('mentions V0.35', () => {
+    assert.match(readme, /V0\.35/);
   });
 
-  it('version badge says 当前版本：V0.35', () => {
-    assert.match(readme, /当前版本：V0\.35/);
-  });
-
-  it('version table has V0.35 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.35 \| 当前版本 \|[^|]*(管理态分桶统计|device-management-summary)/i);
+  it('version table has V0.35 historical row', () => {
+    assert.match(readme, /\| V0\.35 \|[^|]*(管理态分桶统计|device-management-summary)/i);
   });
 
   it('version table keeps V0.34 as historical milestone', () => {
@@ -289,6 +289,46 @@ describe('README — V0.35 management-state bucket summary and quick switching',
 
   it('documents testing coverage includes device-management-summary', () => {
     assert.match(readme, /测试覆盖：.*管理态分桶统计/);
+  });
+});
+
+// ── V0.36 documentation ────────────────────────────────────────────
+
+describe('README — V0.36 accessible active management-state summary controls', () => {
+  it('title says V0.36', () => {
+    assert.match(readme, /^# Linke V0\.36/m);
+  });
+
+  it('version badge says 当前版本：V0.36', () => {
+    assert.match(readme, /当前版本：V0\.36/);
+  });
+
+  it('version table has V0.36 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.36 \| 当前版本 \|[^|]*(active|aria|可访问|高亮|选中态)/i);
+  });
+
+  it('version table keeps V0.35 as historical milestone', () => {
+    assert.match(readme, /\| V0\.35 \|[^|]*(管理态分桶统计|device-management-summary)/i);
+  });
+
+  it('documents active and accessible summary controls', () => {
+    assert.match(readme, /管理态分桶.*(按钮|button)/i);
+    assert.match(readme, /aria-pressed|data-active|选中态|高亮/);
+    assert.match(readme, /device-management-filter/);
+  });
+
+  it('asserts safety docs for active summary controls', () => {
+    assert.match(readme, /管理态分桶.*(选中态|高亮|可访问).*安全(保证|边界)|安全(保证|边界).*(选中态|高亮|可访问)/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不持久化筛选状态|刷新后不保留|不保存筛选状态/);
+  });
+
+  it('documents testing coverage includes active summary controls', () => {
+    assert.match(readme, /测试覆盖：.*管理态分桶选中态/);
   });
 });
 

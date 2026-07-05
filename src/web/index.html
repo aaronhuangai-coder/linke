@@ -66,11 +66,11 @@
           </select>
         </div>
         <div data-testid="device-management-summary" class="device-management-summary">
-          <div data-testid="device-management-summary-all" class="summary-bucket">全部: <span class="count">0</span></div>
-          <div data-testid="device-management-summary-visible" class="summary-bucket">在线可见: <span class="count">0</span></div>
-          <div data-testid="device-management-summary-missing-ip" class="summary-bucket">在线缺 IP: <span class="count">0</span></div>
-          <div data-testid="device-management-summary-offline-retained" class="summary-bucket">离线保留: <span class="count">0</span></div>
-          <div data-testid="device-management-summary-unknown" class="summary-bucket">未知待确认: <span class="count">0</span></div>
+          <button type="button" data-testid="device-management-summary-all" class="summary-bucket is-active" data-management-filter-value="all" data-active="true" aria-pressed="true">全部: <span class="count">0</span></button>
+          <button type="button" data-testid="device-management-summary-visible" class="summary-bucket" data-management-filter-value="visible" data-active="false" aria-pressed="false">在线可见: <span class="count">0</span></button>
+          <button type="button" data-testid="device-management-summary-missing-ip" class="summary-bucket" data-management-filter-value="missing-ip" data-active="false" aria-pressed="false">在线缺 IP: <span class="count">0</span></button>
+          <button type="button" data-testid="device-management-summary-offline-retained" class="summary-bucket" data-management-filter-value="offline-retained" data-active="false" aria-pressed="false">离线保留: <span class="count">0</span></button>
+          <button type="button" data-testid="device-management-summary-unknown" class="summary-bucket" data-management-filter-value="unknown" data-active="false" aria-pressed="false">未知待确认: <span class="count">0</span></button>
         </div>
         <ul data-testid="device-list" id="device-list"></ul>
       </section>
