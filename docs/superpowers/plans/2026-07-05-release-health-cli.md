@@ -29,7 +29,7 @@
 **Interfaces:**
 - Expects `node src/agent.js health --server <url>` to print JSON from `/api/health`.
 
-- [ ] **Step 1: Add failing CLI health test**
+- [x] **Step 1: Add failing CLI health test**
 
 Create `test/agent-health.test.js` with a real temporary server:
 
@@ -100,14 +100,14 @@ describe('Agent health CLI', () => {
 });
 ```
 
-- [ ] **Step 2: Add failing README tests**
+- [x] **Step 2: Add failing README tests**
 
 In `test/readme.test.js`:
 
 - Add V0.47 to version coverage.
 - Add `README — V0.47 release health CLI` tests for title/badge/table row, command docs, exit-code semantics, and safety boundary.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run:
 
@@ -124,7 +124,7 @@ Expected: FAIL because `agent.js health` and V0.47 README docs do not exist.
 - Modify: `README.md`
 - Modify: `test/readme.test.js`
 
-- [ ] **Step 1: Add CLI command**
+- [x] **Step 1: Add CLI command**
 
 In `src/agent.js`:
 
@@ -140,7 +140,7 @@ case 'health': {
 }
 ```
 
-- [ ] **Step 2: Update README**
+- [x] **Step 2: Update README**
 
 Update README:
 
@@ -151,7 +151,7 @@ Update README:
 - Exit-code text: `status:"degraded"` still exits 0 when the endpoint responds; callers should inspect JSON `status` and `checks` to enforce release policy.
 - Testing coverage includes release health CLI.
 
-- [ ] **Step 3: Verify GREEN**
+- [x] **Step 3: Verify GREEN**
 
 Run:
 
@@ -163,29 +163,29 @@ Expected: PASS.
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/agent-health.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full suite**
+- [x] **Step 2: Run full suite**
 
 ```bash
 npm test
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Run Qwen diff review**
+- [x] **Step 4: Run Qwen diff review**
 
 Ask Qwen to check CLI scope, read-only behavior, command output JSON, no hidden device requirement, README over-claims, and test coverage.
 
-- [ ] **Step 5: Run HTTP/CLI smoke**
+- [x] **Step 5: Run HTTP/CLI smoke**
 
 Start a local server and run:
 
@@ -195,7 +195,7 @@ node src/agent.js health --server http://127.0.0.1:<port>
 
 Verify stdout is JSON with `status`, `service`, `version`, and `checks`, and no dataDir path.
 
-- [ ] **Step 6: Run ZAI auxiliary verifier**
+- [x] **Step 6: Run ZAI auxiliary verifier**
 
 Use strict English evidence-only prompt. If ZAI returns tool errors, empty output, missing status fields, or `I don't have a specific response`, record `INCONCLUSIVE` and do not use it as primary acceptance evidence.
 
@@ -206,3 +206,14 @@ git add README.md src/agent.js test/agent-health.test.js test/readme.test.js doc
 git commit -m "feat: add release health cli"
 git push
 ```
+
+## Execution Record
+
+- RED: AGY created `test/agent-health.test.js` and README assertions. PM reran `node --test test/agent-health.test.js test/readme.test.js`; failures were expected and matched the missing `health` command plus V0.47 README docs.
+- GREEN: AGY implemented `src/agent.js` `health` command and V0.47 README updates.
+- PM target verification: `node --test test/agent-health.test.js test/readme.test.js` passed 184 tests.
+- PM full verification: `npm test` passed 577 tests.
+- PM diff hygiene: `git diff --check` passed.
+- Qwen adversarial review: `DONE`, no blocking issues and no non-blocking concerns.
+- HTTP/CLI smoke: temporary server on `127.0.0.1:3010`; `node src/agent.js health --server http://127.0.0.1:3010` returned JSON health payload without dataDir path disclosure; `http://127.0.0.1:1` exited non-zero with `Error: fetch failed`; port was closed after smoke.
+- ZAI auxiliary verifier: final structured verdict `Status: DONE`; PM treated it as auxiliary evidence only because the tool transcript had intermediate file-view/path tool errors.

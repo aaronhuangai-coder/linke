@@ -15,6 +15,7 @@
  *   launchd-dry-run     — generate launchd plist without installing
  *   nas-dry-run         — show NAS dry-run plan (no network, no write)
  *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
+ *   health              — check release health status
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000)
@@ -208,6 +209,7 @@ Commands:
   launchd-dry-run     Generate launchd plist (dry-run, no install)
   nas-dry-run         Show NAS dry-run plan (no network, no write)
   retention-dry-run   Show retention dry-run plan (no delete, read-only)
+  health              Check release health status
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000)
@@ -379,6 +381,12 @@ export async function main() {
         }
         const plan = await request(server, path, 'GET');
         console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+
+      case 'health': {
+        const result = await request(server, '/api/health', 'GET');
+        console.log(JSON.stringify(result, null, 2));
         break;
       }
 

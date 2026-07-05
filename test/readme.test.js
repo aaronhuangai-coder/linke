@@ -204,6 +204,10 @@ describe('README — version coverage', () => {
   it('mentions V0.46 (release health endpoint)', () => {
     assertReadmeContains(/V0\.46/, 'V0.46');
   });
+
+  it('mentions V0.47 (release health CLI)', () => {
+    assertReadmeContains(/V0\.47/, 'V0.47');
+  });
 });
 
 
@@ -1032,13 +1036,16 @@ describe('README — no over-promises', () => {
 });
 
 describe('README — V0.46 release health endpoint', () => {
-  it('title and badge say V0.46', () => {
-    assert.match(readme, /^# Linke V0\.46/m);
-    assert.match(readme, /当前版本：V0\.46/);
+  it('title no longer claims V0.46 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.46/m);
   });
 
-  it('version table has V0.46 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.46 \| 当前版本 \|[^|]*(发布健康检查|release health|\/api\/health)/i);
+  it('version badge no longer says 当前版本：V0.46', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.46/);
+  });
+
+  it('version table has V0.46 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.46 \| 历史版本 \|[^|]*(发布健康检查|release health|\/api\/health)/i);
   });
 
   it('documents the health endpoint and safety boundary', () => {
@@ -1053,5 +1060,35 @@ describe('README — V0.46 release health endpoint', () => {
 
   it('documents testing coverage includes release health endpoint', () => {
     assert.match(readme, /测试覆盖：.*发布健康检查/);
+  });
+});
+
+describe('README — V0.47 release health CLI', () => {
+  it('title and badge say V0.47', () => {
+    assert.match(readme, /^# Linke V0\.47/m);
+    assert.match(readme, /当前版本：V0\.47/);
+  });
+
+  it('version table has V0.47 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.47 \| 当前版本 \|[^|]*(发布健康检查 CLI|release health CLI|health)/i);
+  });
+
+  it('documents the health CLI command and exit-code semantics', () => {
+    assert.match(readme, /agent\.js health/);
+    assert.match(readme, /--server/);
+    assert.match(readme, /degraded|降级/);
+    assert.match(readme, /exit|退出码|0/);
+  });
+
+  it('asserts safety docs for health CLI', () => {
+    assert.match(readme, /只读/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不建立真实 NAS 连接|不连接 NAS/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不需要(设备|--device)/);
+  });
+
+  it('documents testing coverage includes release health CLI', () => {
+    assert.match(readme, /测试覆盖：.*发布健康检查 CLI/);
   });
 });
