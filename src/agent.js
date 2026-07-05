@@ -16,6 +16,7 @@
  *   nas-dry-run         — show NAS dry-run plan (no network, no write)
  *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
  *   health              — check release health status
+ *   release-readiness   — evaluate release readiness from health status
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000)
@@ -29,6 +30,7 @@
  *   --config <path>      Config file path (run-once, launchd-dry-run)
  *   --output <path>      Output path (launchd-dry-run)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
+ *   --expected-version <version> Expected release version (release-readiness)
  */
 
 import { fileURLToPath } from 'node:url';
@@ -36,6 +38,7 @@ import { dirname, resolve, join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { loadConfig, validateConfig } from './config.js';
 import { runNasDryRunFromConfig } from './nas.js';
+import { buildReleaseReadinessReport } from './release-readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -210,6 +213,7 @@ Commands:
   nas-dry-run         Show NAS dry-run plan (no network, no write)
   retention-dry-run   Show retention dry-run plan (no delete, read-only)
   health              Check release health status
+  release-readiness   Evaluate release readiness from health status
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000)
@@ -223,6 +227,7 @@ Options:
   --config <path>      Config file path (for run-once, launchd-dry-run, nas-dry-run)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
+  --expected-version <version> Expected release version (for release-readiness)
 `);
 }
 
@@ -387,6 +392,21 @@ export async function main() {
       case 'health': {
         const result = await request(server, '/api/health', 'GET');
         console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'release-readiness': {
+        if (args['expected-version'] === true) {
+          throw new Error('--expected-version requires a value');
+        }
+        const health = await request(server, '/api/health', 'GET');
+        const report = buildReleaseReadinessReport(health, {
+          expectedVersion: args['expected-version'] || undefined,
+        });
+        console.log(JSON.stringify(report, null, 2));
+        if (!report.ready) {
+          process.exitCode = 2;
+        }
         break;
       }
 

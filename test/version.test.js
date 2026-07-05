@@ -13,6 +13,10 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
+  it('LINKE_RELEASE_VERSION is the V0.50 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.50');
+  });
+
   it('README title matches LINKE_RELEASE_VERSION', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const firstLine = readme.split('\n')[0].trim();

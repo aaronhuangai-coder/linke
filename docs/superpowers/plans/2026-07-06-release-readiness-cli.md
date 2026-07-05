@@ -70,3 +70,14 @@ node src/agent.js release-readiness --server http://127.0.0.1:<port>
 
 - Qwen design review returned `DONE_WITH_CONCERNS`.
 - PM accepted the exit-code, explicit expected-version, and schema-sanitization findings before implementation.
+- AGY RED dispatch failed twice with `authentication failed or timed out` and produced no file changes, so PM used the previously authorized fallback path.
+- RED was confirmed by PM: target tests failed on missing `src/release-readiness.js`, unknown `release-readiness` command, V0.49 docs/version, and missing V0.50 README coverage.
+- GREEN implementation added `src/release-readiness.js`, wired `agent.js release-readiness`, updated `LINKE_RELEASE_VERSION` to `V0.50`, and documented V0.50.
+- PM target verification passed:
+  - `node --test test/release-readiness.test.js test/agent-release-readiness.test.js test/readme.test.js test/version.test.js` (219/219)
+  - `node --test test/release-readiness.test.js test/agent-release-readiness.test.js test/version.test.js test/agent-health.test.js test/health.test.js test/web-console.test.js test/readme.test.js` (470/470 after adding the missing `--expected-version` guard test)
+  - `npm test` (629/629)
+  - `git diff --check`
+- Real HTTP smoke on `127.0.0.1:3014` returned `ready:true` with exit code 0 for `V0.50`, and returned `ready:false` with exit code 2 for `--expected-version V0.0`.
+- Qwen implementation review returned `PASS` with no blocking findings. PM accepted its non-blocking missing-test concern and added coverage for `--expected-version` without a value.
+- ZAI auxiliary verification returned final structured `Status: PASS` with no blocking findings. Intermediate tool chatter included a file-view tool error, so PM used only the final structured verdict as auxiliary evidence.
