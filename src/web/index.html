@@ -155,6 +155,14 @@
             <option value="single-device">单设备</option>
             <option value="synced">一致</option>
           </select>
+          <label for="version-consistency-sort">排序</label>
+          <select id="version-consistency-sort" data-testid="version-consistency-sort">
+            <option value="risk">风险优先</option>
+            <option value="max-drift">最大时间差</option>
+            <option value="stale-count">非最新设备数</option>
+            <option value="latest">最近备份</option>
+            <option value="name">任务名</option>
+          </select>
           <span id="version-consistency-filter-count" class="version-consistency-filter-count" data-testid="version-consistency-filter-count">0 / 0</span>
         </div>
         <ul id="version-consistency-list" class="version-consistency-list" data-testid="version-consistency-list">

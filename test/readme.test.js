@@ -120,27 +120,32 @@ describe('README — version coverage', () => {
   it('mentions V0.25 (version consistency non-latest summary)', () => {
     assertReadmeContains(/V0\.25/, 'V0.25');
   });
+
+  it('mentions V0.26 (version consistency sort controls)', () => {
+    assertReadmeContains(/V0\.26/, 'V0.26');
+  });
 });
 
-// ── V0.25 documentation ────────────────────────────────────────────
+// ── V0.26 documentation ────────────────────────────────────────────
 
-describe('README — V0.25 version consistency non-latest summary', () => {
-  it('title says V0.25', () => {
-    assert.match(readme, /^# Linke V0\.25/m);
+describe('README — V0.26 version consistency sort controls', () => {
+  it('title says V0.26', () => {
+    assert.match(readme, /^# Linke V0\.26/m);
   });
 
-  it('version badge says 当前版本：V0.25', () => {
-    assert.match(readme, /当前版本：V0\.25/);
+  it('version badge says 当前版本：V0.26', () => {
+    assert.match(readme, /当前版本：V0\.26/);
   });
 
-  it('version table has V0.25 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.25 \| 当前版本 \|[^|]*(非最新|一致性|摘要)/);
+  it('version table has V0.26 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.26 \| 当前版本 \|[^|]*(排序|一致性|控制)/);
   });
 
-  it('version table keeps V0.22, V0.23, and V0.24 as historical milestones', () => {
+  it('version table keeps V0.22 through V0.25 as historical milestones', () => {
     assert.match(readme, /\| V0\.22 \| 备份版本一致性 \|/);
     assert.match(readme, /\| V0\.23 \| 版本一致性 snapshot 联动 \|/);
     assert.match(readme, /\| V0\.24 \| 版本一致性筛选与搜索 \|/);
+    assert.match(readme, /\| V0\.25 \| 版本一致性非最新摘要 \|/);
   });
 
   it('documents version consistency search and status filtering', () => {
@@ -161,7 +166,16 @@ describe('README — V0.25 version consistency non-latest summary', () => {
     assert.match(readme, /可见.*总数|总数.*可见/);
   });
 
-  it('asserts safety docs for version consistency non-latest summary', () => {
+  it('documents version consistency sort controls', () => {
+    assert.match(readme, /版本一致性排序控制/);
+    assert.match(readme, /风险优先/);
+    assert.match(readme, /最大时间差/);
+    assert.match(readme, /非最新设备数/);
+    assert.match(readme, /最近备份/);
+    assert.match(readme, /任务名/);
+  });
+
+  it('asserts safety docs for version consistency sort controls', () => {
     assert.match(readme, /版本一致性.*安全(保证|边界)/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
@@ -178,16 +192,16 @@ describe('README — V0.25 version consistency non-latest summary', () => {
     assert.match(readme, /版本一致性 snapshot 联动/);
   });
 
-  it('asserts README contains a V0.25 non-latest summary feature bullet', () => {
-    assert.match(readme, /-\s+\*\*版本一致性非最新摘要\*\*/);
+  it('asserts README contains a V0.26 sort controls feature bullet', () => {
+    assert.match(readme, /-\s+\*\*版本一致性排序控制\*\*/);
   });
 
-  it('asserts Web Console combined feature list includes 版本一致性非最新摘要', () => {
-    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性非最新摘要/);
+  it('asserts Web Console combined feature list includes 版本一致性排序控制', () => {
+    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性排序控制/);
   });
 
-  it('asserts testing coverage sentence includes 版本一致性非最新摘要', () => {
-    assert.match(readme, /测试覆盖：.*版本一致性非最新摘要/);
+  it('asserts testing coverage sentence includes 版本一致性排序控制', () => {
+    assert.match(readme, /测试覆盖：.*版本一致性排序控制/);
   });
 });
 

@@ -12,6 +12,7 @@ import {
   buildDeviceBackupHealth,
   compareDevicesForSort,
   computeFleetSummary,
+  filterVersionConsistencyGroups,
   formatLastBackup,
   formatLastHeartbeat,
   formatSnapshotJobName,
@@ -989,10 +990,16 @@ describe('Web Console / API contract', () => {
 
     assert.ok(html.includes('data-testid="version-consistency-search"'), 'must have version-consistency-search');
     assert.ok(html.includes('data-testid="version-consistency-status-filter"'), 'must have version-consistency-status-filter');
+    assert.ok(html.includes('data-testid="version-consistency-sort"'), 'must have version-consistency-sort');
     assert.ok(html.includes('data-testid="version-consistency-filter-count"'), 'must have version-consistency-filter-count');
     assert.ok(html.includes('value="drifted"'), 'status filter must include drifted option');
     assert.ok(html.includes('value="single-device"'), 'status filter must include single-device option');
     assert.ok(html.includes('value="synced"'), 'status filter must include synced option');
+    assert.ok(html.includes('value="risk"'), 'sort must include risk option');
+    assert.ok(html.includes('value="max-drift"'), 'sort must include max-drift option');
+    assert.ok(html.includes('value="stale-count"'), 'sort must include stale-count option');
+    assert.ok(html.includes('value="latest"'), 'sort must include latest option');
+    assert.ok(html.includes('value="name"'), 'sort must include name option');
   });
 });
 
@@ -3655,11 +3662,25 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     const list = doc.getElementById('version-consistency-list');
     const search = doc.getElementById('version-consistency-search');
     const statusFilter = doc.getElementById('version-consistency-status-filter');
+    const sortSelect = doc.getElementById('version-consistency-sort');
     const initialCallCount = calls.length;
 
     assert.strictEqual(list.children.length, 3);
     assert.ok(search._listeners.input, 'search input must have input listener');
     assert.ok(statusFilter._listeners.change, 'status filter must have change listener');
+    assert.ok(sortSelect._listeners.change, 'sort select must have change listener');
+
+    sortSelect.value = 'name';
+    sortSelect._listeners.change();
+
+    assert.strictEqual(list.children.length, 3);
+    assert.ok(list.children[0].textContent.includes('configs'));
+    assert.ok(list.children[1].textContent.includes('documents'));
+    assert.ok(list.children[2].textContent.includes('photos'));
+    assert.strictEqual(calls.length, initialCallCount, 'sorting must not refetch snapshots');
+
+    sortSelect.value = 'risk';
+    sortSelect._listeners.change();
 
     search.value = '10.0.0.2';
     search._listeners.input();
@@ -3935,6 +3956,65 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.strictEqual(result.groups[0].latestCount, 1);
     assert.strictEqual(result.groups[0].staleCount, 4);
     assert.deepStrictEqual(result.groups[0].staleDeviceNames, ['Mac B', 'Mac C', 'Mac D', 'Mac E']);
+  });
+
+  it('filters and sorts version consistency groups without mutating the source order', () => {
+    const groups = [
+      {
+        jobName: 'zeta',
+        sourcePath: '/zeta',
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+      {
+        jobName: 'alpha',
+        sourcePath: '/alpha',
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T09:00:00.000Z',
+        staleCount: 1,
+        maxTimeDriftMs: 1000,
+        devices: [],
+      },
+      {
+        jobName: 'beta',
+        sourcePath: '/beta',
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T11:00:00.000Z',
+        staleCount: 3,
+        maxTimeDriftMs: 5000,
+        devices: [],
+      },
+    ];
+    const consistency = { groups };
+
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'risk' }).map((group) => group.jobName),
+      ['zeta', 'alpha', 'beta'],
+    );
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'name' }).map((group) => group.jobName),
+      ['alpha', 'beta', 'zeta'],
+    );
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'max-drift' }).map((group) => group.jobName),
+      ['beta', 'alpha', 'zeta'],
+    );
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'stale-count' }).map((group) => group.jobName),
+      ['beta', 'alpha', 'zeta'],
+    );
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'latest' }).map((group) => group.jobName),
+      ['beta', 'zeta', 'alpha'],
+    );
+    assert.deepStrictEqual(
+      filterVersionConsistencyGroups(consistency, { sort: 'unknown' }).map((group) => group.jobName),
+      ['zeta', 'alpha', 'beta'],
+    );
+    assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta', 'alpha', 'beta']);
   });
 
   it('returns empty summary for non-array devices and non-object snapshots', () => {

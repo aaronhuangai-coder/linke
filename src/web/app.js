@@ -286,6 +286,8 @@ const VERSION_CONSISTENCY_SORT_ORDER = {
   synced: 2,
 };
 
+const VERSION_CONSISTENCY_SORT_KEYS = ['risk', 'max-drift', 'stale-count', 'latest', 'name'];
+
 function getValidDateTime(value) {
   const timestamp = Date.parse(value || '');
   return Number.isFinite(timestamp) ? timestamp : 0;
@@ -526,14 +528,72 @@ function matchesVersionConsistencySearch(group, query) {
   return values.some((value) => normalizeSearchValue(value).includes(normalizedQuery));
 }
 
+function normalizeVersionConsistencySort(value) {
+  return VERSION_CONSISTENCY_SORT_KEYS.includes(value) ? value : 'risk';
+}
+
+function getComparableNumber(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareVersionConsistencyRisk(a, b) {
+  return (
+    (VERSION_CONSISTENCY_SORT_ORDER[a?.status] ?? 99) - (VERSION_CONSISTENCY_SORT_ORDER[b?.status] ?? 99)
+    || getValidDateTime(b?.latestCreatedAt) - getValidDateTime(a?.latestCreatedAt)
+    || String(a?.jobName || '').localeCompare(String(b?.jobName || ''))
+    || String(a?.sourcePath || '').localeCompare(String(b?.sourcePath || ''))
+  );
+}
+
+function compareVersionConsistencyName(a, b) {
+  return (
+    String(a?.jobName || '').localeCompare(String(b?.jobName || ''))
+    || String(a?.sourcePath || '').localeCompare(String(b?.sourcePath || ''))
+    || compareVersionConsistencyRisk(a, b)
+  );
+}
+
+function compareVersionConsistencyGroups(a, b, sort) {
+  if (sort === 'max-drift') {
+    return (
+      getComparableNumber(b?.maxTimeDriftMs) - getComparableNumber(a?.maxTimeDriftMs)
+      || compareVersionConsistencyRisk(a, b)
+    );
+  }
+  if (sort === 'stale-count') {
+    return (
+      getComparableNumber(b?.staleCount) - getComparableNumber(a?.staleCount)
+      || getComparableNumber(b?.maxTimeDriftMs) - getComparableNumber(a?.maxTimeDriftMs)
+      || compareVersionConsistencyRisk(a, b)
+    );
+  }
+  if (sort === 'latest') {
+    return (
+      getValidDateTime(b?.latestCreatedAt) - getValidDateTime(a?.latestCreatedAt)
+      || compareVersionConsistencyName(a, b)
+    );
+  }
+  if (sort === 'name') {
+    return compareVersionConsistencyName(a, b);
+  }
+  return 0;
+}
+
 export function filterVersionConsistencyGroups(consistency, controls) {
   const groups = Array.isArray(consistency?.groups) ? consistency.groups : [];
   const status = controls?.status || 'all';
   const validStatus = ['all', 'drifted', 'single-device', 'synced'].includes(status) ? status : 'all';
+  const sort = normalizeVersionConsistencySort(controls?.sort || 'risk');
 
-  return groups
+  const filteredGroups = groups
     .filter((group) => validStatus === 'all' || group?.status === validStatus)
     .filter((group) => matchesVersionConsistencySearch(group, controls?.query || ''));
+
+  if (sort === 'risk') {
+    return filteredGroups;
+  }
+
+  return filteredGroups.sort((a, b) => compareVersionConsistencyGroups(a, b, sort));
 }
 
 // ── Console Initializer ───────────────────────────────────────────
@@ -587,6 +647,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const versionConsistencyListEl = doc.getElementById('version-consistency-list');
   const versionConsistencySearchInput = doc.getElementById('version-consistency-search');
   const versionConsistencyStatusFilter = doc.getElementById('version-consistency-status-filter');
+  const versionConsistencySortSelect = doc.getElementById('version-consistency-sort');
   const versionConsistencyFilterCountEl = doc.getElementById('version-consistency-filter-count');
 
   const EVENT_LOG_VISIBLE_LIMIT = 50;
@@ -661,6 +722,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (versionConsistencyStatusFilter && !versionConsistencyStatusFilter.value) {
     versionConsistencyStatusFilter.value = 'all';
+  }
+  if (versionConsistencySortSelect && !versionConsistencySortSelect.value) {
+    versionConsistencySortSelect.value = 'risk';
   }
 
   function logEvent(msg, type) {
@@ -902,6 +966,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     return {
       query: versionConsistencySearchInput?.value || '',
       status: versionConsistencyStatusFilter?.value || 'all',
+      sort: versionConsistencySortSelect?.value || 'risk',
     };
   }
 
@@ -2068,7 +2133,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
-  for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter]) {
+  for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter, versionConsistencySortSelect]) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredVersionConsistency);
       control.addEventListener('change', renderFilteredVersionConsistency);
