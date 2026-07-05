@@ -274,6 +274,22 @@ export function isDeviceFilterResetActive(controls) {
     || (controls?.sort || 'name') !== 'name';
 }
 
+export const DEVICE_FILTER_SORT_LABELS = {
+  name: '名称',
+  ip: 'IP',
+  heartbeat: '最后心跳',
+  snapshots: '快照数',
+};
+
+export function buildDeviceActiveFilterSummary(controls) {
+  if (!isDeviceFilterResetActive(controls)) return '默认筛选';
+  const query = String(controls?.query || '').trim() || '全部';
+  const status = formatDeviceFilterValue(controls?.status, DEVICE_FILTER_STATUS_LABELS, 'all');
+  const management = formatDeviceFilterValue(controls?.management, DEVICE_FILTER_MANAGEMENT_LABELS, 'all');
+  const sort = formatDeviceFilterValue(controls?.sort, DEVICE_FILTER_SORT_LABELS, 'name');
+  return '当前筛选: 搜索: ' + query + ' · 状态: ' + status + ' · 管理态: ' + management + ' · 排序: ' + sort;
+}
+
 export function buildDeviceManagementSummary(devices) {
   const summary = {
     all: 0,
@@ -888,6 +904,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const deviceSortSelect = doc.getElementById('device-sort');
   const deviceFilterResetButton = doc.getElementById('device-filter-reset');
   const deviceFilterCountEl = doc.querySelector('[data-testid="device-filter-count"]');
+  const deviceActiveFilterSummaryEl = doc.querySelector('[data-testid="device-active-filter-summary"]');
 
   const deviceManagementSummary = doc.querySelector('[data-testid="device-management-summary"]');
   const summaryAll = doc.querySelector('[data-testid="device-management-summary-all"]');
@@ -929,9 +946,16 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderDeviceActiveFilterSummary(controls) {
+    if (deviceActiveFilterSummaryEl) {
+      deviceActiveFilterSummaryEl.textContent = buildDeviceActiveFilterSummary(controls);
+    }
+  }
+
   function renderFilteredDevices() {
     const controls = getDeviceControls();
     syncDeviceFilterResetState(controls);
+    renderDeviceActiveFilterSummary(controls);
     renderDeviceManagementSummary(cachedDevices, controls);
     const visibleDevices = applyDeviceListControls(cachedDevices, controls);
     renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);

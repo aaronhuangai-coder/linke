@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces failing expectations for `buildDeviceActiveFilterSummary`, the static summary hook, DOM updates, reset behavior, and README V0.42 docs.
 
-- [ ] **Step 1: Add failing pure-function tests**
+- [x] **Step 1: Add failing pure-function tests**
 
 Expected:
 
@@ -41,7 +41,7 @@ buildDeviceActiveFilterSummary({ query: '', status: 'online', management: 'visib
   === '当前筛选: 搜索: 全部 · 状态: 在线 · 管理态: 在线可见 · 排序: 快照数'
 ```
 
-- [ ] **Step 2: Add failing HTML/source tests**
+- [x] **Step 2: Add failing HTML/source tests**
 
 Expected:
 
@@ -53,7 +53,7 @@ app.js exports buildDeviceActiveFilterSummary
 app.js contains DEVICE_FILTER_SORT_LABELS
 ```
 
-- [ ] **Step 3: Add failing DOM state test**
+- [x] **Step 3: Add failing DOM state test**
 
 Expected:
 
@@ -64,7 +64,7 @@ reset click returns summary to 默认筛选
 fetchCount remains 1
 ```
 
-- [ ] **Step 4: Add failing README V0.42 tests**
+- [x] **Step 4: Add failing README V0.42 tests**
 
 Expected:
 
@@ -92,7 +92,7 @@ No API/refetch/metadata/NAS/remote changes
 - Consumes: existing `getDeviceControls()`, `renderFilteredDevices()`, `formatDeviceFilterValue()`, and `isDeviceFilterResetActive()`.
 - Produces: `buildDeviceActiveFilterSummary(controls): string`.
 
-- [ ] **Step 1: Add sort labels and pure helper**
+- [x] **Step 1: Add sort labels and pure helper**
 
 ```js
 const DEVICE_FILTER_SORT_LABELS = {
@@ -112,53 +112,55 @@ export function buildDeviceActiveFilterSummary(controls) {
 }
 ```
 
-- [ ] **Step 2: Add static HTML hook**
+- [x] **Step 2: Add static HTML hook**
 
 ```html
 <div class="device-active-filter-summary" data-testid="device-active-filter-summary" role="status" aria-live="polite">默认筛选</div>
 ```
 
-- [ ] **Step 3: Sync summary in render path**
+- [x] **Step 3: Sync summary in render path**
 
 `renderFilteredDevices()` calls `renderDeviceActiveFilterSummary(controls)` after reading controls and before rendering derived views.
 
-- [ ] **Step 4: Add compact CSS**
+- [x] **Step 4: Add compact CSS**
 
 The summary uses compact muted text and spans the full control grid width.
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/web-console.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 ```bash
 node --test --test-reporter=dot test/*.test.js
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Run Qwen diff review**
+- [x] **Step 4: Run Qwen diff review**
 
 Check blockers for overlap with V0.39, reset behavior, refetch, accessibility, documentation, and scope boundaries.
 
-- [ ] **Step 5: Run HTTP smoke**
+- [x] **Step 5: Run HTTP smoke**
 
 Verify `/`, `/app.js`, `/styles.css`, and `/api/devices`; downloaded resources must contain V0.42 hooks/state.
 
-- [ ] **Step 6: Run ZAI final verifier**
+- [x] **Step 6: Run ZAI final verifier**
 
 Use strict English evidence-only prompt if file tools remain unreliable.
 
-- [ ] **Step 7: Commit and push**
+Result: `INCONCLUSIVE`. ZAI repeatedly returned the invalid fallback phrase `I don't have a specific response` for V0.42 verifier prompts, so PM did not treat it as an acceptance verdict.
+
+- [x] **Step 7: Commit and push**
 
 ```bash
 git add ...

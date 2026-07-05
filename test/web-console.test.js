@@ -21,6 +21,8 @@ import {
   getDeviceManagementHint,
   buildDeviceEmptyFilterContext,
   isDeviceFilterResetActive,
+  buildDeviceActiveFilterSummary,
+  DEVICE_FILTER_SORT_LABELS,
   getDeviceManagementState,
   getDeviceManagementStateKey,
   buildDeviceManagementSummary,
@@ -1153,6 +1155,25 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('device-filter-reset'), 'app.js must reference device-filter-reset');
     assert.ok(js.includes('isDeviceFilterResetActive'), 'app.js must expose reset active helper');
     assert.ok(js.includes('syncDeviceFilterResetState'), 'app.js must sync reset button state');
+  });
+
+  // ── V0.42 device active filter summary HTML/source contract ─────────
+
+  it('HTML contains V0.42 device active filter summary hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    assert.strictEqual(res.status, 200);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="device-active-filter-summary"'), 'must have device-active-filter-summary');
+    assert.ok(html.includes('role="status"'), 'must have role="status"');
+    assert.ok(html.includes('aria-live="polite"'), 'must have aria-live="polite"');
+  });
+
+  it('app.js source contract expects buildDeviceActiveFilterSummary and DEVICE_FILTER_SORT_LABELS', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    assert.strictEqual(res.status, 200);
+    const js = await res.text();
+    assert.ok(js.includes('buildDeviceActiveFilterSummary'), 'app.js must export buildDeviceActiveFilterSummary');
+    assert.ok(js.includes('DEVICE_FILTER_SORT_LABELS'), 'app.js must contain DEVICE_FILTER_SORT_LABELS');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -5622,5 +5643,97 @@ describe('V0.41 device filter reset state pure functions', () => {
     assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'online', management: 'all', sort: 'name' }), true);
     assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'all', management: 'visible', sort: 'name' }), true);
     assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'all', management: 'all', sort: 'snapshots' }), true);
+  });
+});
+
+describe('V0.42 device active filter summary pure functions', () => {
+  it('buildDeviceActiveFilterSummary returns 默认筛选 for default controls', () => {
+    assert.strictEqual(buildDeviceActiveFilterSummary({}), '默认筛选');
+    assert.strictEqual(buildDeviceActiveFilterSummary({ query: '   ', status: 'all', management: 'all', sort: 'name' }), '默认筛选');
+  });
+
+  it('buildDeviceActiveFilterSummary returns 当前筛选 summary with query/status/management/sort labels for active controls', () => {
+    assert.strictEqual(
+      buildDeviceActiveFilterSummary({ query: 'Beta', status: 'all', management: 'all', sort: 'name' }),
+      '当前筛选: 搜索: Beta · 状态: 全部 · 管理态: 全部 · 排序: 名称'
+    );
+    assert.strictEqual(
+      buildDeviceActiveFilterSummary({ query: '', status: 'online', management: 'visible', sort: 'snapshots' }),
+      '当前筛选: 搜索: 全部 · 状态: 在线 · 管理态: 在线可见 · 排序: 快照数'
+    );
+  });
+
+  it('DEVICE_FILTER_SORT_LABELS has correct sort keys mapped to Chinese', () => {
+    assert.deepStrictEqual(DEVICE_FILTER_SORT_LABELS, {
+      name: '名称',
+      ip: 'IP',
+      heartbeat: '最后心跳',
+      snapshots: '快照数',
+    });
+  });
+});
+
+describe('V0.42 DOM test: device active filter summary rendering and reset behavior', () => {
+  it('updates summary text when filters change and resets to default without refetching', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'initial fetch should happen');
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const sortSelect = doc.getElementById('device-sort');
+    const resetButton = doc.getElementById('device-filter-reset');
+    const summaryEl = doc.querySelector('[data-testid="device-active-filter-summary"]') || doc.getElementById('device-active-filter-summary');
+
+    assert.ok(summaryEl, 'device-active-filter-summary element must exist');
+    assert.strictEqual(summaryEl.textContent, '默认筛选', 'initial summary should be 默认筛选');
+
+    // 1. Manually set filters to non-default values
+    searchInput.value = 'Beta';
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Summary should update
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 全部 · 管理态: 全部 · 排序: 名称');
+
+    // Change status and sort
+    statusFilter.value = 'online';
+    if (statusFilter._listeners.change) statusFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 在线 · 管理态: 全部 · 排序: 名称');
+
+    managementFilter.value = 'visible';
+    if (managementFilter._listeners.change) managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 在线 · 管理态: 在线可见 · 排序: 名称');
+
+    sortSelect.value = 'snapshots';
+    if (sortSelect._listeners.change) sortSelect._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 在线 · 管理态: 在线可见 · 排序: 快照数');
+
+    // 2. Click the reset button
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 3. Verify summary is reset to default
+    assert.strictEqual(summaryEl.textContent, '默认筛选', 'summary should be reset to default');
+
+    // 4. Verify fetch count did not increase
+    assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
   });
 });

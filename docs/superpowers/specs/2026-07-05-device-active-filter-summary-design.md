@@ -66,3 +66,7 @@ V0.39 `device-empty-filter-context` remains in the empty-list state. V0.42 does 
   - Decision: accepted.
 - Finding: DOM tests should cover reset returning to default and no refetch.
   - Decision: accepted.
+
+## ZAI Final Verifier Note
+
+ZAI answered simple probes (`OK`, `4`, and `ACCEPT`) but repeatedly returned the invalid fallback phrase `I don't have a specific response` for V0.42 verification prompts, including short evidence-only and classification-style prompts. PM marked ZAI final verification as `INCONCLUSIVE` and did not use it as acceptance evidence.

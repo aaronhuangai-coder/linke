@@ -184,6 +184,10 @@ describe('README — version coverage', () => {
   it('mentions V0.41 (device filter reset state)', () => {
     assertReadmeContains(/V0\.41/, 'V0.41');
   });
+
+  it('mentions V0.42 (device active filter summary)', () => {
+    assertReadmeContains(/V0\.42/, 'V0.42');
+  });
 });
 
 
@@ -499,16 +503,12 @@ describe('README — V0.40 device filter reset button', () => {
 // ── V0.41 documentation ────────────────────────────────────────────
 
 describe('README — V0.41 device filter reset state', () => {
-  it('title says V0.41', () => {
-    assert.match(readme, /^# Linke V0\.41/m);
+  it('mentions V0.41', () => {
+    assert.match(readme, /V0\.41/);
   });
 
-  it('version badge says 当前版本：V0.41', () => {
-    assert.match(readme, /当前版本：V0\.41/);
-  });
-
-  it('version table has V0.41 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.41 \| 当前版本 \|[^|]*(禁用|启用|状态|state)/i);
+  it('version table has V0.41 historical row', () => {
+    assert.match(readme, /\| V0\.41 \|[^|]*(禁用|启用|状态|state)/i);
   });
 
   it('version table keeps V0.40 as historical milestone', () => {
@@ -534,6 +534,54 @@ describe('README — V0.41 device filter reset state', () => {
 
   it('documents testing coverage includes reset state', () => {
     assert.match(readme, /测试覆盖：.*设备筛选重置状态/);
+  });
+});
+
+describe('README — V0.42 device active filter summary', () => {
+  it('title says V0.42', () => {
+    assert.match(readme, /^# Linke V0\.42/m);
+  });
+
+  it('version badge says 当前版本：V0.42', () => {
+    assert.match(readme, /当前版本：V0\.42/);
+  });
+
+  it('version table has V0.42 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.42 \| 当前版本 \|[^|]*(当前筛选|active-filter-summary|device-active-filter-summary)/i);
+  });
+
+  it('version table keeps V0.41 as historical milestone', () => {
+    assert.match(readme, /\| V0\.41 \|[^|]*(禁用|启用|状态|state)/i);
+  });
+
+  it('documents active filter summary behavior and accessibility attributes', () => {
+    assert.match(readme, /设备筛选摘要|active-filter-summary|device-active-filter-summary/);
+    assert.match(readme, /默认筛选/);
+    assert.match(readme, /当前筛选/);
+    assert.match(readme, /aria-live/);
+    assert.match(readme, /role="status"/);
+  });
+
+  it('asserts README contains a V0.42 active filter summary feature bullet', () => {
+    assert.match(readme, /- \*\*设备筛选摘要\*\*.*device-active-filter-summary/);
+  });
+
+  it('asserts Web Console combined feature list includes active filter summary', () => {
+    assert.match(readme, /Web Console.*设备筛选摘要/);
+  });
+
+  it('asserts safety docs for active filter summary', () => {
+    assert.match(readme, /筛选摘要.*安全(保证|边界)|安全(保证|边界).*筛选摘要/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不重新请求 `?\/api\/devices`?/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+  });
+
+  it('documents testing coverage includes active filter summary', () => {
+    assert.match(readme, /测试覆盖：.*设备筛选摘要/);
   });
 });
 

@@ -181,6 +181,13 @@ body {
   justify-self: end;
 }
 
+.device-active-filter-summary {
+  margin-bottom: 10px;
+  font-size: 0.76rem;
+  color: #6b7280;
+  line-height: 1.4;
+}
+
 .device-management-summary {
   display: flex;
   flex-wrap: wrap;
