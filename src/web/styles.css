@@ -152,6 +152,46 @@ body {
   justify-self: end;
 }
 
+.device-management-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  background: #fcfcfd;
+  border: 1px solid #eaeaea;
+  border-radius: 6px;
+}
+
+.summary-bucket {
+  flex: 1;
+  min-width: 100px;
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: all 0.15s ease-in-out;
+  user-select: none;
+}
+
+.summary-bucket:hover {
+  border-color: #0066cc;
+  background: #f0f7ff;
+}
+
+.summary-bucket .count {
+  font-weight: 700;
+  color: #0066cc;
+  background: #e6f0ff;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
 /* Device list */
 ul {
   list-style: none;

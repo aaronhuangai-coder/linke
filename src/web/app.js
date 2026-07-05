@@ -228,6 +228,33 @@ export function getDeviceManagementState(device) {
   return MANAGEMENT_STATE_LABELS[key] || '未知待确认';
 }
 
+export function buildDeviceManagementSummary(devices) {
+  const summary = {
+    all: 0,
+    visible: 0,
+    missingIp: 0,
+    offlineRetained: 0,
+    unknown: 0
+  };
+  if (!Array.isArray(devices)) {
+    return summary;
+  }
+  for (let i = 0; i < devices.length; i++) {
+    const key = getDeviceManagementStateKey(devices[i]);
+    summary.all++;
+    if (key === 'visible') {
+      summary.visible++;
+    } else if (key === 'missing-ip') {
+      summary.missingIp++;
+    } else if (key === 'offline-retained') {
+      summary.offlineRetained++;
+    } else {
+      summary.unknown++;
+    }
+  }
+  return summary;
+}
+
 function normalizeSearchValue(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -804,6 +831,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const deviceSortSelect = doc.getElementById('device-sort');
   const deviceFilterCountEl = doc.querySelector('[data-testid="device-filter-count"]');
 
+  const deviceManagementSummary = doc.querySelector('[data-testid="device-management-summary"]');
+  const summaryAll = doc.querySelector('[data-testid="device-management-summary-all"]');
+  const summaryVisible = doc.querySelector('[data-testid="device-management-summary-visible"]');
+  const summaryMissingIp = doc.querySelector('[data-testid="device-management-summary-missing-ip"]');
+  const summaryOfflineRetained = doc.querySelector('[data-testid="device-management-summary-offline-retained"]');
+  const summaryUnknown = doc.querySelector('[data-testid="device-management-summary-unknown"]');
+
   function getDeviceControls() {
     return {
       query: deviceSearchInput?.value || '',
@@ -823,6 +857,15 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     const visibleDevices = applyDeviceListControls(cachedDevices, getDeviceControls());
     renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);
     renderDevices(visibleDevices);
+  }
+
+  function renderDeviceManagementSummary(devices) {
+    const summary = buildDeviceManagementSummary(devices);
+    if (summaryAll) summaryAll.textContent = '全部: ' + summary.all;
+    if (summaryVisible) summaryVisible.textContent = '在线可见: ' + summary.visible;
+    if (summaryMissingIp) summaryMissingIp.textContent = '在线缺 IP: ' + summary.missingIp;
+    if (summaryOfflineRetained) summaryOfflineRetained.textContent = '离线保留: ' + summary.offlineRetained;
+    if (summaryUnknown) summaryUnknown.textContent = '未知待确认: ' + summary.unknown;
   }
 
   if (retentionKeepLastInput && !retentionKeepLastInput.value) {
@@ -922,12 +965,14 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       const selectedDevice = devices.find((d) => d.deviceId === selectedDeviceId) || null;
       if (!selectedDevice) selectedDeviceId = null;
       renderFleetSummary(devices);
+      renderDeviceManagementSummary(devices);
       renderFilteredDevices();
       renderDeviceDetail(selectedDevice);
       renderDeviceBackupHealth(devices);
       fetchBackupVersionConsistency(devices);
       logEvent('已加载 ' + devices.length + ' 台设备', 'info');
     } catch (err) {
+      renderDeviceManagementSummary([]);
       renderDeviceBackupHealth([]);
       renderBackupVersionConsistency([], {});
       logEvent('加载设备失败: ' + err.message, 'error');
@@ -2299,6 +2344,29 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       control.addEventListener('change', renderFilteredDevices);
     }
   }
+
+  function bindBucketClick(summaryEl, filterValue) {
+    if (summaryEl && summaryEl.addEventListener) {
+      summaryEl.addEventListener('click', () => {
+        if (deviceManagementFilter) {
+          deviceManagementFilter.value = filterValue;
+          if (typeof Event !== 'undefined') {
+            try {
+              deviceManagementFilter.dispatchEvent(new Event('change', { bubbles: true }));
+              deviceManagementFilter.dispatchEvent(new Event('input', { bubbles: true }));
+            } catch (e) {}
+          }
+          renderFilteredDevices();
+        }
+      });
+    }
+  }
+
+  bindBucketClick(summaryAll, 'all');
+  bindBucketClick(summaryVisible, 'visible');
+  bindBucketClick(summaryMissingIp, 'missing-ip');
+  bindBucketClick(summaryOfflineRetained, 'offline-retained');
+  bindBucketClick(summaryUnknown, 'unknown');
 
   for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter, versionConsistencySortSelect, versionConsistencyCoverageFilter]) {
     if (control?.addEventListener) {

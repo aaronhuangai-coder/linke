@@ -65,6 +65,13 @@
             <option value="snapshots">快照数</option>
           </select>
         </div>
+        <div data-testid="device-management-summary" class="device-management-summary">
+          <div data-testid="device-management-summary-all" class="summary-bucket">全部: <span class="count">0</span></div>
+          <div data-testid="device-management-summary-visible" class="summary-bucket">在线可见: <span class="count">0</span></div>
+          <div data-testid="device-management-summary-missing-ip" class="summary-bucket">在线缺 IP: <span class="count">0</span></div>
+          <div data-testid="device-management-summary-offline-retained" class="summary-bucket">离线保留: <span class="count">0</span></div>
+          <div data-testid="device-management-summary-unknown" class="summary-bucket">未知待确认: <span class="count">0</span></div>
+        </div>
         <ul data-testid="device-list" id="device-list"></ul>
       </section>
       <section class="panel device-detail-panel" data-testid="device-detail-panel">

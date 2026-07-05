@@ -20,6 +20,7 @@ import {
   getDeviceBackupHealthStatus,
   getDeviceManagementState,
   getDeviceManagementStateKey,
+  buildDeviceManagementSummary,
   initConsole,
   matchesDeviceSearch,
   normalizeDeviceStatus,
@@ -1058,6 +1059,26 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/app.js`);
     const js = await res.text();
     assert.ok(js.includes('device-management-filter'), 'app.js must reference device-management-filter');
+  });
+
+  // ── V0.35 device-management-summary HTML/source contract ─────────────
+
+  it('HTML contains V0.35 device management summary elements and bucket controls', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="device-management-summary"'), 'must have device-management-summary wrapper');
+    assert.ok(html.includes('data-testid="device-management-summary-all"'), 'must have device-management-summary-all control');
+    assert.ok(html.includes('data-testid="device-management-summary-visible"'), 'must have device-management-summary-visible control');
+    assert.ok(html.includes('data-testid="device-management-summary-missing-ip"'), 'must have device-management-summary-missing-ip control');
+    assert.ok(html.includes('data-testid="device-management-summary-offline-retained"'), 'must have device-management-summary-offline-retained control');
+    assert.ok(html.includes('data-testid="device-management-summary-unknown"'), 'must have device-management-summary-unknown control');
+  });
+
+  it('app.js source contract expects device-management-summary and buildDeviceManagementSummary reference', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('device-management-summary'), 'app.js must reference device-management-summary');
+    assert.ok(js.includes('buildDeviceManagementSummary'), 'app.js must reference buildDeviceManagementSummary');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3207,6 +3228,79 @@ describe('initConsole DOM data-testid hooks', () => {
 
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices during filter changes');
   });
+
+  it('DOM test: V0.35 device-management-summary displays counts, clicking bucket control updates device-management-filter value, device list and device-filter-count without refetching /api/devices', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' }, // visible
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' }, // missing-ip
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' }, // offline-retained
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' }, // unknown
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        fetchCount++;
+      }
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'should fetch devices once initially');
+
+    const allSummary = doc.querySelector('[data-testid="device-management-summary-all"]');
+    const visibleSummary = doc.querySelector('[data-testid="device-management-summary-visible"]');
+    const missingIpSummary = doc.querySelector('[data-testid="device-management-summary-missing-ip"]');
+    const offlineRetainedSummary = doc.querySelector('[data-testid="device-management-summary-offline-retained"]');
+    const unknownSummary = doc.querySelector('[data-testid="device-management-summary-unknown"]');
+
+    assert.ok(allSummary, 'summary-all must render');
+    assert.ok(visibleSummary, 'summary-visible must render');
+    assert.ok(missingIpSummary, 'summary-missing-ip must render');
+    assert.ok(offlineRetainedSummary, 'summary-offline-retained must render');
+    assert.ok(unknownSummary, 'summary-unknown must render');
+
+    assert.match(allSummary.textContent, /4/);
+    assert.match(visibleSummary.textContent, /1/);
+    assert.match(missingIpSummary.textContent, /1/);
+    assert.match(offlineRetainedSummary.textContent, /1/);
+    assert.match(unknownSummary.textContent, /1/);
+
+    const managementFilter = doc.getElementById('device-management-filter');
+    assert.ok(managementFilter, 'management filter element must exist');
+
+    // Click visible summary bucket control
+    visibleSummary._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(managementFilter.value, 'visible');
+
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+    assert.strictEqual(countEl.textContent, '1 / 4', 'count must show 1 / 4 after quick switch to visible');
+
+    const deviceListEl = doc.getElementById('device-list');
+    const visibleItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(visibleItems.length, 1);
+    assert.match(visibleItems[0].textContent, /Aaron-Mac/);
+
+    // Click missing-ip summary bucket control
+    missingIpSummary._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(managementFilter.value, 'missing-ip');
+    assert.strictEqual(countEl.textContent, '1 / 4');
+
+    // Click all summary bucket control
+    allSummary._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(managementFilter.value, 'all');
+    assert.strictEqual(countEl.textContent, '4 / 4');
+
+    assert.strictEqual(fetchCount, 1, 'fetch count should remain 1');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -4983,5 +5077,47 @@ describe('V0.34 device management state key pure functions', () => {
     assert.strictEqual(getDeviceManagementStateKey({ status: null }), 'unknown');
     assert.strictEqual(getDeviceManagementStateKey({}), 'unknown');
     assert.strictEqual(getDeviceManagementStateKey(null), 'unknown');
+  });
+});
+
+describe('V0.35 device management summary pure functions', () => {
+  it('returns all zeros for empty/non-array input', () => {
+    const emptySummary = buildDeviceManagementSummary(null);
+    assert.deepStrictEqual(emptySummary, {
+      all: 0,
+      visible: 0,
+      missingIp: 0,
+      offlineRetained: 0,
+      unknown: 0
+    });
+    const emptySummary2 = buildDeviceManagementSummary([]);
+    assert.deepStrictEqual(emptySummary2, {
+      all: 0,
+      visible: 0,
+      missingIp: 0,
+      offlineRetained: 0,
+      unknown: 0
+    });
+  });
+
+  it('returns correct counts for mixed devices without mutating input', () => {
+    const devices = [
+      { status: 'online', ipAddress: '192.168.1.1' }, // visible
+      { status: 'online', ipAddress: '  UNKNOWN  ' }, // missing-ip (whitespace/UNKNOWN IP)
+      { status: 'online', ipAddress: '' }, // missing-ip
+      { status: 'offline', ipAddress: '10.0.0.1' }, // offline-retained
+      { status: 'unknown', ipAddress: '1.1.1.1' }, // unknown
+      { status: 'other', ipAddress: null } // unknown
+    ];
+    const copy = JSON.parse(JSON.stringify(devices));
+    const summary = buildDeviceManagementSummary(devices);
+    assert.deepStrictEqual(summary, {
+      all: 6,
+      visible: 1,
+      missingIp: 2,
+      offlineRetained: 1,
+      unknown: 2
+    });
+    assert.deepStrictEqual(devices, copy, 'should not mutate input');
   });
 });
