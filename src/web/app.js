@@ -286,7 +286,7 @@ const VERSION_CONSISTENCY_SORT_ORDER = {
   synced: 2,
 };
 
-const VERSION_CONSISTENCY_SORT_KEYS = ['risk', 'max-drift', 'stale-count', 'latest', 'name'];
+const VERSION_CONSISTENCY_SORT_KEYS = ['risk', 'max-drift', 'stale-count', 'latest', 'name', 'coverage-gap'];
 
 function getValidDateTime(value) {
   const timestamp = Date.parse(value || '');
@@ -600,6 +600,24 @@ function compareVersionConsistencyName(a, b) {
 }
 
 function compareVersionConsistencyGroups(a, b, sort) {
+  if (sort === 'coverage-gap') {
+    const missingA = a?.missingDeviceCount || 0;
+    const missingB = b?.missingDeviceCount || 0;
+    if (missingB !== missingA) {
+      return missingB - missingA;
+    }
+    const expectedA = a?.expectedDeviceCount || 0;
+    const expectedB = b?.expectedDeviceCount || 0;
+    const ratioA = expectedA <= 0 ? 0 : missingA / expectedA;
+    const ratioB = expectedB <= 0 ? 0 : missingB / expectedB;
+    if (ratioB !== ratioA) {
+      return ratioB - ratioA;
+    }
+    if (expectedB !== expectedA) {
+      return expectedB - expectedA;
+    }
+    return compareVersionConsistencyRisk(a, b);
+  }
   if (sort === 'max-drift') {
     return (
       getComparableNumber(b?.maxTimeDriftMs) - getComparableNumber(a?.maxTimeDriftMs)

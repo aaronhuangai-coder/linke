@@ -1020,6 +1020,15 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('value="gap"'), 'coverage filter must include gap option');
     assert.ok(html.includes('value="full"'), 'coverage filter must include full option');
   });
+
+  // ── V0.29 版本一致性覆盖缺口排序 HTML 契约 ────────────────────────
+
+  it('HTML contains V0.29 version consistency coverage gap sort option', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="version-consistency-sort"'), 'must have version-consistency-sort');
+    assert.ok(html.includes('value="coverage-gap"'), 'sort must include coverage-gap option');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3806,6 +3815,85 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '2 / 3');
     assert.strictEqual(calls.length, initialCallCount, 'coverage filtering must not refetch snapshots');
   });
+
+  it('DOM test selecting sort coverage-gap reorders already loaded groups and does not refetch', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', ipAddress: '10.0.0.1', status: 'online', snapshotCount: 3 },
+      { deviceId: 'mac-b', hostname: 'Mac B', ipAddress: '10.0.0.2', status: 'online', snapshotCount: 2 },
+    ];
+    const snapshotsByDevice = {
+      'mac-a': [
+        {
+          snapshotId: 'a-docs-new',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T10:00:00.000Z',
+          fileCount: 10,
+        },
+        {
+          snapshotId: 'a-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+        {
+          snapshotId: 'a-photos',
+          jobName: 'photos',
+          sourcePath: '/Users/ah/Pictures',
+          createdAt: '2026-07-05T07:00:00.000Z',
+          fileCount: 20,
+        },
+      ],
+      'mac-b': [
+        {
+          snapshotId: 'b-docs-stale',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T09:00:00.000Z',
+          fileCount: 9,
+        },
+        {
+          snapshotId: 'b-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+      ],
+    };
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      const match = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (match) {
+        return { ok: true, status: 200, json: async () => snapshotsByDevice[decodeURIComponent(match[1])] || [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const list = doc.getElementById('version-consistency-list');
+    const sortSelect = doc.getElementById('version-consistency-sort');
+    const initialCallCount = calls.length;
+
+    assert.strictEqual(list.children.length, 3);
+
+    sortSelect.value = 'coverage-gap';
+    sortSelect._listeners.change();
+
+    assert.strictEqual(list.children.length, 3);
+    assert.ok(list.children[0].textContent.includes('photos'), 'photos (missing = 1) must be first');
+    assert.ok(list.children[1].textContent.includes('documents'), 'documents (missing = 0, drifted) must be second');
+    assert.ok(list.children[2].textContent.includes('configs'), 'configs (missing = 0, synced) must be third');
+    assert.strictEqual(calls.length, initialCallCount, 'sorting must not refetch snapshots');
+  });
 });
 
 describe('V0.21 device backup health pure functions', () => {
@@ -4272,6 +4360,185 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.deepStrictEqual(res.map(g => g.jobName), ['beta-gap', 'zeta-gap']);
 
     assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta-gap', 'alpha-full', 'beta-gap']);
+  });
+
+  it('pure filterVersionConsistencyGroups sort coverage-gap orders by missing count, missing ratio tie-break, expectedDeviceCount tie-break, and existing risk fallback', () => {
+    const groups = [
+      {
+        jobName: 'job-B',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 2,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-A',
+        expectedDeviceCount: 3,
+        missingDeviceCount: 3,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-D',
+        expectedDeviceCount: 4,
+        missingDeviceCount: 1,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-C',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 1,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-H',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-G',
+        expectedDeviceCount: 5,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-K',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-J',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'job-M',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T09:00:00.000Z',
+      },
+      {
+        jobName: 'job-L',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T11:00:00.000Z',
+      },
+      {
+        jobName: 'beta',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+      {
+        jobName: 'alpha',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+      },
+    ];
+    const consistency = { groups };
+    const res = filterVersionConsistencyGroups(consistency, { sort: 'coverage-gap' });
+    const expected = [
+      'job-A',
+      'job-B',
+      'job-C',
+      'job-D',
+      'job-G',
+      'job-H',
+      'job-J',
+      'job-L',
+      'alpha',
+      'beta',
+      'job-K',
+      'job-M',
+    ];
+    assert.deepStrictEqual(res.map(g => g.jobName), expected);
+  });
+
+  it('pure test composes coverage-gap with coverage gap filter, status, and query without mutating source order', () => {
+    const groups = [
+      {
+        jobName: 'zeta-gap',
+        sourcePath: '/zeta',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 1,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+      {
+        jobName: 'alpha-full',
+        sourcePath: '/alpha',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T09:00:00.000Z',
+        staleCount: 1,
+        maxTimeDriftMs: 1000,
+        devices: [],
+      },
+      {
+        jobName: 'beta-gap',
+        sourcePath: '/beta',
+        expectedDeviceCount: 4,
+        missingDeviceCount: 3,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T11:00:00.000Z',
+        staleCount: 3,
+        maxTimeDriftMs: 5000,
+        devices: [],
+      },
+      {
+        jobName: 'gamma-gap',
+        sourcePath: '/gamma',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 1,
+        status: 'synced',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+      {
+        jobName: 'delta-gap-other',
+        sourcePath: '/delta',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 2,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+    ];
+    const originalOrder = groups.map(g => g.jobName);
+    const consistency = { groups };
+
+    const res = filterVersionConsistencyGroups(consistency, {
+      status: 'drifted',
+      query: 'gap',
+      coverage: 'gap',
+      sort: 'coverage-gap',
+    });
+
+    // 命中筛选后按缺失设备数降序排序
+    assert.deepStrictEqual(res.map(g => g.jobName), ['beta-gap', 'delta-gap-other', 'zeta-gap']);
+    assert.deepStrictEqual(groups.map(g => g.jobName), originalOrder, 'must not mutate source order');
   });
 
   it('returns empty summary for non-array devices and non-object snapshots', () => {
