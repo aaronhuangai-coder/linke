@@ -163,6 +163,12 @@
             <option value="latest">最近备份</option>
             <option value="name">任务名</option>
           </select>
+          <label for="version-consistency-coverage-filter">覆盖</label>
+          <select id="version-consistency-coverage-filter" data-testid="version-consistency-coverage-filter">
+            <option value="all">全部</option>
+            <option value="gap">有覆盖缺口</option>
+            <option value="full">完全覆盖</option>
+          </select>
           <span id="version-consistency-filter-count" class="version-consistency-filter-count" data-testid="version-consistency-filter-count">0 / 0</span>
         </div>
         <div id="version-consistency-coverage-summary" class="version-consistency-coverage-summary" data-testid="version-consistency-coverage-summary"></div>

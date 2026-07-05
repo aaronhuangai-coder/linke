@@ -630,16 +630,27 @@ export function filterVersionConsistencyGroups(consistency, controls) {
   const status = controls?.status || 'all';
   const validStatus = ['all', 'drifted', 'single-device', 'synced'].includes(status) ? status : 'all';
   const sort = normalizeVersionConsistencySort(controls?.sort || 'risk');
+  const coverage = controls?.coverage || 'all';
+  const validCoverage = ['all', 'gap', 'full'].includes(coverage) ? coverage : 'all';
 
   const filteredGroups = groups
     .filter((group) => validStatus === 'all' || group?.status === validStatus)
-    .filter((group) => matchesVersionConsistencySearch(group, controls?.query || ''));
+    .filter((group) => matchesVersionConsistencySearch(group, controls?.query || ''))
+    .filter((group) => {
+      if (validCoverage === 'gap') {
+        return (group?.missingDeviceCount || 0) > 0;
+      }
+      if (validCoverage === 'full') {
+        return (group?.expectedDeviceCount || 0) > 0 && (group?.missingDeviceCount || 0) === 0;
+      }
+      return true;
+    });
 
   if (sort === 'risk') {
     return filteredGroups;
   }
 
-  return filteredGroups.sort((a, b) => compareVersionConsistencyGroups(a, b, sort));
+  return filteredGroups.slice().sort((a, b) => compareVersionConsistencyGroups(a, b, sort));
 }
 
 // ── Console Initializer ───────────────────────────────────────────
@@ -695,6 +706,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const versionConsistencySearchInput = doc.getElementById('version-consistency-search');
   const versionConsistencyStatusFilter = doc.getElementById('version-consistency-status-filter');
   const versionConsistencySortSelect = doc.getElementById('version-consistency-sort');
+  const versionConsistencyCoverageFilter = doc.getElementById('version-consistency-coverage-filter');
   const versionConsistencyFilterCountEl = doc.getElementById('version-consistency-filter-count');
 
   const EVENT_LOG_VISIBLE_LIMIT = 50;
@@ -772,6 +784,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (versionConsistencySortSelect && !versionConsistencySortSelect.value) {
     versionConsistencySortSelect.value = 'risk';
+  }
+  if (versionConsistencyCoverageFilter && !versionConsistencyCoverageFilter.value) {
+    versionConsistencyCoverageFilter.value = 'all';
   }
 
   function logEvent(msg, type) {
@@ -1027,6 +1042,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       query: versionConsistencySearchInput?.value || '',
       status: versionConsistencyStatusFilter?.value || 'all',
       sort: versionConsistencySortSelect?.value || 'risk',
+      coverage: versionConsistencyCoverageFilter?.value || 'all',
     };
   }
 
@@ -2215,7 +2231,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
-  for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter, versionConsistencySortSelect]) {
+  for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter, versionConsistencySortSelect, versionConsistencyCoverageFilter]) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredVersionConsistency);
       control.addEventListener('change', renderFilteredVersionConsistency);

@@ -1009,6 +1009,17 @@ describe('Web Console / API contract', () => {
     const html = await res.text();
     assert.ok(html.includes('data-testid="version-consistency-coverage-summary"'), 'must have version-consistency-coverage-summary');
   });
+
+  // ── V0.28 版本一致性覆盖筛选 HTML 契约 ───────────────────────────
+
+  it('HTML contains V0.28 version consistency coverage filter control', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="version-consistency-coverage-filter"'), 'must have version-consistency-coverage-filter');
+    assert.ok(html.includes('value="all"'), 'coverage filter must include all option');
+    assert.ok(html.includes('value="gap"'), 'coverage filter must include gap option');
+    assert.ok(html.includes('value="full"'), 'coverage filter must include full option');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3767,6 +3778,33 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.strictEqual(list.children[0].className, 'placeholder');
     assert.strictEqual(list.children[0].textContent, '无匹配版本一致性任务');
     assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '0 / 3');
+
+    // 重置状态与搜索后验证覆盖筛选
+    statusFilter.value = 'all';
+    statusFilter._listeners.change();
+    search.value = '';
+    search._listeners.input();
+
+    const coverageFilter = doc.getElementById('version-consistency-coverage-filter');
+    assert.ok(coverageFilter._listeners.change, 'coverage filter must have change listener');
+
+    coverageFilter.value = 'gap';
+    coverageFilter._listeners.change();
+
+    assert.strictEqual(list.children.length, 1);
+    assert.ok(list.children[0].textContent.includes('photos'));
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '1 / 3');
+    assert.strictEqual(calls.length, initialCallCount, 'coverage filtering must not refetch snapshots');
+
+    coverageFilter.value = 'full';
+    coverageFilter._listeners.change();
+
+    assert.strictEqual(list.children.length, 2);
+    const textOfChildren = Array.from(list.children).map(c => c.textContent);
+    assert.ok(textOfChildren.some(t => t.includes('documents')));
+    assert.ok(textOfChildren.some(t => t.includes('configs')));
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '2 / 3');
+    assert.strictEqual(calls.length, initialCallCount, 'coverage filtering must not refetch snapshots');
   });
 });
 
@@ -4149,6 +4187,91 @@ describe('V0.22 backup version consistency pure functions', () => {
       ['zeta', 'alpha', 'beta'],
     );
     assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta', 'alpha', 'beta']);
+  });
+
+  it('filterVersionConsistencyGroups supports coverage filters (all, gap, full)', () => {
+    const groups = [
+      {
+        jobName: 'gap-job',
+        expectedDeviceCount: 3,
+        missingDeviceCount: 1,
+        status: 'drifted',
+        devices: []
+      },
+      {
+        jobName: 'full-job',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 0,
+        status: 'synced',
+        devices: []
+      },
+      {
+        jobName: 'no-expected-job',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'single-device',
+        devices: []
+      }
+    ];
+    const consistency = { groups };
+
+    const resAll = filterVersionConsistencyGroups(consistency, { coverage: 'all' });
+    assert.deepStrictEqual(resAll.map(g => g.jobName), ['gap-job', 'full-job', 'no-expected-job']);
+
+    const resGap = filterVersionConsistencyGroups(consistency, { coverage: 'gap' });
+    assert.deepStrictEqual(resGap.map(g => g.jobName), ['gap-job']);
+
+    const resFull = filterVersionConsistencyGroups(consistency, { coverage: 'full' });
+    assert.deepStrictEqual(resFull.map(g => g.jobName), ['full-job']);
+  });
+
+  it('coverage filter composes with status/search/sort and does not mutate source order', () => {
+    const groups = [
+      {
+        jobName: 'zeta-gap',
+        sourcePath: '/zeta',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 1,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+      {
+        jobName: 'alpha-full',
+        sourcePath: '/alpha',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T09:00:00.000Z',
+        staleCount: 1,
+        maxTimeDriftMs: 1000,
+        devices: [],
+      },
+      {
+        jobName: 'beta-gap',
+        sourcePath: '/beta',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 2,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T11:00:00.000Z',
+        staleCount: 3,
+        maxTimeDriftMs: 5000,
+        devices: [],
+      },
+    ];
+    const consistency = { groups };
+
+    const res = filterVersionConsistencyGroups(consistency, {
+      status: 'drifted',
+      query: 'gap',
+      coverage: 'gap',
+      sort: 'name'
+    });
+    assert.deepStrictEqual(res.map(g => g.jobName), ['beta-gap', 'zeta-gap']);
+
+    assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta-gap', 'alpha-full', 'beta-gap']);
   });
 
   it('returns empty summary for non-array devices and non-object snapshots', () => {

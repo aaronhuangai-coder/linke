@@ -128,32 +128,37 @@ describe('README — version coverage', () => {
   it('mentions V0.27 (version coverage gap summary lite)', () => {
     assertReadmeContains(/V0\.27/, 'V0.27');
   });
+
+  it('mentions V0.28 (version consistency coverage filter)', () => {
+    assertReadmeContains(/V0\.28/, 'V0.28');
+  });
 });
 
-// ── V0.27 documentation ────────────────────────────────────────────
+// ── V0.28 documentation ────────────────────────────────────────────
 
-describe('README — V0.27 version coverage gap summary lite', () => {
-  it('title says V0.27', () => {
-    assert.match(readme, /^# Linke V0\.27/m);
+describe('README — V0.28 version consistency coverage filter', () => {
+  it('title says V0.28', () => {
+    assert.match(readme, /^# Linke V0\.28/m);
   });
 
-  it('version badge says 当前版本：V0.27', () => {
-    assert.match(readme, /当前版本：V0\.27/);
+  it('version badge says 当前版本：V0.28', () => {
+    assert.match(readme, /当前版本：V0\.28/);
   });
 
-  it('version table has V0.27 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.27 \| 当前版本 \|[^|]*(覆盖|缺口|摘要|Gap)/i);
+  it('version table has V0.28 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.28 \| 当前版本 \|[^|]*(覆盖|筛选|过滤|Coverage|Filter)/i);
   });
 
-  it('version table keeps V0.22 through V0.26 as historical milestones', () => {
+  it('version table keeps V0.22 through V0.27 as historical milestones', () => {
     assert.match(readme, /\| V0\.22 \| 备份版本一致性 \|/);
     assert.match(readme, /\| V0\.23 \| 版本一致性 snapshot 联动 \|/);
     assert.match(readme, /\| V0\.24 \| 版本一致性筛选与搜索 \|/);
     assert.match(readme, /\| V0\.25 \| 版本一致性非最新摘要 \|/);
     assert.match(readme, /\| V0\.26 \| 版本一致性排序控制 \|/);
+    assert.match(readme, /\| V0\.27 \| 覆盖缺口摘要 Lite \|/);
   });
 
-  it('documents version consistency search and status filtering', () => {
+  it('documents version consistency search, status, and coverage filtering', () => {
     assert.match(readme, /版本一致性.*筛选|筛选.*版本一致性/);
     assert.match(readme, /搜索.*jobName|jobName.*搜索/);
     assert.match(readme, /sourcePath/);
@@ -171,18 +176,12 @@ describe('README — V0.27 version coverage gap summary lite', () => {
     assert.match(readme, /可见.*总数|总数.*可见/);
   });
 
-  it('documents version consistency coverage summary', () => {
-    assert.match(readme, /覆盖缺口摘要|coverage gap|版本覆盖/i);
-    assert.match(readme, /可观测设备/);
-    assert.match(readme, /排除/);
+  it('documents version consistency coverage filter', () => {
+    assert.match(readme, /版本一致性覆盖筛选|coverage filter|覆盖过滤/i);
+    assert.match(readme, /all|gap|full/);
   });
 
-  it('documents that single-device and coverage gap overlap transparently', () => {
-    assert.match(readme, /single-device|单设备/);
-    assert.match(readme, /重叠|互斥|同一个问题/);
-  });
-
-  it('asserts safety docs for version consistency coverage summary', () => {
+  it('asserts safety docs for version consistency coverage filter', () => {
     assert.match(readme, /版本一致性.*安全(保证|边界)/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
@@ -195,20 +194,20 @@ describe('README — V0.27 version coverage gap summary lite', () => {
     assert.match(readme, /不执行远程传输|不进行远程文件传输/);
   });
 
-  it('documents test coverage includes version consistency coverage summary', () => {
-    assert.match(readme, /覆盖缺口摘要|coverage gap/i);
+  it('documents test coverage includes version consistency coverage filter', () => {
+    assert.match(readme, /版本一致性覆盖筛选|coverage filter/i);
   });
 
-  it('asserts README contains a V0.27 coverage gap feature bullet', () => {
-    assert.match(readme, /-\s+\*\*覆盖缺口摘要\s*Lite\*\*/i);
+  it('asserts README contains a V0.28 coverage filter feature bullet', () => {
+    assert.match(readme, /-\s+\*\*版本一致性覆盖筛选\*\*/i);
   });
 
-  it('asserts Web Console combined feature list includes 覆盖缺口摘要', () => {
-    assert.match(readme, /Web Console\*\* — 管理界面：.*覆盖缺口摘要/);
+  it('asserts Web Console combined feature list includes 版本一致性覆盖筛选', () => {
+    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性覆盖筛选/);
   });
 
-  it('asserts testing coverage sentence includes 覆盖缺口摘要', () => {
-    assert.match(readme, /测试覆盖：.*覆盖缺口摘要/);
+  it('asserts testing coverage sentence includes 版本一致性覆盖筛选', () => {
+    assert.match(readme, /测试覆盖：.*版本一致性覆盖筛选/);
   });
 });
 
