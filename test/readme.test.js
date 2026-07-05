@@ -176,6 +176,10 @@ describe('README — version coverage', () => {
   it('mentions V0.39 (device empty filter context)', () => {
     assertReadmeContains(/V0\.39/, 'V0.39');
   });
+
+  it('mentions V0.40 (device filter reset button)', () => {
+    assertReadmeContains(/V0\.40/, 'V0.40');
+  });
 });
 
 
@@ -415,16 +419,8 @@ describe('README — V0.38 management-state decision hints', () => {
 // ── V0.39 documentation ────────────────────────────────────────────
 
 describe('README — V0.39 device empty filter context', () => {
-  it('title says V0.39', () => {
-    assert.match(readme, /^# Linke V0\.39/m);
-  });
-
-  it('version badge says 当前版本：V0.39', () => {
-    assert.match(readme, /当前版本：V0\.39/);
-  });
-
-  it('version table has V0.39 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.39 \| 当前版本 \|[^|]*(空态|筛选上下文|empty|filter context)/i);
+  it('version table has V0.39 row', () => {
+    assert.match(readme, /\| V0\.39 \|[^|]*(空态|筛选上下文|empty|filter context)/i);
   });
 
   it('version table keeps V0.38 as historical milestone', () => {
@@ -453,6 +449,54 @@ describe('README — V0.39 device empty filter context', () => {
 
   it('documents testing coverage includes empty device list filter context', () => {
     assert.match(readme, /测试覆盖：.*设备列表空态筛选上下文/);
+  });
+});
+
+// ── V0.40 documentation ────────────────────────────────────────────
+
+describe('README — V0.40 device filter reset button', () => {
+  it('title says V0.40', () => {
+    assert.match(readme, /^# Linke V0\.40/m);
+  });
+
+  it('version badge says 当前版本：V0.40', () => {
+    assert.match(readme, /当前版本：V0\.40/);
+  });
+
+  it('version table has V0.40 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.40 \| 当前版本 \|[^|]*(重置|reset)/i);
+  });
+
+  it('version table keeps V0.39 as historical milestone', () => {
+    assert.match(readme, /\| V0\.39 \|[^|]*(空态|筛选上下文|empty|filter context)/i);
+  });
+
+  it('documents device filter reset button behavior', () => {
+    assert.match(readme, /设备.*(重置|reset)/);
+    assert.match(readme, /device-filter-reset/);
+    assert.match(readme, /重置/);
+  });
+
+  it('asserts README contains a V0.40 device filter reset feature bullet', () => {
+    assert.match(readme, /-\s+\*\*设备筛选重置\*\*/i);
+  });
+
+  it('asserts Web Console combined feature list includes device filter reset', () => {
+    assert.match(readme, /Web Console\*\* — 管理界面：.*设备筛选重置/);
+  });
+
+  it('asserts safety docs for device filter reset button', () => {
+    assert.match(readme, /重置.*安全(保证|边界)|安全(保证|边界).*重置/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不重新请求 `?\/api\/devices`?/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+  });
+
+  it('documents testing coverage includes device filter reset button', () => {
+    assert.match(readme, /测试覆盖：.*设备筛选重置/);
   });
 });
 

@@ -147,6 +147,29 @@ body {
   font-size: 0.8rem;
 }
 
+.device-filter-reset {
+  grid-column: 1 / -1;
+  justify-self: end;
+  padding: 6px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #f9fafb;
+  color: #374151;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.device-filter-reset:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.device-filter-reset:active {
+  background: #e5e7eb;
+}
+
 .version-consistency-filter-count {
   grid-column: 1 / -1;
   justify-self: end;

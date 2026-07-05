@@ -1123,6 +1123,22 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('device-empty-state'), 'app.js must render empty state hook');
     assert.ok(js.includes('device-empty-filter-context'), 'app.js must render empty filter context hook');
   });
+
+  // ── V0.40 device-filter-reset HTML/source contract ─────────────
+
+  it('HTML contains V0.40 device filter reset button', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="device-filter-reset"'), 'must have device-filter-reset button');
+    assert.ok(html.includes('id="device-filter-reset"'), 'must have device-filter-reset id');
+    assert.ok(html.includes('重置筛选'), 'device-filter-reset button must have visible reset text');
+  });
+
+  it('app.js source contract expects device-filter-reset reference', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('device-filter-reset'), 'app.js must reference device-filter-reset');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
@@ -3542,6 +3558,77 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.match(secondContext.textContent, /管理态: 在线可见/);
     assert.strictEqual(countEl.textContent, '0 / 4');
     assert.strictEqual(fetchCount, 1, 'empty-state filter changes must not refetch /api/devices');
+  });
+
+  it('DOM test: V0.40 device filter reset button clears all filters and rerenders without refetching /api/devices', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' },
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'initial fetch should happen');
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const sortSelect = doc.getElementById('device-sort');
+    const deviceListEl = doc.getElementById('device-list');
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+    const summaryAll = doc.querySelector('[data-testid="device-management-summary-all"]');
+    const summaryVisible = doc.querySelector('[data-testid="device-management-summary-visible"]');
+    const resetButton = doc.getElementById('device-filter-reset');
+
+    assert.ok(resetButton, 'device-filter-reset button must exist');
+
+    // 1. Manually set filters to non-default values
+    searchInput.value = 'Beta';
+    statusFilter.value = 'online';
+    managementFilter.value = 'visible';
+    sortSelect.value = 'ip';
+
+    // Trigger update
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Confirm that filter is active
+    assert.strictEqual(countEl.textContent, '0 / 4', 'Beta-Mac lacks IP so it is missing-ip, hence 0 matches under visible');
+    assert.ok(summaryVisible.className.includes('is-active'), 'visible bucket should be active');
+
+    // 2. Click the reset button
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 3. Verify all fields are reset to default
+    assert.strictEqual(searchInput.value, '', 'search input should be cleared');
+    assert.strictEqual(statusFilter.value, 'all', 'status filter should be all');
+    assert.strictEqual(managementFilter.value, 'all', 'management filter should be all');
+    assert.strictEqual(sortSelect.value, 'name', 'sort should be name');
+
+    // 4. Verify count and list are rerendered
+    assert.strictEqual(countEl.textContent, '4 / 4', 'count should show all devices');
+    const listItems = deviceListEl.children.filter((c) => c.className && c.className.includes('device-item'));
+    assert.strictEqual(listItems.length, 4, 'all 4 devices should be rendered');
+
+    // 5. Verify management summary active state updates
+    assert.ok(summaryAll.className.includes('is-active'), 'all bucket should be active after reset');
+    assert.strictEqual(summaryAll.getAttribute('aria-pressed'), 'true', 'all bucket aria-pressed should be true');
+    assert.strictEqual(summaryAll.getAttribute('data-active'), 'true', 'all bucket data-active should be true');
+    assert.ok(!summaryVisible.className.includes('is-active'), 'visible bucket should not be active');
+
+    // 6. Verify fetch count did not increase
+    assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
   });
 });
 

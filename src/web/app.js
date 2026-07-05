@@ -876,6 +876,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const deviceStatusFilter = doc.getElementById('device-status-filter');
   const deviceManagementFilter = doc.getElementById('device-management-filter');
   const deviceSortSelect = doc.getElementById('device-sort');
+  const deviceFilterResetButton = doc.getElementById('device-filter-reset');
   const deviceFilterCountEl = doc.querySelector('[data-testid="device-filter-count"]');
 
   const deviceManagementSummary = doc.querySelector('[data-testid="device-management-summary"]');
@@ -2431,6 +2432,16 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       control.addEventListener('input', renderFilteredDevices);
       control.addEventListener('change', renderFilteredDevices);
     }
+  }
+
+  if (deviceFilterResetButton?.addEventListener) {
+    deviceFilterResetButton.addEventListener('click', function () {
+      if (deviceSearchInput) deviceSearchInput.value = '';
+      if (deviceStatusFilter) deviceStatusFilter.value = 'all';
+      if (deviceManagementFilter) deviceManagementFilter.value = 'all';
+      if (deviceSortSelect) deviceSortSelect.value = 'name';
+      renderFilteredDevices();
+    });
   }
 
   function bindBucketClick(summaryEl, filterValue) {
