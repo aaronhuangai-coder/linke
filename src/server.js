@@ -69,7 +69,7 @@ async function serveStatic(res, filePath) {
   }
 }
 
-const LINKE_RELEASE_VERSION = 'V0.46';
+const LINKE_RELEASE_VERSION = 'V0.48';
 
 export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) {
   const readable = Boolean(dataDirReadable);

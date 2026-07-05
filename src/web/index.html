@@ -34,6 +34,26 @@
           </div>
         </div>
       </section>
+      <section id="release-health-panel" class="panel release-health-panel" data-testid="release-health-panel" data-status="unknown">
+        <header class="panel-title-row">
+          <h2>发布健康检查</h2>
+          <button id="release-health-refresh" data-testid="release-health-refresh" type="button" class="release-health-refresh" aria-disabled="false">刷新状态</button>
+        </header>
+        <dl class="release-health-grid">
+          <dt>状态</dt>
+          <dd id="release-health-status" data-testid="release-health-status">未检查</dd>
+          <dt>版本</dt>
+          <dd id="release-health-version" data-testid="release-health-version">—</dd>
+          <dt>数据目录</dt>
+          <dd id="release-health-data-dir" data-testid="release-health-data-dir">—</dd>
+          <dt>时间戳</dt>
+          <dd id="release-health-timestamp" data-testid="release-health-timestamp">—</dd>
+        </dl>
+        <p id="release-health-message" class="release-health-message" data-testid="release-health-message">点击刷新状态获取 /api/health</p>
+        <p class="release-health-safety-note" data-testid="release-health-safety-note">
+          发布健康检查面板为只读视图，仅手动 GET /api/health，不自动后台轮询、不写入 metadata、不连接 NAS、不执行远程命令、不新增后端接口。
+        </p>
+      </section>
       <section class="panel devices-panel">
         <div class="panel-title-row">
           <h2>设备</h2>

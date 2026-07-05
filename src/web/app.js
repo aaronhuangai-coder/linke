@@ -75,6 +75,89 @@ export function parseNasDryRunConfig(value) {
   }
 }
 
+export function buildReleaseHealthViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      versionText: '—',
+      dataDirText: '—',
+      timestampText: '—',
+      messageText: '健康检查失败: ' + errorMessage,
+    };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      versionText: '—',
+      dataDirText: '—',
+      timestampText: '—',
+      messageText: '点击刷新状态获取 /api/health',
+    };
+  }
+
+  let status = payload.status;
+  const hasStatus = 'status' in payload;
+  const hasVersion = 'version' in payload;
+  const hasChecks = 'checks' in payload;
+  const hasTimestamp = 'timestamp' in payload;
+
+  if (!hasStatus && !hasVersion && !hasChecks && !hasTimestamp) {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      versionText: '—',
+      dataDirText: '—',
+      timestampText: '—',
+      messageText: '点击刷新状态获取 /api/health',
+    };
+  }
+
+  if (hasStatus && status !== 'ok' && status !== 'degraded') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      versionText: '—',
+      dataDirText: '—',
+      timestampText: '—',
+      messageText: '点击刷新状态获取 /api/health',
+    };
+  }
+
+  const checks = payload.checks && typeof payload.checks === 'object' ? payload.checks : {};
+  const dataDirReadable = checks.dataDirReadable;
+  let hasFailedCheck = false;
+  for (const key in checks) {
+    if (checks[key] !== 'ok') {
+      hasFailedCheck = true;
+      break;
+    }
+  }
+
+  if (!hasStatus) {
+    status = hasFailedCheck ? 'degraded' : 'ok';
+  } else if (hasFailedCheck) {
+    status = 'degraded';
+  }
+
+  const dataDirText = dataDirReadable === 'ok'
+    ? '可读'
+    : (dataDirReadable === 'unavailable' ? '不可用' : '未知');
+
+  return {
+    statusKey: status,
+    statusText: status === 'degraded' ? '降级' : '正常',
+    versionText: payload.version ? String(payload.version) : '—',
+    dataDirText,
+    timestampText: String(payload.timestamp || '—'),
+    messageText: status === 'degraded'
+      ? 'GET /api/health 成功，但 checks 显示服务降级'
+      : 'GET /api/health 成功',
+  };
+}
+
 // ── V0.17 Backup Job Overview ──────────────────────────────────────
 
 function normalizeBackupJobName(value) {
@@ -827,6 +910,14 @@ export function filterVersionConsistencyGroups(consistency, controls) {
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
+  const releaseHealthPanelEl = doc.getElementById('release-health-panel');
+  const releaseHealthStatusEl = doc.getElementById('release-health-status');
+  const releaseHealthVersionEl = doc.getElementById('release-health-version');
+  const releaseHealthDataDirEl = doc.getElementById('release-health-data-dir');
+  const releaseHealthTimestampEl = doc.getElementById('release-health-timestamp');
+  const releaseHealthMessageEl = doc.getElementById('release-health-message');
+  const releaseHealthRefreshButton = doc.getElementById('release-health-refresh');
+
   const deviceListEl = doc.getElementById('device-list');
   const deviceDetailContentEl = doc.getElementById('device-detail-content');
   const snapshotListEl = doc.getElementById('snapshot-list');
@@ -2545,6 +2636,67 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       control.addEventListener('input', renderFilteredVersionConsistency);
       control.addEventListener('change', renderFilteredVersionConsistency);
     }
+  }
+
+  let releaseHealthInFlight = false;
+
+  function renderReleaseHealth(viewModel) {
+    const state = viewModel || buildReleaseHealthViewModel(null);
+    if (releaseHealthPanelEl?.setAttribute) {
+      releaseHealthPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (releaseHealthStatusEl) releaseHealthStatusEl.textContent = state.statusText;
+    if (releaseHealthVersionEl) releaseHealthVersionEl.textContent = state.versionText;
+    if (releaseHealthDataDirEl) releaseHealthDataDirEl.textContent = state.dataDirText;
+    if (releaseHealthTimestampEl) releaseHealthTimestampEl.textContent = state.timestampText;
+    if (releaseHealthMessageEl) releaseHealthMessageEl.textContent = state.messageText;
+  }
+
+  function setReleaseHealthRefreshBusy(busy) {
+    if (!releaseHealthRefreshButton) return;
+    releaseHealthRefreshButton.disabled = Boolean(busy);
+    if (releaseHealthRefreshButton.setAttribute) {
+      releaseHealthRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchReleaseHealth() {
+    if (releaseHealthInFlight) return;
+    releaseHealthInFlight = true;
+    setReleaseHealthRefreshBusy(true);
+    try {
+      const res = await fetchImpl('/api/health');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        if (!msg.includes('错误')) {
+          msg += ' 错误';
+        }
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderReleaseHealth(buildReleaseHealthViewModel(payload));
+      logEvent('已刷新发布健康检查', 'info');
+    } catch (err) {
+      renderReleaseHealth(buildReleaseHealthViewModel(null, err.message));
+      logEvent('发布健康检查失败: ' + err.message, 'error');
+    } finally {
+      releaseHealthInFlight = false;
+      setReleaseHealthRefreshBusy(false);
+    }
+  }
+
+  renderReleaseHealth(buildReleaseHealthViewModel(null));
+
+  if (releaseHealthRefreshButton?.addEventListener) {
+    releaseHealthRefreshButton.addEventListener('click', fetchReleaseHealth);
   }
 
   logEvent('Linke 控制台已启动', 'info');

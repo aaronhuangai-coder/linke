@@ -72,7 +72,7 @@ When `/api/health` returns:
 {
   "status": "ok",
   "service": "linke",
-  "version": "V0.46",
+  "version": "V0.48",
   "checks": {
     "http": "ok",
     "dataDirReadable": "ok"
@@ -84,7 +84,7 @@ When `/api/health` returns:
 The Web Console shows:
 
 - status: `正常`
-- version: `V0.46`
+- version: `V0.48`
 - data directory: `可读`
 - timestamp: the response timestamp
 - message: `GET /api/health 成功`

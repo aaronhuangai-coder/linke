@@ -6,14 +6,14 @@ import { tmpdir } from 'node:os';
 import { createServer, buildHealthResponse } from '../src/server.js';
 
 describe('Release health response', () => {
-  it('buildHealthResponse returns a stable V0.46 liveness payload without path disclosure', () => {
+  it('buildHealthResponse returns the current release liveness payload without path disclosure', () => {
     assert.deepStrictEqual(buildHealthResponse({
       dataDirReadable: true,
       now: new Date('2026-07-05T00:00:00.000Z'),
     }), {
       status: 'ok',
       service: 'linke',
-      version: 'V0.46',
+      version: 'V0.48',
       checks: {
         http: 'ok',
         dataDirReadable: 'ok',
@@ -29,7 +29,7 @@ describe('Release health response', () => {
     }), {
       status: 'degraded',
       service: 'linke',
-      version: 'V0.46',
+      version: 'V0.48',
       checks: {
         http: 'ok',
         dataDirReadable: 'unavailable',
@@ -62,7 +62,7 @@ describe('GET /api/health', () => {
     const body = await res.json();
     assert.strictEqual(body.status, 'ok');
     assert.strictEqual(body.service, 'linke');
-    assert.strictEqual(body.version, 'V0.46');
+    assert.strictEqual(body.version, 'V0.48');
     assert.strictEqual(body.checks.http, 'ok');
     assert.strictEqual(body.checks.dataDirReadable, 'ok');
     assert.ok(Number.isFinite(Date.parse(body.timestamp)));

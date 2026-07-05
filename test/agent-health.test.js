@@ -37,7 +37,7 @@ describe('Agent health CLI', () => {
     const body = JSON.parse(stdout);
     assert.strictEqual(body.status, 'ok');
     assert.strictEqual(body.service, 'linke');
-    assert.strictEqual(body.version, 'V0.46');
+    assert.strictEqual(body.version, 'V0.48');
     assert.strictEqual(body.checks.http, 'ok');
     assert.strictEqual(body.checks.dataDirReadable, 'ok');
     assert.ok(Number.isFinite(Date.parse(body.timestamp)));

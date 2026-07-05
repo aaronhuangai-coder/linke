@@ -34,6 +34,7 @@ import {
   parseBackupPreflightExcludePatterns,
   parseNasDryRunConfig,
   buildDeviceFilterCountState,
+  buildReleaseHealthViewModel,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -1229,6 +1230,63 @@ describe('Web Console / API contract', () => {
     assert.ok(css.includes('.device-active-filter-summary[data-active="true"]'), 'CSS must style the active summary explicitly');
     const bareActiveMatch = css.match(/(?:^|\}|\s)\[data-active=["']?true["']?\]/);
     assert.ok(!bareActiveMatch, 'styles.css must not contain a bare [data-active="true"] selector');
+  });
+
+  // ── V0.48 Release Health panel HTML/source contract ────────────────
+
+  it('HTML contains V0.48 release health panel with required data-testid hooks and initial data-status="unknown"', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="release-health-panel"'), 'must have release-health-panel');
+    assert.ok(html.includes('data-testid="release-health-status"'), 'must have release-health-status');
+    assert.ok(html.includes('data-testid="release-health-version"'), 'must have release-health-version');
+    assert.ok(html.includes('data-testid="release-health-data-dir"'), 'must have release-health-data-dir');
+    assert.ok(html.includes('data-testid="release-health-timestamp"'), 'must have release-health-timestamp');
+    assert.ok(html.includes('data-testid="release-health-message"'), 'must have release-health-message');
+    assert.ok(html.includes('data-testid="release-health-refresh"'), 'must have release-health-refresh');
+    assert.ok(html.includes('data-testid="release-health-safety-note"'), 'must have release-health-safety-note');
+
+    assert.ok(html.includes('data-status="unknown"'), 'must have data-status="unknown" initially');
+  });
+
+  it('V0.48 release health panel safety note documents security boundaries and avoids prohibited words', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="release-health-panel"[\s\S]*?<\/(?:section|div)>/);
+
+    assert.ok(panelMatch, 'release-health-panel section/div must exist');
+    const content = panelMatch[0];
+    assert.ok(content.includes('只读'), 'must contain 只读');
+    assert.ok(content.includes('GET /api/health'), 'must contain GET /api/health');
+    assert.ok(/不写入\s*metadata|不写入\s*元数据/i.test(content), 'must contain 不写入 metadata');
+    assert.ok(/不连接\s*NAS/i.test(content), 'must contain 不连接 NAS');
+    assert.ok(content.includes('不执行远程命令'), 'must contain 不执行远程命令');
+
+    assert.ok(!content.includes('执行备份'), 'must not contain 执行备份');
+    assert.ok(!content.includes('创建备份'), 'must not contain 创建备份');
+    assert.ok(!content.includes('执行恢复'), 'must not contain 执行恢复');
+    assert.ok(!content.includes('删除快照'), 'must not contain 删除快照');
+    assert.ok(!content.includes('连接 NAS 设备') && !content.includes('连接NAS设备'), 'must not contain 连接 NAS 设备');
+    assert.ok(!content.includes('远程传输'), 'must not contain 远程传输');
+  });
+
+  it('app.js wires release health rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/health'), 'app.js must reference /api/health');
+    assert.ok(js.includes('release-health-refresh'), 'app.js must reference release-health-refresh');
+    assert.ok(js.includes('buildReleaseHealthViewModel'), 'app.js must reference buildReleaseHealthViewModel');
+  });
+
+  it('styles.css contains V0.48 release health status selectors', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.release-health-panel[data-status="ok"]'), 'styles.css must contain .release-health-panel[data-status="ok"]');
+    assert.ok(css.includes('[data-status="degraded"]'), 'styles.css must contain [data-status="degraded"]');
+    assert.ok(css.includes('[data-status="error"]'), 'styles.css must contain [data-status="error"]');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -6028,5 +6086,300 @@ describe('V0.45 DOM test: device filter count rendering and reset behavior', () 
 
     // 4. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
+  });
+});
+
+describe('V0.48 release health pure functions', () => {
+  it('buildReleaseHealthViewModel formats ok status and masks/omits absolute dataDir', () => {
+    const rawData = {
+      version: 'V0.48',
+      checks: {
+        http: 'ok',
+        dataDirReadable: 'ok',
+      },
+      dataDir: '/private/tmp/linke-secret-path',
+      timestamp: '2026-07-05T12:00:00Z',
+      message: 'OK',
+    };
+    const result = buildReleaseHealthViewModel(rawData);
+    assert.strictEqual(result.statusKey, 'ok');
+    assert.strictEqual(result.statusText, '正常');
+    assert.strictEqual(result.versionText, 'V0.48');
+    assert.strictEqual(result.dataDirText, '可读');
+    assert.strictEqual(result.timestampText, '2026-07-05T12:00:00Z');
+    assert.strictEqual(result.messageText, 'GET /api/health 成功');
+
+    const str = JSON.stringify(result);
+    assert.ok(!str.includes('private/tmp/linke-secret-path'), 'should not disclose absolute dataDir path');
+  });
+
+  it('buildReleaseHealthViewModel formats degraded status', () => {
+    const rawData = {
+      version: 'V0.48',
+      checks: {
+        http: 'ok',
+        dataDirReadable: 'unavailable',
+      },
+      dataDir: '/private/tmp/linke-secret-path',
+      timestamp: '2026-07-05T12:00:00Z',
+      message: 'Degraded storage',
+    };
+    const result = buildReleaseHealthViewModel(rawData);
+    assert.strictEqual(result.statusKey, 'degraded');
+    assert.strictEqual(result.statusText, '降级');
+    assert.strictEqual(result.versionText, 'V0.48');
+    assert.strictEqual(result.dataDirText, '不可用');
+    assert.strictEqual(result.timestampText, '2026-07-05T12:00:00Z');
+    assert.ok(result.messageText.includes('降级') || result.messageText.includes('checks'));
+
+    const str = JSON.stringify(result);
+    assert.ok(!str.includes('private/tmp/linke-secret-path'));
+  });
+
+  it('buildReleaseHealthViewModel treats failed checks as degraded even when payload status is ok', () => {
+    const result = buildReleaseHealthViewModel({
+      status: 'ok',
+      checks: {
+        http: 'ok',
+        dataDirReadable: 'unavailable',
+      },
+      timestamp: '2026-07-05T12:00:00Z',
+    });
+
+    assert.strictEqual(result.statusKey, 'degraded');
+    assert.strictEqual(result.statusText, '降级');
+    assert.strictEqual(result.versionText, '—');
+    assert.strictEqual(result.dataDirText, '不可用');
+    assert.ok(result.messageText.includes('降级') || result.messageText.includes('checks'));
+  });
+
+  it('buildReleaseHealthViewModel formats error status', () => {
+    const result = buildReleaseHealthViewModel(null, 'HTTP 500');
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.strictEqual(result.versionText, '—');
+    assert.strictEqual(result.dataDirText, '—');
+    assert.strictEqual(result.timestampText, '—');
+    assert.ok(result.messageText.includes('HTTP 500'));
+  });
+
+  it('buildReleaseHealthViewModel handles unknown or invalid inputs', () => {
+    const resultNull = buildReleaseHealthViewModel(null);
+    assert.strictEqual(resultNull.statusKey, 'unknown');
+    assert.strictEqual(resultNull.statusText, '未检查');
+    assert.strictEqual(resultNull.versionText, '—');
+    assert.strictEqual(resultNull.dataDirText, '—');
+    assert.strictEqual(resultNull.timestampText, '—');
+    assert.ok(resultNull.messageText.includes('点击刷新状态'));
+
+    const resultEmpty = buildReleaseHealthViewModel({});
+    assert.strictEqual(resultEmpty.statusKey, 'unknown');
+    assert.strictEqual(resultEmpty.statusText, '未检查');
+    assert.strictEqual(resultEmpty.versionText, '—');
+    assert.strictEqual(resultEmpty.dataDirText, '—');
+    assert.strictEqual(resultEmpty.timestampText, '—');
+    assert.ok(resultEmpty.messageText.includes('点击刷新状态'));
+
+    const resultBad = buildReleaseHealthViewModel({ status: 'something-else' });
+    assert.strictEqual(resultBad.statusKey, 'unknown');
+    assert.strictEqual(resultBad.statusText, '未检查');
+    assert.strictEqual(resultBad.versionText, '—');
+    assert.strictEqual(resultBad.dataDirText, '—');
+    assert.strictEqual(resultBad.timestampText, '—');
+    assert.ok(resultBad.messageText.includes('点击刷新状态'));
+  });
+});
+
+describe('V0.48 DOM test: release health panel interactions', () => {
+  it('does not request /api/health on initialization', async () => {
+    const doc = buildMockDoc();
+    let healthFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/health')) healthFetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(healthFetchCount, 0, 'should not call /api/health on init');
+  });
+
+  it('requests /api/health only once and renders ok when release-health-refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let healthFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/health')) {
+        healthFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            version: 'V0.48',
+            checks: {
+              http: 'ok',
+              dataDirReadable: 'ok',
+            },
+            dataDir: '/private/tmp/linke-secret-path',
+            timestamp: '2026-07-05T12:00:00Z',
+            message: 'All systems green',
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-health-refresh"]') || doc.getElementById('release-health-refresh');
+    const panel = doc.querySelector('[data-testid="release-health-panel"]') || doc.getElementById('release-health-panel');
+    const statusEl = doc.querySelector('[data-testid="release-health-status"]') || doc.getElementById('release-health-status');
+    const versionEl = doc.querySelector('[data-testid="release-health-version"]') || doc.getElementById('release-health-version');
+    const dataDirEl = doc.querySelector('[data-testid="release-health-data-dir"]') || doc.getElementById('release-health-data-dir');
+    const timestampEl = doc.querySelector('[data-testid="release-health-timestamp"]') || doc.getElementById('release-health-timestamp');
+    const messageEl = doc.querySelector('[data-testid="release-health-message"]') || doc.getElementById('release-health-message');
+
+    assert.ok(refreshBtn, 'refresh button must exist');
+    assert.ok(panel, 'release health panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(healthFetchCount, 1, 'should request /api/health exactly once');
+
+    assert.strictEqual(panel._attrs['data-status'], 'ok');
+    assert.strictEqual(statusEl.textContent, '正常');
+    assert.strictEqual(versionEl.textContent, 'V0.48');
+    assert.strictEqual(dataDirEl.textContent, '可读');
+    assert.strictEqual(timestampEl.textContent, '2026-07-05T12:00:00Z');
+    assert.ok(messageEl.textContent.includes('成功'));
+  });
+
+  it('renders error on non-2xx response', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/health')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ status: 'error', message: 'HTTP 500 错误' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-health-refresh"]') || doc.getElementById('release-health-refresh');
+    const panel = doc.querySelector('[data-testid="release-health-panel"]') || doc.getElementById('release-health-panel');
+    const statusEl = doc.querySelector('[data-testid="release-health-status"]') || doc.getElementById('release-health-status');
+    const messageEl = doc.querySelector('[data-testid="release-health-message"]') || doc.getElementById('release-health-message');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'], 'error');
+    assert.strictEqual(statusEl.textContent, '检查失败');
+    assert.ok(messageEl.textContent.includes('错误'));
+  });
+
+  it('renders error when 200 but json() throws Invalid JSON', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/health')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => { throw new Error('Invalid JSON 错误'); },
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-health-refresh"]') || doc.getElementById('release-health-refresh');
+    const panel = doc.querySelector('[data-testid="release-health-panel"]') || doc.getElementById('release-health-panel');
+    const statusEl = doc.querySelector('[data-testid="release-health-status"]') || doc.getElementById('release-health-status');
+    const messageEl = doc.querySelector('[data-testid="release-health-message"]') || doc.getElementById('release-health-message');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'], 'error');
+    assert.strictEqual(statusEl.textContent, '检查失败');
+    assert.ok(messageEl.textContent.includes('错误'));
+  });
+
+  it('disables button during request and restores afterwards, and degraded response renders degraded status', async () => {
+    const doc = buildMockDoc();
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/health')) {
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            version: 'V0.48',
+            checks: {
+              http: 'ok',
+              dataDirReadable: 'unavailable',
+            },
+            dataDir: '/private/tmp/linke-secret-path',
+            timestamp: '2026-07-05T12:00:00Z',
+            message: 'Degraded mode',
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="release-health-refresh"]') || doc.getElementById('release-health-refresh');
+    const panel = doc.querySelector('[data-testid="release-health-panel"]') || doc.getElementById('release-health-panel');
+    const statusEl = doc.querySelector('[data-testid="release-health-status"]') || doc.getElementById('release-health-status');
+
+    let clickPromise;
+    if (refreshBtn._listeners.click) {
+      clickPromise = refreshBtn._listeners.click();
+    }
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const isDisabled = refreshBtn.disabled === true || refreshBtn.getAttribute('disabled') === 'true' || refreshBtn.getAttribute('disabled') === true;
+    assert.strictEqual(isDisabled, true, 'button.disabled must be true during request');
+
+    const ariaDisabledDuring = refreshBtn.getAttribute('aria-disabled');
+    assert.ok(ariaDisabledDuring === 'true' || ariaDisabledDuring === true, 'aria-disabled must be true during request');
+
+    resolveRequest();
+    if (clickPromise) {
+      await clickPromise;
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    const isDisabledAfter = refreshBtn.disabled === true || refreshBtn.getAttribute('disabled') === 'true' || refreshBtn.getAttribute('disabled') === true;
+    assert.strictEqual(isDisabledAfter, false, 'button.disabled must be false after request');
+
+    const ariaDisabledAfter = refreshBtn.getAttribute('aria-disabled');
+    assert.ok(ariaDisabledAfter === 'false' || ariaDisabledAfter === false || ariaDisabledAfter === null || ariaDisabledAfter === undefined, 'aria-disabled must be false or removed after request');
+
+    assert.strictEqual(panel._attrs['data-status'], 'degraded');
   });
 });

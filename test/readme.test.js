@@ -208,6 +208,10 @@ describe('README — version coverage', () => {
   it('mentions V0.47 (release health CLI)', () => {
     assertReadmeContains(/V0\.47/, 'V0.47');
   });
+
+  it('mentions V0.48 (release health Web panel)', () => {
+    assertReadmeContains(/V0\.48/, 'V0.48');
+  });
 });
 
 
@@ -1064,13 +1068,16 @@ describe('README — V0.46 release health endpoint', () => {
 });
 
 describe('README — V0.47 release health CLI', () => {
-  it('title and badge say V0.47', () => {
-    assert.match(readme, /^# Linke V0\.47/m);
-    assert.match(readme, /当前版本：V0\.47/);
+  it('title no longer claims V0.47 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.47/m);
   });
 
-  it('version table has V0.47 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.47 \| 当前版本 \|[^|]*(发布健康检查 CLI|release health CLI|health)/i);
+  it('version badge no longer says 当前版本：V0.47', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.47/);
+  });
+
+  it('version table has V0.47 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.47 \| 历史版本 \|[^|]*(发布健康检查 CLI|release health CLI|health)/i);
   });
 
   it('documents the health CLI command and exit-code semantics', () => {
@@ -1090,5 +1097,35 @@ describe('README — V0.47 release health CLI', () => {
 
   it('documents testing coverage includes release health CLI', () => {
     assert.match(readme, /测试覆盖：.*发布健康检查 CLI/);
+  });
+});
+
+describe('README — V0.48 release health Web panel', () => {
+  it('title and badge say V0.48', () => {
+    assert.match(readme, /^# Linke V0\.48/m);
+    assert.match(readme, /当前版本：V0\.48/);
+  });
+
+  it('version table has V0.48 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.48 \| 当前版本 \|[^|]*(发布健康检查面板|release health Web panel)/i);
+  });
+
+  it('documents release health Web panel features', () => {
+    assert.match(readme, /发布健康检查面板/);
+    assert.match(readme, /\/api\/health/);
+    assert.match(readme, /手动刷新|刷新状态/);
+    assert.match(readme, /不自动(后台)?轮询/);
+  });
+
+  it('asserts safety docs for release health Web panel', () => {
+    assert.match(readme, /只读/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不建立真实 NAS 连接|不连接 NAS/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不新增接口/);
+  });
+
+  it('documents testing coverage includes release health Web panel', () => {
+    assert.match(readme, /测试覆盖：.*发布健康检查面板/);
   });
 });

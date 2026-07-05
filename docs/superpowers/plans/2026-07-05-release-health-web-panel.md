@@ -22,6 +22,20 @@
 
 ---
 
+## Execution Record
+
+- RED tests were added and confirmed to fail on the missing `buildReleaseHealthViewModel` export and V0.48 README expectations.
+- AGY implemented the V0.48 Web Console release health panel and README update.
+- PM tightened semantics after GREEN: valid `dl` markup, check-driven degraded state, current release version fallback, and a regression test for status/check mismatch.
+- Qwen adversarial review initially failed on `/api/health.version` still returning `V0.46`; PM accepted the finding and updated the release version to `V0.48`.
+- Qwen re-review returned `STATUS: PASS` with no blockers and no non-blocking concerns.
+- ZAI closed-loop verification returned `Status: PASS`, `Blockers: None`, and verified the safety and test evidence.
+- PM verification passed:
+  - `git diff --check`
+  - `node --test test/health.test.js test/agent-health.test.js test/web-console.test.js test/readme.test.js` (439/439)
+  - `npm test` (598/598)
+  - Real HTTP/Web smoke on `127.0.0.1:3012`, including `/api/health` returning `version:"V0.48"`.
+
 ### Task 1: RED Tests
 
 **Files:**
@@ -32,7 +46,7 @@
 - Consumes existing `buildMockDoc()` helper and `initConsole()`.
 - Produces failing expectations for `buildReleaseHealthViewModel`, `release-health-*` HTML hooks, `/api/health` click behavior, CSS state hooks, and V0.48 README docs.
 
-- [ ] **Step 1: Add app.js import for the new pure helper**
+- [x] **Step 1: Add app.js import for the new pure helper**
 
 In `test/web-console.test.js`, extend the import list from `../src/web/app.js`:
 
@@ -48,7 +62,7 @@ SyntaxError: The requested module '../src/web/app.js' does not provide an export
 
 This import failure will prevent `test/web-console.test.js` from loading and can make the whole file fail before individual tests run. Treat that as the expected RED signal for the missing export, not as an existing Web Console regression.
 
-- [ ] **Step 2: Add HTML contract tests**
+- [x] **Step 2: Add HTML contract tests**
 
 In the `Web Console / API contract` describe block, after the existing V0.46/V0.47 related tests or near other HTML contract tests, add:
 
@@ -102,7 +116,7 @@ In the `Web Console / API contract` describe block, after the existing V0.46/V0.
   });
 ```
 
-- [ ] **Step 3: Add pure view-model tests**
+- [x] **Step 3: Add pure view-model tests**
 
 Add a new describe block before `describe('initConsole', ...)`:
 
@@ -112,7 +126,7 @@ describe('V0.48 release health view model', () => {
     const result = buildReleaseHealthViewModel({
       status: 'ok',
       service: 'linke',
-      version: 'V0.46',
+      version: 'V0.48',
       checks: {
         http: 'ok',
         dataDirReadable: 'ok',
@@ -123,7 +137,7 @@ describe('V0.48 release health view model', () => {
 
     assert.strictEqual(result.statusKey, 'ok');
     assert.strictEqual(result.statusText, '正常');
-    assert.strictEqual(result.versionText, 'V0.46');
+    assert.strictEqual(result.versionText, 'V0.48');
     assert.strictEqual(result.dataDirText, '可读');
     assert.strictEqual(result.timestampText, '2026-07-05T00:00:00.000Z');
     assert.strictEqual(result.messageText, 'GET /api/health 成功');
@@ -134,7 +148,7 @@ describe('V0.48 release health view model', () => {
     const result = buildReleaseHealthViewModel({
       status: 'degraded',
       service: 'linke',
-      version: 'V0.46',
+      version: 'V0.48',
       checks: {
         http: 'ok',
         dataDirReadable: 'unavailable',
@@ -172,7 +186,7 @@ describe('V0.48 release health view model', () => {
 });
 ```
 
-- [ ] **Step 4: Add DOM click behavior tests**
+- [x] **Step 4: Add DOM click behavior tests**
 
 Near other `initConsole` DOM tests, add:
 
@@ -190,7 +204,7 @@ describe('V0.48 Release Health Web Panel DOM tests', () => {
           json: async () => ({
             status: 'ok',
             service: 'linke',
-            version: 'V0.46',
+            version: 'V0.48',
             checks: { http: 'ok', dataDirReadable: 'ok' },
             timestamp: '2026-07-05T00:00:00.000Z',
           }),
@@ -210,7 +224,7 @@ describe('V0.48 Release Health Web Panel DOM tests', () => {
     assert.deepStrictEqual(calls.filter((url) => url === '/api/health'), ['/api/health']);
     assert.strictEqual(doc.getElementById('release-health-panel')._attrs['data-status'], 'ok');
     assert.strictEqual(doc.getElementById('release-health-status').textContent, '正常');
-    assert.strictEqual(doc.getElementById('release-health-version').textContent, 'V0.46');
+    assert.strictEqual(doc.getElementById('release-health-version').textContent, 'V0.48');
     assert.strictEqual(doc.getElementById('release-health-data-dir').textContent, '可读');
     assert.strictEqual(doc.getElementById('release-health-timestamp').textContent, '2026-07-05T00:00:00.000Z');
     assert.match(doc.getElementById('release-health-message').textContent, /成功/);
@@ -285,7 +299,7 @@ describe('V0.48 Release Health Web Panel DOM tests', () => {
       json: async () => ({
         status: 'degraded',
         service: 'linke',
-        version: 'V0.46',
+        version: 'V0.48',
         checks: { http: 'ok', dataDirReadable: 'unavailable' },
         timestamp: '2026-07-05T00:00:00.000Z',
       }),
@@ -300,7 +314,7 @@ describe('V0.48 Release Health Web Panel DOM tests', () => {
 });
 ```
 
-- [ ] **Step 5: Add README RED tests**
+- [x] **Step 5: Add README RED tests**
 
 In `test/readme.test.js`:
 
@@ -344,7 +358,7 @@ describe('README — V0.48 release health Web panel', () => {
 });
 ```
 
-- [ ] **Step 6: Verify RED**
+- [x] **Step 6: Verify RED**
 
 Run:
 
@@ -367,7 +381,7 @@ Expected: FAIL because the new export, HTML hooks, CSS selectors, DOM behavior, 
 - Produces DOM update path bound to `release-health-refresh`.
 - Keeps `initConsole(doc, fetchImpl, intervalImpl)` signature unchanged.
 
-- [ ] **Step 1: Add Web Console HTML panel**
+- [x] **Step 1: Add Web Console HTML panel**
 
 In `src/web/index.html`, add this panel near the top after `fleet-summary`:
 
@@ -402,7 +416,7 @@ In `src/web/index.html`, add this panel near the top after `fleet-summary`:
       </section>
 ```
 
-- [ ] **Step 2: Add release health view model helper**
+- [x] **Step 2: Add release health view model helper**
 
 In `src/web/app.js`, near other pure functions, add:
 
@@ -449,7 +463,7 @@ export function buildReleaseHealthViewModel(payload, errorMessage = '') {
 }
 ```
 
-- [ ] **Step 3: Bind panel elements and render path**
+- [x] **Step 3: Bind panel elements and render path**
 
 Inside `initConsole()`, add element references with the existing element lookup pattern:
 
@@ -520,7 +534,7 @@ Bind the click handler near other event bindings:
 
 Do not call `fetchReleaseHealth()` during startup. Do not add it to `intervalImpl`.
 
-- [ ] **Step 4: Add CSS state styling**
+- [x] **Step 4: Add CSS state styling**
 
 In `src/web/styles.css`, add:
 
@@ -585,7 +599,7 @@ In `src/web/styles.css`, add:
 }
 ```
 
-- [ ] **Step 5: Update README to V0.48**
+- [x] **Step 5: Update README to V0.48**
 
 Update `README.md`:
 
@@ -618,7 +632,7 @@ V0.48 在 Web Console 中新增发布健康检查面板。
 
 Update testing coverage sentence with `发布健康检查面板`.
 
-- [ ] **Step 6: Verify GREEN target tests**
+- [x] **Step 6: Verify GREEN target tests**
 
 Run:
 
@@ -633,25 +647,25 @@ Expected: PASS.
 **Files:**
 - No new production edits unless a verification finding requires a targeted fix.
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/web-console.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full suite**
+- [x] **Step 2: Run full suite**
 
 ```bash
 npm test
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Qwen adversarial review**
+- [x] **Step 4: Qwen adversarial review**
 
 Ask Qwen to review current diff for:
 
@@ -663,7 +677,7 @@ Ask Qwen to review current diff for:
 - no NAS/backup/restore/remote command wording or behavior;
 - README and tests matching V0.48.
 
-- [ ] **Step 5: Real HTTP/Web smoke**
+- [x] **Step 5: Real HTTP/Web smoke**
 
 Start a temporary local server and verify:
 
@@ -675,7 +689,7 @@ curl -s http://127.0.0.1:<port>/styles.css | rg "release-health-panel\\[data-sta
 
 Then run a small browserless DOM smoke through `node --test test/web-console.test.js`.
 
-- [ ] **Step 6: ZAI auxiliary verifier**
+- [x] **Step 6: ZAI auxiliary verifier**
 
 Use a strict English read-only prompt with final schema:
 
@@ -692,7 +706,7 @@ If ZAI returns only tool errors, empty output, missing status fields, or `I do n
 - [ ] **Step 7: Commit and push**
 
 ```bash
-git add README.md src/web/index.html src/web/app.js src/web/styles.css test/web-console.test.js test/readme.test.js docs/superpowers/plans/2026-07-05-release-health-web-panel.md
+git add README.md docs/superpowers/plans/2026-07-05-release-health-web-panel.md docs/superpowers/specs/2026-07-05-release-health-web-panel-design.md src/server.js src/web/index.html src/web/app.js src/web/styles.css test/agent-health.test.js test/health.test.js test/web-console.test.js test/readme.test.js
 git commit -m "feat: add release health web panel"
 git push
 ```
