@@ -172,6 +172,10 @@ describe('README — version coverage', () => {
   it('mentions V0.38 (management-state decision hints)', () => {
     assertReadmeContains(/V0\.38/, 'V0.38');
   });
+
+  it('mentions V0.39 (device empty filter context)', () => {
+    assertReadmeContains(/V0\.39/, 'V0.39');
+  });
 });
 
 
@@ -374,16 +378,12 @@ describe('README — V0.37 management-state summary scoped counts', () => {
 // ── V0.38 documentation ────────────────────────────────────────────
 
 describe('README — V0.38 management-state decision hints', () => {
-  it('title says V0.38', () => {
-    assert.match(readme, /^# Linke V0\.38/m);
+  it('mentions V0.38', () => {
+    assert.match(readme, /V0\.38/);
   });
 
-  it('version badge says 当前版本：V0.38', () => {
-    assert.match(readme, /当前版本：V0\.38/);
-  });
-
-  it('version table has V0.38 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.38 \| 当前版本 \|[^|]*(管理态提示|判定提示|处理提示|hint)/i);
+  it('version table has V0.38 historical row', () => {
+    assert.match(readme, /\| V0\.38 \|[^|]*(管理态提示|判定提示|处理提示|hint)/i);
   });
 
   it('version table keeps V0.37 as historical milestone', () => {
@@ -409,6 +409,50 @@ describe('README — V0.38 management-state decision hints', () => {
 
   it('documents testing coverage includes management-state hints', () => {
     assert.match(readme, /测试覆盖：.*管理态判定提示/);
+  });
+});
+
+// ── V0.39 documentation ────────────────────────────────────────────
+
+describe('README — V0.39 device empty filter context', () => {
+  it('title says V0.39', () => {
+    assert.match(readme, /^# Linke V0\.39/m);
+  });
+
+  it('version badge says 当前版本：V0.39', () => {
+    assert.match(readme, /当前版本：V0\.39/);
+  });
+
+  it('version table has V0.39 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.39 \| 当前版本 \|[^|]*(空态|筛选上下文|empty|filter context)/i);
+  });
+
+  it('version table keeps V0.38 as historical milestone', () => {
+    assert.match(readme, /\| V0\.38 \|[^|]*(管理态提示|判定提示|处理提示|hint)/i);
+  });
+
+  it('documents empty device list filter context behavior', () => {
+    assert.match(readme, /设备列表.*(空态|无匹配设备).*筛选上下文|筛选上下文.*无匹配设备/);
+    assert.match(readme, /device-empty-state/);
+    assert.match(readme, /device-empty-filter-context/);
+    assert.match(readme, /无匹配设备/);
+    assert.match(readme, /搜索/);
+    assert.match(readme, /状态/);
+    assert.match(readme, /管理态/);
+  });
+
+  it('asserts safety docs for empty device list filter context', () => {
+    assert.match(readme, /设备列表.*(空态|筛选上下文).*安全(保证|边界)|安全(保证|边界).*设备列表.*(空态|筛选上下文)/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不重新请求 `?\/api\/devices`?/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+  });
+
+  it('documents testing coverage includes empty device list filter context', () => {
+    assert.match(readme, /测试覆盖：.*设备列表空态筛选上下文/);
   });
 });
 

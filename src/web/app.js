@@ -230,6 +230,18 @@ const MANAGEMENT_STATE_HINTS = {
   'unknown': '状态未知，需确认设备心跳',
 };
 
+const DEVICE_FILTER_STATUS_LABELS = {
+  all: '全部',
+  online: '在线',
+  offline: '离线',
+  unknown: '未知',
+};
+
+const DEVICE_FILTER_MANAGEMENT_LABELS = {
+  all: '全部',
+  ...MANAGEMENT_STATE_LABELS,
+};
+
 export function getDeviceManagementState(device) {
   const key = getDeviceManagementStateKey(device);
   return MANAGEMENT_STATE_LABELS[key] || '未知待确认';
@@ -238,6 +250,18 @@ export function getDeviceManagementState(device) {
 export function getDeviceManagementHint(device) {
   const key = getDeviceManagementStateKey(device);
   return MANAGEMENT_STATE_HINTS[key] || MANAGEMENT_STATE_HINTS.unknown;
+}
+
+function formatDeviceFilterValue(value, labels, fallbackValue) {
+  const key = value || fallbackValue;
+  return labels[key] || String(key || fallbackValue);
+}
+
+export function buildDeviceEmptyFilterContext(controls) {
+  const query = String(controls?.query || '').trim() || '全部';
+  const status = formatDeviceFilterValue(controls?.status, DEVICE_FILTER_STATUS_LABELS, 'all');
+  const management = formatDeviceFilterValue(controls?.management, DEVICE_FILTER_MANAGEMENT_LABELS, 'all');
+  return '搜索: ' + query + ' · 状态: ' + status + ' · 管理态: ' + management;
 }
 
 export function buildDeviceManagementSummary(devices) {
@@ -885,10 +909,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   function renderFilteredDevices() {
-    renderDeviceManagementSummary(cachedDevices);
-    const visibleDevices = applyDeviceListControls(cachedDevices, getDeviceControls());
+    const controls = getDeviceControls();
+    renderDeviceManagementSummary(cachedDevices, controls);
+    const visibleDevices = applyDeviceListControls(cachedDevices, controls);
     renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);
-    renderDevices(visibleDevices);
+    renderDevices(visibleDevices, controls);
   }
 
   function setDeviceManagementSummaryActive(summaryEl, active) {
@@ -901,8 +926,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     summaryEl.className = active ? 'summary-bucket is-active' : 'summary-bucket';
   }
 
-  function renderDeviceManagementSummary(devices) {
-    const controls = getDeviceControls();
+  function renderDeviceManagementSummary(devices, controls = getDeviceControls()) {
     const summary = buildDeviceManagementSummaryScope(devices, controls);
     const activeManagement = controls.management;
     for (const bucket of deviceManagementSummaryBuckets) {
@@ -1389,10 +1413,24 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     logEvent('已加载版本一致性 ' + consistency.summary.total + ' 个任务组', 'info');
   }
 
-  function renderDevices(devices) {
+  function renderDevices(devices, controls = {}) {
     clearElement(deviceListEl);
     if (devices.length === 0) {
-      deviceListEl.innerHTML = '<li class="placeholder">无匹配设备</li>';
+      const emptyItem = doc.createElement('li');
+      emptyItem.className = 'placeholder';
+      emptyItem.setAttribute('data-testid', 'device-empty-state');
+
+      const message = doc.createElement('span');
+      message.textContent = '无匹配设备';
+
+      const context = doc.createElement('span');
+      context.className = 'device-empty-filter-context';
+      context.setAttribute('data-testid', 'device-empty-filter-context');
+      context.textContent = buildDeviceEmptyFilterContext(controls);
+
+      emptyItem.appendChild(message);
+      emptyItem.appendChild(context);
+      deviceListEl.appendChild(emptyItem);
       return;
     }
     devices.forEach(function (device) {

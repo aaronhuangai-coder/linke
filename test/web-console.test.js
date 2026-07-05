@@ -19,6 +19,7 @@ import {
   formatSnapshotMeta,
   getDeviceBackupHealthStatus,
   getDeviceManagementHint,
+  buildDeviceEmptyFilterContext,
   getDeviceManagementState,
   getDeviceManagementStateKey,
   buildDeviceManagementSummary,
@@ -1111,6 +1112,16 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('getDeviceManagementHint'), 'app.js must expose getDeviceManagementHint');
     assert.ok(js.includes('device-management-hint'), 'app.js must render list management hint hook');
     assert.ok(js.includes('device-detail-management-hint'), 'app.js must render detail management hint hook');
+  });
+
+  // ── V0.39 device-empty-filter-context source contract ─────────────
+
+  it('app.js source contract expects V0.39 empty filter context rendering', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+    assert.ok(js.includes('buildDeviceEmptyFilterContext'), 'app.js must expose empty filter context builder');
+    assert.ok(js.includes('device-empty-state'), 'app.js must render empty state hook');
+    assert.ok(js.includes('device-empty-filter-context'), 'app.js must render empty filter context hook');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3476,6 +3487,62 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.strictEqual(countEl.textContent, '1 / 4');
     assert.strictEqual(fetchCount, 1, 'scoped summary changes must not refetch /api/devices');
   });
+
+  it('DOM test: V0.39 empty device list shows current filter context without refetching /api/devices', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' },
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const deviceListEl = doc.getElementById('device-list');
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+
+    searchInput.value = 'NoMatch';
+    searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const firstEmptyState = deviceListEl.children.find((c) => c._attrs?.['data-testid'] === 'device-empty-state');
+    assert.ok(firstEmptyState, 'empty list must render device-empty-state hook');
+    assert.match(firstEmptyState.textContent, /无匹配设备/);
+    const firstContext = firstEmptyState.querySelector('[data-testid="device-empty-filter-context"]');
+    assert.ok(firstContext, 'empty list must render device-empty-filter-context hook');
+    assert.match(firstContext.textContent, /搜索: NoMatch/);
+    assert.match(firstContext.textContent, /状态: 全部/);
+    assert.match(firstContext.textContent, /管理态: 全部/);
+    assert.strictEqual(countEl.textContent, '0 / 4');
+
+    searchInput.value = 'Beta';
+    statusFilter.value = 'online';
+    managementFilter.value = 'visible';
+    statusFilter._listeners.change();
+    managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const secondEmptyState = deviceListEl.children.find((c) => c._attrs?.['data-testid'] === 'device-empty-state');
+    assert.ok(secondEmptyState, 'combined filters must still render device-empty-state hook');
+    const secondContext = secondEmptyState.querySelector('[data-testid="device-empty-filter-context"]');
+    assert.ok(secondContext, 'combined filters must still render device-empty-filter-context hook');
+    assert.match(secondContext.textContent, /搜索: Beta/);
+    assert.match(secondContext.textContent, /状态: 在线/);
+    assert.match(secondContext.textContent, /管理态: 在线可见/);
+    assert.strictEqual(countEl.textContent, '0 / 4');
+    assert.strictEqual(fetchCount, 1, 'empty-state filter changes must not refetch /api/devices');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -5347,5 +5414,21 @@ describe('V0.38 device management hint pure functions', () => {
     assert.strictEqual(getDeviceManagementHint({ status: 'offline', ipAddress: '192.168.1.100' }), '设备离线，保留历史记录和备份上下文');
     assert.strictEqual(getDeviceManagementHint({ status: 'unknown', ipAddress: '192.168.1.100' }), '状态未知，需确认设备心跳');
     assert.strictEqual(getDeviceManagementHint(null), '状态未知，需确认设备心跳');
+  });
+});
+
+describe('V0.39 device empty filter context pure functions', () => {
+  it('formats default controls as all labels', () => {
+    assert.strictEqual(
+      buildDeviceEmptyFilterContext({}),
+      '搜索: 全部 · 状态: 全部 · 管理态: 全部'
+    );
+  });
+
+  it('formats query, status, and management labels', () => {
+    assert.strictEqual(
+      buildDeviceEmptyFilterContext({ query: 'Beta', status: 'online', management: 'visible' }),
+      '搜索: Beta · 状态: 在线 · 管理态: 在线可见'
+    );
   });
 });
