@@ -1,8 +1,8 @@
-# Linke V0.51
+# Linke V0.52
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.51** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.52** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -58,7 +58,8 @@
 | V0.48 | 历史版本 | 发布健康检查面板：Web Console 增加发布健康检查面板，通过 GET /api/health 手动刷新只读状态，不自动轮询 |
 | V0.49 | 历史版本 | 发布版本一致性守卫：以 `src/version.js` 作为当前发布版本单一来源，并用测试校验 README、`/api/health` 和 Agent health 输出一致 |
 | V0.50 | 历史版本 | 发布就绪检查 CLI：`release-readiness` 基于 `/api/health` 输出 sanitized readiness report，并用退出码 0/2/1 区分 ready、not ready 和请求错误 |
-| V0.51 | 当前版本 | 发布就绪网页控制台：新增 GET `/api/release-readiness` 与 `release-health-panel` 内的 release readiness panel，手动检查发布就绪状态 |
+| V0.51 | 历史版本 | 发布就绪网页控制台：新增 GET `/api/release-readiness` 与 `release-health-panel` 内的 release readiness panel，手动检查发布就绪状态 |
+| V0.52 | 当前版本 | Gold readiness Web panel：新增 GET `/api/gold-readiness` 与 `gold-readiness-panel`，展示 Gold readiness scorecard docs、capability/blocker 评分卡和 Gold blockers |
 
 ## 特性
 
@@ -109,6 +110,7 @@
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
 - **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
+- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard，明确 `security-auth`、`real-nas-remote-backup`、`production-hardening` 仍为 Gold blockers
 
 ## 快速开始
 
@@ -168,7 +170,7 @@ node src/agent.js health --server http://localhost:3000
 
 # release-readiness：发布就绪检查 CLI（只读 GET /api/health，输出 sanitized JSON）
 node src/agent.js release-readiness --server http://localhost:3000
-node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.51
+node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.52
 ```
 
 ### run-once
@@ -735,7 +737,7 @@ V0.45 为设备列表的设备筛选计数（`device-filter-count`）增加只�
 V0.46 实现了发布健康检查端点 `/api/health`。
 
 - 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
-- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.51"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.52"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
 - 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
 
 ### 发布健康检查安全边界
@@ -806,7 +808,7 @@ V0.50 新增发布就绪检查命令 `agent.js release-readiness`。
 - **命令示例**：
   ```bash
   node src/agent.js release-readiness --server http://localhost:3000
-  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.51
+  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.52
   ```
 - **说明**：此命令执行一次只读 `GET /api/health`，根据固定 health schema、`status`、`service`、版本号、`checks.http`、`checks.dataDirReadable` 和 `timestamp` 生成 sanitized readiness report。
 - **版本期望**：默认使用当前 `LINKE_RELEASE_VERSION`；滚动更新或外部部署检查可通过 `--expected-version` 显式指定期望版本。
@@ -843,6 +845,29 @@ V0.51 新增只读 GET /api/release-readiness 端点，并在 Web Console 的 `r
 - **不连接 NAS**：不建立真实 NAS 连接，不调用 NAS app。
 - **不执行远程命令**：不执行任何本地或远程命令。
 - **不触发备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照。
+
+### Gold readiness scorecard API 与 Web Console 面板
+
+V0.52 新增只读 GET /api/gold-readiness 端点，并在 Web Console 增加 `gold-readiness-panel`。
+
+- **API 说明**：GET /api/gold-readiness 返回静态 code-owned、人工维护的 scorecard，包含 `status`、`version`、`generatedAt`、`summary` 与 `items`；`generatedAt` 仅表示报告生成时间，不代表实时检查时间。
+- **面板说明**：Gold readiness Web panel 只在用户点击“检查 Gold”时手动请求 GET /api/gold-readiness，展示 ready / partial / blocked / total 计数、每个 capability/blocker 项、证据与下一步。
+- **与 release-readiness 的区别**：`release-readiness` 是 runtime/version gate，用于检查当前运行服务、版本和发布就绪信号；`gold-readiness` 是 capability/blocker scorecard，用于评估完整 Gold 软件发布目标。即使 release-readiness healthy / passing / ok，Gold readiness 也可以因为未实现关键能力而保持 blocked。
+- **Gold blockers**：V0.52 明确 `security-auth`、`real-nas-remote-backup`、`production-hardening` 仍为 blocked。
+- **静态维护规则**：scorecard 的 item list 为静态 code-owned、人工维护清单；每次版本新增能力、变更 ready/partial/blocked 状态、修改 README/API claim 或调整 Gold blocker set 时，必须同步维护该静态清单和测试证据。
+
+### Gold readiness 安全边界
+
+Gold readiness scorecard 具备以下安全保证：
+- **只读**：仅手动 GET `/api/gold-readiness`。
+- **非实时自动检查**：该接口不扫描证据文件、不运行测试、不探测 NAS/auth/生产环境，只返回版本代码维护的 blocker 清单。
+- **无启动请求**：控制台初始化时不请求 `/api/gold-readiness`。
+- **不自动轮询**：不会定时轮询或自动重试。
+- **不写入任何元数据**：不会写入 metadata、设备数据、快照数据或本地配置。
+- **不建立真实 NAS 连接**：不会连接 Synology、Ugreen 或其他 NAS，也不会调用 NAS app。
+- **不执行备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照、不执行真实 NAS 远程备份。
+- **不包含身份验证实现**：V0.52 仍无 auth / authentication / authorization；`security-auth` 是 blocked。
+- **不承诺生产级能力**：该面板不包含生产部署、生产级认证、审计、secret management、监控或 recovery supervisor；不得将当前版本用于生产场景。
 
 ### Web Console 设备筛选摘要状态
 
@@ -1078,6 +1103,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 | GET    | /api/devices/:deviceId/retention-dry-run    | 快照保留 dry-run   |
 | GET    | /api/health                                 | 发布健康检查       |
 | GET    | /api/release-readiness                      | 发布就绪检查       |
+| GET    | /api/gold-readiness                         | Gold readiness scorecard |
 | POST   | /api/heartbeat                              | 记录心跳           |
 | POST   | /api/backups                                | 创建备份快照       |
 | POST   | /api/nas-dry-run                            | NAS 预检 dry-run   |
@@ -1089,7 +1115,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel。
 
 ## 技术约束
 

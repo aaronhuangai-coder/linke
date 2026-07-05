@@ -19,6 +19,7 @@ import { runBackupPreflightDryRun } from './backup-preflight.js';
 import { buildNasDryRunPlan } from './nas.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
+import { buildGoldReadinessReport } from './gold-readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -118,6 +119,11 @@ export function createServer({ dataDir, backupHooks } = {}) {
         const checkedAt = new Date();
         const health = buildHealthResponse({ dataDirReadable, now: checkedAt });
         return sendJSON(res, 200, buildReleaseReadinessReport(health, { now: checkedAt }));
+      }
+
+      // GET /api/gold-readiness
+      if (method === 'GET' && pathname === '/api/gold-readiness') {
+        return sendJSON(res, 200, buildGoldReadinessReport());
       }
 
       // POST /api/heartbeat

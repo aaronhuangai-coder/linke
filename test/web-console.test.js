@@ -36,6 +36,7 @@ import {
   parseNasDryRunConfig,
   buildDeviceFilterCountState,
   buildReleaseHealthViewModel,
+  buildGoldReadinessViewModel,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -1345,6 +1346,62 @@ describe('Web Console / API contract', () => {
     assert.ok(css.includes('.release-readiness-panel[data-status="ready"]') || css.includes('[data-status="ready"]'), 'styles.css must contain ready status styling');
     assert.ok(css.includes('[data-status="not-ready"]'), 'styles.css must contain not-ready status styling');
     assert.ok(css.includes('[data-status="error"]'), 'styles.css must contain error status styling');
+  });
+
+  // ── V0.52 Gold readiness HTML/source contract ───────────────────
+
+  it('HTML contains V0.52 gold readiness panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="gold-readiness-panel"'), 'must have gold-readiness-panel');
+    assert.ok(html.includes('data-testid="gold-readiness-refresh"'), 'must have gold-readiness-refresh');
+    assert.ok(html.includes('data-testid="gold-readiness-status"'), 'must have gold-readiness-status');
+    assert.ok(html.includes('data-testid="gold-readiness-ready-count"'), 'must have gold-readiness-ready-count');
+    assert.ok(html.includes('data-testid="gold-readiness-partial-count"'), 'must have gold-readiness-partial-count');
+    assert.ok(html.includes('data-testid="gold-readiness-blocked-count"'), 'must have gold-readiness-blocked-count');
+    assert.ok(html.includes('data-testid="gold-readiness-total-count"'), 'must have gold-readiness-total-count');
+    assert.ok(html.includes('data-testid="gold-readiness-list"'), 'must have gold-readiness-list');
+    assert.ok(html.includes('data-testid="gold-readiness-message"'), 'must have gold-readiness-message');
+    assert.ok(html.includes('data-testid="gold-readiness-safety-note"'), 'must have gold-readiness-safety-note');
+  });
+
+  it('V0.52 gold readiness safety note documents boundaries and avoids overclaims', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="gold-readiness-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'gold-readiness-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(/只读|read-only/i.test(content), 'must mention read-only behavior');
+    assert.ok(content.includes('GET /api/gold-readiness'), 'must mention GET /api/gold-readiness');
+    assert.ok(/无启动请求|不触发启动请求|no startup/i.test(content), 'must mention no startup request');
+    assert.ok(/不自动轮询|no polling|no auto/i.test(content), 'must mention no auto polling');
+    assert.ok(/不连接\s*NAS|no NAS connection/i.test(content), 'must mention no NAS connection');
+    assert.ok(/不执行.*备份|不执行.*恢复|no backup|no restore/i.test(content), 'must mention no backup/restore execution');
+    assert.ok(/不写入\s*metadata|不写入\s*元数据|no metadata/i.test(content), 'must mention no metadata writes');
+    assert.ok(/不声明.*生产|no production-readiness claim|not production ready/i.test(content), 'must avoid production readiness claim');
+    assert.ok(!/生产可用|production ready/i.test(content), 'must not claim production ready');
+    assert.ok(!/执行.*NAS.*备份|real NAS backup/i.test(content), 'must not claim real NAS backup execution');
+  });
+
+  it('app.js wires gold readiness rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/gold-readiness'), 'app.js must reference /api/gold-readiness');
+    assert.ok(js.includes('gold-readiness-refresh'), 'app.js must reference gold-readiness-refresh');
+    assert.ok(js.includes('buildGoldReadinessViewModel'), 'app.js must reference buildGoldReadinessViewModel');
+  });
+
+  it('styles.css contains V0.52 gold readiness status selectors', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.gold-readiness-panel[data-status="ready"]'), 'styles.css must contain ready status styling');
+    assert.ok(css.includes('.gold-readiness-panel[data-status="partial"]'), 'styles.css must contain partial status styling');
+    assert.ok(css.includes('.gold-readiness-panel[data-status="blocked"]'), 'styles.css must contain blocked status styling');
+    assert.ok(css.includes('.gold-readiness-panel[data-status="error"]'), 'styles.css must contain error status styling');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -6534,6 +6591,110 @@ describe('Release readiness pure functions', () => {
   });
 });
 
+describe('Gold readiness pure functions', () => {
+  it('buildGoldReadinessViewModel handles unknown input', () => {
+    const result = buildGoldReadinessViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.readyCountText, '—');
+    assert.strictEqual(result.partialCountText, '—');
+    assert.strictEqual(result.blockedCountText, '—');
+    assert.strictEqual(result.totalCountText, '—');
+    assert.strictEqual(result.generatedAtText, '—');
+    assert.deepStrictEqual(result.items, []);
+    assert.ok(result.messageText.includes('/api/gold-readiness'));
+  });
+
+  it('buildGoldReadinessViewModel formats ready status', () => {
+    const result = buildGoldReadinessViewModel({
+      status: 'ready',
+      version: LINKE_RELEASE_VERSION,
+      generatedAt: '2026-07-06T12:00:00Z',
+      summary: { ready: 9, partial: 0, blocked: 0, total: 9 },
+      items: [
+        {
+          id: 'release-readiness',
+          area: 'release',
+          label: '发布就绪检查',
+          status: 'ready',
+          evidence: ['GET /api/release-readiness'],
+          nextStep: '保持覆盖',
+        },
+      ],
+    });
+
+    assert.strictEqual(result.statusKey, 'ready');
+    assert.strictEqual(result.statusText, '已就绪');
+    assert.strictEqual(result.readyCountText, '9');
+    assert.strictEqual(result.partialCountText, '0');
+    assert.strictEqual(result.blockedCountText, '0');
+    assert.strictEqual(result.totalCountText, '9');
+    assert.strictEqual(result.generatedAtText, '2026-07-06T12:00:00Z');
+    assert.strictEqual(result.items[0].id, 'release-readiness');
+    assert.strictEqual(result.items[0].statusText, '已就绪');
+  });
+
+  it('buildGoldReadinessViewModel formats partial status', () => {
+    const result = buildGoldReadinessViewModel({
+      status: 'partial',
+      generatedAt: '2026-07-06T12:00:00Z',
+      summary: { ready: 7, partial: 2, blocked: 0, total: 9 },
+      items: [],
+    });
+
+    assert.strictEqual(result.statusKey, 'partial');
+    assert.strictEqual(result.statusText, '部分就绪');
+    assert.strictEqual(result.readyCountText, '7');
+    assert.strictEqual(result.partialCountText, '2');
+    assert.strictEqual(result.blockedCountText, '0');
+    assert.strictEqual(result.totalCountText, '9');
+    assert.ok(result.messageText.includes('部分'));
+  });
+
+  it('buildGoldReadinessViewModel formats blocked status and item evidence', () => {
+    const result = buildGoldReadinessViewModel({
+      status: 'blocked',
+      generatedAt: '2026-07-06T12:00:00Z',
+      summary: { ready: 4, partial: 2, blocked: 3, total: 9 },
+      items: [
+        {
+          id: 'security-auth',
+          area: 'security',
+          label: '认证与授权',
+          status: 'blocked',
+          evidence: ['README', 'test/readme.test.js'],
+          nextStep: '实现认证与授权',
+        },
+      ],
+    });
+
+    assert.strictEqual(result.statusKey, 'blocked');
+    assert.strictEqual(result.statusText, '阻塞');
+    assert.strictEqual(result.readyCountText, '4');
+    assert.strictEqual(result.partialCountText, '2');
+    assert.strictEqual(result.blockedCountText, '3');
+    assert.strictEqual(result.totalCountText, '9');
+    assert.strictEqual(result.items[0].statusText, '阻塞');
+    assert.ok(result.items[0].evidenceText.includes('test/readme.test.js'));
+    assert.ok(result.messageText.includes('阻塞'));
+  });
+
+  it('buildGoldReadinessViewModel formats error status', () => {
+    const result = buildGoldReadinessViewModel(null, 'HTTP 500');
+
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.strictEqual(result.readyCountText, '—');
+    assert.strictEqual(result.partialCountText, '—');
+    assert.strictEqual(result.blockedCountText, '—');
+    assert.strictEqual(result.totalCountText, '—');
+    assert.strictEqual(result.generatedAtText, '—');
+    assert.deepStrictEqual(result.items, []);
+    assert.ok(result.messageText.includes('HTTP 500'));
+  });
+});
+
 describe('DOM test: release readiness panel interactions', () => {
   it('does not request /api/release-readiness on initialization', async () => {
     const doc = buildMockDoc();
@@ -6773,5 +6934,197 @@ describe('DOM test: release readiness panel interactions', () => {
     resolveRequest();
     await firstClick;
     await secondClick;
+  });
+});
+
+describe('DOM test: gold readiness panel interactions', () => {
+  it('does not request /api/gold-readiness on initialization', async () => {
+    const doc = buildMockDoc();
+    let goldFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/gold-readiness')) goldFetchCount++;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(goldFetchCount, 0, 'should not call /api/gold-readiness on init');
+  });
+
+  it('requests /api/gold-readiness only once and renders blocked status when refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let goldFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/gold-readiness')) {
+        goldFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'blocked',
+            version: LINKE_RELEASE_VERSION,
+            generatedAt: '2026-07-06T12:00:00Z',
+            summary: { ready: 4, partial: 2, blocked: 3, total: 9 },
+            items: [
+              {
+                id: 'security-auth',
+                area: 'security',
+                label: '认证与授权',
+                status: 'blocked',
+                evidence: ['README', 'test/readme.test.js'],
+                nextStep: '实现认证与授权',
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="gold-readiness-refresh"]');
+    const panel = doc.querySelector('[data-testid="gold-readiness-panel"]');
+    const statusEl = doc.querySelector('[data-testid="gold-readiness-status"]');
+    const readyEl = doc.querySelector('[data-testid="gold-readiness-ready-count"]');
+    const partialEl = doc.querySelector('[data-testid="gold-readiness-partial-count"]');
+    const blockedEl = doc.querySelector('[data-testid="gold-readiness-blocked-count"]');
+    const totalEl = doc.querySelector('[data-testid="gold-readiness-total-count"]');
+    const messageEl = doc.querySelector('[data-testid="gold-readiness-message"]');
+
+    assert.ok(refreshBtn, 'gold readiness refresh button must exist');
+    assert.ok(panel, 'gold readiness panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(goldFetchCount, 1, 'should request /api/gold-readiness exactly once');
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'blocked');
+    assert.strictEqual(statusEl.textContent, '阻塞');
+    assert.strictEqual(readyEl.textContent, '4');
+    assert.strictEqual(partialEl.textContent, '2');
+    assert.strictEqual(blockedEl.textContent, '3');
+    assert.strictEqual(totalEl.textContent, '9');
+    assert.ok(messageEl.textContent.includes('阻塞'));
+  });
+
+  it('renders blocked gold readiness item rows with evidence and next step', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/gold-readiness')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'blocked',
+            version: LINKE_RELEASE_VERSION,
+            generatedAt: '2026-07-06T12:00:00Z',
+            summary: { ready: 4, partial: 2, blocked: 3, total: 9 },
+            items: [
+              {
+                id: 'real-nas-remote-backup',
+                area: 'nas',
+                label: '真实 NAS 远程备份',
+                status: 'blocked',
+                evidence: ['test/nas-dry-run.test.js'],
+                nextStep: '实现真实 NAS 连接与远程备份',
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="gold-readiness-refresh"]');
+    const listEl = doc.querySelector('[data-testid="gold-readiness-list"]');
+    await refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(listEl.children.length, 1);
+    assert.strictEqual(listEl.children[0]._attrs['data-testid'], 'gold-readiness-item');
+    assert.strictEqual(listEl.children[0]._attrs['data-status'], 'blocked');
+    assert.ok(listEl.children[0].textContent.includes('real-nas-remote-backup'));
+    assert.ok(listEl.children[0].textContent.includes('test/nas-dry-run.test.js'));
+    assert.ok(listEl.children[0].textContent.includes('真实 NAS'));
+  });
+
+  it('does not start a second gold-readiness request while one is in flight', async () => {
+    const doc = buildMockDoc();
+    let goldFetchCount = 0;
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/gold-readiness')) {
+        goldFetchCount++;
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'blocked',
+            version: LINKE_RELEASE_VERSION,
+            generatedAt: '2026-07-06T12:00:00Z',
+            summary: { ready: 4, partial: 2, blocked: 3, total: 9 },
+            items: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="gold-readiness-refresh"]');
+    const firstClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+    const secondClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.strictEqual(goldFetchCount, 1, 'in-flight guard must block duplicate gold-readiness fetches');
+
+    resolveRequest();
+    await firstClick;
+    await secondClick;
+  });
+
+  it('renders error on non-2xx response from gold-readiness', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/gold-readiness')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'HTTP 500' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="gold-readiness-refresh"]');
+    const panel = doc.querySelector('[data-testid="gold-readiness-panel"]');
+    const statusEl = doc.querySelector('[data-testid="gold-readiness-status"]');
+    const messageEl = doc.querySelector('[data-testid="gold-readiness-message"]');
+
+    await refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
+    assert.strictEqual(statusEl.textContent, '检查失败');
+    assert.ok(messageEl.textContent.includes('失败') || messageEl.textContent.includes('500'));
   });
 });

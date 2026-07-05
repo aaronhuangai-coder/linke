@@ -1741,3 +1741,75 @@ ul {
   font-size: 0.78rem;
   line-height: 1.45;
 }
+
+.gold-readiness-panel[data-status="ready"] {
+  border-top: 3px solid #15803d;
+}
+
+.gold-readiness-panel[data-status="partial"] {
+  border-top: 3px solid #ca8a04;
+}
+
+.gold-readiness-panel[data-status="blocked"] {
+  border-top: 3px solid #b91c1c;
+}
+
+.gold-readiness-panel[data-status="error"] {
+  border-top: 3px solid #991b1b;
+}
+
+.gold-readiness-grid {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.gold-readiness-grid dt {
+  color: #6b7280;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.gold-readiness-grid dd {
+  color: #111827;
+  font-size: 0.82rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.gold-readiness-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.gold-readiness-item,
+.gold-readiness-list .placeholder {
+  padding: 7px 9px;
+  border-left: 3px solid #d1d5db;
+  color: #374151;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.gold-readiness-item--ready {
+  border-left-color: #15803d;
+}
+
+.gold-readiness-item--partial {
+  border-left-color: #ca8a04;
+}
+
+.gold-readiness-item--blocked {
+  border-left-color: #b91c1c;
+}
+
+.gold-readiness-message,
+.gold-readiness-safety-note {
+  color: #6b7280;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}

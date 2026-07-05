@@ -40,7 +40,6 @@ describe('Release health response', () => {
     });
   });
 });
-
 describe('GET /api/health', () => {
   let server, dataDir, port;
 
@@ -141,6 +140,46 @@ describe('GET /api/release-readiness', () => {
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
       const res = await fetch(`http://localhost:${port}/api/release-readiness`, { method });
       assert.strictEqual(res.status, 404, `${method} /api/release-readiness must return 404`);
+      assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
+    }
+  });
+});
+
+describe('GET /api/gold-readiness', () => {
+  let server, dataDir, port;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'linke-gold-readiness-'));
+    server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    port = server.address().port;
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('returns 200 JSON gold readiness data and does not mutate dataDir', async () => {
+    assert.deepStrictEqual(await readdir(dataDir), []);
+    const res = await fetch(`http://localhost:${port}/api/gold-readiness`);
+    assert.strictEqual(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /application\/json/);
+    const body = await res.json();
+    assert.strictEqual(body.version, 'V0.52');
+    assert.strictEqual(body.status, 'blocked');
+    assert.deepStrictEqual(body.summary, { ready: 4, partial: 2, blocked: 3, total: 9 });
+    assert.ok(Number.isFinite(Date.parse(body.generatedAt)));
+    assert.strictEqual(Array.isArray(body.items), true);
+    assert.strictEqual(body.items.length, 9);
+    assert.ok(!JSON.stringify(body).includes(dataDir));
+    assert.deepStrictEqual(await readdir(dataDir), []);
+  });
+
+  it('does not implement mutating methods for /api/gold-readiness', async () => {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      const res = await fetch(`http://localhost:${port}/api/gold-readiness`, { method });
+      assert.strictEqual(res.status, 404, `${method} /api/gold-readiness must return 404`);
       assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
     }
   });

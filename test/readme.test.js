@@ -226,6 +226,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.51/, 'V0.51');
   });
 
+  it('mentions V0.52 (Gold readiness scorecard docs)', () => {
+    assertReadmeContains(/V0\.52/, 'V0.52');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1013,13 +1017,16 @@ describe('README — V0.5 description accuracy', () => {
 });
 
 describe('README — V0.51 release readiness Web panel', () => {
-  it('title and badge claim V0.51 as current', () => {
-    assert.match(readme, /^# Linke V0\.51/m);
-    assert.match(readme, /当前版本：V0\.51/);
+  it('title no longer claims V0.51 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.51/m);
   });
 
-  it('version table has V0.51 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.51 \| 当前版本 \|[^|]*(发布就绪网页控制台|release readiness web panel|release readiness panel)/i);
+  it('version badge no longer says 当前版本：V0.51', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.51/);
+  });
+
+  it('version table has V0.51 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.51 \| 历史版本 \|[^|]*(发布就绪网页控制台|release readiness web panel|release readiness panel)/i);
   });
 
   it('version table has V0.50 row with 历史版本 milestone', () => {
@@ -1226,5 +1233,50 @@ describe('README — V0.50 release readiness CLI', () => {
 
   it('version table has V0.50 row with 历史版本 milestone', () => {
     assert.match(readme, /\| V0\.50 \| 历史版本 \|[^|]*(发布就绪|release readiness)/i);
+  });
+});
+
+describe('README — V0.52 Gold readiness scorecard docs', () => {
+  it('title and badge claim V0.52 as current', () => {
+    assert.match(readme, /^# Linke V0\.52/m);
+    assert.match(readme, /当前版本：V0\.52/);
+  });
+
+  it('version table has V0.52 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.52 \| 当前版本 \|[^|]*(Gold readiness scorecard docs|Gold readiness Web panel|gold-readiness-panel)/i);
+  });
+
+  it('version table has V0.51 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.51 \| 历史版本 \|[^|]*(发布就绪网页控制台|release readiness web panel|release readiness panel)/i);
+  });
+
+  it('documents the gold-readiness API endpoint and Web Console gold-readiness panel', () => {
+    assert.match(readme, /GET\s+\/api\/gold-readiness/);
+    assert.match(readme, /gold-readiness-panel|Gold readiness Web panel/i);
+  });
+
+  it('documents Gold blockers', () => {
+    assert.match(readme, /security-auth/);
+    assert.match(readme, /real-nas-remote-backup/);
+    assert.match(readme, /production-hardening/);
+  });
+
+  it('asserts release-readiness is distinct from gold-readiness (runtime/version gate vs capability/blocker scorecard)', () => {
+    assert.match(readme, /(release-readiness|release readiness).*(gold-readiness|gold readiness)|(gold-readiness|gold readiness).*(release-readiness|release readiness)/i);
+    assert.match(readme, /runtime|version gate|运行|版本/i);
+    assert.match(readme, /capability|blocker|scorecard|评估|卡点|指标|看板/i);
+  });
+
+  it('documents static code-owned scorecard maintenance rule or static item list maintenance', () => {
+    assert.match(readme, /static|code-owned|scorecard|maintenance|静态|代码所有|维护/i);
+  });
+
+  it('asserts safety docs / disclaimers for Gold readiness', () => {
+    // no production readiness claim
+    assert.match(readme, /no.*production.*ready|不(承诺|包含).*生产/i);
+    // no real NAS connection
+    assert.match(readme, /不(建立|连接).*真实.*NAS|no.*real.*NAS/i);
+    // no authentication/authorization implementation claim
+    assert.match(readme, /不(包含|实现).*身份验证|无.*(权限|认证)|no.*auth/i);
   });
 });

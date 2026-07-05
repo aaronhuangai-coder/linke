@@ -217,6 +217,89 @@ export function buildReleaseReadinessViewModel(payload, errorMessage = '') {
   };
 }
 
+function formatGoldStatusText(status) {
+  if (status === 'ready') return '已就绪';
+  if (status === 'partial') return '部分就绪';
+  if (status === 'blocked') return '阻塞';
+  return '未检查';
+}
+
+function formatGoldItemStatusText(status) {
+  if (status === 'ready') return '已就绪';
+  if (status === 'partial') return '部分就绪';
+  if (status === 'blocked') return '阻塞';
+  return '未知';
+}
+
+function formatGoldCount(value) {
+  return Number.isFinite(value) ? String(value) : '—';
+}
+
+function formatGoldEvidence(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || '')).filter(Boolean).join(', ')
+    : '';
+}
+
+export function buildGoldReadinessViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      readyCountText: '—',
+      partialCountText: '—',
+      blockedCountText: '—',
+      totalCountText: '—',
+      generatedAtText: '—',
+      items: [],
+      messageText: 'Gold 就绪检查失败: ' + errorMessage,
+    };
+  }
+
+  if (!payload || typeof payload !== 'object' || !['ready', 'partial', 'blocked'].includes(payload.status)) {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      readyCountText: '—',
+      partialCountText: '—',
+      blockedCountText: '—',
+      totalCountText: '—',
+      generatedAtText: '—',
+      items: [],
+      messageText: '点击检查 Gold 获取 /api/gold-readiness',
+    };
+  }
+
+  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : {};
+  const items = Array.isArray(payload.items)
+    ? payload.items.map((item) => ({
+      id: String(item?.id || 'unknown'),
+      area: String(item?.area || 'unknown'),
+      label: String(item?.label || item?.id || 'unknown'),
+      status: ['ready', 'partial', 'blocked'].includes(item?.status) ? item.status : 'unknown',
+      statusText: formatGoldItemStatusText(item?.status),
+      evidenceText: formatGoldEvidence(item?.evidence),
+      nextStep: String(item?.nextStep || '—'),
+    }))
+    : [];
+
+  return {
+    statusKey: payload.status,
+    statusText: formatGoldStatusText(payload.status),
+    readyCountText: formatGoldCount(summary.ready),
+    partialCountText: formatGoldCount(summary.partial),
+    blockedCountText: formatGoldCount(summary.blocked),
+    totalCountText: formatGoldCount(summary.total),
+    generatedAtText: String(payload.generatedAt || '—'),
+    items,
+    messageText: payload.status === 'blocked'
+      ? 'GET /api/gold-readiness 成功，Gold 仍有阻塞项'
+      : (payload.status === 'partial'
+        ? 'GET /api/gold-readiness 成功，Gold 部分就绪'
+        : 'GET /api/gold-readiness 成功，Gold 已就绪'),
+  };
+}
+
 // ── V0.17 Backup Job Overview ──────────────────────────────────────
 
 function normalizeBackupJobName(value) {
@@ -985,6 +1068,16 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const releaseReadinessChecklistEl = doc.getElementById('release-readiness-checklist');
   const releaseReadinessMessageEl = doc.getElementById('release-readiness-message');
   const releaseReadinessRefreshButton = doc.getElementById('release-readiness-refresh');
+  const goldReadinessPanelEl = doc.getElementById('gold-readiness-panel');
+  const goldReadinessStatusEl = doc.getElementById('gold-readiness-status');
+  const goldReadinessReadyCountEl = doc.getElementById('gold-readiness-ready-count');
+  const goldReadinessPartialCountEl = doc.getElementById('gold-readiness-partial-count');
+  const goldReadinessBlockedCountEl = doc.getElementById('gold-readiness-blocked-count');
+  const goldReadinessTotalCountEl = doc.getElementById('gold-readiness-total-count');
+  const goldReadinessGeneratedAtEl = doc.getElementById('gold-readiness-generated-at');
+  const goldReadinessListEl = doc.getElementById('gold-readiness-list');
+  const goldReadinessMessageEl = doc.getElementById('gold-readiness-message');
+  const goldReadinessRefreshButton = doc.getElementById('gold-readiness-refresh');
 
   const deviceListEl = doc.getElementById('device-list');
   const deviceDetailContentEl = doc.getElementById('device-detail-content');
@@ -2708,6 +2801,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   let releaseHealthInFlight = false;
   let releaseReadinessInFlight = false;
+  let goldReadinessInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
@@ -2843,14 +2937,101 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderGoldReadinessList(items) {
+    clearElement(goldReadinessListEl);
+    if (!goldReadinessListEl) return;
+
+    const safeItems = Array.isArray(items) ? items : [];
+    if (safeItems.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '尚未检查';
+      if (typeof goldReadinessListEl.appendChild === 'function') {
+        goldReadinessListEl.appendChild(item);
+      }
+      return;
+    }
+
+    safeItems.forEach(function (entry) {
+      const item = doc.createElement('li');
+      item.className = 'gold-readiness-item gold-readiness-item--' + entry.status;
+      item.setAttribute('data-testid', 'gold-readiness-item');
+      item.setAttribute('data-status', entry.status);
+      item.setAttribute('data-item-id', entry.id);
+      item.textContent = entry.id + ' · ' + entry.statusText + ' · ' + entry.label
+        + ' · evidence: ' + entry.evidenceText
+        + ' · next: ' + entry.nextStep;
+      if (typeof goldReadinessListEl.appendChild === 'function') {
+        goldReadinessListEl.appendChild(item);
+      }
+    });
+  }
+
+  function renderGoldReadiness(viewModel) {
+    const state = viewModel || buildGoldReadinessViewModel(null);
+    if (goldReadinessPanelEl?.setAttribute) {
+      goldReadinessPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (goldReadinessStatusEl) goldReadinessStatusEl.textContent = state.statusText;
+    if (goldReadinessReadyCountEl) goldReadinessReadyCountEl.textContent = state.readyCountText;
+    if (goldReadinessPartialCountEl) goldReadinessPartialCountEl.textContent = state.partialCountText;
+    if (goldReadinessBlockedCountEl) goldReadinessBlockedCountEl.textContent = state.blockedCountText;
+    if (goldReadinessTotalCountEl) goldReadinessTotalCountEl.textContent = state.totalCountText;
+    if (goldReadinessGeneratedAtEl) goldReadinessGeneratedAtEl.textContent = state.generatedAtText;
+    if (goldReadinessMessageEl) goldReadinessMessageEl.textContent = state.messageText;
+    renderGoldReadinessList(state.items);
+  }
+
+  function setGoldReadinessRefreshBusy(busy) {
+    if (!goldReadinessRefreshButton) return;
+    goldReadinessRefreshButton.disabled = Boolean(busy);
+    if (goldReadinessRefreshButton.setAttribute) {
+      goldReadinessRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchGoldReadiness() {
+    if (goldReadinessInFlight) return;
+    goldReadinessInFlight = true;
+    setGoldReadinessRefreshBusy(true);
+    try {
+      const res = await fetchImpl('/api/gold-readiness');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderGoldReadiness(buildGoldReadinessViewModel(payload));
+      logEvent('已刷新 Gold 就绪评分卡', 'info');
+    } catch (err) {
+      renderGoldReadiness(buildGoldReadinessViewModel(null, err.message));
+      logEvent('Gold 就绪评分卡检查失败: ' + err.message, 'error');
+    } finally {
+      goldReadinessInFlight = false;
+      setGoldReadinessRefreshBusy(false);
+    }
+  }
+
   renderReleaseHealth(buildReleaseHealthViewModel(null));
   renderReleaseReadiness(buildReleaseReadinessViewModel(null));
+  renderGoldReadiness(buildGoldReadinessViewModel(null));
 
   if (releaseHealthRefreshButton?.addEventListener) {
     releaseHealthRefreshButton.addEventListener('click', fetchReleaseHealth);
   }
   if (releaseReadinessRefreshButton?.addEventListener) {
     releaseReadinessRefreshButton.addEventListener('click', fetchReleaseReadiness);
+  }
+  if (goldReadinessRefreshButton?.addEventListener) {
+    goldReadinessRefreshButton.addEventListener('click', fetchGoldReadiness);
   }
 
   logEvent('Linke 控制台已启动', 'info');
