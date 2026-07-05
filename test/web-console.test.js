@@ -3514,11 +3514,11 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
 
     const covGap0 = groups[0].querySelector('[data-testid="version-consistency-coverage-gap"]');
     assert.ok(covGap0);
-    assert.strictEqual(covGap0.textContent, '覆盖 2 / 2');
+    assert.strictEqual(covGap0.textContent, '覆盖 2 / 2 · 覆盖率 100%');
 
     const covGap1 = groups[1].querySelector('[data-testid="version-consistency-coverage-gap"]');
     assert.ok(covGap1);
-    assert.strictEqual(covGap1.textContent, '覆盖 1 / 2 · 缺 Mac B');
+    assert.strictEqual(covGap1.textContent, '覆盖 1 / 2 · 覆盖率 50% · 缺 Mac B');
   });
 
   it('fetchBackupVersionConsistency excludes devices that failed to load from coverage calculation', async () => {
@@ -3893,6 +3893,94 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.ok(list.children[1].textContent.includes('documents'), 'documents (missing = 0, drifted) must be second');
     assert.ok(list.children[2].textContent.includes('configs'), 'configs (missing = 0, synced) must be third');
     assert.strictEqual(calls.length, initialCallCount, 'sorting must not refetch snapshots');
+  });
+
+  it('V0.30 DOM test: coverage row shows coverage ratio percentage and handles expectedDeviceCount 0', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', status: 'online', snapshotCount: 1 },
+      { deviceId: 'mac-b', hostname: 'Mac B', status: 'online', snapshotCount: 1 },
+      { deviceId: 'mac-c', hostname: 'Mac C', status: 'online', snapshotCount: 1 },
+    ];
+    const snapshotsByDevice = {
+      'mac-a': [
+        {
+          snapshotId: 'a-job1',
+          jobName: 'job1-coverage-67',
+          sourcePath: '/Users/ah/job1',
+          createdAt: '2026-07-05T10:00:00.000Z',
+          fileCount: 10,
+        },
+      ],
+      'mac-b': [
+        {
+          snapshotId: 'b-job1',
+          jobName: 'job1-coverage-67',
+          sourcePath: '/Users/ah/job1',
+          createdAt: '2026-07-05T10:00:00.000Z',
+          fileCount: 10,
+        },
+      ],
+      'mac-c': [],
+    };
+
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      const match = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (match) {
+        return { ok: true, status: 200, json: async () => snapshotsByDevice[decodeURIComponent(match[1])] || [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const groups = doc._created.filter((el) => el._attrs?.['data-testid'] === 'version-consistency-item');
+    const jobGroup = groups.find((g) => g.querySelector('[data-testid="version-consistency-name"]').textContent.includes('job1-coverage-67'));
+    assert.ok(jobGroup, 'job1-coverage-67 group must be rendered');
+
+    const covGap = jobGroup.querySelector('[data-testid="version-consistency-coverage-gap"]');
+    assert.ok(covGap, 'coverage gap element must be rendered');
+
+    // 1. coverage row must show 覆盖率 67% for coveredDeviceCount 2 / expectedDeviceCount 3
+    assert.match(covGap.textContent, /覆盖率 67%/, 'coverage ratio text must contain "覆盖率 67%"');
+
+    // 2. a rendered group with expectedDeviceCount 0 must not contain 覆盖率
+    const docExcl = buildMockDoc();
+    let callCount = 0;
+    const mockFetchExcl = async (url) => {
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => [
+          { deviceId: 'mac-z', hostname: 'Mac Z' },
+          { deviceId: 'mac-z', hostname: 'Mac Z' },
+        ] };
+      }
+      if (url === '/api/devices/mac-z/snapshots') {
+        callCount++;
+        if (callCount === 1) {
+          return { ok: false, status: 500 };
+        } else {
+          return { ok: true, status: 200, json: async () => [
+            { snapshotId: 'z1', jobName: 'job-zero-expected', sourcePath: '/path-z', createdAt: '2026-07-05T10:00:00.000Z' }
+          ] };
+        }
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(docExcl, mockFetchExcl, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const groupsExcl = docExcl._created.filter((el) => el._attrs?.['data-testid'] === 'version-consistency-item');
+    const zeroGroup = groupsExcl.find((g) => g.querySelector('[data-testid="version-consistency-name"]').textContent.includes('job-zero-expected'));
+    assert.ok(zeroGroup, 'job-zero-expected group must be rendered');
+
+    const zeroCovGap = zeroGroup.querySelector('[data-testid="version-consistency-coverage-gap"]');
+    assert.ok(zeroCovGap, 'zero coverage gap element must be rendered');
+    assert.ok(!zeroCovGap.textContent.includes('覆盖率'), 'group with expectedDeviceCount 0 must not contain "覆盖率"');
   });
 });
 

@@ -1173,8 +1173,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         }
       }
 
-      coverageEl.textContent = '覆盖 ' + String(group.coveredDeviceCount) + ' / ' + String(group.expectedDeviceCount)
-        + (missingText ? ' · 缺 ' + missingText : '');
+      const expectedDeviceCount = Number(group.expectedDeviceCount) || 0;
+      const coveredDeviceCount = Number(group.coveredDeviceCount) || 0;
+      let coverageText = '覆盖 ' + String(group.coveredDeviceCount) + ' / ' + String(group.expectedDeviceCount);
+      if (expectedDeviceCount > 0) {
+        coverageText += ' · 覆盖率 ' + String(Math.round((coveredDeviceCount / expectedDeviceCount) * 100)) + '%';
+      }
+      coverageEl.textContent = coverageText + (missingText ? ' · 缺 ' + missingText : '');
       row.appendChild(coverageEl);
 
       group.devices.forEach(function (device) {

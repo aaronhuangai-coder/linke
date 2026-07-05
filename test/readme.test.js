@@ -136,24 +136,28 @@ describe('README — version coverage', () => {
   it('mentions V0.29 (version consistency coverage gap sort)', () => {
     assertReadmeContains(/V0\.29/, 'V0.29');
   });
+
+  it('mentions V0.30 (version coverage ratio display)', () => {
+    assertReadmeContains(/V0\.30/, 'V0.30');
+  });
 });
 
-// ── V0.29 documentation ────────────────────────────────────────────
+// ── V0.30 documentation ────────────────────────────────────────────
 
-describe('README — V0.29 version consistency coverage gap sort', () => {
-  it('title says V0.29', () => {
-    assert.match(readme, /^# Linke V0\.29/m);
+describe('README — V0.30 version coverage ratio display', () => {
+  it('title says V0.30', () => {
+    assert.match(readme, /^# Linke V0\.30/m);
   });
 
-  it('version badge says 当前版本：V0.29', () => {
-    assert.match(readme, /当前版本：V0\.29/);
+  it('version badge says 当前版本：V0.30', () => {
+    assert.match(readme, /当前版本：V0\.30/);
   });
 
-  it('version table has V0.29 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.29 \| 当前版本 \|[^|]*(缺口排序|覆盖缺口排序|Coverage.*Gap.*Sort)/i);
+  it('version table has V0.30 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.30 \| 当前版本 \|[^|]*(覆盖率显示|覆盖率)/i);
   });
 
-  it('version table keeps V0.22 through V0.28 as historical milestones', () => {
+  it('version table keeps V0.22 through V0.29 as historical milestones', () => {
     assert.match(readme, /\| V0\.22 \| 备份版本一致性 \|/);
     assert.match(readme, /\| V0\.23 \| 版本一致性 snapshot 联动 \|/);
     assert.match(readme, /\| V0\.24 \| 版本一致性筛选与搜索 \|/);
@@ -161,9 +165,10 @@ describe('README — V0.29 version consistency coverage gap sort', () => {
     assert.match(readme, /\| V0\.26 \| 版本一致性排序控制 \|/);
     assert.match(readme, /\| V0\.27 \| 覆盖缺口摘要 Lite \|/);
     assert.match(readme, /\| V0\.28 \| 版本一致性覆盖筛选 \|/);
+    assert.match(readme, /\| V0\.29 \| 版本一致性覆盖缺口排序 \|/);
   });
 
-  it('documents version consistency search, status, coverage filtering, and coverage gap sorting', () => {
+  it('documents version consistency search, status, coverage filtering, coverage gap sorting, and coverage ratio display', () => {
     assert.match(readme, /版本一致性.*筛选|筛选.*版本一致性/);
     assert.match(readme, /搜索.*jobName|jobName.*搜索/);
     assert.match(readme, /sourcePath/);
@@ -174,6 +179,7 @@ describe('README — V0.29 version consistency coverage gap sort', () => {
     assert.match(readme, /单设备/);
     assert.match(readme, /一致/);
     assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
+    assert.match(readme, /覆盖率显示|覆盖率/);
   });
 
   it('documents controls and summary as read-only in-memory derived view', () => {
@@ -182,13 +188,14 @@ describe('README — V0.29 version consistency coverage gap sort', () => {
     assert.match(readme, /可见.*总数|总数.*可见/);
   });
 
-  it('documents version consistency coverage filter and coverage gap sort', () => {
+  it('documents version consistency coverage filter, coverage gap sort, and coverage ratio display', () => {
     assert.match(readme, /版本一致性覆盖筛选|coverage filter|覆盖过滤/i);
     assert.match(readme, /all|gap|full/);
     assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
+    assert.match(readme, /覆盖率显示|覆盖率/);
   });
 
-  it('asserts safety docs for version consistency coverage filter and sort', () => {
+  it('asserts safety docs for version consistency coverage filter, sort, and ratio display', () => {
     assert.match(readme, /版本一致性.*安全(保证|边界)/);
     assert.match(readme, /不新增 API/);
     assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
@@ -201,21 +208,22 @@ describe('README — V0.29 version consistency coverage gap sort', () => {
     assert.match(readme, /不执行远程传输|不进行远程文件传输/);
   });
 
-  it('documents test coverage includes version consistency coverage filter and sort', () => {
+  it('documents test coverage includes version consistency coverage filter, sort, and ratio display', () => {
     assert.match(readme, /版本一致性覆盖筛选|coverage filter/i);
     assert.match(readme, /缺口排序|覆盖缺口排序|coverage.*gap.*sort/i);
+    assert.match(readme, /覆盖率显示|覆盖率/);
   });
 
-  it('asserts README contains a V0.29 coverage gap sort feature bullet', () => {
-    assert.match(readme, /-\s+\*\*版本一致性覆盖缺口排序\*\*/i);
+  it('asserts README contains a V0.30 coverage ratio display feature bullet', () => {
+    assert.match(readme, /-\s+\*\*版本一致性覆盖率显示\*\*/i);
   });
 
-  it('asserts Web Console combined feature list includes 版本一致性覆盖缺口排序', () => {
-    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性覆盖缺口排序/);
+  it('asserts Web Console combined feature list includes 版本一致性覆盖率显示', () => {
+    assert.match(readme, /Web Console\*\* — 管理界面：.*版本一致性覆盖率显示/);
   });
 
-  it('asserts testing coverage sentence includes 版本一致性覆盖缺口排序', () => {
-    assert.match(readme, /测试覆盖：.*版本一致性覆盖缺口排序/);
+  it('asserts testing coverage sentence includes 版本一致性覆盖率显示', () => {
+    assert.match(readme, /测试覆盖：.*版本一致性覆盖率显示/);
   });
 });
 
