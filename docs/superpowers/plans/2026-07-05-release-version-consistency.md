@@ -24,6 +24,7 @@ Implement Linke V0.49 release-version consistency guard so README, `/api/health`
   - `node --test test/version.test.js test/agent-health.test.js test/health.test.js test/web-console.test.js test/readme.test.js` (448/448)
   - `npm test` (607/607)
   - Real HTTP smoke on `127.0.0.1:3013`, including `/api/health` returning `version:"V0.49"`.
+- Feature commit pushed: `f834820 feat: add release version consistency guard`.
 
 ## Task 1: RED Tests
 
@@ -64,4 +65,4 @@ export const LINKE_RELEASE_VERSION = 'V0.49';
 - [x] `git diff --check`
 - [x] Qwen adversarial review for version-drift coverage and unintended behavior changes.
 - [x] ZAI closed-loop verification attempted with strict PASS/FAIL schema; both attempts failed with connection error and were not accepted as PASS evidence.
-- [ ] Commit and push.
+- [x] Commit and push.
