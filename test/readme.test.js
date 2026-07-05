@@ -196,6 +196,10 @@ describe('README — version coverage', () => {
   it('mentions V0.44 (device filter count state)', () => {
     assertReadmeContains(/V0\.44/, 'V0.44');
   });
+
+  it('mentions V0.45 (device filter count metrics)', () => {
+    assertReadmeContains(/V0\.45/, 'V0.45');
+  });
 });
 
 
@@ -609,16 +613,8 @@ describe('README — V0.43 device active filter summary state', () => {
 });
 
 describe('README — V0.44 device filter count state', () => {
-  it('title says V0.44', () => {
-    assert.match(readme, /^# Linke V0\.44/m);
-  });
-
-  it('version badge says 当前版本：V0.44', () => {
-    assert.match(readme, /当前版本：V0\.44/);
-  });
-
-  it('version table has V0.44 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.44 \| 当前版本 \|[^|]*(设备筛选计数状态|device-filter-count-state|device-filter-count)/i);
+  it('version table has V0.44 historical row', () => {
+    assert.match(readme, /\| V0\.44 \| (历史版本|设备筛选计数状态|[^|]*) \|[^|]*(设备筛选计数状态|device-filter-count-state|device-filter-count)/i);
   });
 
   it('documents device filter count state behavior and attributes', () => {
@@ -638,6 +634,45 @@ describe('README — V0.44 device filter count state', () => {
 
   it('documents testing coverage includes device filter count state', () => {
     assert.match(readme, /测试覆盖：.*设备筛选计数状态/);
+  });
+});
+
+describe('README — V0.45 device filter count metrics', () => {
+  it('title says V0.45', () => {
+    assert.match(readme, /^# Linke V0\.45/m);
+  });
+
+  it('version badge says 当前版本：V0.45', () => {
+    assert.match(readme, /当前版本：V0\.45/);
+  });
+
+  it('version table has V0.45 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.45 \| 当前版本 \|[^|]*(设备筛选计数指标|device-filter-count|data-visible-count|data-total-count)/i);
+  });
+
+  it('documents device filter count metrics behavior and attributes', () => {
+    assert.match(readme, /设备筛选计数指标|device-filter-count/);
+    assert.match(readme, /data-visible-count/);
+    assert.match(readme, /data-total-count/);
+  });
+
+  it('documents device filter count metrics in feature lists', () => {
+    assert.match(readme, /- \*\*设备筛选计数指标\*\*.*data-visible-count.*data-total-count/);
+    assert.match(readme, /\*\*Web Console\*\*.*设备筛选计数指标/);
+  });
+
+  it('asserts safety docs for device filter count metrics', () => {
+    assert.match(readme, /设备筛选计数指标.*安全(保证|边界)|安全(保证|边界).*设备筛选计数指标/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不重新请求 `?\/api\/devices`?/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+  });
+
+  it('documents testing coverage includes device filter count metrics', () => {
+    assert.match(readme, /测试覆盖：.*设备筛选计数指标/);
   });
 });
 

@@ -303,6 +303,8 @@ export function buildDeviceFilterCountState(visibleCount, totalCount) {
   return {
     text: String(visible) + ' / ' + String(total),
     filtered: total > 0 && visible < total,
+    visible,
+    total,
   };
 }
 
@@ -952,6 +954,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       deviceFilterCountEl.textContent = state.text;
       if (deviceFilterCountEl.setAttribute) {
         deviceFilterCountEl.setAttribute('data-filtered', state.filtered ? 'true' : 'false');
+        deviceFilterCountEl.setAttribute('data-visible-count', String(state.visible));
+        deviceFilterCountEl.setAttribute('data-total-count', String(state.total));
       }
     }
   }

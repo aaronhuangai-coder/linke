@@ -30,7 +30,7 @@
 **Interfaces:**
 - Produces failing expectations for `buildDeviceFilterCountState()`, static `device-filter-count` markup, DOM count transitions, and README V0.45 docs.
 
-- [ ] **Step 1: Update pure-function expectations**
+- [x] **Step 1: Update pure-function expectations**
 
 Change the existing count state test to expect normalized count metrics:
 
@@ -75,7 +75,7 @@ assert.deepStrictEqual(buildDeviceFilterCountState("foo", "bar"), {
 
 Keep the existing `(0, 0)` assertion and add the same `visible: 0, total: 0` fields to it.
 
-- [ ] **Step 2: Update static HTML test**
+- [x] **Step 2: Update static HTML test**
 
 The targeted `device-filter-count` tag must include all initial attributes:
 
@@ -86,7 +86,7 @@ assert.ok(tag.includes('data-total-count="0"'));
 assert.ok(!tag.includes('aria-live'));
 ```
 
-- [ ] **Step 3: Update DOM transition test**
+- [x] **Step 3: Update DOM transition test**
 
 Extend the existing V0.44 DOM test so each transition checks text and attributes:
 
@@ -110,7 +110,7 @@ reset after management: text 2 / 2, data-filtered false, data-visible-count 2, d
 fetchCount: 1
 ```
 
-- [ ] **Step 4: Update README V0.45 tests**
+- [x] **Step 4: Update README V0.45 tests**
 
 Add a new top-level mention test after the existing V0.44 mention test:
 
@@ -142,7 +142,7 @@ No API/refetch/metadata/NAS/remote changes
 测试覆盖：.*设备筛选计数指标
 ```
 
-- [ ] **Step 5: Verify RED**
+- [x] **Step 5: Verify RED**
 
 Run:
 
@@ -162,7 +162,7 @@ Expected: FAIL because `buildDeviceFilterCountState()` and static/rendered marku
 **Interfaces:**
 - Produces: `buildDeviceFilterCountState(visibleCount, totalCount): { text: string, filtered: boolean, visible: number, total: number }`.
 
-- [ ] **Step 1: Extend pure count state helper**
+- [x] **Step 1: Extend pure count state helper**
 
 Replace the helper return value with:
 
@@ -175,7 +175,7 @@ return {
 };
 ```
 
-- [ ] **Step 2: Extend static HTML state**
+- [x] **Step 2: Extend static HTML state**
 
 Update the count element:
 
@@ -183,7 +183,7 @@ Update the count element:
 <span class="device-filter-count" data-testid="device-filter-count" data-filtered="false" data-visible-count="0" data-total-count="0">0 / 0</span>
 ```
 
-- [ ] **Step 3: Sync metrics in render path**
+- [x] **Step 3: Sync metrics in render path**
 
 Update `renderDeviceFilterCount(visibleCount, totalCount)` so it assigns the new attributes from the state object:
 
@@ -194,11 +194,11 @@ deviceFilterCountEl.setAttribute('data-visible-count', String(state.visible));
 deviceFilterCountEl.setAttribute('data-total-count', String(state.total));
 ```
 
-- [ ] **Step 4: Update README**
+- [x] **Step 4: Update README**
 
 Move V0.44 to historical status, add V0.45 as current, and document that the feature is read-only metadata with no API, refetch, metadata, NAS, or remote side effects.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -210,34 +210,44 @@ Expected: PASS.
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run full suite**
+- [x] **Step 1: Run full suite**
 
 ```bash
 node --test --test-reporter=dot test/*.test.js
 ```
 
-- [ ] **Step 2: Run diff check**
+- [x] **Step 2: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 3: Run Qwen diff review**
+- [x] **Step 3: Run Qwen diff review**
 
 Ask Qwen to check blockers for count text drift, duplicate live-region risk, normalized metrics, reset behavior, refetch, documentation, and scope boundaries.
 
-- [ ] **Step 4: Run HTTP smoke**
+- [x] **Step 4: Run HTTP smoke**
 
 Verify `/`, `/app.js`, and `/api/devices` on a local server. `/` must contain `data-visible-count="0"` and `data-total-count="0"`, `/app.js` must contain the helper and render attributes, and `/api/devices` must return JSON.
 
-- [ ] **Step 5: Run ZAI final verifier**
+- [x] **Step 5: Run ZAI final verifier**
 
 Use a strict English evidence-only prompt. If ZAI returns tool errors, empty output, missing status fields, or `I don't have a specific response`, record `INCONCLUSIVE` and do not use it as primary acceptance evidence.
 
-- [ ] **Step 6: Commit and push**
+- [x] **Step 6: Commit and push**
 
 ```bash
 git add README.md src/web/app.js src/web/index.html test/web-console.test.js test/readme.test.js docs/superpowers/specs/2026-07-05-device-filter-count-metrics-design.md docs/superpowers/plans/2026-07-05-device-filter-count-metrics.md
 git commit -m "feat: add device filter count metrics"
 git push
 ```
+
+Verification notes:
+- PM observed RED first: `node --test test/web-console.test.js test/readme.test.js` failed because V0.45 README docs, static `data-visible-count` / `data-total-count`, helper `visible` / `total`, and rendered DOM attributes were not implemented yet.
+- AGY implemented GREEN changes in `README.md`, `src/web/app.js`, `src/web/index.html`, `test/web-console.test.js`, and `test/readme.test.js`; PM added one README feature-list assertion and corresponding README text after diff review.
+- PM target tests: `node --test test/web-console.test.js test/readme.test.js` passed with 399 tests.
+- PM full suite: `node --test --test-reporter=dot test/*.test.js` exited 0.
+- PM diff check: `git diff --check` exited 0.
+- HTTP smoke on `127.0.0.1:3010` verified `/`, `/app.js`, and `/api/devices`; smoke assertions passed for `data-visible-count`, `data-total-count`, no `aria-live` on `device-filter-count`, helper/render hooks, and JSON device array.
+- Qwen diff review returned `DONE`; only minor residual risk was an untested `visible > total` pure-helper case, which PM classified as non-blocking because the production render path derives both numbers from the same filtered device array.
+- ZAI final verifier was attempted twice. Both responses failed the required schema and returned the invalid fallback phrase, so ZAI evidence is recorded as `INCONCLUSIVE` and is not used as primary acceptance evidence.

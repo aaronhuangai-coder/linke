@@ -134,8 +134,10 @@ describe('Web Console / API contract', () => {
     const countMatch = html.match(/<span[^>]+data-testid="device-filter-count"[^>]*>/);
     assert.ok(countMatch, 'device-filter-count element must exist in HTML');
     const tag = countMatch[0];
-    assert.ok(tag.includes('data-filtered="false"'), 'device-filter-count element must start with data-filtered="false"');
-    assert.ok(!tag.includes('aria-live'), 'device-filter-count element must not contain aria-live');
+    assert.ok(tag.includes('data-filtered="false"'));
+    assert.ok(tag.includes('data-visible-count="0"'));
+    assert.ok(tag.includes('data-total-count="0"'));
+    assert.ok(!tag.includes('aria-live'));
   });
 
   it('styles.css contains .device-filter-count[data-filtered="true"] but not bare [data-filtered="true"]', async () => {
@@ -5889,41 +5891,55 @@ describe('V0.43 DOM state transition test', () => {
   });
 });
 
-describe('V0.44 device filter count state pure functions', () => {
+describe('V0.45 device filter count state pure functions', () => {
   it('buildDeviceFilterCountState returns correct text and filtered state', () => {
     assert.deepStrictEqual(buildDeviceFilterCountState(3, 3), {
       text: '3 / 3',
       filtered: false,
+      visible: 3,
+      total: 3,
     });
     assert.deepStrictEqual(buildDeviceFilterCountState(1, 3), {
       text: '1 / 3',
       filtered: true,
+      visible: 1,
+      total: 3,
     });
     assert.deepStrictEqual(buildDeviceFilterCountState(0, 0), {
       text: '0 / 0',
       filtered: false,
+      visible: 0,
+      total: 0,
     });
     // Test normalization of non-finite values
     assert.deepStrictEqual(buildDeviceFilterCountState(NaN, 3), {
       text: '0 / 3',
       filtered: true,
+      visible: 0,
+      total: 3,
     });
     assert.deepStrictEqual(buildDeviceFilterCountState(3, Infinity), {
       text: '3 / 0',
       filtered: false,
+      visible: 3,
+      total: 0,
     });
     assert.deepStrictEqual(buildDeviceFilterCountState(undefined, null), {
       text: '0 / 0',
       filtered: false,
+      visible: 0,
+      total: 0,
     });
     assert.deepStrictEqual(buildDeviceFilterCountState("foo", "bar"), {
       text: '0 / 0',
       filtered: false,
+      visible: 0,
+      total: 0,
     });
   });
 });
 
-describe('V0.44 DOM test: device filter count rendering and reset behavior', () => {
+describe('V0.45 DOM test: device filter count rendering and reset behavior', () => {
   it('updates device-filter-count text and data-filtered attribute when filters change, and resets correctly', async () => {
     const doc = buildMockDoc();
     const localDevices = [
@@ -5949,52 +5965,66 @@ describe('V0.44 DOM test: device filter count rendering and reset behavior', () 
     const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
 
     assert.ok(countEl, 'device-filter-count element must exist');
-    assert.strictEqual(countEl.textContent, '2 / 2', 'initial text should be 2 / 2');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'initial data-filtered should be false');
+    assert.strictEqual(countEl.textContent, '2 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '2');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     // 1. Set filter to narrow results
     searchInput.value = 'Beta';
     if (searchInput._listeners.input) searchInput._listeners.input();
     await new Promise((r) => setTimeout(r, 20));
 
-    assert.strictEqual(countEl.textContent, '1 / 2', 'filtered count text should update');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'data-filtered should become true');
+    assert.strictEqual(countEl.textContent, '1 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '1');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     // 2. Click the reset button
     if (resetButton._listeners.click) resetButton._listeners.click();
     await new Promise((r) => setTimeout(r, 20));
 
     // 3. Verify count and data-filtered are reset
-    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should be reset');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should be false after reset');
+    assert.strictEqual(countEl.textContent, '2 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '2');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     // 4. Status filter also narrows the count state.
     statusFilter.value = 'unknown';
     if (statusFilter._listeners.change) statusFilter._listeners.change();
     await new Promise((r) => setTimeout(r, 20));
 
-    assert.strictEqual(countEl.textContent, '0 / 2', 'status filter should update count text');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'status filter should mark data-filtered true');
+    assert.strictEqual(countEl.textContent, '0 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '0');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     if (resetButton._listeners.click) resetButton._listeners.click();
     await new Promise((r) => setTimeout(r, 20));
 
-    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should reset after status filter');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should reset after status filter');
+    assert.strictEqual(countEl.textContent, '2 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '2');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     // 5. Management filter also narrows the count state.
     managementFilter.value = 'missing-ip';
     if (managementFilter._listeners.change) managementFilter._listeners.change();
     await new Promise((r) => setTimeout(r, 20));
 
-    assert.strictEqual(countEl.textContent, '1 / 2', 'management filter should update count text');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'management filter should mark data-filtered true');
+    assert.strictEqual(countEl.textContent, '1 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '1');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     if (resetButton._listeners.click) resetButton._listeners.click();
     await new Promise((r) => setTimeout(r, 20));
 
-    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should reset after management filter');
-    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should reset after management filter');
+    assert.strictEqual(countEl.textContent, '2 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false');
+    assert.strictEqual(countEl.getAttribute('data-visible-count'), '2');
+    assert.strictEqual(countEl.getAttribute('data-total-count'), '2');
 
     // 4. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
