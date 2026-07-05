@@ -306,6 +306,17 @@ export function applyDeviceListControls(devices, controls) {
     .sort((a, b) => compareDevicesForSort(a, b, sort));
 }
 
+export function buildDeviceManagementSummaryScope(devices, controls) {
+  if (!Array.isArray(devices)) {
+    return buildDeviceManagementSummary(devices);
+  }
+  const status = controls?.status || 'all';
+  const scopedDevices = devices
+    .filter((device) => matchesDeviceSearch(device, controls?.query || ''))
+    .filter((device) => status === 'all' || normalizeDeviceStatus(device?.status) === status);
+  return buildDeviceManagementSummary(scopedDevices);
+}
+
 const DEVICE_HEALTH_LABELS = {
   healthy: '健康',
   attention: '需关注',
@@ -879,8 +890,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
 
   function renderDeviceManagementSummary(devices) {
-    const summary = buildDeviceManagementSummary(devices);
-    const activeManagement = getDeviceControls().management;
+    const controls = getDeviceControls();
+    const summary = buildDeviceManagementSummaryScope(devices, controls);
+    const activeManagement = controls.management;
     for (const bucket of deviceManagementSummaryBuckets) {
       if (!bucket.el) continue;
       bucket.el.textContent = bucket.label + ': ' + String(summary[bucket.countKey] || 0);

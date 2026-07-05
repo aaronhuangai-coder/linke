@@ -21,6 +21,7 @@ import {
   getDeviceManagementState,
   getDeviceManagementStateKey,
   buildDeviceManagementSummary,
+  buildDeviceManagementSummaryScope,
   initConsole,
   matchesDeviceSearch,
   normalizeDeviceStatus,
@@ -3379,6 +3380,73 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.strictEqual(countEl.textContent, '1 / 4');
     assert.strictEqual(fetchCount, 1, 'active state changes must not refetch /api/devices');
   });
+
+  it('DOM test: V0.37 device-management-summary counts follow search/status scope and ignore management filter changes', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5', snapshotCount: 8, lastHeartbeatAt: '2026-07-04T09:00:00Z' },
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9', snapshotCount: 0, lastHeartbeatAt: '' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const allSummary = doc.querySelector('[data-testid="device-management-summary-all"]');
+    const visibleSummary = doc.querySelector('[data-testid="device-management-summary-visible"]');
+    const missingIpSummary = doc.querySelector('[data-testid="device-management-summary-missing-ip"]');
+    const offlineRetainedSummary = doc.querySelector('[data-testid="device-management-summary-offline-retained"]');
+    const unknownSummary = doc.querySelector('[data-testid="device-management-summary-unknown"]');
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+
+    statusFilter.value = 'online';
+    statusFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.match(allSummary.textContent, /2/);
+    assert.match(visibleSummary.textContent, /1/);
+    assert.match(missingIpSummary.textContent, /1/);
+    assert.match(offlineRetainedSummary.textContent, /0/);
+    assert.match(unknownSummary.textContent, /0/);
+    assert.strictEqual(countEl.textContent, '2 / 4');
+
+    managementFilter.value = 'visible';
+    managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.match(allSummary.textContent, /2/, 'management filter must not change scoped summary total');
+    assert.match(visibleSummary.textContent, /1/, 'visible bucket stays based on search/status scope');
+    assert.match(missingIpSummary.textContent, /1/, 'missing-ip bucket remains available for switching');
+    assert.strictEqual(countEl.textContent, '1 / 4');
+
+    searchInput.value = 'Beta';
+    searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.match(allSummary.textContent, /1/);
+    assert.match(visibleSummary.textContent, /0/);
+    assert.match(missingIpSummary.textContent, /1/);
+    assert.strictEqual(countEl.textContent, '0 / 4');
+
+    missingIpSummary._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(managementFilter.value, 'missing-ip');
+    assert.match(allSummary.textContent, /1/);
+    assert.match(missingIpSummary.textContent, /1/);
+    assert.strictEqual(countEl.textContent, '1 / 4');
+    assert.strictEqual(fetchCount, 1, 'scoped summary changes must not refetch /api/devices');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -5197,5 +5265,42 @@ describe('V0.35 device management summary pure functions', () => {
       unknown: 2
     });
     assert.deepStrictEqual(devices, copy, 'should not mutate input');
+  });
+});
+
+describe('V0.37 device management summary scoped counts pure functions', () => {
+  it('applies query and status controls while ignoring management filter', () => {
+    const devices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '' },
+      { deviceId: 'ipad-3', hostname: 'Design-iPad', status: 'offline', ipAddress: '10.0.0.5' },
+      { deviceId: 'phone-4', hostname: 'TestPhone', status: '', ipAddress: '192.168.31.9' },
+    ];
+    const copy = JSON.parse(JSON.stringify(devices));
+    const summary = buildDeviceManagementSummaryScope(devices, {
+      query: 'mac',
+      status: 'online',
+      management: 'visible',
+    });
+    assert.deepStrictEqual(summary, {
+      all: 2,
+      visible: 1,
+      missingIp: 1,
+      offlineRetained: 0,
+      unknown: 0
+    });
+    assert.deepStrictEqual(devices, copy, 'should not mutate input devices');
+  });
+
+  it('returns all zeros when query/status scope has no devices', () => {
+    assert.deepStrictEqual(buildDeviceManagementSummaryScope([
+      { hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20' },
+    ], { query: 'ipad', status: 'offline', management: 'all' }), {
+      all: 0,
+      visible: 0,
+      missingIp: 0,
+      offlineRetained: 0,
+      unknown: 0
+    });
   });
 });

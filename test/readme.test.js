@@ -164,6 +164,10 @@ describe('README — version coverage', () => {
   it('mentions V0.36 (accessible active management-state summary controls)', () => {
     assertReadmeContains(/V0\.36/, 'V0.36');
   });
+
+  it('mentions V0.37 (management-state summary scoped counts)', () => {
+    assertReadmeContains(/V0\.37/, 'V0.37');
+  });
 });
 
 
@@ -295,16 +299,12 @@ describe('README — V0.35 management-state bucket summary and quick switching',
 // ── V0.36 documentation ────────────────────────────────────────────
 
 describe('README — V0.36 accessible active management-state summary controls', () => {
-  it('title says V0.36', () => {
-    assert.match(readme, /^# Linke V0\.36/m);
+  it('mentions V0.36', () => {
+    assert.match(readme, /V0\.36/);
   });
 
-  it('version badge says 当前版本：V0.36', () => {
-    assert.match(readme, /当前版本：V0\.36/);
-  });
-
-  it('version table has V0.36 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.36 \| 当前版本 \|[^|]*(active|aria|可访问|高亮|选中态)/i);
+  it('version table has V0.36 historical row', () => {
+    assert.match(readme, /\| V0\.36 \|[^|]*(active|aria|可访问|高亮|选中态)/i);
   });
 
   it('version table keeps V0.35 as historical milestone', () => {
@@ -329,6 +329,45 @@ describe('README — V0.36 accessible active management-state summary controls',
 
   it('documents testing coverage includes active summary controls', () => {
     assert.match(readme, /测试覆盖：.*管理态分桶选中态/);
+  });
+});
+
+// ── V0.37 documentation ────────────────────────────────────────────
+
+describe('README — V0.37 management-state summary scoped counts', () => {
+  it('title says V0.37', () => {
+    assert.match(readme, /^# Linke V0\.37/m);
+  });
+
+  it('version badge says 当前版本：V0.37', () => {
+    assert.match(readme, /当前版本：V0\.37/);
+  });
+
+  it('version table has V0.37 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.37 \| 当前版本 \|[^|]*(作用域|搜索|状态|scoped)/i);
+  });
+
+  it('version table keeps V0.36 as historical milestone', () => {
+    assert.match(readme, /\| V0\.36 \|[^|]*(active|aria|可访问|高亮|选中态)/i);
+  });
+
+  it('documents scoped summary count behavior', () => {
+    assert.match(readme, /搜索.*状态.*管理态分桶|管理态分桶.*搜索.*状态/);
+    assert.match(readme, /忽略当前管理态筛选|不受当前管理态筛选影响|management filter/i);
+    assert.match(readme, /不重新请求.*\/api\/devices|不触发.*\/api\/devices|no.*\/api\/devices.*refetch/i);
+  });
+
+  it('asserts safety docs for scoped summary counts', () => {
+    assert.match(readme, /管理态分桶作用域.*安全(保证|边界)|安全(保证|边界).*管理态分桶作用域/);
+    assert.match(readme, /只读/);
+    assert.match(readme, /不新增 API/);
+    assert.match(readme, /不写入(任何)?元数据|不写入(any)?metadata/);
+    assert.match(readme, /不执行(任何)?远程命令|不执行远程命令/);
+    assert.match(readme, /不连接 NAS|不建立真实 NAS 连接/);
+  });
+
+  it('documents testing coverage includes scoped summary counts', () => {
+    assert.match(readme, /测试覆盖：.*管理态分桶作用域/);
   });
 });
 
