@@ -367,14 +367,33 @@ function getVersionState(status, row, latestTime, latestFileCount) {
   return row.latestTime === latestTime && row.latestFileCount === latestFileCount ? 'latest' : 'stale';
 }
 
-export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
+export function buildBackupVersionConsistency(devices, snapshotsByDevice, options = {}) {
+  const excluded = new Set(options?.excludedCoverageDeviceIds || []);
+  const safeDevices = Array.isArray(devices) ? devices : [];
+
+  const expectedDevices = safeDevices.filter((d) => {
+    const id = normalizeDeviceText(d?.deviceId);
+    return id && id !== 'unknown' && !excluded.has(id);
+  });
+
+  const coverageDeviceCount = expectedDevices.length;
+  const coverageExcludedDeviceCount = safeDevices.filter((d) => {
+    const id = normalizeDeviceText(d?.deviceId);
+    return id && id !== 'unknown' && excluded.has(id);
+  }).length;
+
   const summary = {
     synced: 0,
     drifted: 0,
     singleDevice: 0,
     total: 0,
+    coverage: {
+      coverageDeviceCount,
+      coverageExcludedDeviceCount,
+      coverageGapCount: 0,
+      fullyCoveredCount: 0,
+    }
   };
-  const safeDevices = Array.isArray(devices) ? devices : [];
   const snapshotMap = getSnapshotDeviceMap(snapshotsByDevice);
   const groups = new Map();
 
@@ -474,6 +493,28 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
       }
     }
 
+    // 覆盖率字段
+    const expectedDeviceCount = coverageDeviceCount;
+    const coveredDeviceCount = expectedDevices.filter((d) => {
+      const id = normalizeDeviceText(d?.deviceId);
+      return group.devices.has(id);
+    }).length;
+    const missingDevices = expectedDevices.filter((d) => {
+      const id = normalizeDeviceText(d?.deviceId);
+      return !group.devices.has(id);
+    });
+    const missingDeviceCount = missingDevices.length;
+    const missingDeviceNames = missingDevices
+      .map((d) => getDeviceDisplayName(d))
+      .sort((a, b) => a.localeCompare(b));
+
+    if (expectedDeviceCount > 1 && missingDeviceCount > 0) {
+      summary.coverage.coverageGapCount += 1;
+    }
+    if (expectedDeviceCount > 0 && missingDeviceCount === 0) {
+      summary.coverage.fullyCoveredCount += 1;
+    }
+
     return {
       key: group.key,
       jobName: group.jobName,
@@ -493,6 +534,11 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
       singleCount,
       maxTimeDriftMs,
       staleDeviceNames,
+      // V0.27 覆盖率字段
+      expectedDeviceCount,
+      coveredDeviceCount,
+      missingDeviceCount,
+      missingDeviceNames,
     };
   }).sort((a, b) => (
     VERSION_CONSISTENCY_SORT_ORDER[a.status] - VERSION_CONSISTENCY_SORT_ORDER[b.status]
@@ -644,6 +690,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const versionConsistencyDriftedCountEl = doc.getElementById('version-consistency-drifted-count');
   const versionConsistencySingleCountEl = doc.getElementById('version-consistency-single-count');
   const versionConsistencyTotalCountEl = doc.getElementById('version-consistency-total-count');
+  const versionConsistencyCoverageSummaryEl = doc.getElementById('version-consistency-coverage-summary');
   const versionConsistencyListEl = doc.getElementById('version-consistency-list');
   const versionConsistencySearchInput = doc.getElementById('version-consistency-search');
   const versionConsistencyStatusFilter = doc.getElementById('version-consistency-status-filter');
@@ -954,6 +1001,19 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     if (versionConsistencyDriftedCountEl) versionConsistencyDriftedCountEl.textContent = String(summary.drifted);
     if (versionConsistencySingleCountEl) versionConsistencySingleCountEl.textContent = String(summary.singleDevice);
     if (versionConsistencyTotalCountEl) versionConsistencyTotalCountEl.textContent = String(summary.total);
+    if (versionConsistencyCoverageSummaryEl) {
+      if (summary.coverage) {
+        const cov = summary.coverage;
+        versionConsistencyCoverageSummaryEl.textContent =
+          '基于 ' + String(cov.coverageDeviceCount) + ' 台可观测设备检测。' +
+          '排除加载失败: ' + String(cov.coverageExcludedDeviceCount) + ' 台。' +
+          '完全覆盖任务数: ' + String(cov.fullyCoveredCount) + '。' +
+          '覆盖缺口任务数: ' + String(cov.coverageGapCount) +
+          ' (按当前可观测设备口径存在缺失，包含单设备任务组)。';
+      } else {
+        versionConsistencyCoverageSummaryEl.textContent = '';
+      }
+    }
   }
 
   function setVersionConsistencyFilterCount(visibleCount, totalCount) {
@@ -1065,6 +1125,24 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       summaryEl.textContent = text;
       row.appendChild(summaryEl);
 
+      // V0.27 覆盖缺口元素
+      const coverageEl = doc.createElement('div');
+      coverageEl.className = 'version-consistency-coverage-gap';
+      coverageEl.setAttribute('data-testid', 'version-consistency-coverage-gap');
+
+      let missingText = '';
+      if (group.missingDeviceNames && group.missingDeviceNames.length > 0) {
+        if (group.missingDeviceNames.length <= 3) {
+          missingText = group.missingDeviceNames.join(', ');
+        } else {
+          missingText = group.missingDeviceNames.slice(0, 3).join(', ') + ' +' + (group.missingDeviceNames.length - 3) + ' 更多';
+        }
+      }
+
+      coverageEl.textContent = '覆盖 ' + String(group.coveredDeviceCount) + ' / ' + String(group.expectedDeviceCount)
+        + (missingText ? ' · 缺 ' + missingText : '');
+      row.appendChild(coverageEl);
+
       group.devices.forEach(function (device) {
         const deviceField = doc.createElement('span');
         deviceField.className = 'version-consistency-device version-state-' + device.versionState;
@@ -1096,8 +1174,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     renderVersionConsistencyRows(groups, cachedVersionConsistency.groups.length);
   }
 
-  function renderBackupVersionConsistency(devices, snapshotsByDevice) {
-    cachedVersionConsistency = buildBackupVersionConsistency(devices, snapshotsByDevice);
+  function renderBackupVersionConsistency(devices, snapshotsByDevice, options = {}) {
+    cachedVersionConsistency = buildBackupVersionConsistency(devices, snapshotsByDevice, options);
     setVersionConsistencyCounts(cachedVersionConsistency.summary);
     renderFilteredVersionConsistency();
   }
@@ -1120,22 +1198,26 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const snapshots = await res.json();
-        return [deviceId, Array.isArray(snapshots) ? snapshots : []];
+        return [deviceId, Array.isArray(snapshots) ? snapshots : [], false];
       } catch (err) {
         logEvent('加载版本一致性快照失败 (' + deviceId + '): ' + err.message, 'error');
-        return [deviceId, []];
+        return [deviceId, [], true];
       }
     }));
 
     if (requestId !== versionConsistencyRequestId) return;
 
     const snapshotsByDevice = {};
+    const excludedCoverageDeviceIds = [];
     entries.forEach(function (entry) {
       if (!entry) return;
       snapshotsByDevice[entry[0]] = entry[1];
+      if (entry[2]) {
+        excludedCoverageDeviceIds.push(entry[0]);
+      }
     });
-    renderBackupVersionConsistency(safeDevices, snapshotsByDevice);
-    const consistency = buildBackupVersionConsistency(safeDevices, snapshotsByDevice);
+    renderBackupVersionConsistency(safeDevices, snapshotsByDevice, { excludedCoverageDeviceIds });
+    const consistency = buildBackupVersionConsistency(safeDevices, snapshotsByDevice, { excludedCoverageDeviceIds });
     logEvent('已加载版本一致性 ' + consistency.summary.total + ' 个任务组', 'info');
   }
 

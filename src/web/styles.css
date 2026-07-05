@@ -1449,6 +1449,26 @@ ul {
   font-size: 0.78rem;
 }
 
+.version-consistency-coverage-summary {
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  font-size: 0.8rem;
+  color: #475569;
+  font-weight: 500;
+}
+
+.version-consistency-coverage-gap {
+  grid-column: 1 / -1;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #f8fafc;
+  font-size: 0.78rem;
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 760px) {
   .device-health-summary,
   .version-consistency-summary {

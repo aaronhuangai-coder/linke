@@ -1001,6 +1001,14 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('value="latest"'), 'sort must include latest option');
     assert.ok(html.includes('value="name"'), 'sort must include name option');
   });
+
+  // ── V0.27 Version consistency coverage summary HTML contract ─────
+
+  it('HTML contains V0.27 version consistency coverage summary hook', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    assert.ok(html.includes('data-testid="version-consistency-coverage-summary"'), 'must have version-consistency-coverage-summary');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3476,6 +3484,58 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.match(summary0.textContent, /非最新/);
     assert.match(summary0.textContent, /单设备/);
     assert.match(summary0.textContent, /最大时间差/);
+
+    const coverageSummary = doc.querySelector('[data-testid="version-consistency-coverage-summary"]');
+    assert.ok(coverageSummary);
+    assert.match(coverageSummary.textContent, /基于 2 台可观测设备检测/);
+    assert.match(coverageSummary.textContent, /排除加载失败: 0 台/);
+    assert.match(coverageSummary.textContent, /完全覆盖任务数: 2/);
+    assert.match(coverageSummary.textContent, /覆盖缺口任务数: 1/);
+
+    const covGap0 = groups[0].querySelector('[data-testid="version-consistency-coverage-gap"]');
+    assert.ok(covGap0);
+    assert.strictEqual(covGap0.textContent, '覆盖 2 / 2');
+
+    const covGap1 = groups[1].querySelector('[data-testid="version-consistency-coverage-gap"]');
+    assert.ok(covGap1);
+    assert.strictEqual(covGap1.textContent, '覆盖 1 / 2 · 缺 Mac B');
+  });
+
+  it('fetchBackupVersionConsistency excludes devices that failed to load from coverage calculation', async () => {
+    const doc = buildMockDoc();
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', status: 'online', snapshotCount: 1 },
+      { deviceId: 'mac-b', hostname: 'Mac B', status: 'online', snapshotCount: 1 },
+      { deviceId: 'mac-failed', hostname: 'Mac Failed', status: 'online', snapshotCount: 1 },
+    ];
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      const match = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (match) {
+        const id = decodeURIComponent(match[1]);
+        if (id === 'mac-failed') {
+          return { ok: false, status: 500 };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { snapshotId: id + '-snap', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 10 }
+          ]
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const coverageSummary = doc.querySelector('[data-testid="version-consistency-coverage-summary"]');
+    assert.ok(coverageSummary);
+    assert.match(coverageSummary.textContent, /基于 2 台可观测设备检测/);
+    assert.match(coverageSummary.textContent, /排除加载失败: 1 台/);
   });
 
   it('renders version consistency text as textContent without innerHTML injection', async () => {
@@ -3914,6 +3974,12 @@ describe('V0.22 backup version consistency pure functions', () => {
       drifted: 1,
       singleDevice: 1,
       total: 3,
+      coverage: {
+        coverageDeviceCount: 2,
+        coverageExcludedDeviceCount: 0,
+        coverageGapCount: 1,
+        fullyCoveredCount: 2,
+      }
     });
     assert.strictEqual(result.groups[0].status, 'drifted');
     assert.strictEqual(result.groups[0].jobName, 'documents');
@@ -3934,6 +4000,74 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.strictEqual(result.groups[2].status, 'synced');
     assert.strictEqual(result.groups[2].staleCount, 0);
     assert.strictEqual(result.groups[2].maxTimeDriftMs, null);
+  });
+
+  describe('V0.27 version coverage gap summary pure functions', () => {
+    it('builds coverage gap summary and group coverage fields correctly', () => {
+      const devices = [
+        { deviceId: 'mac-a', hostname: 'Mac A' },
+        { deviceId: 'mac-b', hostname: 'Mac B' },
+        { deviceId: 'mac-c', hostname: 'Mac C' },
+      ];
+      const snapshotsByDevice = {
+        'mac-a': [
+          { snapshotId: 'a1', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 10 },
+          { snapshotId: 'a2', jobName: 'photos', sourcePath: '/photos', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 20 },
+        ],
+        'mac-b': [
+          { snapshotId: 'b1', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 10 },
+        ],
+      };
+
+      const result = buildBackupVersionConsistency(devices, snapshotsByDevice, {
+        excludedCoverageDeviceIds: ['mac-c']
+      });
+
+      assert.strictEqual(result.summary.coverage.coverageDeviceCount, 2);
+      assert.strictEqual(result.summary.coverage.coverageExcludedDeviceCount, 1);
+      assert.strictEqual(result.summary.coverage.coverageGapCount, 1);
+      assert.strictEqual(result.summary.coverage.fullyCoveredCount, 1);
+
+      const docsGroup = result.groups.find(g => g.jobName === 'docs');
+      assert.ok(docsGroup);
+      assert.strictEqual(docsGroup.expectedDeviceCount, 2);
+      assert.strictEqual(docsGroup.coveredDeviceCount, 2);
+      assert.strictEqual(docsGroup.missingDeviceCount, 0);
+      assert.deepStrictEqual(docsGroup.missingDeviceNames, []);
+
+      const photosGroup = result.groups.find(g => g.jobName === 'photos');
+      assert.ok(photosGroup);
+      assert.strictEqual(photosGroup.expectedDeviceCount, 2);
+      assert.strictEqual(photosGroup.coveredDeviceCount, 1);
+      assert.strictEqual(photosGroup.missingDeviceCount, 1);
+      assert.deepStrictEqual(photosGroup.missingDeviceNames, ['Mac B']);
+    });
+
+    it('does not count fully covered when expectedDeviceCount is 0', () => {
+      const devices = [
+        { deviceId: 'mac-a', hostname: 'Mac A' },
+      ];
+      const snapshotsByDevice = {
+        'mac-a': [
+          { snapshotId: 'a1', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 10 },
+        ],
+      };
+
+      const result = buildBackupVersionConsistency(devices, snapshotsByDevice, {
+        excludedCoverageDeviceIds: ['mac-a']
+      });
+
+      assert.strictEqual(result.summary.coverage.coverageDeviceCount, 0);
+      assert.strictEqual(result.summary.coverage.coverageExcludedDeviceCount, 1);
+      assert.strictEqual(result.summary.coverage.coverageGapCount, 0);
+      assert.strictEqual(result.summary.coverage.fullyCoveredCount, 0);
+
+      const docsGroup = result.groups.find(g => g.jobName === 'docs');
+      assert.ok(docsGroup);
+      assert.strictEqual(docsGroup.expectedDeviceCount, 0);
+      assert.strictEqual(docsGroup.coveredDeviceCount, 0);
+      assert.strictEqual(docsGroup.missingDeviceCount, 0);
+    });
   });
 
   it('correctly handles staleDeviceNames formatting when there are more than 3 stale devices', () => {
@@ -4024,6 +4158,12 @@ describe('V0.22 backup version consistency pure functions', () => {
       drifted: 0,
       singleDevice: 0,
       total: 0,
+      coverage: {
+        coverageDeviceCount: 0,
+        coverageExcludedDeviceCount: 0,
+        coverageGapCount: 0,
+        fullyCoveredCount: 0,
+      }
     });
     assert.deepStrictEqual(result.groups, []);
   });
