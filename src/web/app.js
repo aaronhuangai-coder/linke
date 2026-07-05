@@ -437,6 +437,41 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
     if (status === 'single-device') summary.singleDevice += 1;
     summary.total += 1;
 
+    const devices = rows.map((row) => ({
+      deviceId: row.deviceId,
+      hostname: row.hostname,
+      ipAddress: row.ipAddress,
+      latestSnapshotId: row.latestSnapshotId,
+      latestCreatedAt: row.latestCreatedAt,
+      latestFileCount: row.latestFileCount,
+      snapshotCount: row.snapshotCount,
+      versionState: getVersionState(status, row, latestTime, latestFileCount),
+    }));
+
+    let latestCount = 0;
+    let staleCount = 0;
+    let singleCount = 0;
+    const staleDeviceNames = [];
+
+    devices.forEach((device) => {
+      if (device.versionState === 'latest') {
+        latestCount++;
+      } else if (device.versionState === 'stale') {
+        staleCount++;
+        staleDeviceNames.push(device.hostname);
+      } else if (device.versionState === 'single') {
+        singleCount++;
+      }
+    });
+
+    let maxTimeDriftMs = null;
+    if (status === 'drifted') {
+      const validRows = rows.filter((r) => r.latestTime > 0);
+      if (validRows.length >= 2) {
+        maxTimeDriftMs = validRows[0].latestTime - validRows[validRows.length - 1].latestTime;
+      }
+    }
+
     return {
       key: group.key,
       jobName: group.jobName,
@@ -450,16 +485,12 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
       snapshotCount: group.snapshotCount,
       latestCreatedAt: rows[0]?.latestCreatedAt || '',
       latestFileCount: latestFileCount,
-      devices: rows.map((row) => ({
-        deviceId: row.deviceId,
-        hostname: row.hostname,
-        ipAddress: row.ipAddress,
-        latestSnapshotId: row.latestSnapshotId,
-        latestCreatedAt: row.latestCreatedAt,
-        latestFileCount: row.latestFileCount,
-        snapshotCount: row.snapshotCount,
-        versionState: getVersionState(status, row, latestTime, latestFileCount),
-      })),
+      devices,
+      latestCount,
+      staleCount,
+      singleCount,
+      maxTimeDriftMs,
+      staleDeviceNames,
     };
   }).sort((a, b) => (
     VERSION_CONSISTENCY_SORT_ORDER[a.status] - VERSION_CONSISTENCY_SORT_ORDER[b.status]
@@ -947,6 +978,27 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       appendVersionConsistencyField(row, 'version-consistency-reason', group.reason);
       appendVersionConsistencyField(row, 'version-consistency-latest', formatLastBackup(group.latestCreatedAt));
       appendVersionConsistencyField(row, 'version-consistency-snapshots', String(group.snapshotCount) + ' 快照');
+
+      // V0.25 staleness summary
+      const summaryEl = doc.createElement('div');
+      summaryEl.className = 'version-consistency-staleness-summary';
+      summaryEl.setAttribute('data-testid', 'version-consistency-staleness-summary');
+
+      let staleText = '';
+      if (group.staleDeviceNames && group.staleDeviceNames.length > 0) {
+        if (group.staleDeviceNames.length <= 3) {
+          staleText = group.staleDeviceNames.join(', ');
+        } else {
+          staleText = group.staleDeviceNames.slice(0, 3).join(', ') + ' +' + (group.staleDeviceNames.length - 3) + ' 更多';
+        }
+      }
+
+      let text = '最新 ' + group.latestCount + ' · 非最新 ' + group.staleCount + ' · 单设备 ' + group.singleCount + ' · 最大时间差 ' + (group.maxTimeDriftMs !== null ? group.maxTimeDriftMs + 'ms' : '无');
+      if (staleText) {
+        text += ' · 非最新设备: ' + staleText;
+      }
+      summaryEl.textContent = text;
+      row.appendChild(summaryEl);
 
       group.devices.forEach(function (device) {
         const deviceField = doc.createElement('span');

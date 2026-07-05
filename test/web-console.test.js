@@ -3462,6 +3462,13 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.match(groups[0].querySelector('[data-testid="version-consistency-reason"]').textContent, /2 台设备/);
     assert.strictEqual(groups[1].dataset.versionStatus, 'single-device');
     assert.strictEqual(groups[2].dataset.versionStatus, 'synced');
+
+    const summary0 = groups[0].querySelector('[data-testid="version-consistency-staleness-summary"]');
+    assert.ok(summary0, 'Group 0 must have a staleness summary element');
+    assert.match(summary0.textContent, /最新/);
+    assert.match(summary0.textContent, /非最新/);
+    assert.match(summary0.textContent, /单设备/);
+    assert.match(summary0.textContent, /最大时间差/);
   });
 
   it('renders version consistency text as textContent without innerHTML injection', async () => {
@@ -3892,8 +3899,42 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.strictEqual(result.groups[0].devices[0].deviceId, 'mac-a');
     assert.strictEqual(result.groups[0].devices[0].versionState, 'latest');
     assert.strictEqual(result.groups[0].devices[1].versionState, 'stale');
+
+    // V0.25 fields
+    assert.strictEqual(result.groups[0].latestCount, 1);
+    assert.strictEqual(result.groups[0].staleCount, 1);
+    assert.strictEqual(result.groups[0].singleCount, 0);
+    assert.strictEqual(result.groups[0].maxTimeDriftMs, 60 * 60 * 1000);
+    assert.deepStrictEqual(result.groups[0].staleDeviceNames, ['Mac B']);
+
     assert.strictEqual(result.groups[1].status, 'single-device');
+    assert.strictEqual(result.groups[1].singleCount, 1);
+
     assert.strictEqual(result.groups[2].status, 'synced');
+    assert.strictEqual(result.groups[2].staleCount, 0);
+    assert.strictEqual(result.groups[2].maxTimeDriftMs, null);
+  });
+
+  it('correctly handles staleDeviceNames formatting when there are more than 3 stale devices', () => {
+    const result = buildBackupVersionConsistency(
+      [
+        { deviceId: 'mac-a', hostname: 'Mac A' },
+        { deviceId: 'mac-b', hostname: 'Mac B' },
+        { deviceId: 'mac-c', hostname: 'Mac C' },
+        { deviceId: 'mac-d', hostname: 'Mac D' },
+        { deviceId: 'mac-e', hostname: 'Mac E' },
+      ],
+      {
+        'mac-a': [{ snapshotId: 'a', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T10:00:00.000Z', fileCount: 10 }],
+        'mac-b': [{ snapshotId: 'b', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T09:00:00.000Z', fileCount: 9 }],
+        'mac-c': [{ snapshotId: 'c', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T09:00:00.000Z', fileCount: 9 }],
+        'mac-d': [{ snapshotId: 'd', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T09:00:00.000Z', fileCount: 9 }],
+        'mac-e': [{ snapshotId: 'e', jobName: 'docs', sourcePath: '/docs', createdAt: '2026-07-05T09:00:00.000Z', fileCount: 9 }],
+      }
+    );
+    assert.strictEqual(result.groups[0].latestCount, 1);
+    assert.strictEqual(result.groups[0].staleCount, 4);
+    assert.deepStrictEqual(result.groups[0].staleDeviceNames, ['Mac B', 'Mac C', 'Mac D', 'Mac E']);
   });
 
   it('returns empty summary for non-array devices and non-object snapshots', () => {

@@ -1432,6 +1432,17 @@ ul {
   color: #166534;
 }
 
+.version-consistency-staleness-summary {
+  grid-column: 1 / -1;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  font-size: 0.8rem;
+  color: #475569;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
 .version-consistency-safety-note {
   margin-top: 10px;
   color: #6b7280;
