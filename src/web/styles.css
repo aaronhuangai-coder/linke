@@ -188,6 +188,11 @@ body {
   line-height: 1.4;
 }
 
+.device-active-filter-summary[data-active="true"] {
+  color: #374151;
+  font-weight: 600;
+}
+
 .device-management-summary {
   display: flex;
   flex-wrap: wrap;

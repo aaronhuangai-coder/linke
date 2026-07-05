@@ -290,6 +290,13 @@ export function buildDeviceActiveFilterSummary(controls) {
   return '当前筛选: 搜索: ' + query + ' · 状态: ' + status + ' · 管理态: ' + management + ' · 排序: ' + sort;
 }
 
+export function buildDeviceActiveFilterSummaryState(controls) {
+  return {
+    text: buildDeviceActiveFilterSummary(controls),
+    active: isDeviceFilterResetActive(controls),
+  };
+}
+
 export function buildDeviceManagementSummary(devices) {
   const summary = {
     all: 0,
@@ -948,7 +955,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   function renderDeviceActiveFilterSummary(controls) {
     if (deviceActiveFilterSummaryEl) {
-      deviceActiveFilterSummaryEl.textContent = buildDeviceActiveFilterSummary(controls);
+      const state = buildDeviceActiveFilterSummaryState(controls);
+      deviceActiveFilterSummaryEl.textContent = state.text;
+      if (deviceActiveFilterSummaryEl.setAttribute) {
+        deviceActiveFilterSummaryEl.setAttribute('data-active', state.active ? 'true' : 'false');
+      }
     }
   }
 

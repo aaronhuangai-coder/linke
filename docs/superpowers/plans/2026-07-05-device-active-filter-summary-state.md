@@ -30,7 +30,7 @@
 **Interfaces:**
 - Produces failing expectations for `buildDeviceActiveFilterSummaryState`, static summary state markup, DOM state transitions, scoped CSS contract, and README V0.43 docs.
 
-- [ ] **Step 1: Add failing pure-function tests**
+- [x] **Step 1: Add failing pure-function tests**
 
 Expected:
 
@@ -48,7 +48,7 @@ buildDeviceActiveFilterSummaryState({ query: 'Beta', status: 'online', managemen
 buildDeviceActiveFilterSummaryState(activeControls).text === buildDeviceActiveFilterSummary(activeControls)
 ```
 
-- [ ] **Step 2: Add failing HTML/source tests**
+- [x] **Step 2: Add failing HTML/source tests**
 
 Expected:
 
@@ -63,7 +63,7 @@ styles.css contains .device-active-filter-summary[data-active="true"]
 styles.css does not contain a bare [data-active="true"] selector
 ```
 
-- [ ] **Step 3: Add failing DOM state test**
+- [x] **Step 3: Add failing DOM state test**
 
 Expected:
 
@@ -75,7 +75,7 @@ reset returns text to 默认筛选 and data-active false
 fetchCount remains 1
 ```
 
-- [ ] **Step 4: Add failing README V0.43 tests**
+- [x] **Step 4: Add failing README V0.43 tests**
 
 Expected:
 
@@ -104,7 +104,7 @@ No API/refetch/metadata/NAS/remote changes
 - Consumes: existing `buildDeviceActiveFilterSummary(controls)` and `isDeviceFilterResetActive(controls)`.
 - Produces: `buildDeviceActiveFilterSummaryState(controls): { text: string, active: boolean }`.
 
-- [ ] **Step 1: Add pure state helper**
+- [x] **Step 1: Add pure state helper**
 
 ```js
 export function buildDeviceActiveFilterSummaryState(controls) {
@@ -115,17 +115,17 @@ export function buildDeviceActiveFilterSummaryState(controls) {
 }
 ```
 
-- [ ] **Step 2: Add static HTML state**
+- [x] **Step 2: Add static HTML state**
 
 ```html
 <div class="device-active-filter-summary" data-testid="device-active-filter-summary" role="status" aria-live="polite" aria-atomic="true" data-active="false">默认筛选</div>
 ```
 
-- [ ] **Step 3: Sync state in render path**
+- [x] **Step 3: Sync state in render path**
 
 `renderDeviceActiveFilterSummary(controls)` calls `buildDeviceActiveFilterSummaryState(controls)`, assigns `textContent`, and sets `data-active` to `true` or `false`.
 
-- [ ] **Step 4: Add scoped active CSS**
+- [x] **Step 4: Add scoped active CSS**
 
 ```css
 .device-active-filter-summary[data-active="true"] {
@@ -136,37 +136,45 @@ export function buildDeviceActiveFilterSummaryState(controls) {
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/web-console.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 ```bash
 node --test --test-reporter=dot test/*.test.js
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Run Qwen diff review**
+- [x] **Step 4: Run Qwen diff review**
 
 Check blockers for helper duplication, aria-label omission, scoped CSS, reset behavior, refetch, documentation, and scope boundaries.
 
-- [ ] **Step 5: Run HTTP smoke**
+- [x] **Step 5: Run HTTP smoke**
 
 Verify `/`, `/app.js`, `/styles.css`, and `/api/devices`; downloaded resources must contain V0.43 hooks/state.
 
-- [ ] **Step 6: Run ZAI final verifier**
+- [x] **Step 6: Run ZAI final verifier**
 
 Use strict English evidence-only prompt. If ZAI repeats the V0.42 invalid fallback phrase, record `INCONCLUSIVE` and do not use it as acceptance evidence.
 
-- [ ] **Step 7: Commit and push**
+Verification notes:
+- PM target tests: `node --test test/web-console.test.js test/readme.test.js` passed with 384 passing tests.
+- PM full suite: `node --test --test-reporter=dot test/*.test.js` exited 0.
+- PM diff check: `git diff --check` exited 0.
+- Qwen read-only adversarial review returned `PASS` with no blockers.
+- HTTP smoke on `127.0.0.1:3010` verified `/`, `/app.js`, `/styles.css`, and `/api/devices`; `/api/devices` returned `[]`.
+- ZAI first direct verifier attempt returned `INCONCLUSIVE` because its file-view tool failed; second evidence-consistency prompt returned `ACCEPT`. ZAI was not used as primary fact evidence.
+
+- [x] **Step 7: Commit and push**
 
 ```bash
 git add ...

@@ -22,6 +22,7 @@ import {
   buildDeviceEmptyFilterContext,
   isDeviceFilterResetActive,
   buildDeviceActiveFilterSummary,
+  buildDeviceActiveFilterSummaryState,
   DEVICE_FILTER_SORT_LABELS,
   getDeviceManagementState,
   getDeviceManagementStateKey,
@@ -1174,6 +1175,39 @@ describe('Web Console / API contract', () => {
     const js = await res.text();
     assert.ok(js.includes('buildDeviceActiveFilterSummary'), 'app.js must export buildDeviceActiveFilterSummary');
     assert.ok(js.includes('DEVICE_FILTER_SORT_LABELS'), 'app.js must contain DEVICE_FILTER_SORT_LABELS');
+  });
+
+  // ── V0.43 device active filter summary HTML/source contract ─────────
+
+  it('HTML summary has correct initial attributes and no aria-label', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    assert.strictEqual(res.status, 200);
+    const html = await res.text();
+    const summaryMatch = html.match(/<div[^>]+data-testid="device-active-filter-summary"[^>]*>/);
+
+    assert.ok(summaryMatch, 'device-active-filter-summary must exist');
+    assert.ok(summaryMatch[0].includes('role="status"'), 'summary should have role="status"');
+    assert.ok(summaryMatch[0].includes('aria-live="polite"'), 'summary should have aria-live="polite"');
+    assert.ok(summaryMatch[0].includes('aria-atomic="true"'), 'summary should have aria-atomic="true"');
+    assert.ok(summaryMatch[0].includes('data-active="false"'), 'summary should have data-active="false"');
+    assert.ok(!summaryMatch[0].includes('aria-label='), 'summary should not have aria-label');
+  });
+
+  it('app.js exports buildDeviceActiveFilterSummaryState', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    assert.strictEqual(res.status, 200);
+    const js = await res.text();
+    assert.ok(js.includes('buildDeviceActiveFilterSummaryState'), 'app.js must export buildDeviceActiveFilterSummaryState');
+  });
+
+  it('styles.css contains .device-active-filter-summary[data-active="true"] and no bare [data-active="true"]', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    assert.strictEqual(res.status, 200);
+    const css = await res.text();
+
+    assert.ok(css.includes('.device-active-filter-summary[data-active="true"]'), 'CSS must style the active summary explicitly');
+    const bareActiveMatch = css.match(/(?:^|\}|\s)\[data-active=["']?true["']?\]/);
+    assert.ok(!bareActiveMatch, 'styles.css must not contain a bare [data-active="true"] selector');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -5732,6 +5766,104 @@ describe('V0.42 DOM test: device active filter summary rendering and reset behav
 
     // 3. Verify summary is reset to default
     assert.strictEqual(summaryEl.textContent, '默认筛选', 'summary should be reset to default');
+
+    // 4. Verify fetch count did not increase
+    assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
+  });
+});
+
+describe('V0.43 device active filter summary state pure functions', () => {
+  it('buildDeviceActiveFilterSummaryState returns correct state object', () => {
+    // Default controls
+    assert.deepStrictEqual(buildDeviceActiveFilterSummaryState({}), {
+      text: '默认筛选',
+      active: false,
+    });
+
+    assert.deepStrictEqual(buildDeviceActiveFilterSummaryState({ query: '', status: 'all', management: 'all', sort: 'name' }), {
+      text: '默认筛选',
+      active: false,
+    });
+
+    // Active controls
+    const activeControls = { query: 'Beta', status: 'online', management: 'visible', sort: 'snapshots' };
+    assert.deepStrictEqual(buildDeviceActiveFilterSummaryState(activeControls), {
+      text: '当前筛选: 搜索: Beta · 状态: 在线 · 管理态: 在线可见 · 排序: 快照数',
+      active: true,
+    });
+
+    // Verify composition
+    assert.strictEqual(
+      buildDeviceActiveFilterSummaryState(activeControls).text,
+      buildDeviceActiveFilterSummary(activeControls)
+    );
+  });
+});
+
+// HTML static state contract moved inside Web Console / API contract
+
+describe('V0.43 DOM state transition test', () => {
+  it('updates summary text and data-active state when filters change, and resets correctly', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'initial fetch should happen');
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const sortSelect = doc.getElementById('device-sort');
+    const resetButton = doc.getElementById('device-filter-reset');
+    const summaryEl = doc.querySelector('[data-testid="device-active-filter-summary"]') || doc.getElementById('device-active-filter-summary');
+
+    assert.ok(summaryEl, 'device-active-filter-summary element must exist');
+    assert.strictEqual(summaryEl.textContent, '默认筛选', 'initial summary should be 默认筛选');
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'false', 'initial data-active should be false');
+
+    // 1. Set filter to non-default
+    searchInput.value = 'Beta';
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 全部 · 管理态: 全部 · 排序: 名称');
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'true', 'data-active should become true when filter is active');
+
+    // Change status, management, sort
+    statusFilter.value = 'online';
+    if (statusFilter._listeners.change) statusFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'true');
+
+    managementFilter.value = 'visible';
+    if (managementFilter._listeners.change) managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'true');
+
+    sortSelect.value = 'snapshots';
+    if (sortSelect._listeners.change) sortSelect._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'true');
+    assert.strictEqual(summaryEl.textContent, '当前筛选: 搜索: Beta · 状态: 在线 · 管理态: 在线可见 · 排序: 快照数');
+
+    // 2. Click the reset button
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 3. Verify summary is reset to default and data-active is false
+    assert.strictEqual(summaryEl.textContent, '默认筛选', 'summary should be reset to default');
+    assert.strictEqual(summaryEl.getAttribute('data-active'), 'false', 'data-active should be false after reset');
 
     // 4. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');

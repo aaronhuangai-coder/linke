@@ -66,7 +66,7 @@
           </select>
           <button id="device-filter-reset" data-testid="device-filter-reset" type="button" class="device-filter-reset" disabled aria-disabled="true" data-active="false">重置筛选</button>
         </div>
-        <div class="device-active-filter-summary" data-testid="device-active-filter-summary" role="status" aria-live="polite">默认筛选</div>
+        <div class="device-active-filter-summary" data-testid="device-active-filter-summary" role="status" aria-live="polite" aria-atomic="true" data-active="false">默认筛选</div>
         <div data-testid="device-management-summary" class="device-management-summary">
           <button type="button" data-testid="device-management-summary-all" class="summary-bucket is-active" data-management-filter-value="all" data-active="true" aria-pressed="true">全部: <span class="count">0</span></button>
           <button type="button" data-testid="device-management-summary-visible" class="summary-bucket" data-management-filter-value="visible" data-active="false" aria-pressed="false">在线可见: <span class="count">0</span></button>
