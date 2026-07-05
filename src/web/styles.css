@@ -123,6 +123,10 @@ body {
   font-weight: 600;
 }
 
+.device-filter-count[data-filtered="true"] {
+  color: #374151;
+}
+
 .device-controls,
 .version-consistency-controls {
   display: grid;

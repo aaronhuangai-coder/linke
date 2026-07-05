@@ -30,7 +30,7 @@
 **Interfaces:**
 - Produces failing expectations for `buildDeviceFilterCountState`, static count state markup, DOM state transitions, scoped CSS contract, and README V0.44 docs.
 
-- [ ] **Step 1: Add failing pure-function tests**
+- [x] **Step 1: Add failing pure-function tests**
 
 Expected:
 
@@ -51,7 +51,7 @@ buildDeviceFilterCountState(0, 0) === {
 }
 ```
 
-- [ ] **Step 2: Add failing HTML/source tests**
+- [x] **Step 2: Add failing HTML/source tests**
 
 Expected:
 
@@ -65,7 +65,7 @@ styles.css does not contain a bare [data-filtered="true"] selector
 
 The HTML assertion must match the exact `device-filter-count` element before checking `data-filtered`; a broad page-level `includes('data-filtered="false"')` is not sufficient.
 
-- [ ] **Step 3: Add failing DOM state test**
+- [x] **Step 3: Add failing DOM state test**
 
 Expected:
 
@@ -77,7 +77,7 @@ reset returns count to total and data-filtered false
 fetchCount remains 1
 ```
 
-- [ ] **Step 4: Add failing README V0.44 tests**
+- [x] **Step 4: Add failing README V0.44 tests**
 
 Expected:
 
@@ -105,7 +105,7 @@ No API/refetch/metadata/NAS/remote changes
 **Interfaces:**
 - Produces: `buildDeviceFilterCountState(visibleCount, totalCount): { text: string, filtered: boolean }`.
 
-- [ ] **Step 1: Add pure count state helper**
+- [x] **Step 1: Add pure count state helper**
 
 ```js
 export function buildDeviceFilterCountState(visibleCount, totalCount) {
@@ -118,17 +118,17 @@ export function buildDeviceFilterCountState(visibleCount, totalCount) {
 }
 ```
 
-- [ ] **Step 2: Add static HTML state**
+- [x] **Step 2: Add static HTML state**
 
 ```html
 <span class="device-filter-count" data-testid="device-filter-count" data-filtered="false">0 / 0</span>
 ```
 
-- [ ] **Step 3: Sync state in render path**
+- [x] **Step 3: Sync state in render path**
 
 `renderDeviceFilterCount(visibleCount, totalCount)` calls `buildDeviceFilterCountState(visibleCount, totalCount)`, assigns `textContent`, and sets `data-filtered` to `true` or `false`.
 
-- [ ] **Step 4: Add scoped filtered CSS**
+- [x] **Step 4: Add scoped filtered CSS**
 
 ```css
 .device-filter-count[data-filtered="true"] {
@@ -138,37 +138,46 @@ export function buildDeviceFilterCountState(visibleCount, totalCount) {
 
 ### Task 3: Verification
 
-- [ ] **Step 1: Run target tests**
+- [x] **Step 1: Run target tests**
 
 ```bash
 node --test test/web-console.test.js test/readme.test.js
 ```
 
-- [ ] **Step 2: Run full test suite**
+- [x] **Step 2: Run full test suite**
 
 ```bash
 node --test --test-reporter=dot test/*.test.js
 ```
 
-- [ ] **Step 3: Run diff check**
+- [x] **Step 3: Run diff check**
 
 ```bash
 git diff --check
 ```
 
-- [ ] **Step 4: Run Qwen diff review**
+- [x] **Step 4: Run Qwen diff review**
 
 Check blockers for count text/state drift, duplicate live-region risk, scoped CSS, reset behavior, refetch, documentation, and scope boundaries.
 
-- [ ] **Step 5: Run HTTP smoke**
+- [x] **Step 5: Run HTTP smoke**
 
 Verify `/`, `/app.js`, `/styles.css`, and `/api/devices`; downloaded resources must contain V0.44 hooks/state.
 
-- [ ] **Step 6: Run ZAI final verifier**
+- [x] **Step 6: Run ZAI final verifier**
 
 Use strict English evidence-only prompt. If ZAI returns tool errors, empty output, or the invalid fallback phrase, record `INCONCLUSIVE` and do not use it as primary acceptance evidence.
 
-- [ ] **Step 7: Commit and push**
+Verification notes:
+- PM target tests: `node --test test/web-console.test.js test/readme.test.js` passed with 393 passing tests.
+- PM full suite: `node --test --test-reporter=dot test/*.test.js` exited 0.
+- PM diff check: `git diff --check` exited 0.
+- Qwen implementation review returned `PASS` with no blockers.
+- Qwen re-review returned `PASS` after PM strengthened the DOM test to cover search, status, management, reset, and no refetch.
+- HTTP smoke on `127.0.0.1:3010` verified `/`, `/app.js`, `/styles.css`, and `/api/devices`; `/api/devices` returned `[]`.
+- ZAI evidence-consistency verifier returned `ACCEPT`; PM did not use ZAI as primary fact evidence.
+
+- [x] **Step 7: Commit and push**
 
 ```bash
 git add ...

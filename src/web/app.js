@@ -297,6 +297,15 @@ export function buildDeviceActiveFilterSummaryState(controls) {
   };
 }
 
+export function buildDeviceFilterCountState(visibleCount, totalCount) {
+  const visible = Number.isFinite(Number(visibleCount)) ? Number(visibleCount) : 0;
+  const total = Number.isFinite(Number(totalCount)) ? Number(totalCount) : 0;
+  return {
+    text: String(visible) + ' / ' + String(total),
+    filtered: total > 0 && visible < total,
+  };
+}
+
 export function buildDeviceManagementSummary(devices) {
   const summary = {
     all: 0,
@@ -939,7 +948,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   function renderDeviceFilterCount(visibleCount, totalCount) {
     if (deviceFilterCountEl) {
-      deviceFilterCountEl.textContent = String(visibleCount) + ' / ' + String(totalCount);
+      const state = buildDeviceFilterCountState(visibleCount, totalCount);
+      deviceFilterCountEl.textContent = state.text;
+      if (deviceFilterCountEl.setAttribute) {
+        deviceFilterCountEl.setAttribute('data-filtered', state.filtered ? 'true' : 'false');
+      }
     }
   }
 

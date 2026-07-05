@@ -33,6 +33,7 @@ import {
   normalizeDeviceStatus,
   parseBackupPreflightExcludePatterns,
   parseNasDryRunConfig,
+  buildDeviceFilterCountState,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -125,6 +126,24 @@ describe('Web Console / API contract', () => {
     const html = await res.text();
     assert.ok(html.includes('src="/app.js"'), 'HTML must reference app.js');
     assert.ok(html.includes('href="/styles.css"'), 'HTML must reference styles.css');
+  });
+
+  it('GET / returns HTML with device-filter-count element having data-filtered="false" and no aria-live', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const countMatch = html.match(/<span[^>]+data-testid="device-filter-count"[^>]*>/);
+    assert.ok(countMatch, 'device-filter-count element must exist in HTML');
+    const tag = countMatch[0];
+    assert.ok(tag.includes('data-filtered="false"'), 'device-filter-count element must start with data-filtered="false"');
+    assert.ok(!tag.includes('aria-live'), 'device-filter-count element must not contain aria-live');
+  });
+
+  it('styles.css contains .device-filter-count[data-filtered="true"] but not bare [data-filtered="true"]', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+    assert.ok(css.includes('.device-filter-count[data-filtered="true"]'), 'styles.css must contain .device-filter-count[data-filtered="true"]');
+    const barePattern = /(?<!\.device-filter-count)\[data-filtered\s*=\s*["']?true["']?\]/;
+    assert.ok(!barePattern.test(css), 'styles.css must not contain a bare [data-filtered="true"] selector');
   });
 
   // ── V0.1 Agent config panel ───────────────────────────────────
@@ -5767,7 +5786,7 @@ describe('V0.42 DOM test: device active filter summary rendering and reset behav
     // 3. Verify summary is reset to default
     assert.strictEqual(summaryEl.textContent, '默认筛选', 'summary should be reset to default');
 
-    // 4. Verify fetch count did not increase
+    // 6. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
   });
 });
@@ -5864,6 +5883,118 @@ describe('V0.43 DOM state transition test', () => {
     // 3. Verify summary is reset to default and data-active is false
     assert.strictEqual(summaryEl.textContent, '默认筛选', 'summary should be reset to default');
     assert.strictEqual(summaryEl.getAttribute('data-active'), 'false', 'data-active should be false after reset');
+
+    // 4. Verify fetch count did not increase
+    assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
+  });
+});
+
+describe('V0.44 device filter count state pure functions', () => {
+  it('buildDeviceFilterCountState returns correct text and filtered state', () => {
+    assert.deepStrictEqual(buildDeviceFilterCountState(3, 3), {
+      text: '3 / 3',
+      filtered: false,
+    });
+    assert.deepStrictEqual(buildDeviceFilterCountState(1, 3), {
+      text: '1 / 3',
+      filtered: true,
+    });
+    assert.deepStrictEqual(buildDeviceFilterCountState(0, 0), {
+      text: '0 / 0',
+      filtered: false,
+    });
+    // Test normalization of non-finite values
+    assert.deepStrictEqual(buildDeviceFilterCountState(NaN, 3), {
+      text: '0 / 3',
+      filtered: true,
+    });
+    assert.deepStrictEqual(buildDeviceFilterCountState(3, Infinity), {
+      text: '3 / 0',
+      filtered: false,
+    });
+    assert.deepStrictEqual(buildDeviceFilterCountState(undefined, null), {
+      text: '0 / 0',
+      filtered: false,
+    });
+    assert.deepStrictEqual(buildDeviceFilterCountState("foo", "bar"), {
+      text: '0 / 0',
+      filtered: false,
+    });
+  });
+});
+
+describe('V0.44 DOM test: device filter count rendering and reset behavior', () => {
+  it('updates device-filter-count text and data-filtered attribute when filters change, and resets correctly', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(fetchCount, 1, 'initial fetch should happen');
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const resetButton = doc.getElementById('device-filter-reset');
+    const countEl = doc.querySelector('[data-testid="device-filter-count"]') || doc.getElementById('device-filter-count');
+
+    assert.ok(countEl, 'device-filter-count element must exist');
+    assert.strictEqual(countEl.textContent, '2 / 2', 'initial text should be 2 / 2');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'initial data-filtered should be false');
+
+    // 1. Set filter to narrow results
+    searchInput.value = 'Beta';
+    if (searchInput._listeners.input) searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 2', 'filtered count text should update');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'data-filtered should become true');
+
+    // 2. Click the reset button
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 3. Verify count and data-filtered are reset
+    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should be reset');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should be false after reset');
+
+    // 4. Status filter also narrows the count state.
+    statusFilter.value = 'unknown';
+    if (statusFilter._listeners.change) statusFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '0 / 2', 'status filter should update count text');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'status filter should mark data-filtered true');
+
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should reset after status filter');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should reset after status filter');
+
+    // 5. Management filter also narrows the count state.
+    managementFilter.value = 'missing-ip';
+    if (managementFilter._listeners.change) managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '1 / 2', 'management filter should update count text');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'true', 'management filter should mark data-filtered true');
+
+    if (resetButton._listeners.click) resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(countEl.textContent, '2 / 2', 'count text should reset after management filter');
+    assert.strictEqual(countEl.getAttribute('data-filtered'), 'false', 'data-filtered should reset after management filter');
 
     // 4. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
