@@ -649,17 +649,20 @@ export function filterVersionConsistencyGroups(consistency, controls) {
   const validStatus = ['all', 'drifted', 'single-device', 'synced'].includes(status) ? status : 'all';
   const sort = normalizeVersionConsistencySort(controls?.sort || 'risk');
   const coverage = controls?.coverage || 'all';
-  const validCoverage = ['all', 'gap', 'full'].includes(coverage) ? coverage : 'all';
+  const validCoverage = ['all', 'gap', 'full', 'unobservable'].includes(coverage) ? coverage : 'all';
 
   const filteredGroups = groups
     .filter((group) => validStatus === 'all' || group?.status === validStatus)
     .filter((group) => matchesVersionConsistencySearch(group, controls?.query || ''))
     .filter((group) => {
       if (validCoverage === 'gap') {
-        return (group?.missingDeviceCount || 0) > 0;
+        return (group?.expectedDeviceCount || 0) > 0 && (group?.missingDeviceCount || 0) > 0;
       }
       if (validCoverage === 'full') {
         return (group?.expectedDeviceCount || 0) > 0 && (group?.missingDeviceCount || 0) === 0;
+      }
+      if (validCoverage === 'unobservable') {
+        return (group?.expectedDeviceCount || 0) <= 0;
       }
       return true;
     });

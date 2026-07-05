@@ -1019,6 +1019,7 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('value="all"'), 'coverage filter must include all option');
     assert.ok(html.includes('value="gap"'), 'coverage filter must include gap option');
     assert.ok(html.includes('value="full"'), 'coverage filter must include full option');
+    assert.ok(html.includes('value="unobservable"'), 'coverage filter must include unobservable option');
   });
 
   // ── V0.29 版本一致性覆盖缺口排序 HTML 契约 ────────────────────────
@@ -3814,6 +3815,15 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.ok(textOfChildren.some(t => t.includes('configs')));
     assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '2 / 3');
     assert.strictEqual(calls.length, initialCallCount, 'coverage filtering must not refetch snapshots');
+
+    coverageFilter.value = 'unobservable';
+    coverageFilter._listeners.change();
+
+    assert.strictEqual(list.children.length, 1);
+    assert.strictEqual(list.children[0].className, 'placeholder');
+    assert.strictEqual(list.children[0].textContent, '无匹配版本一致性任务');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '0 / 3');
+    assert.strictEqual(calls.length, initialCallCount, 'coverage filtering must not refetch snapshots');
   });
 
   it('DOM test selecting sort coverage-gap reorders already loaded groups and does not refetch', async () => {
@@ -4368,7 +4378,7 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta', 'alpha', 'beta']);
   });
 
-  it('filterVersionConsistencyGroups supports coverage filters (all, gap, full)', () => {
+  it('filterVersionConsistencyGroups supports coverage filters (all, gap, full, unobservable)', () => {
     const groups = [
       {
         jobName: 'gap-job',
@@ -4390,18 +4400,35 @@ describe('V0.22 backup version consistency pure functions', () => {
         missingDeviceCount: 0,
         status: 'single-device',
         devices: []
+      },
+      {
+        jobName: 'negative-expected-job',
+        expectedDeviceCount: -1,
+        missingDeviceCount: 0,
+        status: 'single-device',
+        devices: []
+      },
+      {
+        jobName: 'no-expected-gap-job',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 1,
+        status: 'drifted',
+        devices: []
       }
     ];
     const consistency = { groups };
 
     const resAll = filterVersionConsistencyGroups(consistency, { coverage: 'all' });
-    assert.deepStrictEqual(resAll.map(g => g.jobName), ['gap-job', 'full-job', 'no-expected-job']);
+    assert.deepStrictEqual(resAll.map(g => g.jobName), ['gap-job', 'full-job', 'no-expected-job', 'negative-expected-job', 'no-expected-gap-job']);
 
     const resGap = filterVersionConsistencyGroups(consistency, { coverage: 'gap' });
     assert.deepStrictEqual(resGap.map(g => g.jobName), ['gap-job']);
 
     const resFull = filterVersionConsistencyGroups(consistency, { coverage: 'full' });
     assert.deepStrictEqual(resFull.map(g => g.jobName), ['full-job']);
+
+    const resUnobservable = filterVersionConsistencyGroups(consistency, { coverage: 'unobservable' });
+    assert.deepStrictEqual(resUnobservable.map(g => g.jobName), ['no-expected-job', 'negative-expected-job', 'no-expected-gap-job']);
   });
 
   it('coverage filter composes with status/search/sort and does not mutate source order', () => {
@@ -4451,6 +4478,55 @@ describe('V0.22 backup version consistency pure functions', () => {
     assert.deepStrictEqual(res.map(g => g.jobName), ['beta-gap', 'zeta-gap']);
 
     assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta-gap', 'alpha-full', 'beta-gap']);
+  });
+
+  it('coverage filter unobservable composes with status/search/sort and does not mutate source order', () => {
+    const groups = [
+      {
+        jobName: 'zeta-unobservable',
+        sourcePath: '/zeta',
+        expectedDeviceCount: 0,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T10:00:00.000Z',
+        staleCount: 0,
+        maxTimeDriftMs: null,
+        devices: [],
+      },
+      {
+        jobName: 'alpha-full',
+        sourcePath: '/alpha',
+        expectedDeviceCount: 2,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T09:00:00.000Z',
+        staleCount: 1,
+        maxTimeDriftMs: 1000,
+        devices: [],
+      },
+      {
+        jobName: 'beta-unobservable',
+        sourcePath: '/beta',
+        expectedDeviceCount: -1,
+        missingDeviceCount: 0,
+        status: 'drifted',
+        latestCreatedAt: '2026-07-05T11:00:00.000Z',
+        staleCount: 3,
+        maxTimeDriftMs: 5000,
+        devices: [],
+      },
+    ];
+    const consistency = { groups };
+
+    const res = filterVersionConsistencyGroups(consistency, {
+      status: 'drifted',
+      query: 'unobservable',
+      coverage: 'unobservable',
+      sort: 'name'
+    });
+    assert.deepStrictEqual(res.map(g => g.jobName), ['beta-unobservable', 'zeta-unobservable']);
+
+    assert.deepStrictEqual(groups.map((group) => group.jobName), ['zeta-unobservable', 'alpha-full', 'beta-unobservable']);
   });
 
   it('pure filterVersionConsistencyGroups sort coverage-gap orders by missing count, missing ratio tie-break, expectedDeviceCount tie-break, and existing risk fallback', () => {
