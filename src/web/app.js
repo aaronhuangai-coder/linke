@@ -404,6 +404,7 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
         group.devices.set(deviceId, {
           deviceId,
           hostname: getDeviceDisplayName(device),
+          ipAddress: normalizeDeviceText(device?.ipAddress),
           latestSnapshotId: snapshot?.snapshotId || '',
           latestCreatedAt: snapshot?.createdAt || '',
           latestTime,
@@ -452,6 +453,7 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
       devices: rows.map((row) => ({
         deviceId: row.deviceId,
         hostname: row.hostname,
+        ipAddress: row.ipAddress,
         latestSnapshotId: row.latestSnapshotId,
         latestCreatedAt: row.latestCreatedAt,
         latestFileCount: row.latestFileCount,
@@ -467,6 +469,40 @@ export function buildBackupVersionConsistency(devices, snapshotsByDevice) {
   ));
 
   return { summary, groups: versionGroups };
+}
+
+function matchesVersionConsistencySearch(group, query) {
+  const normalizedQuery = normalizeSearchValue(query);
+  if (!normalizedQuery) return true;
+
+  const values = [
+    group?.jobName,
+    group?.sourcePath,
+    group?.status,
+    group?.statusLabel,
+    group?.reason,
+  ];
+
+  for (const device of group?.devices || []) {
+    values.push(
+      device?.deviceId,
+      device?.hostname,
+      device?.ipAddress,
+      device?.latestSnapshotId,
+    );
+  }
+
+  return values.some((value) => normalizeSearchValue(value).includes(normalizedQuery));
+}
+
+export function filterVersionConsistencyGroups(consistency, controls) {
+  const groups = Array.isArray(consistency?.groups) ? consistency.groups : [];
+  const status = controls?.status || 'all';
+  const validStatus = ['all', 'drifted', 'single-device', 'synced'].includes(status) ? status : 'all';
+
+  return groups
+    .filter((group) => validStatus === 'all' || group?.status === validStatus)
+    .filter((group) => matchesVersionConsistencySearch(group, controls?.query || ''));
 }
 
 // ── Console Initializer ───────────────────────────────────────────
@@ -518,6 +554,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const versionConsistencySingleCountEl = doc.getElementById('version-consistency-single-count');
   const versionConsistencyTotalCountEl = doc.getElementById('version-consistency-total-count');
   const versionConsistencyListEl = doc.getElementById('version-consistency-list');
+  const versionConsistencySearchInput = doc.getElementById('version-consistency-search');
+  const versionConsistencyStatusFilter = doc.getElementById('version-consistency-status-filter');
+  const versionConsistencyFilterCountEl = doc.getElementById('version-consistency-filter-count');
 
   const EVENT_LOG_VISIBLE_LIMIT = 50;
   let eventTotalCount = 0;
@@ -548,6 +587,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let selectedSnapshotId = null;
   let selectedBackupJobKey = null;
   let versionConsistencyRequestId = 0;
+  let cachedVersionConsistency = {
+    summary: { synced: 0, drifted: 0, singleDevice: 0, total: 0 },
+    groups: [],
+  };
   let cachedSnapshots = [];
   let cachedDevices = [];
 
@@ -584,6 +627,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (backupPreflightExcludesInput && !backupPreflightExcludesInput.value) {
     backupPreflightExcludesInput.value = '*.tmp\nnode_modules';
+  }
+  if (versionConsistencyStatusFilter && !versionConsistencyStatusFilter.value) {
+    versionConsistencyStatusFilter.value = 'all';
   }
 
   function logEvent(msg, type) {
@@ -815,9 +861,23 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     if (versionConsistencyTotalCountEl) versionConsistencyTotalCountEl.textContent = String(summary.total);
   }
 
+  function setVersionConsistencyFilterCount(visibleCount, totalCount) {
+    if (versionConsistencyFilterCountEl) {
+      versionConsistencyFilterCountEl.textContent = String(visibleCount) + ' / ' + String(totalCount);
+    }
+  }
+
+  function getVersionConsistencyControls() {
+    return {
+      query: versionConsistencySearchInput?.value || '',
+      status: versionConsistencyStatusFilter?.value || 'all',
+    };
+  }
+
   function setVersionConsistencyPlaceholder(message) {
     clearElement(versionConsistencyListEl);
     setVersionConsistencyCounts({ synced: 0, drifted: 0, singleDevice: 0, total: 0 });
+    setVersionConsistencyFilterCount(0, 0);
     if (!versionConsistencyListEl) return;
     const item = doc.createElement('li');
     item.className = 'placeholder';
@@ -858,23 +918,23 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     fetchRestoreDryRunPlan(safeDeviceId, safeSnapshotId);
   }
 
-  function renderBackupVersionConsistency(devices, snapshotsByDevice) {
-    const consistency = buildBackupVersionConsistency(devices, snapshotsByDevice);
-    setVersionConsistencyCounts(consistency.summary);
+  function renderVersionConsistencyRows(groups, totalCount) {
     clearElement(versionConsistencyListEl);
     if (!versionConsistencyListEl) return;
 
-    if (consistency.groups.length === 0) {
+    setVersionConsistencyFilterCount(groups.length, totalCount);
+
+    if (groups.length === 0) {
       const item = doc.createElement('li');
       item.className = 'placeholder';
-      item.textContent = '暂无版本一致性数据';
+      item.textContent = totalCount === 0 ? '暂无版本一致性数据' : '无匹配版本一致性任务';
       if (typeof versionConsistencyListEl.appendChild === 'function') {
         versionConsistencyListEl.appendChild(item);
       }
       return;
     }
 
-    consistency.groups.forEach(function (group) {
+    groups.forEach(function (group) {
       const row = doc.createElement('li');
       row.className = 'version-consistency-item version-consistency-' + group.status;
       row.setAttribute('data-testid', 'version-consistency-item');
@@ -901,7 +961,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         deviceField.addEventListener('click', function () {
           selectVersionConsistencySnapshot(device.deviceId, device.latestSnapshotId);
         });
-        deviceField.textContent = device.hostname + ' · ' + device.versionState + ' · '
+        deviceField.textContent = device.hostname + ' · ' + device.deviceId + ' · '
+          + device.ipAddress + ' · ' + device.versionState + ' · '
           + formatLastBackup(device.latestCreatedAt) + ' · '
           + String(device.latestFileCount || 0) + ' files';
         row.appendChild(deviceField);
@@ -911,6 +972,17 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         versionConsistencyListEl.appendChild(row);
       }
     });
+  }
+
+  function renderFilteredVersionConsistency() {
+    const groups = filterVersionConsistencyGroups(cachedVersionConsistency, getVersionConsistencyControls());
+    renderVersionConsistencyRows(groups, cachedVersionConsistency.groups.length);
+  }
+
+  function renderBackupVersionConsistency(devices, snapshotsByDevice) {
+    cachedVersionConsistency = buildBackupVersionConsistency(devices, snapshotsByDevice);
+    setVersionConsistencyCounts(cachedVersionConsistency.summary);
+    renderFilteredVersionConsistency();
   }
 
   async function fetchBackupVersionConsistency(devices) {
@@ -1941,6 +2013,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredDevices);
       control.addEventListener('change', renderFilteredDevices);
+    }
+  }
+
+  for (const control of [versionConsistencySearchInput, versionConsistencyStatusFilter]) {
+    if (control?.addEventListener) {
+      control.addEventListener('input', renderFilteredVersionConsistency);
+      control.addEventListener('change', renderFilteredVersionConsistency);
     }
   }
 

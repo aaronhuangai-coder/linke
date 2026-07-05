@@ -1,8 +1,8 @@
-# Linke V0.23
+# Linke V0.24
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.23** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
+> **当前版本：V0.24** — 单机 localhost 原型阶段，尚未具备生产级安全隔离。
 
 ## 版本演进
 
@@ -30,7 +30,8 @@
 | V0.20 | 事件日志面板增强 | Web Console 事件日志面板增强，展示前端内存态结构化事件、累计计数、最近事件和 50 条可见上限 |
 | V0.21 | 设备备份健康 | Web Console 新增设备备份健康面板，基于现有设备状态、快照数和最后备份时间生成只读健康分类 |
 | V0.22 | 备份版本一致性 | Web Console 新增备份版本一致性面板，从现有 snapshot 元数据比较跨设备任务最新版本 |
-| V0.23 | 当前版本 | Web Console 版本一致性 snapshot 联动，可点击设备版本行并复用快照清单详情与恢复预检 dry-run |
+| V0.23 | 版本一致性 snapshot 联动 | Web Console 版本一致性 snapshot 联动，可点击设备版本行并复用快照清单详情与恢复预检 dry-run |
+| V0.24 | 当前版本 | Web Console 版本一致性筛选与搜索，可按状态和任务 / 路径 / 设备 / IP 搜索任务组 |
 
 ## 特性
 
@@ -39,6 +40,7 @@
 - **设备备份健康** — Web Console 基于现有 `/api/devices` 数据生成前端只读健康分类，展示健康、需关注、离线和未知设备数量
 - **备份版本一致性** — Web Console 只读读取现有设备快照，按 jobName / sourcePath 比较跨设备任务的最新版本是否一致
 - **版本一致性 snapshot 联动** — Web Console 可从版本一致性面板点击设备版本行，并复用现有快照清单详情与恢复预检 dry-run 查看具体 snapshot
+- **版本一致性筛选与搜索** — Web Console 可在版本一致性面板按全部 / 版本不一致 / 单设备 / 一致过滤，并按 jobName / sourcePath / deviceId / hostname / IP 搜索任务组，显示可见 / 总数计数
 - **备份任务概览** — Web Console 只读备份任务概览面板，从现有 snapshot 元数据按 jobName / sourcePath 聚合，展示任务数、快照总数、最近备份时间和每个任务的详情
 - **备份任务详情时间线** — Web Console 可从备份任务概览中选择一个任务，只读查看该任务的历史快照时间线、源路径、快照数量和最近备份时间
 - **备份任务时间线 snapshot 联动** — Web Console 可从备份任务详情时间线中选择单个历史 snapshot，并复用快照清单详情与恢复预检 dry-run 面板查看版本内容和恢复影响预览
@@ -46,7 +48,7 @@
 - **事件日志面板增强** — Web Console 事件日志面板增强，展示前端内存态结构化事件、累计计数、最近事件和 50 条可见上限
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志面板增强 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线 / 备份任务时间线 snapshot 联动 / 设备备份健康 / 备份版本一致性 / 版本一致性 snapshot 联动
+- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志面板增强 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线 / 备份任务时间线 snapshot 联动 / 设备备份健康 / 备份版本一致性 / 版本一致性 snapshot 联动 / 版本一致性筛选与搜索
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
@@ -331,6 +333,29 @@ V0.23 在 V0.22 的备份版本一致性面板上增加只读 drill-down。点�
 
 该功能仍是前端只读联动，不新增 API、不写入 metadata、不触发备份、不执行同步、不执行恢复、不删除快照、不连接 NAS、不调用 NAS app、不执行远程文件传输。
 
+### Web Console 版本一致性筛选与搜索
+
+V0.24 在 V0.22/V0.23 的备份版本一致性面板上增加只读筛选与搜索工具栏。控制台仍先读取现有 `/api/devices` 与 `/api/devices/:deviceId/snapshots` 响应，生成全量一致性结果，然后只在浏览器内存中重新过滤和渲染任务组，不重新请求 API，不保存筛选状态。
+
+支持的状态筛选：
+
+- `全部`
+- `版本不一致`
+- `单设备`
+- `一致`
+
+支持的搜索字段：
+
+- `jobName`
+- `sourcePath`
+- `deviceId`
+- `hostname`
+- `IP`
+
+面板会显示可见 / 总数计数。汇总数字仍代表全量任务组的一致、版本不一致、单设备和任务组总数；筛选只影响下方列表的可见范围。
+
+该功能只是前端只读派生视图控制，不新增 API、不写入 metadata、不触发备份、不执行同步、不执行恢复、不删除快照、不连接 NAS、不调用 NAS app、不执行远程文件传输。
+
 ### Web Console 保留计划面板
 
 V0.7 在 Web Console 中增加只读保留计划面板。选中设备后，控制台会请求该设备的 `retention-dry-run` 计划，并显示：
@@ -469,6 +494,13 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 - 不触发备份、不执行同步、不执行恢复、不删除快照、不连接 NAS、不调用 NAS app、不执行远程文件传输。
 - 点击设备版本行只是切换 Web Console 的只读查看上下文，不会自动选择正确版本或解决冲突。
 
+### 版本一致性筛选与搜索安全保证
+
+- 版本一致性筛选与搜索只读取已加载到浏览器内存中的一致性结果，不重新请求 API，不新增 API。
+- 不写入任何元数据，不保存筛选条件，不保存搜索内容。
+- 不触发备份、不执行同步、不执行恢复、不删除快照、不连接 NAS、不调用 NAS app、不执行远程文件传输。
+- 搜索和状态筛选只改变可见任务组列表，不改变一致性分类结果，也不会自动选择正确版本或解决冲突。
+
 ### NAS 实现现状
 
 > **重要**：当前 NAS 实现仅为 **dry-run provider 骨架**。它只负责验证配置结构和输出计划，**不会建立真实 NAS 连接**，不会执行真实远程备份。真实 NAS 传输功能尚未实现。
@@ -496,7 +528,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索。
 
 ## 技术约束
 

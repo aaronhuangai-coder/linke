@@ -145,6 +145,18 @@
             <span>任务组</span>
           </div>
         </div>
+        <div class="version-consistency-controls">
+          <label for="version-consistency-search">搜索</label>
+          <input id="version-consistency-search" data-testid="version-consistency-search" type="search" placeholder="任务 / 路径 / 设备 / IP">
+          <label for="version-consistency-status-filter">状态</label>
+          <select id="version-consistency-status-filter" data-testid="version-consistency-status-filter">
+            <option value="all">全部</option>
+            <option value="drifted">版本不一致</option>
+            <option value="single-device">单设备</option>
+            <option value="synced">一致</option>
+          </select>
+          <span id="version-consistency-filter-count" class="version-consistency-filter-count" data-testid="version-consistency-filter-count">0 / 0</span>
+        </div>
         <ul id="version-consistency-list" class="version-consistency-list" data-testid="version-consistency-list">
           <li class="placeholder">暂无版本一致性数据</li>
         </ul>

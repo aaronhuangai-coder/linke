@@ -116,13 +116,15 @@ body {
   margin-bottom: 0;
 }
 
-.device-filter-count {
+.device-filter-count,
+.version-consistency-filter-count {
   color: #6b7280;
   font-size: 0.78rem;
   font-weight: 600;
 }
 
-.device-controls {
+.device-controls,
+.version-consistency-controls {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 6px 8px;
@@ -133,7 +135,9 @@ body {
 }
 
 .device-controls input,
-.device-controls select {
+.device-controls select,
+.version-consistency-controls input,
+.version-consistency-controls select {
   min-width: 0;
   border: 1px solid #d1d5db;
   border-radius: 4px;
@@ -141,6 +145,11 @@ body {
   background: #fff;
   color: #111827;
   font-size: 0.8rem;
+}
+
+.version-consistency-filter-count {
+  grid-column: 1 / -1;
+  justify-self: end;
 }
 
 /* Device list */

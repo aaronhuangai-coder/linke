@@ -980,6 +980,20 @@ describe('Web Console / API contract', () => {
     assert.ok(js.includes('fetchSnapshotManifest'), 'click path must reuse manifest detail loader');
     assert.ok(js.includes('fetchRestoreDryRunPlan'), 'click path must reuse restore dry-run loader');
   });
+
+  // ── V0.24 Version consistency controls HTML contract ────────────
+
+  it('HTML contains V0.24 version consistency filter controls', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="version-consistency-search"'), 'must have version-consistency-search');
+    assert.ok(html.includes('data-testid="version-consistency-status-filter"'), 'must have version-consistency-status-filter');
+    assert.ok(html.includes('data-testid="version-consistency-filter-count"'), 'must have version-consistency-filter-count');
+    assert.ok(html.includes('value="drifted"'), 'status filter must include drifted option');
+    assert.ok(html.includes('value="single-device"'), 'status filter must include single-device option');
+    assert.ok(html.includes('value="synced"'), 'status filter must include synced option');
+  });
 });
 
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3566,6 +3580,105 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.strictEqual(doc.querySelector('[data-testid="device-detail-device-id"]').textContent, 'mac-b');
     assert.strictEqual(doc.querySelector('[data-testid="manifest-snapshot-id"]').textContent, 'b-docs-stale');
     assert.strictEqual(doc.querySelector('[data-testid="restore-dry-run-create-count"]').textContent, '1');
+  });
+
+  it('filters version consistency groups by status and search without refetching snapshots', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const devices = [
+      { deviceId: 'mac-a', hostname: 'Mac A', ipAddress: '10.0.0.1', status: 'online', snapshotCount: 3 },
+      { deviceId: 'mac-b', hostname: 'Mac B', ipAddress: '10.0.0.2', status: 'online', snapshotCount: 2 },
+    ];
+    const snapshotsByDevice = {
+      'mac-a': [
+        {
+          snapshotId: 'a-docs-new',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T10:00:00.000Z',
+          fileCount: 10,
+        },
+        {
+          snapshotId: 'a-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+        {
+          snapshotId: 'a-photos',
+          jobName: 'photos',
+          sourcePath: '/Users/ah/Pictures',
+          createdAt: '2026-07-05T07:00:00.000Z',
+          fileCount: 20,
+        },
+      ],
+      'mac-b': [
+        {
+          snapshotId: 'b-docs-stale',
+          jobName: 'documents',
+          sourcePath: '/Users/ah/Documents',
+          createdAt: '2026-07-05T09:00:00.000Z',
+          fileCount: 9,
+        },
+        {
+          snapshotId: 'b-config',
+          jobName: 'configs',
+          sourcePath: '/Users/ah/.config',
+          createdAt: '2026-07-05T08:00:00.000Z',
+          fileCount: 4,
+        },
+      ],
+    };
+    const mockFetch = async (url) => {
+      calls.push(url);
+      if (url === '/api/devices') {
+        return { ok: true, status: 200, json: async () => devices };
+      }
+      const match = String(url).match(/^\/api\/devices\/([^/]+)\/snapshots$/);
+      if (match) {
+        return { ok: true, status: 200, json: async () => snapshotsByDevice[decodeURIComponent(match[1])] || [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const list = doc.getElementById('version-consistency-list');
+    const search = doc.getElementById('version-consistency-search');
+    const statusFilter = doc.getElementById('version-consistency-status-filter');
+    const initialCallCount = calls.length;
+
+    assert.strictEqual(list.children.length, 3);
+    assert.ok(search._listeners.input, 'search input must have input listener');
+    assert.ok(statusFilter._listeners.change, 'status filter must have change listener');
+
+    search.value = '10.0.0.2';
+    search._listeners.input();
+
+    assert.strictEqual(list.children.length, 2);
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '2 / 3');
+    assert.ok(list.children[0].textContent.includes('documents'));
+    assert.ok(list.children[1].textContent.includes('configs'));
+    assert.strictEqual(calls.length, initialCallCount, 'filtering must not refetch snapshots');
+
+    statusFilter.value = 'drifted';
+    statusFilter._listeners.change();
+
+    assert.strictEqual(list.children.length, 1);
+    assert.ok(list.children[0].textContent.includes('documents'));
+    assert.strictEqual(list.children[0].dataset.versionStatus, 'drifted');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '1 / 3');
+    assert.strictEqual(calls.length, initialCallCount, 'status filtering must not refetch snapshots');
+
+    search.value = 'not-found';
+    search._listeners.input();
+
+    assert.strictEqual(list.children.length, 1);
+    assert.strictEqual(list.children[0].className, 'placeholder');
+    assert.strictEqual(list.children[0].textContent, '无匹配版本一致性任务');
+    assert.strictEqual(doc.querySelector('[data-testid="version-consistency-filter-count"]').textContent, '0 / 3');
   });
 });
 
