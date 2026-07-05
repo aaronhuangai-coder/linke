@@ -3895,7 +3895,7 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
     assert.strictEqual(calls.length, initialCallCount, 'sorting must not refetch snapshots');
   });
 
-  it('V0.30 DOM test: coverage row shows coverage ratio percentage and handles expectedDeviceCount 0', async () => {
+  it('V0.31 DOM test: coverage row shows coverage ratio percentage, handles expectedDeviceCount <= 0 by showing fallback, and handles expectedDeviceCount > 0 by not showing fallback', async () => {
     const doc = buildMockDoc();
     const devices = [
       { deviceId: 'mac-a', hostname: 'Mac A', status: 'online', snapshotCount: 1 },
@@ -3947,8 +3947,10 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
 
     // 1. coverage row must show 覆盖率 67% for coveredDeviceCount 2 / expectedDeviceCount 3
     assert.match(covGap.textContent, /覆盖率 67%/, 'coverage ratio text must contain "覆盖率 67%"');
+    // 2. coverage row must not contain "无可观测设备" when expectedDeviceCount > 0
+    assert.ok(!covGap.textContent.includes('无可观测设备'), 'group with expectedDeviceCount > 0 must not contain "无可观测设备"');
 
-    // 2. a rendered group with expectedDeviceCount 0 must not contain 覆盖率
+    // 3. a rendered group with expectedDeviceCount 0 must contain "无可观测设备" and must still not contain "覆盖率"
     const docExcl = buildMockDoc();
     let callCount = 0;
     const mockFetchExcl = async (url) => {
@@ -3980,6 +3982,7 @@ describe('V0.22 Backup Version Consistency Panel unit tests', () => {
 
     const zeroCovGap = zeroGroup.querySelector('[data-testid="version-consistency-coverage-gap"]');
     assert.ok(zeroCovGap, 'zero coverage gap element must be rendered');
+    assert.ok(zeroCovGap.textContent.includes('无可观测设备'), 'group with expectedDeviceCount 0 must contain "无可观测设备"');
     assert.ok(!zeroCovGap.textContent.includes('覆盖率'), 'group with expectedDeviceCount 0 must not contain "覆盖率"');
   });
 });

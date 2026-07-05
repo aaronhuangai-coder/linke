@@ -1178,6 +1178,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       let coverageText = '覆盖 ' + String(group.coveredDeviceCount) + ' / ' + String(group.expectedDeviceCount);
       if (expectedDeviceCount > 0) {
         coverageText += ' · 覆盖率 ' + String(Math.round((coveredDeviceCount / expectedDeviceCount) * 100)) + '%';
+      } else {
+        coverageText += ' · 无可观测设备';
       }
       coverageEl.textContent = coverageText + (missingText ? ' · 缺 ' + missingText : '');
       row.appendChild(coverageEl);
