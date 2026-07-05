@@ -20,6 +20,7 @@ import {
   getDeviceBackupHealthStatus,
   getDeviceManagementHint,
   buildDeviceEmptyFilterContext,
+  isDeviceFilterResetActive,
   getDeviceManagementState,
   getDeviceManagementStateKey,
   buildDeviceManagementSummary,
@@ -1134,10 +1135,24 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('重置筛选'), 'device-filter-reset button must have visible reset text');
   });
 
+  // ── V0.41 device-filter-reset state HTML/source contract ─────────
+
+  it('HTML initializes V0.41 device filter reset as disabled and inactive', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const buttonMatch = html.match(/<button[^>]+data-testid="device-filter-reset"[^>]*>/);
+    assert.ok(buttonMatch, 'device-filter-reset button must exist');
+    assert.ok(buttonMatch[0].includes('disabled'), 'device-filter-reset must start disabled');
+    assert.ok(buttonMatch[0].includes('aria-disabled="true"'), 'device-filter-reset must start aria-disabled true');
+    assert.ok(buttonMatch[0].includes('data-active="false"'), 'device-filter-reset must start data-active false');
+  });
+
   it('app.js source contract expects device-filter-reset reference', async () => {
     const res = await fetch(`http://localhost:${port}/app.js`);
     const js = await res.text();
     assert.ok(js.includes('device-filter-reset'), 'app.js must reference device-filter-reset');
+    assert.ok(js.includes('isDeviceFilterResetActive'), 'app.js must expose reset active helper');
+    assert.ok(js.includes('syncDeviceFilterResetState'), 'app.js must sync reset button state');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -3630,6 +3645,77 @@ describe('initConsole DOM data-testid hooks', () => {
     // 6. Verify fetch count did not increase
     assert.strictEqual(fetchCount, 1, 'should not have refetched /api/devices');
   });
+
+  it('DOM test: V0.41 device filter reset state enables only when controls differ from defaults', async () => {
+    const doc = buildMockDoc();
+    const localDevices = [
+      { deviceId: 'mac-1', hostname: 'Aaron-Mac', status: 'online', ipAddress: '10.0.0.20', snapshotCount: 2, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+      { deviceId: 'mac-2', hostname: 'Beta-Mac', status: 'online', ipAddress: '', snapshotCount: 0, lastHeartbeatAt: '2026-07-04T10:00:00Z' },
+    ];
+
+    let fetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url === '/api/devices') fetchCount++;
+      return { ok: true, status: 200, json: async () => (url.includes('/snapshots') ? [] : localDevices) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const searchInput = doc.getElementById('device-search');
+    const statusFilter = doc.getElementById('device-status-filter');
+    const managementFilter = doc.getElementById('device-management-filter');
+    const sortSelect = doc.getElementById('device-sort');
+    const resetButton = doc.getElementById('device-filter-reset');
+
+    assert.ok(resetButton, 'device-filter-reset button must exist');
+    assert.strictEqual(resetButton.disabled, true, 'reset button starts disabled');
+    assert.strictEqual(resetButton.getAttribute('aria-disabled'), 'true');
+    assert.strictEqual(resetButton.getAttribute('data-active'), 'false');
+
+    searchInput.value = 'Beta';
+    searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(resetButton.disabled, false, 'query change enables reset button');
+    assert.strictEqual(resetButton.getAttribute('aria-disabled'), 'false');
+    assert.strictEqual(resetButton.getAttribute('data-active'), 'true');
+
+    searchInput.value = '';
+    searchInput._listeners.input();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(resetButton.disabled, true, 'returning query to default disables reset button');
+    assert.strictEqual(resetButton.getAttribute('data-active'), 'false');
+
+    statusFilter.value = 'online';
+    statusFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(resetButton.disabled, false, 'status change enables reset button');
+
+    statusFilter.value = 'all';
+    managementFilter.value = 'visible';
+    managementFilter._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(resetButton.disabled, false, 'management change enables reset button');
+
+    managementFilter.value = 'all';
+    sortSelect.value = 'snapshots';
+    sortSelect._listeners.change();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.strictEqual(resetButton.disabled, false, 'sort change enables reset button');
+
+    resetButton._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(searchInput.value, '');
+    assert.strictEqual(statusFilter.value, 'all');
+    assert.strictEqual(managementFilter.value, 'all');
+    assert.strictEqual(sortSelect.value, 'name');
+    assert.strictEqual(resetButton.disabled, true, 'reset disables button after restoring defaults');
+    assert.strictEqual(resetButton.getAttribute('aria-disabled'), 'true');
+    assert.strictEqual(resetButton.getAttribute('data-active'), 'false');
+    assert.strictEqual(fetchCount, 1, 'reset state changes must not refetch /api/devices');
+  });
 });
 
 describe('V0.16 device list controls helpers', () => {
@@ -5517,5 +5603,24 @@ describe('V0.39 device empty filter context pure functions', () => {
       buildDeviceEmptyFilterContext({ query: 'Beta', status: 'online', management: 'visible' }),
       '搜索: Beta · 状态: 在线 · 管理态: 在线可见'
     );
+  });
+});
+
+describe('V0.41 device filter reset state pure functions', () => {
+  it('returns false for default controls and whitespace-only query', () => {
+    assert.strictEqual(isDeviceFilterResetActive({}), false);
+    assert.strictEqual(isDeviceFilterResetActive({
+      query: '   ',
+      status: 'all',
+      management: 'all',
+      sort: 'name',
+    }), false);
+  });
+
+  it('returns true when any control differs from its default', () => {
+    assert.strictEqual(isDeviceFilterResetActive({ query: 'Beta', status: 'all', management: 'all', sort: 'name' }), true);
+    assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'online', management: 'all', sort: 'name' }), true);
+    assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'all', management: 'visible', sort: 'name' }), true);
+    assert.strictEqual(isDeviceFilterResetActive({ query: '', status: 'all', management: 'all', sort: 'snapshots' }), true);
   });
 });

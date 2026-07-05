@@ -170,6 +170,12 @@ body {
   background: #e5e7eb;
 }
 
+.device-filter-reset:disabled,
+.device-filter-reset[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .version-consistency-filter-count {
   grid-column: 1 / -1;
   justify-self: end;

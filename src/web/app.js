@@ -264,6 +264,16 @@ export function buildDeviceEmptyFilterContext(controls) {
   return '搜索: ' + query + ' · 状态: ' + status + ' · 管理态: ' + management;
 }
 
+/**
+ * Returns true when any device list control differs from the default state.
+ */
+export function isDeviceFilterResetActive(controls) {
+  return Boolean(String(controls?.query || '').trim())
+    || (controls?.status || 'all') !== 'all'
+    || (controls?.management || 'all') !== 'all'
+    || (controls?.sort || 'name') !== 'name';
+}
+
 export function buildDeviceManagementSummary(devices) {
   const summary = {
     all: 0,
@@ -909,8 +919,19 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function syncDeviceFilterResetState(controls) {
+    if (!deviceFilterResetButton) return;
+    const active = isDeviceFilterResetActive(controls);
+    deviceFilterResetButton.disabled = !active;
+    if (deviceFilterResetButton.setAttribute) {
+      deviceFilterResetButton.setAttribute('aria-disabled', active ? 'false' : 'true');
+      deviceFilterResetButton.setAttribute('data-active', active ? 'true' : 'false');
+    }
+  }
+
   function renderFilteredDevices() {
     const controls = getDeviceControls();
+    syncDeviceFilterResetState(controls);
     renderDeviceManagementSummary(cachedDevices, controls);
     const visibleDevices = applyDeviceListControls(cachedDevices, controls);
     renderDeviceFilterCount(visibleDevices.length, cachedDevices.length);
