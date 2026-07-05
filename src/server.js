@@ -2,6 +2,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { constants } from 'node:fs';
 import { readFile, access } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
+import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   recordHeartbeat,
@@ -42,6 +43,31 @@ function sendJSON(res, status, data) {
 
 function sendError(res, status, message) {
   sendJSON(res, status, { error: message });
+}
+
+function normalizeAuthToken(authToken) {
+  if (authToken === undefined || authToken === null) return '';
+  if (typeof authToken !== 'string') throw new Error('authToken must be a string');
+  const token = authToken.trim();
+  if (authToken.length > 0 && !token) {
+    throw new Error('authToken must be a non-empty string when provided');
+  }
+  return token;
+}
+
+function authTokensMatch(actualToken, expectedToken) {
+  const actual = Buffer.from(actualToken);
+  const expected = Buffer.from(expectedToken);
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(actual, expected);
+}
+
+export function isAuthorizedRequest(req, authToken) {
+  const expectedToken = normalizeAuthToken(authToken);
+  if (!expectedToken) return true;
+  const header = req.headers.authorization;
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+  return authTokensMatch(header.slice('Bearer '.length), expectedToken);
 }
 
 async function readBody(req) {
@@ -97,8 +123,9 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks } = {}) {
+export function createServer({ dataDir, backupHooks, authToken } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
+  const expectedAuthToken = normalizeAuthToken(authToken);
 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -106,6 +133,9 @@ export function createServer({ dataDir, backupHooks } = {}) {
 
     try {
       // ── API Routes ──────────────────────────────────────────
+      if ((pathname === '/api' || pathname.startsWith('/api/')) && !isAuthorizedRequest(req, expectedAuthToken)) {
+        return sendError(res, 401, 'Unauthorized');
+      }
 
       // GET /api/health
       if (method === 'GET' && pathname === '/api/health') {
@@ -364,10 +394,14 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const port = parseInt(process.env.PORT || '3000', 10);
   const host = process.env.HOST || '127.0.0.1';
   const dataDir = process.env.DATA_DIR || resolve(join(process.cwd(), 'data'));
+  const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
 
-  const server = createServer({ dataDir });
+  const server = createServer({ dataDir, authToken });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
+    if (normalizeAuthToken(authToken)) {
+      console.log('API bearer token authentication: enabled');
+    }
   });
 }

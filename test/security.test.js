@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
@@ -190,5 +190,153 @@ describe('Security — devices directory namespace isolation', () => {
       }
     })();
     assert.strictEqual(repoEntries.length, 0, 'no snapshots/ dir should exist at repo root');
+  });
+});
+
+describe('Security — optional bearer token authentication', () => {
+  let dataDir;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'linke-auth-'));
+  });
+
+  after(async () => {
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('rejects GET /api/devices without Authorization with 401 JSON {error:\'Unauthorized\'} and does not mutate dataDir', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const getEntries = async () => {
+        try {
+          return await import('node:fs/promises').then((fs) => fs.readdir(dataDir));
+        } catch {
+          return [];
+        }
+      };
+      const beforeEntries = await getEntries();
+
+      const res = await fetch(`http://localhost:${port}/api/devices`);
+      assert.strictEqual(res.status, 401);
+
+      const body = await res.json();
+      assert.deepStrictEqual(body, { error: 'Unauthorized' });
+
+      const afterEntries = await getEntries();
+      assert.deepStrictEqual(afterEntries, beforeEntries);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects GET /api/health without Authorization when authToken is enabled', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/health`);
+      assert.strictEqual(res.status, 401);
+      assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects POST /api/heartbeat without Authorization before mutating dataDir', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      assert.deepStrictEqual(await readdir(dataDir), []);
+      const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: 'blocked-device' }),
+      });
+      assert.strictEqual(res.status, 401);
+      assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
+      assert.deepStrictEqual(await readdir(dataDir), []);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('protects the exact /api path when authToken is enabled', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api`);
+      assert.strictEqual(res.status, 401);
+      assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('fails fast when authToken is only whitespace', () => {
+    assert.throws(
+      () => createServer({ dataDir, authToken: '   ' }),
+      /authToken must be a non-empty string/,
+    );
+  });
+
+  it('rejects wrong Bearer token with 401', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer wrong-token',
+        },
+      });
+      assert.strictEqual(res.status, 401);
+      const body = await res.json();
+      assert.deepStrictEqual(body, { error: 'Unauthorized' });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('accepts Authorization: Bearer test-token for GET /api/devices', async () => {
+    const server = createServer({ dataDir, authToken: 'test-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer test-token',
+        },
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.ok(Array.isArray(body));
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('when no authToken is provided, existing unauthenticated localhost behavior remains allowed', async () => {
+    const server = createServer({ dataDir });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.ok(Array.isArray(body));
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
   });
 });

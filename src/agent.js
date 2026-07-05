@@ -31,6 +31,7 @@
  *   --output <path>      Output path (launchd-dry-run)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --expected-version <version> Expected release version (release-readiness)
+ *   --token <token>      Bearer token for authenticated Linke Server requests
  */
 
 import { fileURLToPath } from 'node:url';
@@ -46,9 +47,10 @@ const PROJECT_ROOT = resolve(join(__dirname, '..'));
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
-async function request(server, path, method, body) {
+async function request(server, path, method, body, options = {}) {
   const url = `${server}${path}`;
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (options.authToken) opts.headers.Authorization = `Bearer ${options.authToken}`;
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
   const data = await res.json();
@@ -86,7 +88,7 @@ export function parseArgs(argv) {
  * Load config from `configPath`, validate, then POST /api/backups for each job.
  * Returns an array of snapshot records.
  */
-export async function runOnceFromConfig(configPath) {
+export async function runOnceFromConfig(configPath, options = {}) {
   const raw = await loadConfig(configPath);
   const config = validateConfig(raw);
 
@@ -95,7 +97,7 @@ export async function runOnceFromConfig(configPath) {
     deviceId: config.deviceId,
     hostname: config.hostname,
     ipAddress: config.ipAddress,
-  });
+  }, options);
 
   const results = [];
   for (const job of config.backupJobs) {
@@ -107,7 +109,7 @@ export async function runOnceFromConfig(configPath) {
       excludePatterns: config.excludePatterns,
       jobName: job.name,
     };
-    const result = await request(config.serverUrl, '/api/backups', 'POST', body);
+    const result = await request(config.serverUrl, '/api/backups', 'POST', body, options);
     results.push(result);
   }
   return results;
@@ -228,6 +230,7 @@ Options:
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --expected-version <version> Expected release version (for release-readiness)
+  --token <token>      Bearer token for authenticated Linke Server requests
 `);
 }
 
@@ -237,6 +240,8 @@ export async function main() {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
   const server = args.server || 'http://localhost:3000';
+  const requestOptions = args.token && args.token !== true ? { authToken: args.token } : {};
+  const apiRequest = (path, method, body) => request(server, path, method, body, requestOptions);
 
   if (!command) {
     printUsage();
@@ -244,10 +249,14 @@ export async function main() {
   }
 
   try {
+    if (args.token === true) {
+      throw new Error('--token requires a value');
+    }
+
     switch (command) {
       case 'heartbeat': {
         if (!args.device) throw new Error('--device is required');
-        const result = await request(server, '/api/heartbeat', 'POST', {
+        const result = await apiRequest('/api/heartbeat', 'POST', {
           deviceId: args.device,
           hostname: args.hostname,
           ipAddress: args.ip,
@@ -259,7 +268,7 @@ export async function main() {
 
       case 'backup': {
         if (!args.device || !args.source) throw new Error('--device and --source are required');
-        const result = await request(server, '/api/backups', 'POST', {
+        const result = await apiRequest('/api/backups', 'POST', {
           deviceId: args.device,
           hostname: args.hostname,
           ipAddress: args.ip,
@@ -280,7 +289,7 @@ export async function main() {
           if (pattern === true) throw new Error('--exclude requires a pattern value');
           params.append('exclude', pattern);
         }
-        const plan = await request(server, `/api/backup-preflight-dry-run?${params.toString()}`, 'GET');
+        const plan = await apiRequest(`/api/backup-preflight-dry-run?${params.toString()}`, 'GET');
         console.log(JSON.stringify(plan, null, 2));
         break;
       }
@@ -289,7 +298,7 @@ export async function main() {
         if (!args.device || !args.snapshot || !args.target) {
           throw new Error('--device, --snapshot, and --target are required');
         }
-        const result = await request(server, '/api/restore', 'POST', {
+        const result = await apiRequest('/api/restore', 'POST', {
           deviceId: args.device,
           snapshotId: args.snapshot,
           targetPath: args.target,
@@ -306,14 +315,14 @@ export async function main() {
         const path = `/api/devices/${encodeURIComponent(args.device)}`
           + `/snapshots/${encodeURIComponent(args.snapshot)}`
           + `/restore-dry-run?targetPath=${encodeURIComponent(args.target)}`;
-        const plan = await request(server, path, 'GET');
+        const plan = await apiRequest(path, 'GET');
         console.log(JSON.stringify(plan, null, 2));
         break;
       }
 
       case 'snapshots': {
         if (!args.device) throw new Error('--device is required');
-        const result = await request(server, `/api/devices/${encodeURIComponent(args.device)}/snapshots`, 'GET');
+        const result = await apiRequest(`/api/devices/${encodeURIComponent(args.device)}/snapshots`, 'GET');
         console.log('Snapshots:');
         console.log(JSON.stringify(result, null, 2));
         break;
@@ -321,7 +330,7 @@ export async function main() {
 
       case 'status': {
         if (!args.device) throw new Error('--device is required');
-        const devices = await request(server, '/api/devices', 'GET');
+        const devices = await apiRequest('/api/devices', 'GET');
         const device = devices.find((d) => d.deviceId === args.device);
         if (!device) {
           console.log(`Device "${args.device}" not found`);
@@ -334,7 +343,7 @@ export async function main() {
 
       case 'run-once': {
         if (!args.config) throw new Error('--config is required');
-        const results = await runOnceFromConfig(args.config);
+        const results = await runOnceFromConfig(args.config, requestOptions);
         console.log('Run-once completed:');
         console.log(JSON.stringify(results, null, 2));
         break;
@@ -384,13 +393,13 @@ export async function main() {
         if (keepLast !== undefined) {
           path += `?keepLast=${keepLast}`;
         }
-        const plan = await request(server, path, 'GET');
+        const plan = await apiRequest(path, 'GET');
         console.log(JSON.stringify(plan, null, 2));
         break;
       }
 
       case 'health': {
-        const result = await request(server, '/api/health', 'GET');
+        const result = await apiRequest('/api/health', 'GET');
         console.log(JSON.stringify(result, null, 2));
         break;
       }
@@ -399,7 +408,7 @@ export async function main() {
         if (args['expected-version'] === true) {
           throw new Error('--expected-version requires a value');
         }
-        const health = await request(server, '/api/health', 'GET');
+        const health = await apiRequest('/api/health', 'GET');
         const report = buildReleaseReadinessReport(health, {
           expectedVersion: args['expected-version'] || undefined,
         });

@@ -166,9 +166,9 @@ describe('GET /api/gold-readiness', () => {
     assert.strictEqual(res.status, 200);
     assert.match(res.headers.get('content-type') || '', /application\/json/);
     const body = await res.json();
-    assert.strictEqual(body.version, 'V0.52');
+    assert.strictEqual(body.version, 'V0.53');
     assert.strictEqual(body.status, 'blocked');
-    assert.deepStrictEqual(body.summary, { ready: 4, partial: 2, blocked: 3, total: 9 });
+    assert.deepStrictEqual(body.summary, { ready: 4, partial: 3, blocked: 2, total: 9 });
     assert.ok(Number.isFinite(Date.parse(body.generatedAt)));
     assert.strictEqual(Array.isArray(body.items), true);
     assert.strictEqual(body.items.length, 9);

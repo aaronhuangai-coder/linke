@@ -230,6 +230,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.52/, 'V0.52');
   });
 
+  it('mentions V0.53 (optional bearer token auth skeleton)', () => {
+    assertReadmeContains(/V0\.53/, 'V0.53');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -872,8 +876,15 @@ describe('README — security boundaries', () => {
     assertReadmeContains(/安全|security/i, 'security boundary section');
   });
 
-  it('states there is NO authentication / no auth', () => {
-    assertReadmeContains(/无认证|没有认证|no\s*auth|without\s*auth|未.*认证|不.*鉴权/i, 'no authentication');
+  it('states authentication remains partial and not production-grade authorization', () => {
+    assertReadmeContains(
+      /Bearer|token|LINKE_AUTH_TOKEN|认证.*骨架|partial.*auth|not.*production.*auth/i,
+      'partial bearer token authentication',
+    );
+    assertReadmeContains(
+      /不.*完整.*鉴权|不是.*生产级|not.*complete.*authorization|not.*production/i,
+      'not production-grade authorization',
+    );
   });
 
   it('states nas-dry-run does NOT connect to NAS', () => {
@@ -1236,19 +1247,40 @@ describe('README — V0.50 release readiness CLI', () => {
   });
 });
 
-describe('README — V0.52 Gold readiness scorecard docs', () => {
-  it('title and badge claim V0.52 as current', () => {
-    assert.match(readme, /^# Linke V0\.52/m);
-    assert.match(readme, /当前版本：V0\.52/);
+describe('README — V0.53 optional bearer token auth skeleton', () => {
+  it('title and badge claim V0.53 as current', () => {
+    assert.match(readme, /^# Linke V0\.53/m);
+    assert.match(readme, /当前版本：V0\.53/);
   });
 
-  it('version table has V0.52 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.52 \| 当前版本 \|[^|]*(Gold readiness scorecard docs|Gold readiness Web panel|gold-readiness-panel)/i);
+  it('version table has V0.53 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.53 \| 当前版本 \|[^|]*(Bearer|token|认证|auth)/i);
+  });
+
+  it('version table has V0.52 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.52 \| 历史版本 \|[^|]*(Gold readiness scorecard docs|Gold readiness Web panel|gold-readiness-panel)/i);
   });
 
   it('version table has V0.51 row with 历史版本 milestone', () => {
     assert.match(readme, /\| V0\.51 \| 历史版本 \|[^|]*(发布就绪网页控制台|release readiness web panel|release readiness panel)/i);
   });
+
+  it('documents optional bearer token server and agent usage', () => {
+    assert.match(readme, /LINKE_AUTH_TOKEN/);
+    assert.match(readme, /LINKE_TOKEN/);
+    assert.match(readme, /Authorization:\s*Bearer/i);
+    assert.match(readme, /--token\s+<token>|--token/i);
+    assert.match(readme, /401|Unauthorized/);
+  });
+
+  it('states bearer token auth remains partial and not production-grade authorization', () => {
+    assert.match(readme, /partial|部分|骨架|prototype|原型/i);
+    assert.match(readme, /不是.*生产级|not.*production|不.*完整.*鉴权|not.*complete.*authorization/i);
+    assert.match(readme, /Web.*(未|not).*token|token.*Web.*(未|not)|浏览器.*token/i);
+  });
+});
+
+describe('README — V0.52 Gold readiness scorecard docs', () => {
 
   it('documents the gold-readiness API endpoint and Web Console gold-readiness panel', () => {
     assert.match(readme, /GET\s+\/api\/gold-readiness/);
@@ -1276,7 +1308,7 @@ describe('README — V0.52 Gold readiness scorecard docs', () => {
     assert.match(readme, /no.*production.*ready|不(承诺|包含).*生产/i);
     // no real NAS connection
     assert.match(readme, /不(建立|连接).*真实.*NAS|no.*real.*NAS/i);
-    // no authentication/authorization implementation claim
-    assert.match(readme, /不(包含|实现).*身份验证|无.*(权限|认证)|no.*auth/i);
+    // authentication remains partial, not a complete Gold authorization claim
+    assert.match(readme, /security-auth[\s\S]*(partial|部分)|Bearer[\s\S]*(partial|部分)|不.*完整.*鉴权/i);
   });
 });

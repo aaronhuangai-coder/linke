@@ -15,19 +15,19 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.52', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.52');
+  it('expects LINKE_RELEASE_VERSION to be V0.53', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.53');
   });
 
-  it('expects report.version to be V0.52', () => {
+  it('expects report.version to be V0.53', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.52');
+    assert.strictEqual(report.version, 'V0.53');
   });
 
   it('expects status blocked and correct summary count', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     assert.strictEqual(report.status, 'blocked');
-    assert.deepStrictEqual(report.summary, { ready: 4, partial: 2, blocked: 3, total: 9 });
+    assert.deepStrictEqual(report.summary, { ready: 4, partial: 3, blocked: 2, total: 9 });
   });
 
   it('verifies generatedAt timestamp is parsed from options.now', () => {
@@ -122,9 +122,18 @@ describe('Gold Readiness Report', () => {
     );
   });
 
-  it('verifies security-auth, real-nas-remote-backup, and production-hardening are blocked', () => {
+  it('verifies security-auth is partial while real-nas-remote-backup and production-hardening remain blocked', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    const blockedIds = ['security-auth', 'real-nas-remote-backup', 'production-hardening'];
+    const securityItem = report.items.find(item => item.id === 'security-auth');
+    assert.ok(securityItem, 'security-auth should exist');
+    assert.strictEqual(securityItem.status, 'partial');
+    const securityEvidence = evidenceText(securityItem);
+    assert.ok(securityEvidence.includes('test/security.test.js'));
+    assert.ok(securityEvidence.includes('test/agent-health.test.js'));
+    assert.ok(securityEvidence.includes('Authorization: Bearer'));
+    assert.match(securityItem.nextStep, /Web|authorization|secret|production/i);
+
+    const blockedIds = ['real-nas-remote-backup', 'production-hardening'];
     for (const id of blockedIds) {
       const item = report.items.find(item => item.id === id);
       assert.ok(item, `${id} should exist`);

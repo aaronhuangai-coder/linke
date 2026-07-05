@@ -59,7 +59,7 @@ const GOLD_READINESS_ITEMS = [
       'test/nas-dry-run.test.js',
       'test/config.test.js',
     ],
-    nextStep: 'No real NAS connection is made in V0.52; implement authenticated NAS connection separately.',
+    nextStep: 'No real NAS connection is made in V0.53; implement authenticated NAS connection separately.',
   },
   {
     id: 'automation-installation',
@@ -75,13 +75,16 @@ const GOLD_READINESS_ITEMS = [
   {
     id: 'security-auth',
     area: 'security',
-    label: 'Authentication and authorization',
-    status: 'blocked',
+    label: 'Optional API bearer token authentication skeleton',
+    status: 'partial',
     evidence: [
-      'README security boundary',
-      'test/readme.test.js',
+      'src/server.js authToken API gate',
+      'src/agent.js --token option',
+      'Authorization: Bearer header',
+      'test/security.test.js',
+      'test/agent-health.test.js',
     ],
-    nextStep: 'Design and implement authentication and authorization before any Gold release claim.',
+    nextStep: 'Add Web token UX, role-based authorization, secret management, audit logs, and production security review before any Gold release claim.',
   },
   {
     id: 'real-nas-remote-backup',

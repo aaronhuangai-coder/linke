@@ -63,3 +63,54 @@ describe('Agent health CLI', () => {
     );
   });
 });
+
+describe('Agent health CLI with optional bearer token authentication', () => {
+  let server, dataDir, port;
+
+  before(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'linke-agent-health-auth-'));
+    server = createServer({ dataDir, authToken: 'health-test-token' });
+    await new Promise((resolve) => server.listen(0, resolve));
+    port = server.address().port;
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('passes --token as a bearer token when checking health', async () => {
+    assert.deepStrictEqual(await readdir(dataDir), []);
+    const agentPath = join(import.meta.dirname, '..', 'src', 'agent.js');
+    const { stdout } = await exec('node', [
+      agentPath,
+      'health',
+      '--server',
+      `http://localhost:${port}`,
+      '--token',
+      'health-test-token',
+    ]);
+
+    const body = JSON.parse(stdout);
+    assert.strictEqual(body.status, 'ok');
+    assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
+    assert.deepStrictEqual(await readdir(dataDir), []);
+  });
+
+  it('fails without --token when server authToken is enabled', async () => {
+    const agentPath = join(import.meta.dirname, '..', 'src', 'agent.js');
+    await assert.rejects(
+      () => exec('node', [
+        agentPath,
+        'health',
+        '--server',
+        `http://localhost:${port}`,
+      ]),
+      (err) => {
+        assert.notStrictEqual(err.code, 0);
+        assert.match(err.stderr, /Unauthorized/);
+        return true;
+      },
+    );
+  });
+});
