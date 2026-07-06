@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.79', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.79');
+  it('expects LINKE_RELEASE_VERSION to be V0.80', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.80');
   });
 
-  it('expects report.version to be V0.79', () => {
+  it('expects report.version to be V0.80', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.79');
+    assert.strictEqual(report.version, 'V0.80');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -149,6 +149,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/agent-supervisor-install-dry-run.test.js'));
     assert.ok(automationEvidence.includes('src/agent.js supervisor-install-dry-run'));
     assert.ok(automationEvidence.includes('src/agent.js buildSupervisorInstallDryRunPlan'));
+    assert.ok(automationEvidence.includes('src/agent.js buildSupervisorInstallReadinessSummary'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-install-dry-run --readiness-summary'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-install-dry-run --fail-on-blocked'));
+    assert.ok(automationEvidence.includes('readinessSummary.state:blocked'));
     assert.ok(automationEvidence.includes('GET /api/supervisor-status'));
     assert.ok(automationEvidence.includes('src/server.js buildSupervisorStatusResponse'));
     assert.ok(automationEvidence.includes('src/agent.js supervisor-status'));
@@ -159,7 +163,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/health.test.js supervisor-status'));
     assert.ok(automationEvidence.includes('supervisor.state:not_configured'));
     assert.ok(automationEvidence.includes('supervisorInstalled:false'));
-    assert.match(automationItem.nextStep, /dry-run|not_configured|installer|launchd|watchdog|monitoring|managed daemon/i);
+    assert.match(automationItem.nextStep, /readiness|gate|dry-run|not_configured|installer|launchd|watchdog|monitoring|managed daemon/i);
   });
 
   it('verifies security-auth and production-hardening are partial while real-nas-remote-backup remains blocked', () => {
@@ -224,6 +228,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/agent-supervisor-install-dry-run.test.js'));
     assert.ok(hardeningEvidence.includes('src/agent.js supervisor-install-dry-run'));
     assert.ok(hardeningEvidence.includes('src/agent.js buildSupervisorInstallDryRunPlan'));
+    assert.ok(hardeningEvidence.includes('src/agent.js buildSupervisorInstallReadinessSummary'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-install-dry-run --readiness-summary'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-install-dry-run --fail-on-blocked'));
+    assert.ok(hardeningEvidence.includes('readinessSummary.state:blocked'));
     assert.ok(hardeningEvidence.includes('supervisor.state:not_configured'));
     assert.ok(hardeningEvidence.includes('supervisorInstalled:false'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorStatusViewModel'));

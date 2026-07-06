@@ -9,6 +9,19 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const exec = promisify(execFile);
 const agentPath = join(import.meta.dirname, '..', 'src', 'agent.js');
+const EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY = Object.freeze({
+  state: 'blocked',
+  blockedCount: 4,
+  blockers: [
+    'real-install-not-implemented',
+    'launchd-install-blocked',
+    'supervisor-start-blocked',
+    'production-boundaries-incomplete',
+  ],
+  readyCount: 0,
+  checkedCount: 4,
+  failOnBlockedExitCode: 2,
+});
 
 async function runAgent(args) {
   return exec('node', [agentPath, ...args]);
@@ -41,8 +54,12 @@ describe('Agent supervisor-install-dry-run CLI', () => {
   it('buildSupervisorInstallDryRunPlan returns a sanitized dry-run plan without sensitive config values', async () => {
     const app = await import('../src/agent.js');
     const buildSupervisorInstallDryRunPlan = app.buildSupervisorInstallDryRunPlan;
+    const buildSupervisorInstallReadinessSummary = app.buildSupervisorInstallReadinessSummary;
     if (!buildSupervisorInstallDryRunPlan) {
       throw new Error('buildSupervisorInstallDryRunPlan is not defined in src/agent.js');
+    }
+    if (!buildSupervisorInstallReadinessSummary) {
+      throw new Error('buildSupervisorInstallReadinessSummary is not defined in src/agent.js');
     }
 
     const sourcePath = '/Users/ah/private/source';
@@ -112,6 +129,14 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       restoreTriggered: false,
       remoteCommandExecuted: false,
     });
+    assert.deepStrictEqual(
+      buildSupervisorInstallReadinessSummary(),
+      EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
+    );
+    assert.deepStrictEqual(
+      plan.readinessSummary,
+      EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
+    );
     assert.ok(Array.isArray(plan.nextSteps));
     assert.ok(plan.nextSteps.some((step) => /launchd-dry-run/.test(step)));
 
@@ -164,6 +189,10 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.supervisor.state, 'not_configured');
       assert.strictEqual(body.supervisor.wouldInstall, false);
       assert.strictEqual(body.supervisor.wouldCallLaunchctl, false);
+      assert.deepStrictEqual(
+        body.readinessSummary,
+        EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
+      );
       assert.strictEqual(body.safety.launchctlCalled, false);
       assert.strictEqual(body.safety.processListRead, false);
       assert.strictEqual(body.safety.launchdFileWritten, false);
@@ -174,6 +203,172 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.doesNotMatch(stdout, new RegExp(dataDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|ugreen\.local|ugreen-ref|unused-local-token|Bearer/i);
       assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('prints only sanitized readinessSummary with --readiness-summary', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-install-summary-'));
+    const sourceDir = join(dataDir, 'private-source');
+    const configPath = join(dataDir, 'config.json');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        serverUrl: 'http://127.0.0.1:3000',
+        deviceId: 'agent-install-summary',
+        backupJobs: [{ name: 'private-job', sourcePath: sourceDir }],
+        nasTargets: [
+          {
+            name: 'synology-a',
+            provider: 'synology',
+            endpoint: 'https://synology.local',
+            shareName: 'backup',
+            remotePath: '/private/remote',
+            credentialRef: 'synology-ref',
+          },
+        ],
+      }),
+    );
+
+    try {
+      const { stdout, stderr } = await runAgent([
+        'supervisor-install-dry-run',
+        '--config',
+        configPath,
+        '--readiness-summary',
+        '--token',
+        'unused-summary-token',
+      ]);
+      const body = JSON.parse(stdout);
+
+      assert.strictEqual(stderr, '');
+      assert.deepStrictEqual(body, EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY);
+      assert.strictEqual(body.supervisor, undefined);
+      assert.strictEqual(body.configSummary, undefined);
+      assert.doesNotMatch(stdout, new RegExp(escapeRegExp(dataDir)));
+      assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|synology\.local|synology-ref|unused-summary-token|Bearer/i);
+      assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 2 with full sanitized JSON when --fail-on-blocked is used', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-install-fail-full-'));
+    const sourceDir = join(dataDir, 'private-source');
+    const configPath = join(dataDir, 'config.json');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        serverUrl: 'http://127.0.0.1:3000',
+        deviceId: 'agent-install-fail-full',
+        backupJobs: [{ name: 'private-job', sourcePath: sourceDir }],
+      }),
+    );
+
+    try {
+      const err = await rejectAgent([
+        'supervisor-install-dry-run',
+        '--config',
+        configPath,
+        '--fail-on-blocked',
+      ], 2);
+      const body = JSON.parse(err.stdout);
+
+      assert.strictEqual(err.stderr, '');
+      assert.strictEqual(body.command, 'supervisor-install-dry-run');
+      assert.deepStrictEqual(
+        body.readinessSummary,
+        EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
+      );
+      assert.strictEqual(body.readinessSummary.state, 'blocked');
+      assert.strictEqual(body.safety.launchctlCalled, false);
+      assert.strictEqual(body.safety.processListRead, false);
+      assert.strictEqual(body.safety.launchdFileWritten, false);
+      assert.strictEqual(body.safety.metadataWritten, false);
+      assert.strictEqual(body.safety.nasConnected, false);
+      assert.strictEqual(body.safety.backupTriggered, false);
+      assert.strictEqual(body.safety.restoreTriggered, false);
+      assert.strictEqual(body.safety.remoteCommandExecuted, false);
+      assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
+      assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 2 with only readinessSummary when summary and fail flags are combined', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-install-fail-summary-'));
+    const sourceDir = join(dataDir, 'private-source');
+    const configPath = join(dataDir, 'config.json');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        serverUrl: 'http://127.0.0.1:3000',
+        deviceId: 'agent-install-fail-summary',
+        backupJobs: [{ name: 'private-job', sourcePath: sourceDir }],
+      }),
+    );
+
+    try {
+      const err = await rejectAgent([
+        'supervisor-install-dry-run',
+        '--config',
+        configPath,
+        '--readiness-summary',
+        '--fail-on-blocked',
+      ], 2);
+      const body = JSON.parse(err.stdout);
+
+      assert.strictEqual(err.stderr, '');
+      assert.deepStrictEqual(body, EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY);
+      assert.strictEqual(body.supervisor, undefined);
+      assert.strictEqual(body.configSummary, undefined);
+      assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
+      assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects readiness flags with values before printing JSON', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-install-flag-values-'));
+    const sourceDir = join(dataDir, 'private-source');
+    const configPath = join(dataDir, 'config.json');
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        serverUrl: 'http://127.0.0.1:3000',
+        deviceId: 'agent-install-flag-values',
+        backupJobs: [{ name: 'private-job', sourcePath: sourceDir }],
+      }),
+    );
+
+    try {
+      const summaryErr = await rejectAgent([
+        'supervisor-install-dry-run',
+        '--config',
+        configPath,
+        '--readiness-summary',
+        'yes',
+      ], 1);
+      assert.match(summaryErr.stderr, /--readiness-summary does not accept a value/);
+      assert.strictEqual(summaryErr.stdout, '');
+
+      const failErr = await rejectAgent([
+        'supervisor-install-dry-run',
+        '--config',
+        configPath,
+        '--fail-on-blocked',
+        'yes',
+      ], 1);
+      assert.match(failErr.stderr, /--fail-on-blocked does not accept a value/);
+      assert.strictEqual(failErr.stdout, '');
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

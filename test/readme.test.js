@@ -1737,18 +1737,19 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.79 Supervisor install dry-run CLI', () => {
-  it('title and badge claim V0.79 as current', () => {
-    assertReadmeContains(/# Linke V0\.79/, 'README title should mention V0.79');
-    assertReadmeContains(/\*\*当前版本：V0\.79\*\*/, 'README badge should mention V0.79');
+describe('README — V0.80 Supervisor install readiness gate', () => {
+  it('title and badge claim V0.80 as current', () => {
+    assertReadmeContains(/# Linke V0\.80/, 'README title should mention V0.80');
+    assertReadmeContains(/\*\*当前版本：V0\.80\*\*/, 'README badge should mention V0.80');
   });
 
-  it('version table marks V0.75 through V0.78 historical and V0.79 current', () => {
+  it('version table marks V0.75 through V0.79 historical and V0.80 current', () => {
     assertReadmeContains(/\| V0\.75 \| 历史版本 \|[^|]*(gold-readiness|Gold readiness|fail-on-blocked|自动化门禁)/i, 'V0.75 should be historical Agent Gold readiness CLI milestone');
     assertReadmeContains(/\| V0\.76 \| 历史版本 \|[^|]*(auth-status|认证状态|--token|token material)/i, 'V0.76 should be historical Agent auth-status CLI milestone');
     assertReadmeContains(/\| V0\.77 \| 历史版本 \|[^|]*(supervisor-status|supervisor|not_configured|托管|守护)/i, 'V0.77 should be historical supervisor-status API/CLI milestone');
     assertReadmeContains(/\| V0\.78 \| 历史版本 \|[^|]*(supervisor-status-panel|Web Console|supervisor-status|not_configured)/i, 'V0.78 should be historical supervisor-status Web panel milestone');
-    assertReadmeContains(/\| V0\.79 \| 当前版本 \|[^|]*(supervisor-install-dry-run|install dry-run|安装计划|dry-run)/i, 'V0.79 should be current supervisor-install-dry-run milestone');
+    assertReadmeContains(/\| V0\.79 \| 历史版本 \|[^|]*(supervisor-install-dry-run|install dry-run|安装计划|dry-run)/i, 'V0.79 should be historical supervisor-install-dry-run milestone');
+    assertReadmeContains(/\| V0\.80 \| 当前版本 \|[^|]*(readinessSummary|readiness-summary|fail-on-blocked|退出码 2|blocked)/i, 'V0.80 should be current supervisor install readiness gate milestone');
   });
 
   it('keeps documenting hardening-status API, CLI, and Web panel safety boundaries', () => {
@@ -1843,7 +1844,12 @@ describe('README — V0.79 Supervisor install dry-run CLI', () => {
   it('documents supervisor-install-dry-run CLI safety boundaries', () => {
     assertReadmeContains(/agent\.js supervisor-install-dry-run|node src\/agent\.js supervisor-install-dry-run/, 'README should document supervisor-install-dry-run CLI');
     assertReadmeContains(/--config/, 'README should document supervisor-install-dry-run --config option');
-    assertReadmeContains(/buildSupervisorInstallDryRunPlan|test\/agent-supervisor-install-dry-run\.test\.js/, 'README should document supervisor-install-dry-run test coverage');
+    assertReadmeContains(/--readiness-summary/, 'README should document supervisor-install-dry-run readiness summary option');
+    assertReadmeContains(/--fail-on-blocked/, 'README should document supervisor-install-dry-run fail-on-blocked option');
+    assertReadmeContains(/readinessSummary|readiness summary|就绪摘要/i, 'README should document supervisor-install-dry-run readiness summary output');
+    assertReadmeContains(/state:"blocked"|state:'blocked'|state.*blocked|blocked.*state/i, 'README should document blocked readiness state');
+    assertReadmeContains(/退出码\s*2|exit code\s*2|exits?\s*2/i, 'README should document fail-on-blocked exit code 2');
+    assertReadmeContains(/buildSupervisorInstallDryRunPlan|buildSupervisorInstallReadinessSummary|test\/agent-supervisor-install-dry-run\.test\.js/, 'README should document supervisor-install-dry-run test coverage');
     assertReadmeContains(/wouldInstall:false|不安装/i, 'README should document no install');
     assertReadmeContains(/wouldStart:false|不启动/i, 'README should document no start');
     assertReadmeContains(/launchctlCalled:false|不调用 launchctl/i, 'README should document no launchctl call');
@@ -1856,7 +1862,7 @@ describe('README — V0.79 Supervisor install dry-run CLI', () => {
     assertReadmeContains(/--output.*not supported|不支持 --output|不会写输出文件/i, 'README should document --output is not supported');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.79', () => {
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.80', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

@@ -33,13 +33,13 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run)
  *   --output <path>      Output path (launchd-dry-run)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
- *   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
- *   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state or gold-readiness status is blocked
+ *   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
+ *   --fail-on-blocked   Exit 2 when nas-dry-run/supervisor-install-dry-run readinessSummary.state or gold-readiness status is blocked
  *   --token <token>      Bearer token for authenticated Linke Server requests
  */
 
@@ -74,6 +74,12 @@ const SUPERVISOR_SAFETY_FALSE_FIELDS = [
   'remoteCommandExecuted',
 ];
 const SUPERVISOR_INSTALL_DRY_RUN_CONFIG_ERROR = 'supervisor-install-dry-run failed; verify --config points to a readable valid Linke config';
+const SUPERVISOR_INSTALL_READINESS_BLOCKERS = Object.freeze([
+  'real-install-not-implemented',
+  'launchd-install-blocked',
+  'supervisor-start-blocked',
+  'production-boundaries-incomplete',
+]);
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
@@ -300,11 +306,23 @@ export function buildSupervisorInstallDryRunPlan(config) {
       restoreTriggered: false,
       remoteCommandExecuted: false,
     },
+    readinessSummary: buildSupervisorInstallReadinessSummary(),
     nextSteps: [
       'Review this sanitized dry-run plan.',
       'Use launchd-dry-run separately if a plist preview is needed.',
       'Real install/start remains out of scope.',
     ],
+  };
+}
+
+export function buildSupervisorInstallReadinessSummary() {
+  return {
+    state: 'blocked',
+    blockedCount: SUPERVISOR_INSTALL_READINESS_BLOCKERS.length,
+    blockers: SUPERVISOR_INSTALL_READINESS_BLOCKERS.slice(),
+    readyCount: 0,
+    checkedCount: SUPERVISOR_INSTALL_READINESS_BLOCKERS.length,
+    failOnBlockedExitCode: 2,
   };
 }
 
@@ -362,8 +380,8 @@ Options:
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
   --expected-version <version> Expected release version (for release-readiness)
-  --readiness-summary  Print only NAS readinessSummary for nas-dry-run
-  --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state or gold-readiness status is blocked
+  --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
+  --fail-on-blocked   Exit 2 when nas-dry-run/supervisor-install-dry-run readinessSummary.state or gold-readiness status is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
 `);
 }
@@ -579,8 +597,18 @@ export async function main() {
         if (args.output !== undefined) {
           throw new Error('--output is not supported by supervisor-install-dry-run');
         }
+        if (args['readiness-summary'] !== undefined && args['readiness-summary'] !== true) {
+          throw new Error('--readiness-summary does not accept a value');
+        }
+        if (args['fail-on-blocked'] !== undefined && args['fail-on-blocked'] !== true) {
+          throw new Error('--fail-on-blocked does not accept a value');
+        }
         const result = await runSupervisorInstallDryRun(args.config);
-        console.log(JSON.stringify(result, null, 2));
+        const output = args['readiness-summary'] === true ? result.readinessSummary : result;
+        console.log(JSON.stringify(output, null, 2));
+        if (args['fail-on-blocked'] === true && result.readinessSummary.state === 'blocked') {
+          process.exitCode = 2;
+        }
         break;
       }
 
