@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.77', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.77');
+  it('expects LINKE_RELEASE_VERSION to be V0.78', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.78');
   });
 
-  it('expects report.version to be V0.77', () => {
+  it('expects report.version to be V0.78', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.77');
+    assert.strictEqual(report.version, 'V0.78');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -149,6 +149,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('GET /api/supervisor-status'));
     assert.ok(automationEvidence.includes('src/server.js buildSupervisorStatusResponse'));
     assert.ok(automationEvidence.includes('src/agent.js supervisor-status'));
+    assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorStatusViewModel'));
+    assert.ok(automationEvidence.includes('src/web/index.html supervisor-status-panel'));
+    assert.ok(automationEvidence.includes('test/web-console.test.js supervisor-status panel'));
     assert.ok(automationEvidence.includes('test/agent-supervisor-status.test.js'));
     assert.ok(automationEvidence.includes('test/health.test.js supervisor-status'));
     assert.ok(automationEvidence.includes('supervisor.state:not_configured'));
@@ -217,6 +220,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('src/agent.js supervisor-status'));
     assert.ok(hardeningEvidence.includes('supervisor.state:not_configured'));
     assert.ok(hardeningEvidence.includes('supervisorInstalled:false'));
+    assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorStatusViewModel'));
+    assert.ok(hardeningEvidence.includes('src/web/index.html supervisor-status-panel'));
+    assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor-status panel'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildHardeningStatusViewModel'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js hardening-status panel'));
     assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|rotation|retention|hardening-status/i);

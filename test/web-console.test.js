@@ -1578,6 +1578,73 @@ describe('Web Console / API contract', () => {
     );
   });
 
+  // ── V0.78 supervisor-status Web panel contract tests ────────────────
+
+  it('HTML contains supervisor-status panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="supervisor-status-panel"'), 'must have supervisor-status-panel');
+    assert.ok(html.includes('data-testid="supervisor-status-refresh"'), 'must have supervisor-status-refresh');
+    assert.ok(html.includes('data-testid="supervisor-status-state"'), 'must have supervisor-status-state');
+    assert.ok(html.includes('data-testid="supervisor-status-installed"'), 'must have supervisor-status-installed');
+    assert.ok(html.includes('data-testid="supervisor-status-managed"'), 'must have supervisor-status-managed');
+    assert.ok(html.includes('data-testid="supervisor-status-launchd"'), 'must have supervisor-status-launchd');
+    assert.ok(html.includes('data-testid="supervisor-status-watchdog"'), 'must have supervisor-status-watchdog');
+    assert.ok(html.includes('data-testid="supervisor-status-monitoring"'), 'must have supervisor-status-monitoring');
+    assert.ok(html.includes('data-testid="supervisor-status-recovery"'), 'must have supervisor-status-recovery');
+    assert.ok(html.includes('data-testid="supervisor-status-safety"'), 'must have supervisor-status-safety');
+    assert.ok(html.includes('data-testid="supervisor-status-message"'), 'must have supervisor-status-message');
+    assert.ok(html.includes('data-testid="supervisor-status-safety-note"'), 'must have supervisor-status-safety-note');
+  });
+
+  it('supervisor-status Web panel safety note documents read-only boundaries and avoids overclaims', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="supervisor-status-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'supervisor-status-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(/只读|read-only/i.test(content), 'must mention read-only behavior');
+    assert.ok(content.includes('GET /api/supervisor-status'), 'must mention GET /api/supervisor-status');
+    assert.ok(/无启动请求|不触发启动请求|no startup/i.test(content), 'must mention no startup request');
+    assert.ok(/不自动轮询|no polling|no auto/i.test(content), 'must mention no auto polling');
+    assert.ok(/不调用\s*launchctl|launchctlCalled:false/i.test(content), 'must mention no launchctl call');
+    assert.ok(/不读取.*进程|processListRead:false/i.test(content), 'must mention no process-list read');
+    assert.ok(/不安装|supervisorInstalled:false/i.test(content), 'must mention no supervisor install');
+    assert.ok(/不写入\s*metadata|不写入\s*元数据|metadataWritten:false/i.test(content), 'must mention no metadata writes');
+    assert.ok(/不连接\s*NAS|nasConnected:false/i.test(content), 'must mention no NAS connection');
+    assert.ok(/不触发.*备份|不触发.*恢复|不执行远程命令|backupTriggered:false|restoreTriggered:false|remoteCommandExecuted:false/i.test(content), 'must mention no backup/restore/remote command');
+    assert.ok(!/生产可用|production ready/i.test(content), 'must not claim production ready');
+    assert.ok(!/已安装守护进程|daemon installed|launchd installed/i.test(content), 'must not claim daemon installation');
+  });
+
+  it('app.js wires supervisor-status rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/supervisor-status'), 'app.js must reference /api/supervisor-status');
+    assert.ok(
+      js.includes('supervisor-status-refresh') || js.includes('supervisorStatusRefresh'),
+      'app.js must reference supervisor-status-refresh'
+    );
+    assert.ok(js.includes('buildSupervisorStatusViewModel'), 'app.js must reference buildSupervisorStatusViewModel');
+  });
+
+  it('styles.css contains supervisor-status panel CSS status selectors partial and error', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(
+      css.includes('supervisor-status-panel[data-status="partial"]'),
+      'styles.css must contain partial status styling'
+    );
+    assert.ok(
+      css.includes('supervisor-status-panel[data-status="error"]'),
+      'styles.css must contain error status styling'
+    );
+  });
+
   // ── V0.74 audit-log Web panel contract tests ────────────────────────
 
   it('HTML contains audit-log panel with required data-testid hooks', async () => {
@@ -8024,6 +8091,104 @@ describe('Hardening status pure functions', () => {
   });
 });
 
+describe('Supervisor status pure functions', () => {
+  it('buildSupervisorStatusViewModel is exported and handles unknown input', async () => {
+    const app = await import('../src/web/app.js');
+    const buildSupervisorStatusViewModel = app.buildSupervisorStatusViewModel;
+    if (!buildSupervisorStatusViewModel) {
+      throw new Error('buildSupervisorStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const result = buildSupervisorStatusViewModel(null);
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.stateText, '—');
+    assert.strictEqual(result.installedText, '—');
+    assert.strictEqual(result.managedText, '—');
+    assert.strictEqual(result.launchdText, '—');
+    assert.strictEqual(result.watchdogText, '—');
+    assert.strictEqual(result.monitoringText, '—');
+    assert.strictEqual(result.recoveryText, '—');
+    assert.strictEqual(result.safetyText, '—');
+    assert.ok(result.messageText.includes('/api/supervisor-status'));
+  });
+
+  it('buildSupervisorStatusViewModel formats error status with redaction', async () => {
+    const app = await import('../src/web/app.js');
+    const buildSupervisorStatusViewModel = app.buildSupervisorStatusViewModel;
+    if (!buildSupervisorStatusViewModel) {
+      throw new Error('buildSupervisorStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const result = buildSupervisorStatusViewModel(null, 'HTTP 500');
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.strictEqual(result.stateText, '—');
+    assert.ok(result.messageText.includes('HTTP 500'));
+
+    const sensitiveResult = buildSupervisorStatusViewModel(null, 'Bearer token failed at /Users/ah/private/supervisor');
+    assert.strictEqual(sensitiveResult.statusKey, 'error');
+    assert.ok(sensitiveResult.messageText.includes('[redacted]'), 'credential-like or path-like error text must be redacted');
+    assert.doesNotMatch(sensitiveResult.messageText, /Bearer|token|\/Users\/ah\/private/);
+  });
+
+  it('buildSupervisorStatusViewModel formats partial status with whitelisted fields', async () => {
+    const app = await import('../src/web/app.js');
+    const buildSupervisorStatusViewModel = app.buildSupervisorStatusViewModel;
+    if (!buildSupervisorStatusViewModel) {
+      throw new Error('buildSupervisorStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const payload = {
+      status: 'partial',
+      service: 'linke',
+      version: LINKE_RELEASE_VERSION,
+      supervisor: {
+        installed: false,
+        managed: false,
+        launchdConfigured: false,
+        watchdogConfigured: false,
+        monitoringConfigured: false,
+        recoveryConfigured: false,
+        state: 'not_configured',
+        rawPath: '/Users/ah/private/supervisor',
+      },
+      safety: {
+        launchctlCalled: false,
+        processListRead: false,
+        supervisorInstalled: false,
+        metadataWritten: false,
+        nasConnected: false,
+        backupTriggered: false,
+        restoreTriggered: false,
+        remoteCommandExecuted: false,
+        Authorization: 'Bearer leaked-token',
+      }
+    };
+
+    const result = buildSupervisorStatusViewModel(payload);
+    assert.strictEqual(result.statusKey, 'partial');
+    assert.strictEqual(result.statusText, '部分就绪');
+    assert.strictEqual(result.stateText, 'not_configured');
+    assert.strictEqual(result.installedText, '未配置');
+    assert.strictEqual(result.managedText, '未配置');
+    assert.strictEqual(result.launchdText, '未配置');
+    assert.strictEqual(result.watchdogText, '未配置');
+    assert.strictEqual(result.monitoringText, '未配置');
+    assert.strictEqual(result.recoveryText, '未配置');
+    assert.match(result.safetyText, /launchctl:false/);
+    assert.match(result.safetyText, /process:false/);
+    assert.match(result.safetyText, /metadata:false/);
+    assert.match(result.safetyText, /NAS:false/);
+    assert.match(result.safetyText, /backup:false/);
+    assert.match(result.safetyText, /restore:false/);
+    assert.match(result.safetyText, /remote:false/);
+
+    const text = JSON.stringify(result);
+    assert.doesNotMatch(text, /Bearer|leaked-token|private\/supervisor|rawPath|Authorization/);
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -8221,6 +8386,187 @@ describe('DOM test: hardening status panel interactions', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     assert.strictEqual(hardeningFetchCount, 1, 'in-flight guard must block duplicate hardening-status fetches');
+
+    resolveRequest();
+    await firstClick;
+    await secondClick;
+  });
+});
+
+describe('DOM test: supervisor-status panel interactions', () => {
+  it('does not request /api/supervisor-status on initialization', async () => {
+    const doc = buildMockDoc();
+    let supervisorFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/supervisor-status')) supervisorFetchCount++;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(supervisorFetchCount, 0, 'should not call /api/supervisor-status on init');
+  });
+
+  it('requests /api/supervisor-status only once and renders partial status and whitelisted fields when refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let supervisorFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/supervisor-status')) {
+        supervisorFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'partial',
+            service: 'linke',
+            version: LINKE_RELEASE_VERSION,
+            supervisor: {
+              installed: false,
+              managed: false,
+              launchdConfigured: false,
+              watchdogConfigured: false,
+              monitoringConfigured: false,
+              recoveryConfigured: false,
+              state: 'not_configured',
+              rawPath: '/Users/ah/private/supervisor',
+            },
+            safety: {
+              launchctlCalled: false,
+              processListRead: false,
+              supervisorInstalled: false,
+              metadataWritten: false,
+              nasConnected: false,
+              backupTriggered: false,
+              restoreTriggered: false,
+              remoteCommandExecuted: false,
+              Authorization: 'Bearer leaked-token',
+            }
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="supervisor-status-refresh"]');
+    const panel = doc.querySelector('[data-testid="supervisor-status-panel"]');
+    const stateEl = doc.querySelector('[data-testid="supervisor-status-state"]');
+    const installedEl = doc.querySelector('[data-testid="supervisor-status-installed"]');
+    const managedEl = doc.querySelector('[data-testid="supervisor-status-managed"]');
+    const launchdEl = doc.querySelector('[data-testid="supervisor-status-launchd"]');
+    const safetyEl = doc.querySelector('[data-testid="supervisor-status-safety"]');
+    const messageEl = doc.querySelector('[data-testid="supervisor-status-message"]');
+
+    assert.ok(refreshBtn, 'supervisor-status refresh button must exist');
+    assert.ok(panel, 'supervisor-status panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(supervisorFetchCount, 1, 'should request /api/supervisor-status exactly once');
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'partial');
+    assert.strictEqual(stateEl.textContent, 'not_configured');
+    assert.match(installedEl.textContent, /未配置|false/);
+    assert.match(managedEl.textContent, /未配置|false/);
+    assert.match(launchdEl.textContent, /未配置|false/);
+    assert.match(safetyEl.textContent, /launchctl:false/);
+    assert.match(safetyEl.textContent, /metadata:false/);
+    assert.match(safetyEl.textContent, /remote:false/);
+    assert.ok(messageEl.textContent.includes('成功'));
+
+    const panelText = panel.textContent || '';
+    assert.doesNotMatch(panelText + safetyEl.textContent, /Bearer|leaked-token|private\/supervisor|\/Users\/ah/);
+  });
+
+  it('renders redacted error on non-2xx response from supervisor-status', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/supervisor-status')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'Bearer token failed at /Users/ah/private/supervisor' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="supervisor-status-refresh"]');
+    const panel = doc.querySelector('[data-testid="supervisor-status-panel"]');
+    const messageEl = doc.querySelector('[data-testid="supervisor-status-message"]');
+    const eventLogEl = doc.getElementById('event-log');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
+    assert.ok(messageEl.textContent.includes('[redacted]'));
+    assert.doesNotMatch(messageEl.textContent, /Bearer|token|\/Users\/ah\/private/);
+    assert.doesNotMatch(eventLogEl.textContent, /Bearer|token|\/Users\/ah\/private/);
+  });
+
+  it('does not start a second supervisor-status request while one is in flight', async () => {
+    const doc = buildMockDoc();
+    let supervisorFetchCount = 0;
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/supervisor-status')) {
+        supervisorFetchCount++;
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'partial',
+            supervisor: {
+              installed: false,
+              managed: false,
+              launchdConfigured: false,
+              watchdogConfigured: false,
+              monitoringConfigured: false,
+              recoveryConfigured: false,
+              state: 'not_configured',
+            },
+            safety: {
+              launchctlCalled: false,
+              processListRead: false,
+              supervisorInstalled: false,
+              metadataWritten: false,
+              nasConnected: false,
+              backupTriggered: false,
+              restoreTriggered: false,
+              remoteCommandExecuted: false,
+            }
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="supervisor-status-refresh"]');
+    const firstClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+    const secondClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.strictEqual(supervisorFetchCount, 1, 'in-flight guard must block duplicate supervisor-status fetches');
 
     resolveRequest();
     await firstClick;

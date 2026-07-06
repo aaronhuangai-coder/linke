@@ -1880,6 +1880,53 @@ ul {
   line-height: 1.45;
 }
 
+.supervisor-status-panel[data-status="unknown"] {
+  border-top: 3px solid #d1d5db;
+}
+
+.supervisor-status-panel[data-status="ready"] {
+  border-top: 3px solid #15803d;
+}
+
+.supervisor-status-panel[data-status="partial"] {
+  border-top: 3px solid #ca8a04;
+}
+
+.supervisor-status-panel[data-status="blocked"] {
+  border-top: 3px solid #b91c1c;
+}
+
+.supervisor-status-panel[data-status="error"] {
+  border-top: 3px solid #991b1b;
+}
+
+.supervisor-status-grid {
+  display: grid;
+  grid-template-columns: 105px minmax(0, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.supervisor-status-grid dt {
+  color: #6b7280;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.supervisor-status-grid dd {
+  color: #111827;
+  font-size: 0.82rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.supervisor-status-message,
+.supervisor-status-safety-note {
+  color: #6b7280;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .audit-log-panel[data-status="unknown"] {
   border-top: 3px solid #d1d5db;
 }

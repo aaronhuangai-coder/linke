@@ -115,6 +115,34 @@
           硬化状态面板为只读视图，仅手动 GET /api/hardening-status，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；仅展示布尔状态、请求体上限和写入路由数量，不显示 token、restore root、audit path、环境变量值或 Authorization header。
         </p>
       </section>
+      <section id="supervisor-status-panel" class="panel supervisor-status-panel" data-testid="supervisor-status-panel" data-status="unknown">
+        <header class="panel-title-row">
+          <h2>Supervisor 状态</h2>
+          <button id="supervisor-status-refresh" data-testid="supervisor-status-refresh" type="button" class="release-health-refresh" aria-disabled="false">检查 Supervisor</button>
+        </header>
+        <dl class="supervisor-status-grid">
+          <dt>状态</dt>
+          <dd id="supervisor-status-state" data-testid="supervisor-status-state">—</dd>
+          <dt>安装</dt>
+          <dd id="supervisor-status-installed" data-testid="supervisor-status-installed">—</dd>
+          <dt>托管</dt>
+          <dd id="supervisor-status-managed" data-testid="supervisor-status-managed">—</dd>
+          <dt>launchd</dt>
+          <dd id="supervisor-status-launchd" data-testid="supervisor-status-launchd">—</dd>
+          <dt>Watchdog</dt>
+          <dd id="supervisor-status-watchdog" data-testid="supervisor-status-watchdog">—</dd>
+          <dt>监控</dt>
+          <dd id="supervisor-status-monitoring" data-testid="supervisor-status-monitoring">—</dd>
+          <dt>恢复</dt>
+          <dd id="supervisor-status-recovery" data-testid="supervisor-status-recovery">—</dd>
+          <dt>安全边界</dt>
+          <dd id="supervisor-status-safety" data-testid="supervisor-status-safety">—</dd>
+        </dl>
+        <p id="supervisor-status-message" class="supervisor-status-message" data-testid="supervisor-status-message">点击检查 Supervisor 获取 /api/supervisor-status</p>
+        <p class="supervisor-status-safety-note" data-testid="supervisor-status-safety-note">
+          Supervisor 状态面板为只读视图，仅手动 GET /api/supervisor-status，无启动请求、不自动轮询、不调用 launchctl、不读取进程列表、不安装或启动托管守护进程、不写入 metadata、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 sanitized not_configured 状态和 safety 布尔摘要，不显示 token、Authorization header、路径或环境变量值，不声明生产级 supervisor 或生产就绪。
+        </p>
+      </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
         <header class="panel-title-row">
           <h2>审计日志</h2>

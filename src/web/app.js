@@ -279,6 +279,34 @@ function formatHardeningErrorMessage(value) {
   return text;
 }
 
+function formatSupervisorState(value) {
+  const text = String(value || '').trim();
+  if (!text) return '—';
+  if (text.includes('/') || text.includes('\\')) return '[redacted]';
+  if (!/^[a-zA-Z0-9_.:-]+$/.test(text)) return '[redacted]';
+  return text.slice(0, 80);
+}
+
+function formatSupervisorSafetyFlag(value) {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return 'unknown';
+}
+
+function buildSupervisorSafetyText(safety) {
+  const source = safety && typeof safety === 'object' ? safety : {};
+  return [
+    'launchctl:' + formatSupervisorSafetyFlag(source.launchctlCalled),
+    'process:' + formatSupervisorSafetyFlag(source.processListRead),
+    'install:' + formatSupervisorSafetyFlag(source.supervisorInstalled),
+    'metadata:' + formatSupervisorSafetyFlag(source.metadataWritten),
+    'NAS:' + formatSupervisorSafetyFlag(source.nasConnected),
+    'backup:' + formatSupervisorSafetyFlag(source.backupTriggered),
+    'restore:' + formatSupervisorSafetyFlag(source.restoreTriggered),
+    'remote:' + formatSupervisorSafetyFlag(source.remoteCommandExecuted),
+  ].join(' · ');
+}
+
 export function buildHardeningStatusViewModel(payload, errorMessage = '') {
   if (errorMessage) {
     return {
@@ -329,6 +357,60 @@ export function buildHardeningStatusViewModel(payload, errorMessage = '') {
       : (statusKey === 'blocked'
         ? 'GET /api/hardening-status 成功，硬化状态仍有阻塞项'
         : 'GET /api/hardening-status 成功，生产硬化仍为 partial'),
+  };
+}
+
+export function buildSupervisorStatusViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      stateText: '—',
+      installedText: '—',
+      managedText: '—',
+      launchdText: '—',
+      watchdogText: '—',
+      monitoringText: '—',
+      recoveryText: '—',
+      safetyText: '—',
+      messageText: 'Supervisor 状态检查失败: ' + formatHardeningErrorMessage(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object' || !['ready', 'partial', 'blocked'].includes(payload.status)) {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      stateText: '—',
+      installedText: '—',
+      managedText: '—',
+      launchdText: '—',
+      watchdogText: '—',
+      monitoringText: '—',
+      recoveryText: '—',
+      safetyText: '—',
+      messageText: '点击检查 Supervisor 获取 /api/supervisor-status',
+    };
+  }
+
+  const supervisor = payload.supervisor && typeof payload.supervisor === 'object' ? payload.supervisor : {};
+  const statusKey = payload.status;
+  return {
+    statusKey,
+    statusText: formatHardeningStatusText(statusKey),
+    stateText: formatSupervisorState(supervisor.state),
+    installedText: formatHardeningBoolean(supervisor.installed),
+    managedText: formatHardeningBoolean(supervisor.managed),
+    launchdText: formatHardeningBoolean(supervisor.launchdConfigured),
+    watchdogText: formatHardeningBoolean(supervisor.watchdogConfigured),
+    monitoringText: formatHardeningBoolean(supervisor.monitoringConfigured),
+    recoveryText: formatHardeningBoolean(supervisor.recoveryConfigured),
+    safetyText: buildSupervisorSafetyText(payload.safety),
+    messageText: statusKey === 'ready'
+      ? 'GET /api/supervisor-status 成功，Supervisor 状态已就绪'
+      : (statusKey === 'blocked'
+        ? 'GET /api/supervisor-status 成功，Supervisor 状态仍有阻塞项'
+        : 'GET /api/supervisor-status 成功，Supervisor 仍为 not_configured / partial'),
   };
 }
 
@@ -1298,6 +1380,17 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const hardeningStatusWriteRoutesEl = doc.getElementById('hardening-status-write-routes');
   const hardeningStatusMessageEl = doc.getElementById('hardening-status-message');
   const hardeningStatusRefreshButton = doc.getElementById('hardening-status-refresh');
+  const supervisorStatusPanelEl = doc.getElementById('supervisor-status-panel');
+  const supervisorStatusStateEl = doc.getElementById('supervisor-status-state');
+  const supervisorStatusInstalledEl = doc.getElementById('supervisor-status-installed');
+  const supervisorStatusManagedEl = doc.getElementById('supervisor-status-managed');
+  const supervisorStatusLaunchdEl = doc.getElementById('supervisor-status-launchd');
+  const supervisorStatusWatchdogEl = doc.getElementById('supervisor-status-watchdog');
+  const supervisorStatusMonitoringEl = doc.getElementById('supervisor-status-monitoring');
+  const supervisorStatusRecoveryEl = doc.getElementById('supervisor-status-recovery');
+  const supervisorStatusSafetyEl = doc.getElementById('supervisor-status-safety');
+  const supervisorStatusMessageEl = doc.getElementById('supervisor-status-message');
+  const supervisorStatusRefreshButton = doc.getElementById('supervisor-status-refresh');
   const auditLogPanelEl = doc.getElementById('audit-log-panel');
   const auditLogStatusEl = doc.getElementById('audit-log-status');
   const auditLogCountEl = doc.getElementById('audit-log-count');
@@ -3130,6 +3223,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let releaseReadinessInFlight = false;
   let goldReadinessInFlight = false;
   let hardeningStatusInFlight = false;
+  let supervisorStatusInFlight = false;
   let auditLogInFlight = false;
 
   function renderReleaseHealth(viewModel) {
@@ -3403,6 +3497,61 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderSupervisorStatus(viewModel) {
+    const state = viewModel || buildSupervisorStatusViewModel(null);
+    if (supervisorStatusPanelEl?.setAttribute) {
+      supervisorStatusPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (supervisorStatusStateEl) supervisorStatusStateEl.textContent = state.stateText;
+    if (supervisorStatusInstalledEl) supervisorStatusInstalledEl.textContent = state.installedText;
+    if (supervisorStatusManagedEl) supervisorStatusManagedEl.textContent = state.managedText;
+    if (supervisorStatusLaunchdEl) supervisorStatusLaunchdEl.textContent = state.launchdText;
+    if (supervisorStatusWatchdogEl) supervisorStatusWatchdogEl.textContent = state.watchdogText;
+    if (supervisorStatusMonitoringEl) supervisorStatusMonitoringEl.textContent = state.monitoringText;
+    if (supervisorStatusRecoveryEl) supervisorStatusRecoveryEl.textContent = state.recoveryText;
+    if (supervisorStatusSafetyEl) supervisorStatusSafetyEl.textContent = state.safetyText;
+    if (supervisorStatusMessageEl) supervisorStatusMessageEl.textContent = state.messageText;
+  }
+
+  function setSupervisorStatusRefreshBusy(busy) {
+    if (!supervisorStatusRefreshButton) return;
+    supervisorStatusRefreshButton.disabled = Boolean(busy);
+    if (supervisorStatusRefreshButton.setAttribute) {
+      supervisorStatusRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchSupervisorStatus() {
+    if (supervisorStatusInFlight) return;
+    supervisorStatusInFlight = true;
+    setSupervisorStatusRefreshBusy(true);
+    try {
+      const res = await apiFetch('/api/supervisor-status');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderSupervisorStatus(buildSupervisorStatusViewModel(payload));
+      logEvent('已刷新 Supervisor 状态', 'info');
+    } catch (err) {
+      const safeErrorMessage = formatHardeningErrorMessage(err.message);
+      renderSupervisorStatus(buildSupervisorStatusViewModel(null, safeErrorMessage));
+      logEvent('Supervisor 状态检查失败: ' + safeErrorMessage, 'error');
+    } finally {
+      supervisorStatusInFlight = false;
+      setSupervisorStatusRefreshBusy(false);
+    }
+  }
+
   function renderAuditLogList(events) {
     clearElement(auditLogListEl);
     if (!auditLogListEl) return;
@@ -3504,6 +3653,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   renderReleaseReadiness(buildReleaseReadinessViewModel(null));
   renderGoldReadiness(buildGoldReadinessViewModel(null));
   renderHardeningStatus(buildHardeningStatusViewModel(null));
+  renderSupervisorStatus(buildSupervisorStatusViewModel(null));
   renderAuditLog(buildAuditLogViewModel(null));
 
   if (releaseHealthRefreshButton?.addEventListener) {
@@ -3517,6 +3667,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (hardeningStatusRefreshButton?.addEventListener) {
     hardeningStatusRefreshButton.addEventListener('click', fetchHardeningStatus);
+  }
+  if (supervisorStatusRefreshButton?.addEventListener) {
+    supervisorStatusRefreshButton.addEventListener('click', fetchSupervisorStatus);
   }
   if (auditLogRefreshButton?.addEventListener) {
     auditLogRefreshButton.addEventListener('click', fetchAuditLog);
