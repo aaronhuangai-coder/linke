@@ -2,7 +2,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { constants, realpathSync, statSync } from 'node:fs';
 import { readFile, access, realpath } from 'node:fs/promises';
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   recordHeartbeat,
@@ -12,6 +12,7 @@ import {
   listSnapshots,
   getSnapshotManifest,
   restoreSnapshot,
+  slugify,
 } from './storage.js';
 import { buildRetentionDryRunPlan } from './retention.js';
 import { buildSnapshotDiffDryRunPlan } from './snapshot-diff.js';
@@ -21,6 +22,7 @@ import { buildNasDryRunPlan } from './nas.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
+import { appendAuditEvent, readAuditEvents } from './audit-log.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -52,6 +54,22 @@ function createHttpError(statusCode, message) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
+}
+
+async function recordAudit(dataDir, event) {
+  try {
+    await appendAuditEvent(dataDir, event);
+  } catch (err) {
+    console.error('Audit log write failed:', err.message);
+  }
+}
+
+function errorStatusCode(err) {
+  return Number.isInteger(err.statusCode) ? err.statusCode : 500;
+}
+
+function auditDeviceId(deviceId) {
+  return typeof deviceId === 'string' && deviceId.trim() ? slugify(deviceId) : undefined;
 }
 
 function isPathInsideRoot(root, candidate) {
@@ -213,10 +231,19 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const { pathname, method } = { pathname: url.pathname, method: req.method };
+    const requestId = randomUUID();
 
     try {
       // ── API Routes ──────────────────────────────────────────
       if ((pathname === '/api' || pathname.startsWith('/api/')) && !isAuthorizedRequest(req, expectedAuthToken)) {
+        await recordAudit(dataDir, {
+          type: 'auth.denied',
+          method,
+          path: pathname,
+          statusCode: 401,
+          outcome: 'denied',
+          requestId,
+        });
         return sendError(res, 401, 'Unauthorized');
       }
 
@@ -239,11 +266,37 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
         return sendJSON(res, 200, buildGoldReadinessReport());
       }
 
+      // GET /api/audit-log?limit=50
+      if (method === 'GET' && pathname === '/api/audit-log') {
+        const events = await readAuditEvents(dataDir, { limit: url.searchParams.get('limit') });
+        return sendJSON(res, 200, { events });
+      }
+
       // POST /api/heartbeat
       if (method === 'POST' && pathname === '/api/heartbeat') {
         const body = await readBody(req);
-        if (!body.deviceId) return sendError(res, 400, 'deviceId is required');
+        if (!body.deviceId) {
+          await recordAudit(dataDir, {
+            type: 'api.heartbeat.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            message: 'deviceId is required',
+          });
+          return sendError(res, 400, 'deviceId is required');
+        }
         const info = await recordHeartbeat(dataDir, body.deviceId, body.hostname, body.ipAddress);
+        await recordAudit(dataDir, {
+          type: 'api.heartbeat.success',
+          method,
+          path: pathname,
+          statusCode: 200,
+          outcome: 'success',
+          requestId,
+          deviceId: info.deviceId,
+        });
         return sendJSON(res, 200, info);
       }
 
@@ -251,20 +304,57 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
       if (method === 'POST' && pathname === '/api/backups') {
         const body = await readBody(req);
         if (!body.deviceId || !body.sourcePath) {
+          await recordAudit(dataDir, {
+            type: 'api.backup.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(body.deviceId),
+            message: 'deviceId and sourcePath are required',
+          });
           return sendError(res, 400, 'deviceId and sourcePath are required');
         }
-        const snapshot = await createBackup(
-          dataDir,
-          {
-            deviceId: body.deviceId,
-            hostname: body.hostname,
-            ipAddress: body.ipAddress,
-            sourcePath: body.sourcePath,
-            excludePatterns: body.excludePatterns,
-            jobName: body.jobName,
-          },
-          backupHooks,
-        );
+        let snapshot;
+        try {
+          snapshot = await createBackup(
+            dataDir,
+            {
+              deviceId: body.deviceId,
+              hostname: body.hostname,
+              ipAddress: body.ipAddress,
+              sourcePath: body.sourcePath,
+              excludePatterns: body.excludePatterns,
+              jobName: body.jobName,
+            },
+            backupHooks,
+          );
+        } catch (err) {
+          const statusCode = errorStatusCode(err);
+          await recordAudit(dataDir, {
+            type: 'api.backup.failure',
+            method,
+            path: pathname,
+            statusCode,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(body.deviceId),
+            message: statusCode >= 500 ? 'Internal Server Error' : err.message,
+          });
+          throw err;
+        }
+        await recordAudit(dataDir, {
+          type: 'api.backup.created',
+          method,
+          path: pathname,
+          statusCode: 201,
+          outcome: 'success',
+          requestId,
+          deviceId: auditDeviceId(body.deviceId),
+          snapshotId: snapshot.snapshotId,
+          fileCount: snapshot.fileCount,
+        });
         return sendJSON(res, 201, snapshot);
       }
 
@@ -307,18 +397,56 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
 
       // POST /api/restore
       if (method === 'POST' && pathname === '/api/restore') {
-        const body = await readBody(req);
-        if (!body.deviceId || !body.snapshotId || !body.targetPath) {
-          return sendError(res, 400, 'deviceId, snapshotId, and targetPath are required');
+        let body = {};
+        try {
+          body = await readBody(req);
+          if (!body.deviceId || !body.snapshotId || !body.targetPath) {
+            await recordAudit(dataDir, {
+              type: 'api.restore.failure',
+              method,
+              path: pathname,
+              statusCode: 400,
+              outcome: 'failure',
+              requestId,
+              deviceId: auditDeviceId(body.deviceId),
+              snapshotId: body.snapshotId,
+              message: 'deviceId, snapshotId, and targetPath are required',
+            });
+            return sendError(res, 400, 'deviceId, snapshotId, and targetPath are required');
+          }
+          const targetPath = await resolveRestoreTargetPath(body.targetPath, normalizedRestoreRoot);
+          const result = await restoreSnapshot(dataDir, {
+            deviceId: body.deviceId,
+            snapshotId: body.snapshotId,
+            targetPath,
+            restoreRoot: normalizedRestoreRoot,
+          });
+          await recordAudit(dataDir, {
+            type: 'api.restore.completed',
+            method,
+            path: pathname,
+            statusCode: 200,
+            outcome: 'success',
+            requestId,
+            deviceId: auditDeviceId(body.deviceId),
+            snapshotId: body.snapshotId,
+          });
+          return sendJSON(res, 200, result);
+        } catch (err) {
+          const statusCode = errorStatusCode(err);
+          await recordAudit(dataDir, {
+            type: 'api.restore.failure',
+            method,
+            path: pathname,
+            statusCode,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(body.deviceId),
+            snapshotId: body.snapshotId,
+            message: statusCode >= 500 ? 'Internal Server Error' : err.message,
+          });
+          throw err;
         }
-        const targetPath = await resolveRestoreTargetPath(body.targetPath, normalizedRestoreRoot);
-        const result = await restoreSnapshot(dataDir, {
-          deviceId: body.deviceId,
-          snapshotId: body.snapshotId,
-          targetPath,
-          restoreRoot: normalizedRestoreRoot,
-        });
-        return sendJSON(res, 200, result);
       }
 
       // GET /api/devices

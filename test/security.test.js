@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, MAX_JSON_BODY_BYTES } from '../src/server.js';
 import { slugify, safeDevicePath, createBackup } from '../src/storage.js';
+import { readAuditEvents } from '../src/audit-log.js';
 
 function postJSON(port, path, body) {
   return fetch(`http://localhost:${port}${path}`, {
@@ -48,6 +49,15 @@ function postRawJSONWithoutContentLength(port, path, body) {
     req.write(body.slice(0, splitAt));
     req.end(body.slice(splitAt));
   });
+}
+
+async function pathExists(path) {
+  try {
+    await import('node:fs/promises').then((fs) => fs.access(path));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe('Security — deviceId path traversal prevention', () => {
@@ -240,7 +250,7 @@ describe('Security — optional bearer token authentication', () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  it('rejects GET /api/devices without Authorization with 401 JSON {error:\'Unauthorized\'} and does not mutate dataDir', async () => {
+  it('rejects GET /api/devices without Authorization and only writes an auth.denied audit event', async () => {
     const server = createServer({ dataDir, authToken: 'test-token' });
     await new Promise((r) => server.listen(0, r));
     const port = server.address().port;
@@ -262,7 +272,11 @@ describe('Security — optional bearer token authentication', () => {
       assert.deepStrictEqual(body, { error: 'Unauthorized' });
 
       const afterEntries = await getEntries();
-      assert.deepStrictEqual(afterEntries, beforeEntries);
+      assert.deepStrictEqual(afterEntries.filter((entry) => entry !== 'audit'), beforeEntries.filter((entry) => entry !== 'audit'));
+      assert.strictEqual(await pathExists(join(dataDir, 'repo')), false);
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.denied');
+      assert.strictEqual(events[0].path, '/api/devices');
     } finally {
       await new Promise((r) => server.close(r));
     }
@@ -282,13 +296,13 @@ describe('Security — optional bearer token authentication', () => {
     }
   });
 
-  it('rejects POST /api/heartbeat without Authorization before mutating dataDir', async () => {
+  it('rejects POST /api/heartbeat without Authorization before writing device data', async () => {
     const server = createServer({ dataDir, authToken: 'test-token' });
     await new Promise((r) => server.listen(0, r));
     const port = server.address().port;
 
     try {
-      assert.deepStrictEqual(await readdir(dataDir), []);
+      const beforeEntries = await readdir(dataDir);
       const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -296,7 +310,12 @@ describe('Security — optional bearer token authentication', () => {
       });
       assert.strictEqual(res.status, 401);
       assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
-      assert.deepStrictEqual(await readdir(dataDir), []);
+      const afterEntries = await readdir(dataDir);
+      assert.deepStrictEqual(afterEntries.filter((entry) => entry !== 'audit'), beforeEntries.filter((entry) => entry !== 'audit'));
+      assert.strictEqual(await pathExists(join(dataDir, 'repo', 'devices', 'blocked-device')), false);
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.denied');
+      assert.strictEqual(events[0].path, '/api/heartbeat');
     } finally {
       await new Promise((r) => server.close(r));
     }
