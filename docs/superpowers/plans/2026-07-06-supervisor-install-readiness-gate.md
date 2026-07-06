@@ -236,6 +236,8 @@ Observed:
 - Qwen read-only adversarial re-review returned `VERDICT: PASS`, `FINDINGS: none`, `TEST GAPS: none`, `CONFIDENCE: high`.
 - ZAI closure returned structured JSON content with `verdict:"PASS"`, `accepted:true`, no blocking findings, `gold_status:"blocked"`, and `confidence:"high"`.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 Commit message: `feat: add supervisor install readiness gate`
+
+Observed: committed and pushed `1c654a0 feat: add supervisor install readiness gate` to `linke-v0.12-web-panel`.
