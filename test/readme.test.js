@@ -1737,27 +1737,32 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.71 hardening status CLI', () => {
-  it('title and badge claim V0.71 as current', () => {
-    assertReadmeContains(/# Linke V0\.71/, 'README title should mention V0.71');
-    assertReadmeContains(/\*\*当前版本：V0\.71\*\*/, 'README badge should mention V0.71');
+describe('README — V0.72 hardening status Web panel', () => {
+  it('title and badge claim V0.72 as current', () => {
+    assertReadmeContains(/# Linke V0\.72/, 'README title should mention V0.72');
+    assertReadmeContains(/\*\*当前版本：V0\.72\*\*/, 'README badge should mention V0.72');
   });
 
-  it('version table marks V0.70 historical and V0.71 current', () => {
-    assertReadmeContains(/\| V0\.70 \| 历史版本 \|/, 'V0.70 should be historical');
-    assertReadmeContains(/\| V0\.71 \| 当前版本 \|[^|]*(hardening-status|硬化状态|生产硬化|Agent)/i, 'V0.71 should be current hardening-status CLI milestone');
+  it('version table marks V0.71 historical and V0.72 current', () => {
+    assertReadmeContains(/\| V0\.71 \| 历史版本 \|/, 'V0.71 should be historical');
+    assertReadmeContains(/\| V0\.72 \| 当前版本 \|[^|]*(hardening-status|硬化状态|生产硬化|Web)/i, 'V0.72 should be current hardening-status Web panel milestone');
   });
 
-  it('documents hardening-status API and CLI safety boundaries', () => {
+  it('documents hardening-status API, CLI, and Web panel safety boundaries', () => {
     assertReadmeContains(/agent\.js hardening-status/, 'README should document hardening-status CLI');
     assertReadmeContains(/GET \/api\/hardening-status/, 'README should document hardening-status endpoint');
+    assertReadmeContains(/hardening-status-panel|硬化状态面板|Web Console[^\\n]*hardening-status/i, 'README should document hardening-status Web panel');
+    assertReadmeContains(/无启动请求|不触发启动请求|no startup/i, 'README should document no startup request');
+    assertReadmeContains(/不自动轮询|no polling|no auto/i, 'README should document no auto polling');
+    assertReadmeContains(/不写入\s*metadata|不写入\s*元数据|no metadata/i, 'README should document no metadata writes');
     assertReadmeContains(/tokenValuesReturned:false/, 'README should document tokenValuesReturned false');
     assertReadmeContains(/restoreRootValueReturned:false/, 'README should document restoreRootValueReturned false');
     assertReadmeContains(/auditPathReturned:false/, 'README should document auditPathReturned false');
     assertReadmeContains(/Agent hardening-status CLI/, 'README should document Agent hardening-status CLI test coverage');
+    assertReadmeContains(/Web hardening-status panel|hardening-status Web panel|硬化状态面板/, 'README should document Web hardening-status test coverage');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.71', () => {
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.72', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

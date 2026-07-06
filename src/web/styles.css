@@ -1833,6 +1833,53 @@ ul {
   line-height: 1.45;
 }
 
+.hardening-status-panel[data-status="unknown"] {
+  border-top: 3px solid #d1d5db;
+}
+
+.hardening-status-panel[data-status="ready"] {
+  border-top: 3px solid #15803d;
+}
+
+.hardening-status-panel[data-status="partial"] {
+  border-top: 3px solid #ca8a04;
+}
+
+.hardening-status-panel[data-status="blocked"] {
+  border-top: 3px solid #b91c1c;
+}
+
+.hardening-status-panel[data-status="error"] {
+  border-top: 3px solid #991b1b;
+}
+
+.hardening-status-grid {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.hardening-status-grid dt {
+  color: #6b7280;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.hardening-status-grid dd {
+  color: #111827;
+  font-size: 0.82rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hardening-status-message,
+.hardening-status-safety-note {
+  color: #6b7280;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .gold-readiness-panel[data-status="ready"] {
   border-top: 3px solid #15803d;
 }

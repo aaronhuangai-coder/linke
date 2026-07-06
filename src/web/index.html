@@ -89,6 +89,32 @@
           </p>
         </section>
       </section>
+      <section id="hardening-status-panel" class="panel hardening-status-panel" data-testid="hardening-status-panel" data-status="unknown">
+        <header class="panel-title-row">
+          <h2>硬化状态</h2>
+          <button id="hardening-status-refresh" data-testid="hardening-status-refresh" type="button" class="release-health-refresh" aria-disabled="false">检查硬化</button>
+        </header>
+        <dl class="hardening-status-grid">
+          <dt>认证</dt>
+          <dd id="hardening-status-auth" data-testid="hardening-status-auth">—</dd>
+          <dt>分域 Token</dt>
+          <dd id="hardening-status-scoped-tokens" data-testid="hardening-status-scoped-tokens">—</dd>
+          <dt>限流</dt>
+          <dd id="hardening-status-rate-limit" data-testid="hardening-status-rate-limit">—</dd>
+          <dt>审计保留</dt>
+          <dd id="hardening-status-audit-retention" data-testid="hardening-status-audit-retention">—</dd>
+          <dt>恢复 Root</dt>
+          <dd id="hardening-status-restore-root" data-testid="hardening-status-restore-root">—</dd>
+          <dt>请求上限</dt>
+          <dd id="hardening-status-request-limit" data-testid="hardening-status-request-limit">—</dd>
+          <dt>写入路由</dt>
+          <dd id="hardening-status-write-routes" data-testid="hardening-status-write-routes">—</dd>
+        </dl>
+        <p id="hardening-status-message" class="hardening-status-message" data-testid="hardening-status-message">点击检查硬化获取 /api/hardening-status</p>
+        <p class="hardening-status-safety-note" data-testid="hardening-status-safety-note">
+          硬化状态面板为只读视图，仅手动 GET /api/hardening-status，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；仅展示布尔状态、请求体上限和写入路由数量，不显示 token、restore root、audit path、环境变量值或 Authorization header。
+        </p>
+      </section>
       <section id="gold-readiness-panel" class="panel gold-readiness-panel" data-testid="gold-readiness-panel" data-status="unknown">
         <header class="panel-title-row">
           <h2>Gold 就绪评分卡</h2>

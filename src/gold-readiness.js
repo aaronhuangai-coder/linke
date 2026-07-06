@@ -145,6 +145,8 @@ const GOLD_READINESS_ITEMS = [
       'src/server.js buildHardeningStatusResponse',
       'test/agent-hardening-status.test.js',
       'src/agent.js hardening-status',
+      'src/web/app.js buildHardeningStatusViewModel',
+      'test/web-console.test.js hardening-status panel',
       'LINKE_AUDIT_MAX_EVENTS',
       'Audit retention newest events',
       'LINKE_RATE_LIMIT_PER_MINUTE',
@@ -159,7 +161,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'V0.71 adds an Agent CLI wrapper for sanitized hardening-status visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'V0.72 adds a manual Web Console hardening-status panel for sanitized visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 

@@ -1531,6 +1531,51 @@ describe('Web Console / API contract', () => {
     assert.match(html, /agent\.js hardening-status|GET\s*\/api\/hardening-status|hardening-status|硬化状态/);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
+
+  // ── V0.72 hardening-status Web panel contract tests ──────────────────
+
+  it('HTML contains hardening-status panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="hardening-status-panel"'), 'must have hardening-status-panel');
+    assert.ok(html.includes('data-testid="hardening-status-refresh"'), 'must have hardening-status-refresh');
+    assert.ok(html.includes('data-testid="hardening-status-auth"'), 'must have hardening-status-auth');
+    assert.ok(html.includes('data-testid="hardening-status-scoped-tokens"'), 'must have hardening-status-scoped-tokens');
+    assert.ok(html.includes('data-testid="hardening-status-rate-limit"'), 'must have hardening-status-rate-limit');
+    assert.ok(html.includes('data-testid="hardening-status-audit-retention"'), 'must have hardening-status-audit-retention');
+    assert.ok(html.includes('data-testid="hardening-status-restore-root"'), 'must have hardening-status-restore-root');
+    assert.ok(html.includes('data-testid="hardening-status-request-limit"'), 'must have hardening-status-request-limit');
+    assert.ok(html.includes('data-testid="hardening-status-write-routes"'), 'must have hardening-status-write-routes');
+    assert.ok(html.includes('data-testid="hardening-status-message"'), 'must have hardening-status-message');
+    assert.ok(html.includes('data-testid="hardening-status-safety-note"'), 'must have hardening-status-safety-note');
+  });
+
+  it('app.js contains wiring strings for hardening status', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/hardening-status'), 'app.js must fetch /api/hardening-status');
+    assert.ok(
+      js.includes('hardening-status-refresh') || js.includes('hardeningStatusRefresh'),
+      'app.js must reference hardening-status-refresh'
+    );
+    assert.ok(js.includes('buildHardeningStatusViewModel'), 'app.js must reference buildHardeningStatusViewModel');
+  });
+
+  it('styles.css contains hardening status panel CSS status selectors partial and error', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(
+      css.includes('hardening-status-panel[data-status="partial"]'),
+      'styles.css must contain partial status styling'
+    );
+    assert.ok(
+      css.includes('hardening-status-panel[data-status="error"]'),
+      'styles.css must contain error status styling'
+    );
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
@@ -1573,7 +1618,6 @@ describe('computeFleetSummary', () => {
     assert.strictEqual(result.totalSnapshots, 0);
   });
 });
-
 describe('formatLastHeartbeat', () => {
   it('returns "无心跳" for null', () => {
     assert.strictEqual(formatLastHeartbeat(null), '无心跳');
@@ -7831,5 +7875,301 @@ describe('DOM test: API token UX interactions', () => {
         globalThis.document = originalDocument;
       }
     }
+  });
+});
+
+describe('Hardening status pure functions', () => {
+  it('buildHardeningStatusViewModel is exported and handles unknown input', async () => {
+    const app = await import('../src/web/app.js');
+    const buildHardeningStatusViewModel = app.buildHardeningStatusViewModel;
+    if (!buildHardeningStatusViewModel) {
+      throw new Error('buildHardeningStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const result = buildHardeningStatusViewModel(null);
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.authText, '—');
+    assert.strictEqual(result.scopedTokensText, '—');
+    assert.strictEqual(result.rateLimitText, '—');
+    assert.strictEqual(result.auditRetentionText, '—');
+    assert.strictEqual(result.restoreRootText, '—');
+    assert.strictEqual(result.requestLimitText, '—');
+    assert.strictEqual(result.writeRoutesText, '—');
+    assert.ok(result.messageText.includes('/api/hardening-status'));
+  });
+
+  it('buildHardeningStatusViewModel formats error status', async () => {
+    const app = await import('../src/web/app.js');
+    const buildHardeningStatusViewModel = app.buildHardeningStatusViewModel;
+    if (!buildHardeningStatusViewModel) {
+      throw new Error('buildHardeningStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const result = buildHardeningStatusViewModel(null, 'HTTP 500');
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.strictEqual(result.authText, '—');
+    assert.strictEqual(result.scopedTokensText, '—');
+    assert.strictEqual(result.rateLimitText, '—');
+    assert.strictEqual(result.auditRetentionText, '—');
+    assert.strictEqual(result.restoreRootText, '—');
+    assert.strictEqual(result.requestLimitText, '—');
+    assert.strictEqual(result.writeRoutesText, '—');
+    assert.ok(result.messageText.includes('HTTP 500'));
+
+    const sensitiveResult = buildHardeningStatusViewModel(null, 'Bearer token abc123 rejected');
+    assert.strictEqual(sensitiveResult.statusKey, 'error');
+    assert.ok(sensitiveResult.messageText.includes('[redacted]'), 'credential-like error text must be redacted');
+    assert.ok(!sensitiveResult.messageText.toLowerCase().includes('token'), 'credential-like error text must not be displayed');
+  });
+
+  it('buildHardeningStatusViewModel formats partial status with whitelisted fields', async () => {
+    const app = await import('../src/web/app.js');
+    const buildHardeningStatusViewModel = app.buildHardeningStatusViewModel;
+    if (!buildHardeningStatusViewModel) {
+      throw new Error('buildHardeningStatusViewModel is not defined in src/web/app.js');
+    }
+
+    const payload = {
+      status: 'partial',
+      service: 'linke',
+      version: LINKE_RELEASE_VERSION,
+      hardening: {
+        authConfigured: true,
+        scopedTokensConfigured: false,
+        rateLimitConfigured: true,
+        auditRetentionConfigured: false,
+        restoreRootConfigured: true,
+        requestBodyLimitBytes: 1048576,
+        writeRoutes: [
+          'POST /api/heartbeat',
+          'POST /api/backups',
+          'POST /api/restore'
+        ]
+      },
+      safety: {
+        tokenValuesReturned: false,
+        restoreRootValueReturned: false,
+        auditPathReturned: false,
+        environmentValuesReturned: false,
+        successAuditEvent: false
+      }
+    };
+
+    const result = buildHardeningStatusViewModel(payload);
+    assert.strictEqual(result.statusKey, 'partial');
+    assert.strictEqual(result.statusText, '部分就绪');
+    assert.strictEqual(result.authText, '已配置');
+    assert.strictEqual(result.scopedTokensText, '未配置');
+    assert.strictEqual(result.rateLimitText, '已配置');
+    assert.strictEqual(result.auditRetentionText, '未配置');
+    assert.strictEqual(result.restoreRootText, '已配置');
+    assert.strictEqual(result.requestLimitText, '1048576');
+    assert.strictEqual(result.writeRoutesText, '3');
+  });
+});
+
+describe('DOM test: hardening status panel interactions', () => {
+  it('does not request /api/hardening-status on initialization', async () => {
+    const doc = buildMockDoc();
+    let hardeningFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/hardening-status')) hardeningFetchCount++;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(hardeningFetchCount, 0, 'should not call /api/hardening-status on init');
+  });
+
+  it('requests /api/hardening-status only once and renders partial status and whitelisted fields when refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let hardeningFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/hardening-status')) {
+        hardeningFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'partial',
+            service: 'linke',
+            version: LINKE_RELEASE_VERSION,
+            hardening: {
+              authConfigured: true,
+              scopedTokensConfigured: true,
+              rateLimitConfigured: true,
+              auditRetentionConfigured: true,
+              restoreRootConfigured: true,
+              requestBodyLimitBytes: 1048576,
+              writeRoutes: [
+                'POST /api/heartbeat',
+                'POST /api/backups',
+                'POST /api/restore'
+              ]
+            },
+            safety: {
+              tokenValuesReturned: false,
+              restoreRootValueReturned: false,
+              restoreRootPath: '/Users/ah/secret-path',
+              auditPathReturned: false,
+              environmentValuesReturned: false,
+              successAuditEvent: false
+            }
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="hardening-status-refresh"]');
+    const panel = doc.querySelector('[data-testid="hardening-status-panel"]');
+    const authEl = doc.querySelector('[data-testid="hardening-status-auth"]');
+    const scopedEl = doc.querySelector('[data-testid="hardening-status-scoped-tokens"]');
+    const rateLimitEl = doc.querySelector('[data-testid="hardening-status-rate-limit"]');
+    const auditEl = doc.querySelector('[data-testid="hardening-status-audit-retention"]');
+    const restoreEl = doc.querySelector('[data-testid="hardening-status-restore-root"]');
+    const limitEl = doc.querySelector('[data-testid="hardening-status-request-limit"]');
+    const routesEl = doc.querySelector('[data-testid="hardening-status-write-routes"]');
+
+    assert.ok(refreshBtn, 'refresh button must exist');
+    assert.ok(panel, 'hardening status panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(hardeningFetchCount, 1, 'should request /api/hardening-status exactly once');
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'partial');
+    assert.match(authEl.textContent, /已配置|已启用|true/);
+    assert.match(scopedEl.textContent, /已配置|已启用|true/);
+    assert.match(rateLimitEl.textContent, /已配置|已启用|true/);
+    assert.match(auditEl.textContent, /已配置|已启用|true/);
+    assert.match(restoreEl.textContent, /已配置|已启用|true/);
+    assert.ok(limitEl.textContent.includes('1048576'));
+    assert.ok(routesEl.textContent.includes('3'));
+
+    const panelHtml = panel.innerHTML || '';
+    assert.ok(!panelHtml.includes('/Users/ah/secret-path'), 'should redact or omit path-like secret material');
+  });
+
+  it('renders error on non-2xx response from hardening-status', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/hardening-status')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: '/Users/ah/private/restore-root failed' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="hardening-status-refresh"]');
+    const panel = doc.querySelector('[data-testid="hardening-status-panel"]');
+    const messageEl = doc.querySelector('[data-testid="hardening-status-message"]');
+    const eventLogEl = doc.getElementById('event-log');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
+    assert.ok(messageEl.textContent.includes('失败') || messageEl.textContent.includes('500'));
+    assert.ok(messageEl.textContent.includes('[redacted]'), 'panel error message must redact path-like material');
+    assert.ok(!messageEl.textContent.includes('/Users/ah/private/restore-root'), 'panel must not display raw path-like error material');
+    assert.ok(!eventLogEl.textContent.includes('/Users/ah/private/restore-root'), 'event log must not display raw path-like error material');
+  });
+
+  it('disables hardening-status refresh button during active request and restores afterwards', async () => {
+    const doc = buildMockDoc();
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/hardening-status')) {
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'partial' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="hardening-status-refresh"]');
+    let clickPromise;
+    if (refreshBtn._listeners.click) {
+      clickPromise = refreshBtn._listeners.click();
+    }
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const isDisabled = refreshBtn.disabled === true || refreshBtn.getAttribute('disabled') === 'true' || refreshBtn.getAttribute('disabled') === true;
+    assert.strictEqual(isDisabled, true, 'button.disabled must be true during request');
+
+    resolveRequest();
+    if (clickPromise) {
+      await clickPromise;
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    const isDisabledAfter = refreshBtn.disabled === false || refreshBtn.getAttribute('disabled') === 'false' || refreshBtn.getAttribute('disabled') === false || refreshBtn.getAttribute('disabled') === null;
+    assert.strictEqual(isDisabledAfter, true, 'button.disabled must be false after request');
+  });
+
+  it('does not start a second hardening-status request while one is in flight', async () => {
+    const doc = buildMockDoc();
+    let hardeningFetchCount = 0;
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/hardening-status')) {
+        hardeningFetchCount++;
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'partial' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="hardening-status-refresh"]');
+    const firstClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+    const secondClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.strictEqual(hardeningFetchCount, 1, 'in-flight guard must block duplicate hardening-status fetches');
+
+    resolveRequest();
+    await firstClick;
+    await secondClick;
   });
 });

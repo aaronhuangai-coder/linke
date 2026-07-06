@@ -241,6 +241,97 @@ function formatGoldEvidence(value) {
     : '';
 }
 
+function formatHardeningStatusText(status) {
+  if (status === 'ready') return '已就绪';
+  if (status === 'partial') return '部分就绪';
+  if (status === 'blocked') return '阻塞';
+  return '未检查';
+}
+
+function formatHardeningBoolean(value) {
+  if (value === true) return '已配置';
+  if (value === false) return '未配置';
+  return '—';
+}
+
+function formatHardeningNumber(value) {
+  return Number.isFinite(value) ? String(value) : '—';
+}
+
+function formatHardeningErrorMessage(value) {
+  const text = String(value || '').trim();
+  if (!text) return 'unknown';
+  const lowerText = text.toLowerCase();
+  const sensitiveKeywords = [
+    'authorization',
+    'bearer',
+    'token',
+    'password',
+    'secret',
+    'api key',
+    'apikey',
+    'credential',
+    'private key',
+    'access key',
+  ];
+  if (text.includes('/') || text.includes('\\')) return '[redacted]';
+  if (sensitiveKeywords.some((keyword) => lowerText.includes(keyword))) return '[redacted]';
+  return text;
+}
+
+export function buildHardeningStatusViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      authText: '—',
+      scopedTokensText: '—',
+      rateLimitText: '—',
+      auditRetentionText: '—',
+      restoreRootText: '—',
+      requestLimitText: '—',
+      writeRoutesText: '—',
+      messageText: '硬化状态检查失败: ' + formatHardeningErrorMessage(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object' || !['ready', 'partial', 'blocked'].includes(payload.status)) {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      authText: '—',
+      scopedTokensText: '—',
+      rateLimitText: '—',
+      auditRetentionText: '—',
+      restoreRootText: '—',
+      requestLimitText: '—',
+      writeRoutesText: '—',
+      messageText: '点击检查硬化获取 /api/hardening-status',
+    };
+  }
+
+  const hardening = payload.hardening && typeof payload.hardening === 'object' ? payload.hardening : {};
+  const writeRoutes = Array.isArray(hardening.writeRoutes) ? hardening.writeRoutes : [];
+  const statusKey = payload.status;
+
+  return {
+    statusKey,
+    statusText: formatHardeningStatusText(statusKey),
+    authText: formatHardeningBoolean(hardening.authConfigured),
+    scopedTokensText: formatHardeningBoolean(hardening.scopedTokensConfigured),
+    rateLimitText: formatHardeningBoolean(hardening.rateLimitConfigured),
+    auditRetentionText: formatHardeningBoolean(hardening.auditRetentionConfigured),
+    restoreRootText: formatHardeningBoolean(hardening.restoreRootConfigured),
+    requestLimitText: formatHardeningNumber(hardening.requestBodyLimitBytes),
+    writeRoutesText: String(writeRoutes.length),
+    messageText: statusKey === 'ready'
+      ? 'GET /api/hardening-status 成功，硬化状态已就绪'
+      : (statusKey === 'blocked'
+        ? 'GET /api/hardening-status 成功，硬化状态仍有阻塞项'
+        : 'GET /api/hardening-status 成功，生产硬化仍为 partial'),
+  };
+}
+
 export function buildGoldReadinessViewModel(payload, errorMessage = '') {
   if (errorMessage) {
     return {
@@ -1096,6 +1187,16 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const goldReadinessListEl = doc.getElementById('gold-readiness-list');
   const goldReadinessMessageEl = doc.getElementById('gold-readiness-message');
   const goldReadinessRefreshButton = doc.getElementById('gold-readiness-refresh');
+  const hardeningStatusPanelEl = doc.getElementById('hardening-status-panel');
+  const hardeningStatusAuthEl = doc.getElementById('hardening-status-auth');
+  const hardeningStatusScopedTokensEl = doc.getElementById('hardening-status-scoped-tokens');
+  const hardeningStatusRateLimitEl = doc.getElementById('hardening-status-rate-limit');
+  const hardeningStatusAuditRetentionEl = doc.getElementById('hardening-status-audit-retention');
+  const hardeningStatusRestoreRootEl = doc.getElementById('hardening-status-restore-root');
+  const hardeningStatusRequestLimitEl = doc.getElementById('hardening-status-request-limit');
+  const hardeningStatusWriteRoutesEl = doc.getElementById('hardening-status-write-routes');
+  const hardeningStatusMessageEl = doc.getElementById('hardening-status-message');
+  const hardeningStatusRefreshButton = doc.getElementById('hardening-status-refresh');
 
   let apiAuthToken = '';
 
@@ -2919,6 +3020,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let releaseHealthInFlight = false;
   let releaseReadinessInFlight = false;
   let goldReadinessInFlight = false;
+  let hardeningStatusInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
@@ -3137,6 +3239,60 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderHardeningStatus(viewModel) {
+    const state = viewModel || buildHardeningStatusViewModel(null);
+    if (hardeningStatusPanelEl?.setAttribute) {
+      hardeningStatusPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (hardeningStatusAuthEl) hardeningStatusAuthEl.textContent = state.authText;
+    if (hardeningStatusScopedTokensEl) hardeningStatusScopedTokensEl.textContent = state.scopedTokensText;
+    if (hardeningStatusRateLimitEl) hardeningStatusRateLimitEl.textContent = state.rateLimitText;
+    if (hardeningStatusAuditRetentionEl) hardeningStatusAuditRetentionEl.textContent = state.auditRetentionText;
+    if (hardeningStatusRestoreRootEl) hardeningStatusRestoreRootEl.textContent = state.restoreRootText;
+    if (hardeningStatusRequestLimitEl) hardeningStatusRequestLimitEl.textContent = state.requestLimitText;
+    if (hardeningStatusWriteRoutesEl) hardeningStatusWriteRoutesEl.textContent = state.writeRoutesText;
+    if (hardeningStatusMessageEl) hardeningStatusMessageEl.textContent = state.messageText;
+  }
+
+  function setHardeningStatusRefreshBusy(busy) {
+    if (!hardeningStatusRefreshButton) return;
+    hardeningStatusRefreshButton.disabled = Boolean(busy);
+    if (hardeningStatusRefreshButton.setAttribute) {
+      hardeningStatusRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchHardeningStatus() {
+    if (hardeningStatusInFlight) return;
+    hardeningStatusInFlight = true;
+    setHardeningStatusRefreshBusy(true);
+    try {
+      const res = await apiFetch('/api/hardening-status');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderHardeningStatus(buildHardeningStatusViewModel(payload));
+      logEvent('已刷新硬化状态', 'info');
+    } catch (err) {
+      const safeErrorMessage = formatHardeningErrorMessage(err.message);
+      renderHardeningStatus(buildHardeningStatusViewModel(null, safeErrorMessage));
+      logEvent('硬化状态检查失败: ' + safeErrorMessage, 'error');
+    } finally {
+      hardeningStatusInFlight = false;
+      setHardeningStatusRefreshBusy(false);
+    }
+  }
+
   if (apiTokenApplyButton?.addEventListener) {
     apiTokenApplyButton.addEventListener('click', () => {
       const token = apiTokenInput ? apiTokenInput.value : '';
@@ -3158,6 +3314,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   renderReleaseHealth(buildReleaseHealthViewModel(null));
   renderReleaseReadiness(buildReleaseReadinessViewModel(null));
   renderGoldReadiness(buildGoldReadinessViewModel(null));
+  renderHardeningStatus(buildHardeningStatusViewModel(null));
 
   if (releaseHealthRefreshButton?.addEventListener) {
     releaseHealthRefreshButton.addEventListener('click', fetchReleaseHealth);
@@ -3167,6 +3324,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (goldReadinessRefreshButton?.addEventListener) {
     goldReadinessRefreshButton.addEventListener('click', fetchGoldReadiness);
+  }
+  if (hardeningStatusRefreshButton?.addEventListener) {
+    hardeningStatusRefreshButton.addEventListener('click', fetchHardeningStatus);
   }
 
   logEvent('Linke 控制台已启动', 'info');
