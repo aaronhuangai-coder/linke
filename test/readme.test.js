@@ -1737,25 +1737,27 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.70 hardening status endpoint', () => {
-  it('title and badge claim V0.70 as current', () => {
-    assertReadmeContains(/# Linke V0\.70/, 'README title should mention V0.70');
-    assertReadmeContains(/\*\*当前版本：V0\.70\*\*/, 'README badge should mention V0.70');
+describe('README — V0.71 hardening status CLI', () => {
+  it('title and badge claim V0.71 as current', () => {
+    assertReadmeContains(/# Linke V0\.71/, 'README title should mention V0.71');
+    assertReadmeContains(/\*\*当前版本：V0\.71\*\*/, 'README badge should mention V0.71');
   });
 
-  it('version table marks V0.69 historical and V0.70 current', () => {
-    assertReadmeContains(/\| V0\.69 \| 历史版本 \|/, 'V0.69 should be historical');
-    assertReadmeContains(/\| V0\.70 \| 当前版本 \|[^|]*(hardening-status|硬化状态|生产硬化)/i, 'V0.70 should be current hardening-status milestone');
+  it('version table marks V0.70 historical and V0.71 current', () => {
+    assertReadmeContains(/\| V0\.70 \| 历史版本 \|/, 'V0.70 should be historical');
+    assertReadmeContains(/\| V0\.71 \| 当前版本 \|[^|]*(hardening-status|硬化状态|生产硬化|Agent)/i, 'V0.71 should be current hardening-status CLI milestone');
   });
 
-  it('documents hardening-status endpoint safety boundaries', () => {
+  it('documents hardening-status API and CLI safety boundaries', () => {
+    assertReadmeContains(/agent\.js hardening-status/, 'README should document hardening-status CLI');
     assertReadmeContains(/GET \/api\/hardening-status/, 'README should document hardening-status endpoint');
     assertReadmeContains(/tokenValuesReturned:false/, 'README should document tokenValuesReturned false');
     assertReadmeContains(/restoreRootValueReturned:false/, 'README should document restoreRootValueReturned false');
     assertReadmeContains(/auditPathReturned:false/, 'README should document auditPathReturned false');
+    assertReadmeContains(/Agent hardening-status CLI/, 'README should document Agent hardening-status CLI test coverage');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.70', () => {
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.71', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

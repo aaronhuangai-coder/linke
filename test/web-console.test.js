@@ -1523,12 +1523,12 @@ describe('Web Console / API contract', () => {
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 
-  it('HTML safety notes document V0.70 hardening status endpoint without claiming production readiness', async () => {
+  it('HTML safety notes document V0.71 hardening status CLI without claiming production readiness', async () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.70/);
-    assert.match(html, /GET\s*\/api\/hardening-status|hardening-status|硬化状态/);
+    assert.match(html, /V0\.71/);
+    assert.match(html, /agent\.js hardening-status|GET\s*\/api\/hardening-status|hardening-status|硬化状态/);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 });

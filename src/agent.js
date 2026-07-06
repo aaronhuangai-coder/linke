@@ -16,6 +16,7 @@
  *   nas-dry-run         — show NAS dry-run plan (no network, no write)
  *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
  *   health              — check release health status
+ *   hardening-status    — show sanitized hardening status
  *   release-readiness   — evaluate release readiness from health status
  *
  * Options:
@@ -217,6 +218,7 @@ Commands:
   nas-dry-run         Show NAS dry-run plan (no network, no write)
   retention-dry-run   Show retention dry-run plan (no delete, read-only)
   health              Check release health status
+  hardening-status    Show sanitized hardening status
   release-readiness   Evaluate release readiness from health status
 
 Options:
@@ -422,6 +424,12 @@ export async function main() {
 
       case 'health': {
         const result = await apiRequest('/api/health', 'GET');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'hardening-status': {
+        const result = await apiRequest('/api/hardening-status', 'GET');
         console.log(JSON.stringify(result, null, 2));
         break;
       }
