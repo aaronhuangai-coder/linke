@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer, buildAuthStatusResponse, buildHealthResponse } from '../src/server.js';
+import { createServer, buildAuthStatusResponse, buildHealthResponse, API_WRITE_ROUTES, formatApiRoute, isApiWriteRoute } from '../src/server.js';
 import { LINKE_RELEASE_VERSION } from '../src/version.js';
 import { buildReleaseReadinessReport } from '../src/release-readiness.js';
 import { readAuditEvents } from '../src/audit-log.js';
@@ -61,11 +61,7 @@ describe('Auth status response', () => {
           read: true,
           write: true,
         },
-        writeRoutes: [
-          'POST /api/heartbeat',
-          'POST /api/backups',
-          'POST /api/restore',
-        ],
+        writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       },
       safety: {
         tokenValuesReturned: false,
@@ -73,6 +69,35 @@ describe('Auth status response', () => {
       },
     });
     assert.doesNotMatch(JSON.stringify(body), /full-secret-token|read-secret-token|write-secret-token/);
+  });
+});
+
+describe('Shared write-route registry pure tests', () => {
+  it('defines API_WRITE_ROUTES correctly', () => {
+    assert.strictEqual(Array.isArray(API_WRITE_ROUTES), true);
+    assert.strictEqual(API_WRITE_ROUTES.length, 3);
+
+    const expected = [
+      { method: 'POST', path: '/api/heartbeat' },
+      { method: 'POST', path: '/api/backups' },
+      { method: 'POST', path: '/api/restore' },
+    ];
+    assert.deepStrictEqual(API_WRITE_ROUTES, expected);
+  });
+
+  it('formatApiRoute formats route objects', () => {
+    assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/heartbeat' }), 'POST /api/heartbeat');
+    assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/backups' }), 'POST /api/backups');
+    assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/restore' }), 'POST /api/restore');
+  });
+
+  it('isApiWriteRoute returns true for the write routes and false for others', () => {
+    assert.strictEqual(isApiWriteRoute('POST', '/api/heartbeat'), true);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/backups'), true);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/restore'), true);
+
+    assert.strictEqual(isApiWriteRoute('GET', '/api/heartbeat'), false);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/nas-dry-run'), false);
   });
 });
 describe('GET /api/health', () => {
@@ -159,11 +184,7 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false });
       assert.strictEqual(body.auth.enabled, false);
-      assert.deepStrictEqual(body.auth.writeRoutes, [
-        'POST /api/heartbeat',
-        'POST /api/backups',
-        'POST /api/restore',
-      ]);
+      assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
       assert.deepStrictEqual(await readdir(dataDir), []);
     } finally {

@@ -80,6 +80,9 @@ const GOLD_READINESS_ITEMS = [
     evidence: [
       'src/server.js authToken API gate',
       'src/server.js read/write token scope gate',
+      'src/server.js API_WRITE_ROUTES',
+      'src/server.js isApiWriteRoute',
+      'src/server.js formatApiRoute',
       'src/server.js buildAuthStatusResponse',
       'GET /api/auth-status',
       'src/agent.js --token option',

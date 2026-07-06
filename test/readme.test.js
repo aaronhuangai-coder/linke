@@ -270,6 +270,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.62/, 'V0.62');
   });
 
+  it('mentions V0.63 (shared write-route registry)', () => {
+    assertReadmeContains(/V0\.63/, 'V0.63');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1517,14 +1521,14 @@ describe('README — V0.61 API read/write token foundation', () => {
 });
 
 describe('README — V0.62 auth status readiness API', () => {
-  it('title and badge claim V0.62 as current', () => {
-    assert.match(readme, /^# Linke V0\.62/m);
-    assert.match(readme, /当前版本：V0\.62/);
+  it('title and badge no longer claim V0.62 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.62/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.62/);
   });
 
-  it('version table marks V0.61 historical and V0.62 current', () => {
+  it('version table marks V0.61 and V0.62 historical', () => {
     assert.match(readme, /\| V0\.61 \| 历史版本 \|[^|]*(read\/write|读\/写|读写|LINKE_READ_TOKEN|LINKE_WRITE_TOKEN|403|auth\.forbidden)/i);
-    assert.match(readme, /\| V0\.62 \| 当前版本 \|[^|]*(auth-status|auth status|认证状态|GET \/api\/auth-status|buildAuthStatusResponse)/i);
+    assert.match(readme, /\| V0\.62 \| 历史版本 \|[^|]*(auth-status|auth status|认证状态|GET \/api\/auth-status|buildAuthStatusResponse)/i);
   });
 
   it('documents auth-status API and sanitized response boundary', () => {
@@ -1538,6 +1542,33 @@ describe('README — V0.62 auth status readiness API', () => {
   it('keeps Gold readiness blocked and documents auth-status limits', () => {
     assert.match(readme, /security-auth[\s\S]*(partial|部分)|auth-status[\s\S]*(partial|部分)/i);
     assert.match(readme, /不.*token rotation|token rotation|secret management|生产级鉴权/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.63 shared write-route registry', () => {
+  it('title and badge claim V0.63 as current', () => {
+    assert.match(readme, /^# Linke V0\.63/m);
+    assert.match(readme, /当前版本：V0\.63/);
+  });
+
+  it('version table marks V0.62 historical and V0.63 current', () => {
+    assert.match(readme, /\| V0\.62 \| 历史版本 \|[^|]*(auth-status|auth status|认证状态|GET \/api\/auth-status|buildAuthStatusResponse)/i);
+    assert.match(readme, /\| V0\.63 \| 当前版本 \|[^|]*(write-route|write route|写入路由|API_WRITE_ROUTES|isApiWriteRoute)/i);
+  });
+
+  it('documents shared write-route registry and auth-status alignment', () => {
+    assert.match(readme, /API_WRITE_ROUTES/);
+    assert.match(readme, /formatApiRoute/);
+    assert.match(readme, /isApiWriteRoute/);
+    assert.match(readme, /writeRoutes|写入路由/);
+    assert.match(readme, /auth-status|GET\s+\/api\/auth-status/i);
+    assert.match(readme, /single source|同一来源|共享|registry|注册表/i);
+  });
+
+  it('keeps Gold blocked and rejects production authorization overclaims', () => {
+    assert.match(readme, /security-auth[\s\S]*(partial|部分)|write-route[\s\S]*(foundation|基础)/i);
+    assert.match(readme, /不是完整生产级鉴权|不.*production-grade authorization|not production-grade authorization|token rotation|secret management/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });
 });

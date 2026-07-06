@@ -1422,7 +1422,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.61|V0\.62/);
+    assert.match(html, /V0\.61|V0\.62|V0\.63/);
     assert.match(html, /LINKE_READ_TOKEN/);
     assert.match(html, /LINKE_WRITE_TOKEN/);
     assert.match(html, /403\s+Forbidden|auth\.forbidden/);
@@ -1434,10 +1434,21 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.62/);
+    assert.match(html, /V0\.62|V0\.63/);
     assert.match(html, /GET \/api\/auth-status|auth-status/);
     assert.match(html, /configuredScopes|writeRoutes|认证状态|写入路由/);
     assert.match(html, /不返回.*token|tokenValuesReturned|不暴露.*token/i);
+    assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
+  });
+
+  it('HTML safety notes document V0.63 shared write-route registry without claiming production readiness', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.match(html, /V0\.63/);
+    assert.match(html, /API_WRITE_ROUTES|isApiWriteRoute|write-route|写入路由/);
+    assert.match(html, /共享|同一来源|registry|注册表/i);
+    assert.match(html, /partial|完整鉴权|生产级审计|生产硬化|production/i);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 });

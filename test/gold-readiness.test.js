@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.62', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.62');
+  it('expects LINKE_RELEASE_VERSION to be V0.63', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.63');
   });
 
-  it('expects report.version to be V0.62', () => {
+  it('expects report.version to be V0.63', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.62');
+    assert.strictEqual(report.version, 'V0.63');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -139,6 +139,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(securityEvidence.includes('auth.forbidden'));
     assert.ok(securityEvidence.includes('GET /api/auth-status'));
     assert.ok(securityEvidence.includes('buildAuthStatusResponse'));
+    assert.ok(securityEvidence.includes('API_WRITE_ROUTES'));
+    assert.ok(securityEvidence.includes('isApiWriteRoute'));
+    assert.ok(securityEvidence.includes('formatApiRoute'));
     assert.doesNotMatch(securityItem.nextStep, /Web token UX/i);
     assert.match(securityItem.nextStep, /authorization|secret|production/i);
 

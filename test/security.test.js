@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promis
 import { request } from 'node:http';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer, MAX_JSON_BODY_BYTES } from '../src/server.js';
+import { createServer, MAX_JSON_BODY_BYTES, API_WRITE_ROUTES } from '../src/server.js';
 import { slugify, safeDevicePath, createBackup } from '../src/storage.js';
 import { readAuditEvents } from '../src/audit-log.js';
 
@@ -423,6 +423,76 @@ describe('Security — optional bearer token authentication', () => {
       assert.strictEqual(events[0].type, 'auth.forbidden');
       assert.strictEqual(events[0].path, '/api/heartbeat');
       assert.strictEqual(events[0].statusCode, 403);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects readToken for all registered write routes with 403 and does not cause side effects', async () => {
+    const server = createServer({ dataDir, readToken: 'read-token', writeToken: 'write-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const tempSourceDir = join(dataDir, 'temp-source-dir');
+      await mkdir(tempSourceDir, { recursive: true });
+      const tempSourceFile = join(tempSourceDir, 'file.txt');
+      await writeFile(tempSourceFile, 'hello');
+
+      const tempTargetDir = join(dataDir, 'temp-target-dir');
+
+      for (const route of API_WRITE_ROUTES) {
+        const beforeEntries = await readdir(dataDir);
+
+        let body;
+        if (route.path === '/api/heartbeat') {
+          body = {
+            deviceId: 'registry-device',
+            hostname: 'Registry',
+            ipAddress: '10.0.0.8',
+          };
+        } else if (route.path === '/api/backups') {
+          body = {
+            deviceId: 'registry-device',
+            sourcePath: tempSourceDir,
+          };
+        } else if (route.path === '/api/restore') {
+          body = {
+            deviceId: 'registry-device',
+            snapshotId: '00000000-0000-0000-0000-000000000000',
+            targetPath: tempTargetDir,
+          };
+        } else {
+          body = {};
+        }
+
+        const res = await fetch(`http://localhost:${port}${route.path}`, {
+          method: route.method,
+          headers: {
+            'Authorization': 'Bearer read-token',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+
+        assert.strictEqual(res.status, 403, `Route ${route.method} ${route.path} should return 403`);
+        assert.deepStrictEqual(await res.json(), { error: 'Forbidden' });
+
+        // 验证 dataDir 没有业务副作用，排除审计目录和测试夹具目录。
+        const afterEntries = await readdir(dataDir);
+        const sanitizeList = (list) => list.filter((e) => e !== 'audit' && e !== 'temp-source-dir' && e !== 'temp-target-dir');
+        assert.deepStrictEqual(sanitizeList(afterEntries), sanitizeList(beforeEntries), `Route ${route.path} caused side effects in dataDir`);
+
+        // 验证拒绝写入时记录 auth.forbidden 审计事件。
+        const events = await readAuditEvents(dataDir, { limit: 1 });
+        assert.ok(events.length > 0, `No audit events found for route ${route.path}`);
+        assert.strictEqual(events[0].type, 'auth.forbidden', `Route ${route.path} audit event type mismatch`);
+        assert.strictEqual(events[0].path, route.path, `Route ${route.path} audit event path mismatch`);
+        assert.strictEqual(events[0].statusCode, 403, `Route ${route.path} audit event statusCode mismatch`);
+      }
+
+      await rm(tempSourceDir, { recursive: true, force: true });
+      await rm(tempTargetDir, { recursive: true, force: true });
     } finally {
       await new Promise((r) => server.close(r));
     }

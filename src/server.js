@@ -37,6 +37,24 @@ const MIME = {
 
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const RESTORE_ROOT_ERROR = 'targetPath is outside the allowed restore root';
+// 新增写入接口必须注册在这里，测试会捕获 auth gate 与 auth-status 的漂移。
+export const API_WRITE_ROUTES = [
+  { method: 'POST', path: '/api/heartbeat' },
+  { method: 'POST', path: '/api/backups' },
+  { method: 'POST', path: '/api/restore' },
+];
+
+export function formatApiRoute(route) {
+  return `${String(route.method).toUpperCase()} ${route.path}`;
+}
+
+/**
+ * 判断请求是否命中注册表中的写入接口；空 method 按非写入请求处理。
+ */
+export function isApiWriteRoute(method, pathname) {
+  const normalizedMethod = String(method || '').toUpperCase();
+  return API_WRITE_ROUTES.some((route) => route.method === normalizedMethod && route.path === pathname);
+}
 
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
@@ -256,11 +274,7 @@ export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {
         read: Boolean(normRead),
         write: Boolean(normWrite),
       },
-      writeRoutes: [
-        'POST /api/heartbeat',
-        'POST /api/backups',
-        'POST /api/restore',
-      ],
+      writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
     },
     safety: {
       tokenValuesReturned: false,
@@ -344,9 +358,7 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           }
 
           if (!isWriteAllowed) {
-            const isWriteRoute =
-              (method === 'POST' && (pathname === '/api/heartbeat' || pathname === '/api/backups' || pathname === '/api/restore'));
-            if (isWriteRoute) {
+            if (isApiWriteRoute(method, pathname)) {
               await recordAudit(dataDir, {
                 type: 'auth.forbidden',
                 method,
