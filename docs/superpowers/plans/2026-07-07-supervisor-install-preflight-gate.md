@@ -630,7 +630,7 @@ Expected: commit and push succeed.
 - Consumes: all V0.82 changes
 - Produces: verification evidence, Qwen adversarial review result, DeepSeek auxiliary closure result, final commit/push notes
 
-- [ ] **Step 1: Run full local verification**
+- [x] **Step 1: Run full local verification**
 
 Run:
 
@@ -656,7 +656,7 @@ rg -n "production ready|Gold ready|real NAS remote backup ready|daemon installed
 
 Expected: no matches except if the pattern appears only inside a documented verification command in a plan file; for `README.md src`, expected no matches.
 
-- [ ] **Step 2: Run Qwen read-only adversarial review**
+- [x] **Step 2: Run Qwen read-only adversarial review**
 
 Run Qwen with this prompt:
 
@@ -666,7 +666,7 @@ qwen -p "You are the read-only adversarial reviewer for Linke V0.82. Review the 
 
 Expected: `VERDICT: PASS`. If Qwen returns `FAIL` or concrete findings, record them here and fix only accepted findings after PM review.
 
-- [ ] **Step 3: Run DeepSeek JSON-only auxiliary closure**
+- [x] **Step 3: Run DeepSeek JSON-only auxiliary closure**
 
 Run DeepSeek with an evidence-rich prompt after local verification and Qwen review:
 
@@ -678,21 +678,21 @@ Expected: structured JSON with `verdict:"PASS"`, `accepted:true`, `blocking_find
 
 If DeepSeek returns `INCONCLUSIVE`, improve the evidence summary with concrete source/test facts and run once more. Do not use ZAI as a required verifier for V0.82.
 
-- [ ] **Step 4: Record closure evidence**
+- [x] **Step 4: Record closure evidence**
 
 Append an `Observed:` block under this task with:
 
 ```md
 Observed:
-- Full local tests: `<command>` exited `<code>`.
-- `git diff --check`: exited `<code>`.
-- Overclaim scan: `<result>`.
-- Qwen review: `<verdict summary>`.
-- DeepSeek closure: `<verdict summary>`.
+- Full local tests: `node --test --test-reporter=dot test/*.test.js` exited `0`.
+- `git diff --check`: exited `0`.
+- Overclaim scan: `git grep -n -E ...` returned no matches.
+- Qwen review: VERDICT: PASS, FINDINGS: none blocking, REQUIRED CHANGES: none, CONFIDENCE: high.
+- DeepSeek closure: verdict: PASS, accepted: true, gold_status: blocked, risk: low, reason: All acceptance criteria met.
 - ZAI: not required for V0.82 due V0.81 repeated fixed generic response; no PASS/FAIL accepted from ZAI.
 ```
 
-- [ ] **Step 5: Commit Task 3 closure notes**
+- [x] **Step 5: Commit Task 3 closure notes**
 
 Run:
 
