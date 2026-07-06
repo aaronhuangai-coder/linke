@@ -143,6 +143,50 @@
           Supervisor 状态面板为只读视图，仅手动 GET /api/supervisor-status，无启动请求、不自动轮询、不调用 launchctl、不读取进程列表、不安装或启动托管守护进程、不写入 metadata、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 sanitized not_configured 状态和 safety 布尔摘要，不显示 token、Authorization header、路径或环境变量值，不声明生产级 supervisor 或生产就绪。
         </p>
       </section>
+      <section id="supervisor-install-dry-run-panel" class="panel supervisor-install-dry-run-panel" data-testid="supervisor-install-dry-run-panel">
+        <h2>Supervisor install dry-run</h2>
+        <div class="supervisor-install-dry-run-controls">
+          <label for="supervisor-install-dry-run-config">配置 JSON</label>
+          <textarea
+            id="supervisor-install-dry-run-config"
+            data-testid="supervisor-install-dry-run-config"
+            rows="10"
+          >{
+  "serverUrl": "http://localhost:3000",
+  "deviceId": "web-supervisor-dry-run",
+  "backupJobs": [
+    { "name": "documents", "sourcePath": "/tmp/linke-documents" }
+  ],
+  "excludePatterns": ["*.tmp", "node_modules"],
+  "scheduleSeconds": 3600
+}</textarea>
+          <button id="supervisor-install-dry-run-run" data-testid="supervisor-install-dry-run-run" type="button">Supervisor dry-run</button>
+        </div>
+        <div class="supervisor-install-dry-run-stats">
+          <div class="supervisor-install-dry-run-stat">
+            <span id="supervisor-install-dry-run-status" data-testid="supervisor-install-dry-run-status">未检查</span>
+            <span>状态</span>
+          </div>
+          <div class="supervisor-install-dry-run-stat">
+            <span id="supervisor-install-dry-run-install-state" data-testid="supervisor-install-dry-run-install-state">—</span>
+            <span>安装门禁</span>
+          </div>
+          <div class="supervisor-install-dry-run-stat">
+            <span id="supervisor-install-dry-run-approval-state" data-testid="supervisor-install-dry-run-approval-state">—</span>
+            <span>批准</span>
+          </div>
+          <div class="supervisor-install-dry-run-stat">
+            <span id="supervisor-install-dry-run-rollback-state" data-testid="supervisor-install-dry-run-rollback-state">—</span>
+            <span>Rollback</span>
+          </div>
+        </div>
+        <div id="supervisor-install-dry-run-result" data-testid="supervisor-install-dry-run-result">
+          <p class="placeholder">请粘贴配置 JSON 进行 Supervisor install dry-run 预检</p>
+        </div>
+        <div class="supervisor-install-dry-run-safety-note" data-testid="supervisor-install-dry-run-safety-note">
+          <p>Supervisor install dry-run 仅手动 POST /api/supervisor-install-dry-run 生成只读预览，无启动请求、不自动轮询、不调用 launchctl、不读取进程列表、不安装或启动 supervisor、不写入 metadata、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 allowlist 字段，不显示 token、Authorization header、serverUrl、sourcePath、NAS endpoint、credentialRef、approval identity、timestamp、plist path、executable path 或 runnable command；Gold 仍 blocked，不能声明生产就绪。</p>
+        </div>
+      </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
         <header class="panel-title-row">
           <h2>审计日志</h2>

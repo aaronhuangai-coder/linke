@@ -40,6 +40,7 @@ import {
   buildReleaseHealthViewModel,
   buildGoldReadinessViewModel,
   buildAuditLogViewModel,
+  buildSupervisorInstallDryRunViewModel,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -1814,6 +1815,58 @@ describe('Web Console / API contract', () => {
     assert.ok(css.includes('.audit-log-panel[data-status="ready"]'), 'styles.css must contain ready status styling');
     assert.ok(css.includes('.audit-log-panel[data-status="empty"]'), 'styles.css must contain empty status styling');
     assert.ok(css.includes('.audit-log-panel[data-status="error"]'), 'styles.css must contain error status styling');
+  });
+
+  it('HTML contains supervisor-install-dry-run panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-panel"'), 'must have supervisor-install-dry-run-panel');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-config"'), 'must have supervisor-install-dry-run-config textarea');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-run"'), 'must have supervisor-install-dry-run-run button');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-status"'), 'must have supervisor-install-dry-run-status stat');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-install-state"'), 'must have supervisor-install-dry-run-install-state stat');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-approval-state"'), 'must have supervisor-install-dry-run-approval-state stat');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-rollback-state"'), 'must have supervisor-install-dry-run-rollback-state stat');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-result"'), 'must have supervisor-install-dry-run-result');
+    assert.ok(html.includes('data-testid="supervisor-install-dry-run-safety-note"'), 'must have supervisor-install-dry-run-safety-note');
+  });
+
+  it('supervisor-install-dry-run panel safety note documents manual dry-run boundaries and avoids Gold overclaims', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="supervisor-install-dry-run-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'supervisor-install-dry-run-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(content.includes('POST /api/supervisor-install-dry-run'), 'must mention POST endpoint');
+    assert.match(content, /dry-run|只读|预览/);
+    assert.match(content, /无启动请求|不自动轮询/);
+    assert.match(content, /不调用 launchctl/);
+    assert.match(content, /不读取进程列表/);
+    assert.match(content, /不安装|不启动/);
+    assert.match(content, /不写入 metadata|不写 metadata/);
+    assert.match(content, /不连接 NAS/);
+    assert.match(content, /不触发备份或恢复|不执行备份或恢复/);
+    assert.match(content, /不执行远程命令/);
+    assert.match(content, /不声明.*Gold|Gold.*blocked|Gold.*未完成/);
+  });
+
+  it('app.js wires supervisor-install-dry-run rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/supervisor-install-dry-run'), 'app.js must reference /api/supervisor-install-dry-run');
+    assert.ok(js.includes('buildSupervisorInstallDryRunViewModel'), 'app.js must export supervisor install dry-run view model');
+    assert.ok(js.includes('supervisor-install-dry-run-run') || js.includes('supervisorInstallDryRunRun'), 'app.js must reference the run button');
+  });
+
+  it('styles.css contains supervisor-install-dry-run panel styles', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.supervisor-install-dry-run-panel'), 'styles.css must contain panel styles');
+    assert.ok(css.includes('.supervisor-install-dry-run-error'), 'styles.css must contain error styles');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -8307,6 +8360,97 @@ describe('Supervisor status pure functions', () => {
   });
 });
 
+describe('buildSupervisorInstallDryRunViewModel', () => {
+  it('returns unknown state for missing payload', () => {
+    const result = buildSupervisorInstallDryRunViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.installStateText, '—');
+    assert.strictEqual(result.approvalStateText, '—');
+    assert.strictEqual(result.rollbackStateText, '—');
+    assert.match(result.messageText, /supervisor install dry-run/i);
+  });
+
+  it('returns sanitized blocked display fields for a full dry-run plan', () => {
+    const result = buildSupervisorInstallDryRunViewModel({
+      status: 'partial',
+      command: 'supervisor-install-dry-run',
+      supervisor: {
+        state: 'not_configured',
+        wouldInstall: false,
+        wouldStart: false,
+        program: 'node src/agent.js run-once --config /Users/ah/secret-config.json',
+      },
+      readinessSummary: {
+        state: 'blocked',
+        blockers: ['real-install-not-implemented'],
+      },
+      installCommandPreview: {
+        state: 'blocked',
+        actions: [
+          {
+            id: 'write-launch-agent-plist',
+            command: 'launchctl bootstrap gui/501 /Users/ah/Library/LaunchAgents/com.linke.agent.plist',
+            wouldRun: false,
+            wouldWrite: false,
+          },
+        ],
+      },
+      installPreflight: {
+        state: 'blocked',
+        checks: [
+          { id: 'launchd-install', status: 'blocked', blockerCode: 'launchd-install-blocked' },
+        ],
+      },
+      installApprovalManifest: {
+        state: 'blocked',
+        approval: { approved: false },
+        rollback: { available: false },
+        controls: [
+          { id: 'explicit-operator-approval', status: 'blocked', blockerCode: 'operator-approval-required' },
+        ],
+      },
+      safety: {
+        launchctlCalled: false,
+        processListRead: false,
+        launchdFileWritten: false,
+        metadataWritten: false,
+        nasConnected: false,
+        backupTriggered: false,
+        restoreTriggered: false,
+        remoteCommandExecuted: false,
+      },
+      configSummary: {
+        deviceId: 'secret-device',
+      },
+    });
+    const text = JSON.stringify(result);
+
+    assert.strictEqual(result.statusKey, 'partial');
+    assert.strictEqual(result.statusText, '部分就绪');
+    assert.strictEqual(result.installStateText, 'not_configured / wouldInstall:false / wouldStart:false');
+    assert.strictEqual(result.approvalStateText, 'approved:false');
+    assert.strictEqual(result.rollbackStateText, 'available:false');
+    assert.deepStrictEqual(result.readinessBlockers, ['real-install-not-implemented']);
+    assert.deepStrictEqual(result.commandActions, ['write-launch-agent-plist · wouldRun:false · wouldWrite:false']);
+    assert.deepStrictEqual(result.preflightChecks, ['launchd-install · blocked · launchd-install-blocked']);
+    assert.deepStrictEqual(result.approvalControls, ['explicit-operator-approval · blocked · operator-approval-required']);
+    assert.ok(result.safetyLines.includes('launchctlCalled:false'));
+    assert.ok(!text.includes('/Users/ah/secret-config.json'), 'view model must not expose config path');
+    assert.ok(!text.includes('launchctl bootstrap'), 'view model must not expose runnable command');
+    assert.ok(!text.includes('secret-device'), 'view model must not expose arbitrary config summary strings');
+  });
+
+  it('returns sanitized error state', () => {
+    const result = buildSupervisorInstallDryRunViewModel(null, 'serverUrl secret-value is invalid');
+
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.ok(!result.messageText.includes('secret-value'), 'error message must be sanitized');
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -8904,5 +9048,190 @@ describe('DOM test: audit-log panel interactions', () => {
     resolveRequest();
     await firstClick;
     await secondClick;
+  });
+});
+
+describe('DOM test: supervisor-install-dry-run panel interactions', () => {
+  it('does not request /api/supervisor-install-dry-run on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url).includes('/api/supervisor-install-dry-run')) fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call /api/supervisor-install-dry-run on init');
+  });
+
+  it('validates empty and invalid JSON locally without calling the API', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        calls.push(url);
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-install-dry-run-config').value = '   ';
+    doc.getElementById('supervisor-install-dry-run-run')._listeners.click();
+    assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-install-dry-run')));
+    assert.match(doc.getElementById('supervisor-install-dry-run-result').textContent, /不能为空/);
+
+    doc.getElementById('supervisor-install-dry-run-config').value = '{ invalid json';
+    doc.getElementById('supervisor-install-dry-run-run')._listeners.click();
+    assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-install-dry-run')));
+    assert.match(doc.getElementById('supervisor-install-dry-run-result').textContent, /JSON 格式错误/);
+  });
+
+  it('requests supervisor install dry-run once and renders sanitized blocked plan fields', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url).includes('/api/supervisor-install-dry-run')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              status: 'partial',
+              command: 'supervisor-install-dry-run',
+              supervisor: { state: 'not_configured', wouldInstall: false, wouldStart: false },
+              readinessSummary: { state: 'blocked', blockers: ['real-install-not-implemented'] },
+              installCommandPreview: {
+                state: 'blocked',
+                actions: [{ id: 'write-launch-agent-plist', command: 'launchctl bootstrap secret', wouldRun: false, wouldWrite: false }],
+              },
+              installPreflight: {
+                state: 'blocked',
+                checks: [{ id: 'operator-approval', status: 'blocked', blockerCode: 'operator-approval-required' }],
+              },
+              installApprovalManifest: {
+                state: 'blocked',
+                approval: { approved: false },
+                rollback: { available: false },
+                controls: [{ id: 'explicit-operator-approval', status: 'blocked', blockerCode: 'operator-approval-required' }],
+              },
+              safety: {
+                launchctlCalled: false,
+                processListRead: false,
+                launchdFileWritten: false,
+                metadataWritten: false,
+                nasConnected: false,
+                backupTriggered: false,
+                restoreTriggered: false,
+                remoteCommandExecuted: false,
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-install-dry-run-config').value = JSON.stringify({
+      serverUrl: 'http://secret.localhost:3000',
+      deviceId: 'web-supervisor-dry-run',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+      nasTargets: [{ name: 'synology-web', provider: 'synology', endpoint: 'http://192.168.1.100:5000', shareName: 'backup', remotePath: '/volume1/backup', credentialRef: 'nas-ref' }],
+    });
+    doc.getElementById('supervisor-install-dry-run-run')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url).includes('/api/supervisor-install-dry-run'));
+    assert.ok(apiCall, 'must call supervisor install dry-run API');
+    assert.strictEqual(apiCall.options.method, 'POST');
+    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-status').textContent, '部分就绪');
+    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-install-state').textContent, 'not_configured / wouldInstall:false / wouldStart:false');
+    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-approval-state').textContent, 'approved:false');
+    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-rollback-state').textContent, 'available:false');
+
+    const resultText = doc.getElementById('supervisor-install-dry-run-result').textContent;
+    assert.match(resultText, /real-install-not-implemented/);
+    assert.match(resultText, /write-launch-agent-plist/);
+    assert.match(resultText, /wouldRun:false/);
+    assert.match(resultText, /operator-approval-required/);
+    assert.match(resultText, /launchctlCalled:false/);
+    assert.ok(!resultText.includes('secret.localhost'), 'must not render serverUrl');
+    assert.ok(!resultText.includes('/tmp/linke-documents'), 'must not render sourcePath');
+    assert.ok(!resultText.includes('192.168.1.100'), 'must not render NAS endpoint');
+    assert.ok(!resultText.includes('nas-ref'), 'must not render credentialRef');
+    assert.ok(!resultText.includes('launchctl bootstrap secret'), 'must not render runnable command');
+  });
+
+  it('does not start a second supervisor install dry-run request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url).includes('/api/supervisor-install-dry-run')) {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              status: 'partial',
+              supervisor: { state: 'not_configured', wouldInstall: false, wouldStart: false },
+              readinessSummary: { state: 'blocked', blockers: [] },
+              installCommandPreview: { state: 'blocked', actions: [] },
+              installPreflight: { state: 'blocked', checks: [] },
+              installApprovalManifest: { state: 'blocked', approval: { approved: false }, rollback: { available: false }, controls: [] },
+              safety: {},
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-install-dry-run-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-supervisor-dry-run',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    const runBtn = doc.getElementById('supervisor-install-dry-run-run');
+    runBtn._listeners.click();
+    runBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+
+  it('renders sanitized error on non-2xx supervisor install dry-run response', async () => {
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url).includes('/api/supervisor-install-dry-run')) {
+          return { ok: false, status: 400, json: async () => ({ error: 'serverUrl secret-value invalid' }) };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-install-dry-run-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-supervisor-dry-run',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-install-dry-run-run')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const text = doc.getElementById('supervisor-install-dry-run-result').textContent;
+    assert.match(text, /检查失败|加载失败|失败/);
+    assert.ok(!text.includes('secret-value'), 'must redact secret-like error detail');
   });
 });

@@ -574,6 +574,110 @@ export function buildGoldReadinessViewModel(payload, errorMessage = '') {
   };
 }
 
+function sanitizeSupervisorInstallErrorMessage(message) {
+  const raw = String(message || '').trim();
+  if (!raw) return '请求失败';
+  return raw
+    .replace(/https?:\/\/[^\s"']+/gi, '[redacted-url]')
+    .replace(/\/Users\/[^\s"']+/g, '[redacted-path]')
+    .replace(/secret[-_\w]*/gi, '[redacted-secret]')
+    .replace(/token[-_\w]*/gi, '[redacted-token]')
+    .slice(0, 180);
+}
+
+function normalizeStringList(values) {
+  return Array.isArray(values)
+    ? values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim())
+    : [];
+}
+
+function buildSupervisorInstallSafetyLines(safety) {
+  const source = safety && typeof safety === 'object' ? safety : {};
+  return [
+    'launchctlCalled',
+    'processListRead',
+    'launchdFileWritten',
+    'metadataWritten',
+    'nasConnected',
+    'backupTriggered',
+    'restoreTriggered',
+    'remoteCommandExecuted',
+  ].map((key) => `${key}:${source[key] === true ? 'true' : 'false'}`);
+}
+
+export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      installStateText: '—',
+      approvalStateText: '—',
+      rollbackStateText: '—',
+      readinessBlockers: [],
+      commandActions: [],
+      preflightChecks: [],
+      approvalControls: [],
+      safetyLines: [],
+      messageText: 'Supervisor install dry-run 检查失败: ' + sanitizeSupervisorInstallErrorMessage(errorMessage),
+    };
+  }
+
+  if (!plan || typeof plan !== 'object') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      installStateText: '—',
+      approvalStateText: '—',
+      rollbackStateText: '—',
+      readinessBlockers: [],
+      commandActions: [],
+      preflightChecks: [],
+      approvalControls: [],
+      safetyLines: [],
+      messageText: '点击 Supervisor install dry-run 手动 POST /api/supervisor-install-dry-run',
+    };
+  }
+
+  const supervisor = plan.supervisor && typeof plan.supervisor === 'object' ? plan.supervisor : {};
+  const readiness = plan.readinessSummary && typeof plan.readinessSummary === 'object' ? plan.readinessSummary : {};
+  const commandPreview = plan.installCommandPreview && typeof plan.installCommandPreview === 'object' ? plan.installCommandPreview : {};
+  const preflight = plan.installPreflight && typeof plan.installPreflight === 'object' ? plan.installPreflight : {};
+  const manifest = plan.installApprovalManifest && typeof plan.installApprovalManifest === 'object' ? plan.installApprovalManifest : {};
+  const approval = manifest.approval && typeof manifest.approval === 'object' ? manifest.approval : {};
+  const rollback = manifest.rollback && typeof manifest.rollback === 'object' ? manifest.rollback : {};
+
+  const statusKey = ['ready', 'partial', 'blocked'].includes(plan.status) ? plan.status : 'partial';
+
+  return {
+    statusKey,
+    statusText: formatHardeningStatusText(statusKey),
+    installStateText: `${formatAuditDisplayString(supervisor.state) || 'unknown'} / wouldInstall:${supervisor.wouldInstall === true ? 'true' : 'false'} / wouldStart:${supervisor.wouldStart === true ? 'true' : 'false'}`,
+    approvalStateText: `approved:${approval.approved === true ? 'true' : 'false'}`,
+    rollbackStateText: `available:${rollback.available === true ? 'true' : 'false'}`,
+    readinessBlockers: normalizeStringList(readiness.blockers),
+    commandActions: Array.isArray(commandPreview.actions)
+      ? commandPreview.actions.map((action) => {
+        const source = action && typeof action === 'object' ? action : {};
+        return `${formatAuditDisplayString(source.id) || 'unknown'} · wouldRun:${source.wouldRun === true ? 'true' : 'false'} · wouldWrite:${source.wouldWrite === true ? 'true' : 'false'}`;
+      })
+      : [],
+    preflightChecks: Array.isArray(preflight.checks)
+      ? preflight.checks.map((check) => {
+        const source = check && typeof check === 'object' ? check : {};
+        return `${formatAuditDisplayString(source.id) || 'unknown'} · ${formatAuditDisplayString(source.status) || 'unknown'} · ${formatAuditDisplayString(source.blockerCode) || 'none'}`;
+      })
+      : [],
+    approvalControls: Array.isArray(manifest.controls)
+      ? manifest.controls.map((control) => {
+        const source = control && typeof control === 'object' ? control : {};
+        return `${formatAuditDisplayString(source.id) || 'unknown'} · ${formatAuditDisplayString(source.status) || 'unknown'} · ${formatAuditDisplayString(source.blockerCode) || 'none'}`;
+      })
+      : [],
+    safetyLines: buildSupervisorInstallSafetyLines(plan.safety),
+    messageText: 'POST /api/supervisor-install-dry-run 成功，仍为 blocked dry-run 预览',
+  };
+}
+
 // ── V0.17 Backup Job Overview ──────────────────────────────────────
 
 function normalizeBackupJobName(value) {
@@ -1456,6 +1560,13 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const nasDryRunTargetCountEl = doc.getElementById('nas-dry-run-target-count');
   const nasDryRunJobCountEl = doc.getElementById('nas-dry-run-job-count');
   const nasDryRunResultEl = doc.getElementById('nas-dry-run-result');
+  const supervisorInstallDryRunConfigInput = doc.getElementById('supervisor-install-dry-run-config');
+  const supervisorInstallDryRunRunButton = doc.getElementById('supervisor-install-dry-run-run');
+  const supervisorInstallDryRunStatusEl = doc.getElementById('supervisor-install-dry-run-status');
+  const supervisorInstallDryRunInstallStateEl = doc.getElementById('supervisor-install-dry-run-install-state');
+  const supervisorInstallDryRunApprovalStateEl = doc.getElementById('supervisor-install-dry-run-approval-state');
+  const supervisorInstallDryRunRollbackStateEl = doc.getElementById('supervisor-install-dry-run-rollback-state');
+  const supervisorInstallDryRunResultEl = doc.getElementById('supervisor-install-dry-run-result');
   const snapshotDiffDeviceName = doc.getElementById('snapshot-diff-device-name');
   const snapshotDiffFromSelect = doc.getElementById('snapshot-diff-from');
   const snapshotDiffToSelect = doc.getElementById('snapshot-diff-to');
@@ -2918,6 +3029,115 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function setSupervisorInstallDryRunError(message) {
+    const viewModel = buildSupervisorInstallDryRunViewModel(null, message);
+    renderSupervisorInstallDryRun(viewModel);
+  }
+
+  function appendSupervisorInstallGroup(titleText, lines) {
+    if (!supervisorInstallDryRunResultEl || lines.length === 0) return;
+    const group = doc.createElement('div');
+    group.className = 'supervisor-install-dry-run-group';
+
+    const title = doc.createElement('h3');
+    title.textContent = titleText;
+    if (typeof group.appendChild === 'function') {
+      group.appendChild(title);
+    }
+
+    const list = doc.createElement('ul');
+    lines.forEach((line) => {
+      const item = doc.createElement('li');
+      item.textContent = line;
+      if (typeof list.appendChild === 'function') {
+        list.appendChild(item);
+      }
+    });
+    if (typeof group.appendChild === 'function') {
+      group.appendChild(list);
+    }
+    if (typeof supervisorInstallDryRunResultEl.appendChild === 'function') {
+      supervisorInstallDryRunResultEl.appendChild(group);
+    }
+  }
+
+  function renderSupervisorInstallDryRun(viewModel) {
+    const state = viewModel || buildSupervisorInstallDryRunViewModel(null);
+    if (supervisorInstallDryRunStatusEl) supervisorInstallDryRunStatusEl.textContent = state.statusText;
+    if (supervisorInstallDryRunInstallStateEl) supervisorInstallDryRunInstallStateEl.textContent = state.installStateText;
+    if (supervisorInstallDryRunApprovalStateEl) supervisorInstallDryRunApprovalStateEl.textContent = state.approvalStateText;
+    if (supervisorInstallDryRunRollbackStateEl) supervisorInstallDryRunRollbackStateEl.textContent = state.rollbackStateText;
+    if (!supervisorInstallDryRunResultEl) return;
+
+    clearElement(supervisorInstallDryRunResultEl);
+    if (state.statusKey === 'error') {
+      const error = doc.createElement('div');
+      error.className = 'supervisor-install-dry-run-error';
+      error.textContent = state.messageText;
+      if (typeof supervisorInstallDryRunResultEl.appendChild === 'function') {
+        supervisorInstallDryRunResultEl.appendChild(error);
+      }
+      return;
+    }
+
+    const message = doc.createElement('p');
+    message.className = 'placeholder';
+    message.textContent = state.messageText;
+    if (typeof supervisorInstallDryRunResultEl.appendChild === 'function') {
+      supervisorInstallDryRunResultEl.appendChild(message);
+    }
+
+    appendSupervisorInstallGroup('Readiness blockers', state.readinessBlockers);
+    appendSupervisorInstallGroup('Command preview', state.commandActions);
+    appendSupervisorInstallGroup('Install preflight', state.preflightChecks);
+    appendSupervisorInstallGroup('Approval manifest', state.approvalControls);
+    appendSupervisorInstallGroup('Safety flags', state.safetyLines);
+  }
+
+  async function fetchSupervisorInstallDryRunPlan() {
+    if (!supervisorInstallDryRunResultEl || supervisorInstallDryRunInFlight) return;
+
+    const parsed = parseNasDryRunConfig(supervisorInstallDryRunConfigInput ? supervisorInstallDryRunConfigInput.value : '');
+    if (!parsed.ok) {
+      setSupervisorInstallDryRunError(parsed.error);
+      return;
+    }
+
+    supervisorInstallDryRunInFlight = true;
+    if (supervisorInstallDryRunRunButton) supervisorInstallDryRunRunButton.disabled = true;
+    clearElement(supervisorInstallDryRunResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '加载中...';
+    supervisorInstallDryRunResultEl.appendChild(loading);
+
+    try {
+      const res = await apiFetch('/api/supervisor-install-dry-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.config),
+      });
+      if (!res.ok) {
+        let errBody;
+        try {
+          errBody = await res.json();
+        } catch (_) {
+          errBody = {};
+        }
+        throw new Error(errBody.error || 'HTTP ' + res.status);
+      }
+      const plan = await res.json();
+      renderSupervisorInstallDryRun(buildSupervisorInstallDryRunViewModel(plan));
+      logEvent('已加载 Supervisor install dry-run 预检', 'info');
+    } catch (err) {
+      setSupervisorInstallDryRunError(err.message);
+      logEvent('加载 Supervisor install dry-run 失败: ' + sanitizeSupervisorInstallErrorMessage(err.message), 'error');
+    } finally {
+      supervisorInstallDryRunInFlight = false;
+      if (supervisorInstallDryRunRunButton) supervisorInstallDryRunRunButton.disabled = false;
+    }
+  }
+
   function setSnapshotDiffCounts(addedCount, removedCount, unchangedCount) {
     if (snapshotDiffAddedCountEl) snapshotDiffAddedCountEl.textContent = String(addedCount);
     if (snapshotDiffRemovedCountEl) snapshotDiffRemovedCountEl.textContent = String(removedCount);
@@ -3172,6 +3392,12 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     nasDryRunRunButton.addEventListener('click', fetchNasDryRunPlan);
   }
 
+  renderSupervisorInstallDryRun(buildSupervisorInstallDryRunViewModel(null));
+
+  if (supervisorInstallDryRunRunButton?.addEventListener) {
+    supervisorInstallDryRunRunButton.addEventListener('click', fetchSupervisorInstallDryRunPlan);
+  }
+
   for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredDevices);
@@ -3225,6 +3451,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let hardeningStatusInFlight = false;
   let supervisorStatusInFlight = false;
   let auditLogInFlight = false;
+  let supervisorInstallDryRunInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
