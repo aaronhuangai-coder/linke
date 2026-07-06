@@ -1880,6 +1880,66 @@ ul {
   line-height: 1.45;
 }
 
+.audit-log-panel[data-status="unknown"] {
+  border-top: 3px solid #d1d5db;
+}
+
+.audit-log-panel[data-status="ready"] {
+  border-top: 3px solid #15803d;
+}
+
+.audit-log-panel[data-status="empty"] {
+  border-top: 3px solid #6b7280;
+}
+
+.audit-log-panel[data-status="error"] {
+  border-top: 3px solid #991b1b;
+}
+
+.audit-log-grid {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.audit-log-grid dt {
+  color: #6b7280;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.audit-log-grid dd {
+  color: #111827;
+  font-size: 0.82rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.audit-log-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.audit-log-item,
+.audit-log-list .placeholder {
+  padding: 7px 9px;
+  border-left: 3px solid #9ca3af;
+  color: #374151;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.audit-log-message,
+.audit-log-safety-note {
+  color: #6b7280;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .gold-readiness-panel[data-status="ready"] {
   border-top: 3px solid #15803d;
 }

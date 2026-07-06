@@ -1737,15 +1737,15 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.73 audit log Agent CLI', () => {
-  it('title and badge claim V0.73 as current', () => {
-    assertReadmeContains(/# Linke V0\.73/, 'README title should mention V0.73');
-    assertReadmeContains(/\*\*当前版本：V0\.73\*\*/, 'README badge should mention V0.73');
+describe('README — V0.74 audit log Web panel', () => {
+  it('title and badge claim V0.74 as current', () => {
+    assertReadmeContains(/# Linke V0\.74/, 'README title should mention V0.74');
+    assertReadmeContains(/\*\*当前版本：V0\.74\*\*/, 'README badge should mention V0.74');
   });
 
-  it('version table marks V0.72 historical and V0.73 current', () => {
-    assertReadmeContains(/\| V0\.72 \| 历史版本 \|/, 'V0.72 should be historical');
-    assertReadmeContains(/\| V0\.73 \| 当前版本 \|[^|]*(audit-log|审计日志|Agent)/i, 'V0.73 should be current audit-log Agent CLI milestone');
+  it('version table marks V0.73 historical and V0.74 current', () => {
+    assertReadmeContains(/\| V0\.73 \| 历史版本 \|/, 'V0.73 should be historical');
+    assertReadmeContains(/\| V0\.74 \| 当前版本 \|[^|]*(audit-log|审计日志|Web|面板)/i, 'V0.74 should be current audit-log Web panel milestone');
   });
 
   it('keeps documenting hardening-status API, CLI, and Web panel safety boundaries', () => {
@@ -1773,7 +1773,19 @@ describe('README — V0.73 audit log Agent CLI', () => {
     assertReadmeContains(/production-grade audit|生产级审计/i, 'README should document production-grade audit boundary');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.73', () => {
+  it('documents audit-log Web panel safety boundaries', () => {
+    assertReadmeContains(/audit-log-panel|审计日志面板|Web Console[^\\n]*audit-log/i, 'README should document audit-log Web panel');
+    assertReadmeContains(/GET \/api\/audit-log/, 'README should document audit-log endpoint for Web panel');
+    assertReadmeContains(/无启动请求|不触发启动请求|no startup/i, 'README should document no startup request');
+    assertReadmeContains(/不自动轮询|no polling|no auto/i, 'README should document no auto polling');
+    assertReadmeContains(/不写入\s*metadata|不写入\s*元数据|no metadata/i, 'README should document no metadata writes');
+    assertReadmeContains(/不连接 NAS|no NAS/i, 'README should document no NAS connection');
+    assertReadmeContains(/不执行.*备份|不执行.*恢复|不执行远程命令|no backup|no restore/i, 'README should document no backup/restore/remote execution');
+    assertReadmeContains(/token|Authorization|sourcePath|targetPath|credential-like|sanitized|脱敏|allowlist/i, 'README should document sensitive audit fields are not displayed');
+    assertReadmeContains(/buildAuditLogViewModel|Web audit-log panel|审计日志面板/, 'README should document Web audit-log test coverage');
+  });
+
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.74', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

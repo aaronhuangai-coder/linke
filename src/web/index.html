@@ -115,6 +115,29 @@
           硬化状态面板为只读视图，仅手动 GET /api/hardening-status，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；仅展示布尔状态、请求体上限和写入路由数量，不显示 token、restore root、audit path、环境变量值或 Authorization header。
         </p>
       </section>
+      <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
+        <header class="panel-title-row">
+          <h2>审计日志</h2>
+          <button id="audit-log-refresh" data-testid="audit-log-refresh" type="button" class="release-health-refresh" aria-disabled="false">查看审计</button>
+        </header>
+        <dl class="audit-log-grid">
+          <dt>状态</dt>
+          <dd id="audit-log-status" data-testid="audit-log-status">未检查</dd>
+          <dt>事件数</dt>
+          <dd id="audit-log-count" data-testid="audit-log-count">—</dd>
+          <dt>最新类型</dt>
+          <dd id="audit-log-latest-type" data-testid="audit-log-latest-type">—</dd>
+          <dt>最新设备</dt>
+          <dd id="audit-log-latest-device" data-testid="audit-log-latest-device">—</dd>
+        </dl>
+        <ul id="audit-log-list" class="audit-log-list" data-testid="audit-log-list">
+          <li class="placeholder">尚未加载审计事件</li>
+        </ul>
+        <p id="audit-log-message" class="audit-log-message" data-testid="audit-log-message">点击查看审计日志获取 /api/audit-log</p>
+        <p class="audit-log-safety-note" data-testid="audit-log-safety-note">
+          审计日志面板为只读视图，仅手动 GET /api/audit-log，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；仅显示 sanitized allowlist 字段，不显示 token、Authorization header、sourcePath、targetPath、NAS endpoint、password、apiKey、secret 或 credential-like 字段，不声明生产级审计或生产就绪。
+        </p>
+      </section>
       <section id="gold-readiness-panel" class="panel gold-readiness-panel" data-testid="gold-readiness-panel" data-status="unknown">
         <header class="panel-title-row">
           <h2>Gold 就绪评分卡</h2>

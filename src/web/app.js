@@ -332,6 +332,107 @@ export function buildHardeningStatusViewModel(payload, errorMessage = '') {
   };
 }
 
+function formatAuditStatusText(status) {
+  if (status === 'ready') return '已加载';
+  if (status === 'empty') return '无事件';
+  if (status === 'error') return '加载失败';
+  return '未检查';
+}
+
+function formatAuditDisplayString(value, maxLength = 160) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.slice(0, maxLength);
+}
+
+function formatAuditDisplayNumber(value) {
+  return Number.isFinite(value) ? String(value) : '';
+}
+
+function buildAuditEventDisplay(event) {
+  const source = event && typeof event === 'object' ? event : {};
+  const type = formatAuditDisplayString(source.type) || 'unknown';
+  const createdAt = formatAuditDisplayString(source.createdAt) || '—';
+  const method = formatAuditDisplayString(source.method);
+  const path = formatAuditDisplayString(source.path);
+  const outcome = formatAuditDisplayString(source.outcome);
+  const deviceId = formatAuditDisplayString(source.deviceId);
+  const snapshotId = formatAuditDisplayString(source.snapshotId);
+  const requestId = formatAuditDisplayString(source.requestId);
+  const message = formatAuditDisplayString(source.message);
+  const statusCode = formatAuditDisplayNumber(source.statusCode);
+  const fileCount = formatAuditDisplayNumber(source.fileCount);
+
+  const details = [
+    method && path ? method + ' ' + path : '',
+    outcome ? 'outcome=' + outcome : '',
+    statusCode ? 'status=' + statusCode : '',
+    deviceId ? 'device=' + deviceId : '',
+    snapshotId ? 'snapshot=' + snapshotId : '',
+    fileCount ? 'files=' + fileCount : '',
+    requestId ? 'request=' + requestId : '',
+    message ? 'message=' + message : '',
+  ].filter(Boolean);
+
+  return {
+    createdAt,
+    type,
+    deviceId: deviceId || '—',
+    statusCodeText: statusCode || '—',
+    summaryText: createdAt + ' · ' + type + (details.length ? ' · ' + details.join(' · ') : ''),
+  };
+}
+
+export function buildAuditLogViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: formatAuditStatusText('error'),
+      eventCountText: '—',
+      latestTypeText: '—',
+      latestDeviceText: '—',
+      events: [],
+      messageText: '审计日志加载失败: ' + formatHardeningErrorMessage(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.events)) {
+    return {
+      statusKey: 'unknown',
+      statusText: formatAuditStatusText('unknown'),
+      eventCountText: '—',
+      latestTypeText: '—',
+      latestDeviceText: '—',
+      events: [],
+      messageText: '点击查看审计日志获取 /api/audit-log',
+    };
+  }
+
+  const events = payload.events.map(buildAuditEventDisplay);
+  if (events.length === 0) {
+    return {
+      statusKey: 'empty',
+      statusText: formatAuditStatusText('empty'),
+      eventCountText: '0',
+      latestTypeText: '—',
+      latestDeviceText: '—',
+      events,
+      messageText: 'GET /api/audit-log 成功，暂无审计事件',
+    };
+  }
+
+  return {
+    statusKey: 'ready',
+    statusText: formatAuditStatusText('ready'),
+    eventCountText: String(events.length),
+    latestTypeText: events[0].type,
+    latestDeviceText: events[0].deviceId,
+    events,
+    messageText: 'GET /api/audit-log 成功，已加载 ' + String(events.length) + ' 条 sanitized 审计事件',
+  };
+}
+
 export function buildGoldReadinessViewModel(payload, errorMessage = '') {
   if (errorMessage) {
     return {
@@ -1197,6 +1298,14 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const hardeningStatusWriteRoutesEl = doc.getElementById('hardening-status-write-routes');
   const hardeningStatusMessageEl = doc.getElementById('hardening-status-message');
   const hardeningStatusRefreshButton = doc.getElementById('hardening-status-refresh');
+  const auditLogPanelEl = doc.getElementById('audit-log-panel');
+  const auditLogStatusEl = doc.getElementById('audit-log-status');
+  const auditLogCountEl = doc.getElementById('audit-log-count');
+  const auditLogLatestTypeEl = doc.getElementById('audit-log-latest-type');
+  const auditLogLatestDeviceEl = doc.getElementById('audit-log-latest-device');
+  const auditLogListEl = doc.getElementById('audit-log-list');
+  const auditLogMessageEl = doc.getElementById('audit-log-message');
+  const auditLogRefreshButton = doc.getElementById('audit-log-refresh');
 
   let apiAuthToken = '';
 
@@ -3021,6 +3130,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let releaseReadinessInFlight = false;
   let goldReadinessInFlight = false;
   let hardeningStatusInFlight = false;
+  let auditLogInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
@@ -3293,6 +3403,85 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function renderAuditLogList(events) {
+    clearElement(auditLogListEl);
+    if (!auditLogListEl) return;
+
+    const safeEvents = Array.isArray(events) ? events : [];
+    if (safeEvents.length === 0) {
+      const item = doc.createElement('li');
+      item.className = 'placeholder';
+      item.textContent = '尚未加载审计事件';
+      if (typeof auditLogListEl.appendChild === 'function') {
+        auditLogListEl.appendChild(item);
+      }
+      return;
+    }
+
+    safeEvents.forEach(function (event) {
+      const item = doc.createElement('li');
+      item.className = 'audit-log-item';
+      item.setAttribute('data-testid', 'audit-log-item');
+      item.setAttribute('data-event-type', event.type);
+      item.textContent = event.summaryText;
+      if (typeof auditLogListEl.appendChild === 'function') {
+        auditLogListEl.appendChild(item);
+      }
+    });
+  }
+
+  function renderAuditLog(viewModel) {
+    const state = viewModel || buildAuditLogViewModel(null);
+    if (auditLogPanelEl?.setAttribute) {
+      auditLogPanelEl.setAttribute('data-status', state.statusKey);
+    }
+    if (auditLogStatusEl) auditLogStatusEl.textContent = state.statusText;
+    if (auditLogCountEl) auditLogCountEl.textContent = state.eventCountText;
+    if (auditLogLatestTypeEl) auditLogLatestTypeEl.textContent = state.latestTypeText;
+    if (auditLogLatestDeviceEl) auditLogLatestDeviceEl.textContent = state.latestDeviceText;
+    if (auditLogMessageEl) auditLogMessageEl.textContent = state.messageText;
+    renderAuditLogList(state.events);
+  }
+
+  function setAuditLogRefreshBusy(busy) {
+    if (!auditLogRefreshButton) return;
+    auditLogRefreshButton.disabled = Boolean(busy);
+    if (auditLogRefreshButton.setAttribute) {
+      auditLogRefreshButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+  }
+
+  async function fetchAuditLog() {
+    if (auditLogInFlight) return;
+    auditLogInFlight = true;
+    setAuditLogRefreshBusy(true);
+    try {
+      const res = await apiFetch('/api/audit-log?limit=20');
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.message) {
+            msg += ': ' + body.message;
+          } else if (body && body.error) {
+            msg += ': ' + body.error;
+          }
+        } catch (e) {}
+        throw new Error(msg);
+      }
+      const payload = await res.json();
+      renderAuditLog(buildAuditLogViewModel(payload));
+      logEvent('已刷新审计日志', 'info');
+    } catch (err) {
+      const safeErrorMessage = formatHardeningErrorMessage(err.message);
+      renderAuditLog(buildAuditLogViewModel(null, safeErrorMessage));
+      logEvent('审计日志加载失败: ' + safeErrorMessage, 'error');
+    } finally {
+      auditLogInFlight = false;
+      setAuditLogRefreshBusy(false);
+    }
+  }
+
   if (apiTokenApplyButton?.addEventListener) {
     apiTokenApplyButton.addEventListener('click', () => {
       const token = apiTokenInput ? apiTokenInput.value : '';
@@ -3315,6 +3504,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   renderReleaseReadiness(buildReleaseReadinessViewModel(null));
   renderGoldReadiness(buildGoldReadinessViewModel(null));
   renderHardeningStatus(buildHardeningStatusViewModel(null));
+  renderAuditLog(buildAuditLogViewModel(null));
 
   if (releaseHealthRefreshButton?.addEventListener) {
     releaseHealthRefreshButton.addEventListener('click', fetchReleaseHealth);
@@ -3327,6 +3517,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   }
   if (hardeningStatusRefreshButton?.addEventListener) {
     hardeningStatusRefreshButton.addEventListener('click', fetchHardeningStatus);
+  }
+  if (auditLogRefreshButton?.addEventListener) {
+    auditLogRefreshButton.addEventListener('click', fetchAuditLog);
   }
 
   logEvent('Linke 控制台已启动', 'info');

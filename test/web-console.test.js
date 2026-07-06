@@ -39,6 +39,7 @@ import {
   buildDeviceFilterCountState,
   buildReleaseHealthViewModel,
   buildGoldReadinessViewModel,
+  buildAuditLogViewModel,
 } from '../src/web/app.js';
 
 function postJSON(port, path, body) {
@@ -1575,6 +1576,59 @@ describe('Web Console / API contract', () => {
       css.includes('hardening-status-panel[data-status="error"]'),
       'styles.css must contain error status styling'
     );
+  });
+
+  // ── V0.74 audit-log Web panel contract tests ────────────────────────
+
+  it('HTML contains audit-log panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="audit-log-panel"'), 'must have audit-log-panel');
+    assert.ok(html.includes('data-testid="audit-log-refresh"'), 'must have audit-log-refresh');
+    assert.ok(html.includes('data-testid="audit-log-count"'), 'must have audit-log-count');
+    assert.ok(html.includes('data-testid="audit-log-latest-type"'), 'must have audit-log-latest-type');
+    assert.ok(html.includes('data-testid="audit-log-latest-device"'), 'must have audit-log-latest-device');
+    assert.ok(html.includes('data-testid="audit-log-list"'), 'must have audit-log-list');
+    assert.ok(html.includes('data-testid="audit-log-message"'), 'must have audit-log-message');
+    assert.ok(html.includes('data-testid="audit-log-safety-note"'), 'must have audit-log-safety-note');
+  });
+
+  it('audit-log Web panel safety note documents read-only boundaries and avoids overclaims', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="audit-log-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'audit-log-panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(/只读|read-only/i.test(content), 'must mention read-only behavior');
+    assert.ok(content.includes('GET /api/audit-log'), 'must mention GET /api/audit-log');
+    assert.ok(/无启动请求|不触发启动请求|no startup/i.test(content), 'must mention no startup request');
+    assert.ok(/不自动轮询|no polling|no auto/i.test(content), 'must mention no auto polling');
+    assert.ok(/不写入\s*metadata|不写入\s*元数据|no metadata/i.test(content), 'must mention no metadata writes');
+    assert.ok(/不连接\s*NAS|no NAS/i.test(content), 'must mention no NAS connection');
+    assert.ok(/不执行.*备份|不执行.*恢复|不执行远程命令|no backup|no restore/i.test(content), 'must mention no backup/restore/remote execution');
+    assert.ok(/不显示.*token|Authorization|sourcePath|targetPath|脱敏|sanitized/i.test(content), 'must mention sensitive fields are not displayed');
+    assert.ok(!/生产可用|production ready/i.test(content), 'must not claim production ready');
+    assert.ok(!/执行.*NAS.*备份|real NAS backup/i.test(content), 'must not claim real NAS backup execution');
+  });
+
+  it('app.js wires audit-log rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/audit-log'), 'app.js must reference /api/audit-log');
+    assert.ok(js.includes('audit-log-refresh') || js.includes('auditLogRefresh'), 'app.js must reference audit-log-refresh');
+    assert.ok(js.includes('buildAuditLogViewModel'), 'app.js must reference buildAuditLogViewModel');
+  });
+
+  it('styles.css contains audit-log panel CSS status selectors ready and error', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.audit-log-panel[data-status="ready"]'), 'styles.css must contain ready status styling');
+    assert.ok(css.includes('.audit-log-panel[data-status="empty"]'), 'styles.css must contain empty status styling');
+    assert.ok(css.includes('.audit-log-panel[data-status="error"]'), 'styles.css must contain error status styling');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -8167,6 +8221,221 @@ describe('DOM test: hardening status panel interactions', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     assert.strictEqual(hardeningFetchCount, 1, 'in-flight guard must block duplicate hardening-status fetches');
+
+    resolveRequest();
+    await firstClick;
+    await secondClick;
+  });
+});
+
+describe('Audit log Web view model', () => {
+  it('buildAuditLogViewModel handles unknown input', () => {
+    const result = buildAuditLogViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.eventCountText, '—');
+    assert.strictEqual(result.latestTypeText, '—');
+    assert.strictEqual(result.latestDeviceText, '—');
+    assert.deepStrictEqual(result.events, []);
+    assert.ok(result.messageText.includes('/api/audit-log'));
+  });
+
+  it('buildAuditLogViewModel formats empty audit payload', () => {
+    const result = buildAuditLogViewModel({ events: [] });
+
+    assert.strictEqual(result.statusKey, 'empty');
+    assert.strictEqual(result.statusText, '无事件');
+    assert.strictEqual(result.eventCountText, '0');
+    assert.strictEqual(result.latestTypeText, '—');
+    assert.strictEqual(result.latestDeviceText, '—');
+    assert.deepStrictEqual(result.events, []);
+    assert.ok(result.messageText.includes('无审计事件'));
+  });
+
+  it('buildAuditLogViewModel formats allowed fields and drops sensitive payload fields', () => {
+    const result = buildAuditLogViewModel({
+      events: [
+        {
+          id: 'evt-1',
+          createdAt: '2026-07-06T12:00:00.000Z',
+          type: 'api.heartbeat.success',
+          method: 'POST',
+          path: '/api/heartbeat',
+          outcome: 'success',
+          requestId: 'req-1',
+          deviceId: 'audit-device',
+          statusCode: 200,
+          Authorization: 'Bearer leaked-token',
+          sourcePath: '/private/tmp/source-secret',
+          targetPath: '/private/tmp/target-secret',
+          password: 'password-secret',
+          token: 'token-secret',
+        },
+      ],
+    });
+
+    assert.strictEqual(result.statusKey, 'ready');
+    assert.strictEqual(result.statusText, '已加载');
+    assert.strictEqual(result.eventCountText, '1');
+    assert.strictEqual(result.latestTypeText, 'api.heartbeat.success');
+    assert.strictEqual(result.latestDeviceText, 'audit-device');
+    assert.strictEqual(result.events[0].type, 'api.heartbeat.success');
+    assert.ok(result.events[0].summaryText.includes('api.heartbeat.success'));
+    assert.ok(result.events[0].summaryText.includes('audit-device'));
+
+    const text = JSON.stringify(result);
+    assert.doesNotMatch(text, /Bearer|leaked-token|source-secret|target-secret|password-secret|token-secret/);
+  });
+
+  it('buildAuditLogViewModel redacts sensitive error text', () => {
+    const result = buildAuditLogViewModel(null, 'Bearer token failed at /Users/ah/private/audit');
+
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '加载失败');
+    assert.ok(result.messageText.includes('[redacted]'));
+    assert.doesNotMatch(result.messageText, /Bearer|token|\/Users\/ah\/private/);
+  });
+});
+
+describe('DOM test: audit-log panel interactions', () => {
+  it('does not request /api/audit-log on initialization', async () => {
+    const doc = buildMockDoc();
+    let auditFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/audit-log')) auditFetchCount++;
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(auditFetchCount, 0, 'should not call /api/audit-log on init');
+  });
+
+  it('requests /api/audit-log only once and renders sanitized events when refresh button is clicked', async () => {
+    const doc = buildMockDoc();
+    let auditFetchCount = 0;
+    const mockFetch = async (url) => {
+      if (url.includes('/api/audit-log')) {
+        auditFetchCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            events: [
+              {
+                id: 'evt-1',
+                createdAt: '2026-07-06T12:00:00.000Z',
+                type: 'api.heartbeat.success',
+                method: 'POST',
+                path: '/api/heartbeat',
+                outcome: 'success',
+                requestId: 'req-1',
+                deviceId: 'audit-web-device',
+                statusCode: 200,
+                Authorization: 'Bearer leaked-token',
+                sourcePath: '/private/tmp/source-secret',
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="audit-log-refresh"]');
+    const panel = doc.querySelector('[data-testid="audit-log-panel"]');
+    const countEl = doc.querySelector('[data-testid="audit-log-count"]');
+    const latestTypeEl = doc.querySelector('[data-testid="audit-log-latest-type"]');
+    const latestDeviceEl = doc.querySelector('[data-testid="audit-log-latest-device"]');
+    const listEl = doc.querySelector('[data-testid="audit-log-list"]');
+    const messageEl = doc.querySelector('[data-testid="audit-log-message"]');
+
+    assert.ok(refreshBtn, 'audit-log refresh button must exist');
+    assert.ok(panel, 'audit-log panel must exist');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(auditFetchCount, 1, 'should request /api/audit-log exactly once');
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'ready');
+    assert.strictEqual(countEl.textContent, '1');
+    assert.strictEqual(latestTypeEl.textContent, 'api.heartbeat.success');
+    assert.strictEqual(latestDeviceEl.textContent, 'audit-web-device');
+    assert.ok(listEl.textContent.includes('api.heartbeat.success'));
+    assert.ok(messageEl.textContent.includes('成功'));
+    assert.doesNotMatch(panel.textContent + listEl.textContent, /Bearer|leaked-token|source-secret|private\/tmp/);
+  });
+
+  it('renders redacted error on non-2xx response from audit-log', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (url.includes('/api/audit-log')) {
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: 'Bearer token failed at /Users/ah/private/audit' }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="audit-log-refresh"]');
+    const panel = doc.querySelector('[data-testid="audit-log-panel"]');
+    const messageEl = doc.querySelector('[data-testid="audit-log-message"]');
+    const eventLogEl = doc.getElementById('event-log');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
+    assert.ok(messageEl.textContent.includes('[redacted]'));
+    assert.doesNotMatch(messageEl.textContent, /Bearer|token|\/Users\/ah\/private/);
+    assert.doesNotMatch(eventLogEl.textContent, /Bearer|token|\/Users\/ah\/private/);
+  });
+
+  it('does not start a second audit-log request while one is in flight', async () => {
+    const doc = buildMockDoc();
+    let auditFetchCount = 0;
+    let resolveRequest;
+    const requestPromise = new Promise((resolve) => {
+      resolveRequest = resolve;
+    });
+
+    const mockFetch = async (url) => {
+      if (url.includes('/api/audit-log')) {
+        auditFetchCount++;
+        await requestPromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ events: [] }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const refreshBtn = doc.querySelector('[data-testid="audit-log-refresh"]');
+    const firstClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+    const secondClick = refreshBtn._listeners.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.strictEqual(auditFetchCount, 1, 'in-flight guard must block duplicate audit-log fetches');
 
     resolveRequest();
     await firstClick;
