@@ -102,9 +102,26 @@ describe('Agent nas-dry-run CLI', () => {
         summary.blockers.sort(),
         ['remote-execution-blocked', 'target-disabled'].sort(),
       );
+      assert.deepStrictEqual(Object.keys(summary).sort(), [
+        'blockedTargets',
+        'blockers',
+        'credentialRefConfiguredTargets',
+        'disabledTargets',
+        'enabledCredentialRefMissingTargets',
+        'enabledTargets',
+        'mode',
+        'remoteExecutionBlocked',
+        'state',
+        'totalTargets',
+      ].sort());
 
       assert.ok(!Object.hasOwn(summary, 'targets'), 'summary output must not include targets');
       assert.ok(!Object.hasOwn(summary, 'jobs'), 'summary output must not include jobs');
+      assert.ok(!stdout.includes('primary-synology'), 'summary must not echo target name');
+      assert.ok(!stdout.includes('disabled-ugreen'), 'summary must not echo target name');
+      assert.ok(!stdout.includes('backup'), 'summary must not echo shareName');
+      assert.ok(!stdout.includes('archive'), 'summary must not echo shareName');
+      assert.ok(!stdout.includes('documents'), 'summary must not echo job name');
       assert.ok(!stdout.includes('home-backup'), 'summary must not echo raw credentialRef');
       assert.ok(!stdout.includes('192.168.50.10'), 'summary must not echo endpoint');
       assert.ok(!stdout.includes('/volume1/linke'), 'summary must not echo remotePath');

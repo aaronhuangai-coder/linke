@@ -1728,6 +1728,8 @@ describe('README — V0.68 NAS CLI readiness summary option', () => {
     ].join('|');
     assert.doesNotMatch(readme, new RegExp(forbiddenOverclaims, 'i'));
     assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
+    assert.match(readme, /Gold blockers[\s\S]*V0\.68[\s\S]*CLI readiness-summary/i);
+    assert.match(readme, /NAS、认证和生产硬化仍是 partial[\s\S]*V0\.68[\s\S]*CLI readiness-summary/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });
