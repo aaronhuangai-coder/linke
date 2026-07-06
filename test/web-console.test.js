@@ -1422,11 +1422,22 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.61/);
+    assert.match(html, /V0\.61|V0\.62/);
     assert.match(html, /LINKE_READ_TOKEN/);
     assert.match(html, /LINKE_WRITE_TOKEN/);
     assert.match(html, /403\s+Forbidden|auth\.forbidden/);
     assert.match(html, /完整鉴权|生产级审计|生产硬化|production/i);
+    assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
+  });
+
+  it('HTML safety notes document V0.62 auth-status boundary without exposing token material', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.match(html, /V0\.62/);
+    assert.match(html, /GET \/api\/auth-status|auth-status/);
+    assert.match(html, /configuredScopes|writeRoutes|认证状态|写入路由/);
+    assert.match(html, /不返回.*token|tokenValuesReturned|不暴露.*token/i);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 });

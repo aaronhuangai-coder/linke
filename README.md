@@ -1,8 +1,8 @@
-# Linke V0.61
+# Linke V0.62
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.61** — 单机 localhost 原型阶段，具备可选 Bearer token API 认证骨架、read/write token 授权基础、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备完整生产级鉴权、分布式限流或生产级审计。
+> **当前版本：V0.62** — 单机 localhost 原型阶段，具备可选 Bearer token API 认证骨架、read/write token 授权基础、GET `/api/auth-status` 认证状态只读接口、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备完整生产级鉴权、分布式限流或生产级审计。
 
 ## 版本演进
 
@@ -68,7 +68,8 @@
 | V0.58 | 历史版本 | Audit log foundation：新增本地 `dataDir/audit/events.jsonl` JSONL 审计基础与 GET `/api/audit-log` 只读查询，记录 auth.denied、backup/restore/heartbeat 结果且不保存 token、sourcePath、targetPath 或 NAS endpoint |
 | V0.59 | 历史版本 | API rate-limit foundation：通过 `LINKE_RATE_LIMIT_PER_MINUTE` 可选启用 `/api/*` 单进程内存限流，超过返回 429 `Rate limit exceeded` 并记录 `api.rate_limited` |
 | V0.60 | 历史版本 | Audit retention foundation：通过 `LINKE_AUDIT_MAX_EVENTS` 可选保留 `events.jsonl` 最新 N 条审计事件，默认关闭，不声明生产级审计 |
-| V0.61 | 当前版本 | API read/write token foundation：通过 `LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 可选区分读/写 API 授权，读 token 写入返回 403 `Forbidden` 并记录 `auth.forbidden` |
+| V0.61 | 历史版本 | API read/write token foundation：通过 `LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 可选区分读/写 API 授权，读 token 写入返回 403 `Forbidden` 并记录 `auth.forbidden` |
+| V0.62 | 当前版本 | auth-status readiness API：新增只读 GET `/api/auth-status` 与 `buildAuthStatusResponse`，返回 `configuredScopes` / `writeRoutes`，不返回 token 值 |
 
 ## 特性
 
@@ -119,9 +120,10 @@
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
 - **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
-- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.61 将 `security-auth` 与 `production-hardening` 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
+- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.62 将 `security-auth` 与 `production-hardening` 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
 - **可选 Bearer token API 认证骨架** — 服务端可通过 `LINKE_AUTH_TOKEN` 或 `LINKE_TOKEN` 为 `/api/*` 请求启用 `Authorization: Bearer <token>` 检查，Agent CLI 支持 `--token <token>`；这仍是 partial auth，不是完整生产级 authorization
 - **API read/write token foundation** — 服务端可通过 `LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 区分只读 API 与写入 API；读 token 访问写入 API 返回 403 `Forbidden` 并记录 `auth.forbidden`，旧 `LINKE_AUTH_TOKEN` / `LINKE_TOKEN` 仍作为 full-access 兼容 token
+- **Auth status readiness API** — GET `/api/auth-status` 返回 sanitized 认证状态（`enabled`、`configuredScopes`、`writeRoutes`），由 `buildAuthStatusResponse` 生成；启用 auth 时仍受 Bearer gate 保护，不返回 token 值、token prefix、Authorization header 或 env 原值，不写入 metadata
 - **Web Console 内存态 API Token UX** — 页面顶部提供 API Token 输入、应用、清除与状态提示；token 只保存在当前页面内存中，刷新后需重新输入，不写 localStorage、sessionStorage、cookie 或 metadata；401 会清空 token 并提示认证失败
 - **服务端请求/错误硬化** — JSON 请求体上限为 1 MiB，超限返回 413 `Request body too large` 且不写入 metadata；未知 500 响应统一为 `Internal Server Error`，不暴露 snapshotId、路径或内部错误消息；带 `statusCode` 的有意 4xx 仍保留具体业务错误
 - **恢复目标 root guard** — 设置 `LINKE_RESTORE_ROOT` 后，`/api/restore` 和 `restore-dry-run` 的 targetPath 只能解析到该 root 内；相对路径按 root 内路径处理，绝对路径必须位于 root 内，symlink 逃逸返回 400 且不执行恢复或目标树读取
@@ -155,9 +157,9 @@ LINKE_AUDIT_MAX_EVENTS=500 node src/server.js
 HOST=0.0.0.0 PORT=3000 node src/server.js
 ```
 
-> **默认只监听 127.0.0.1**，不暴露到局域网/公网。如需局域网测试可设置 `HOST=0.0.0.0`，仅限受控测试环境使用。
+> **默认只监听 127.0.0.1**，不暴露到局域网/公网。如需局域网测试可设置 `HOST=0.0.0.0`，仅限受控测试环境使用；若同时未配置任何 token，GET `/api/auth-status` 会公开显示 `enabled:false`，因此开放监听时应配置 `LINKE_AUTH_TOKEN`、`LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN`。
 
-> 设置 `LINKE_AUTH_TOKEN`、兼容变量 `LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。`LINKE_READ_TOKEN` 只能访问只读 API，访问 `POST /api/heartbeat`、`POST /api/backups` 或 `POST /api/restore` 会返回 `403 Forbidden` 并记录 `auth.forbidden`；`LINKE_WRITE_TOKEN` 可访问读写 API。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
+> 设置 `LINKE_AUTH_TOKEN`、兼容变量 `LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。`LINKE_READ_TOKEN` 只能访问只读 API，访问 `POST /api/heartbeat`、`POST /api/backups` 或 `POST /api/restore` 会返回 `403 Forbidden` 并记录 `auth.forbidden`；`LINKE_WRITE_TOKEN` 可访问读写 API。GET `/api/auth-status` 也是只读 API，返回 `configuredScopes` 与 `writeRoutes` 等 sanitized 认证状态，不返回 token 值。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
 
 ## Agent CLI
 
@@ -791,6 +793,18 @@ V0.61 增加可选 API read/write token foundation，用于把只读 API 访问�
 - **审计边界**：审计事件不记录 Authorization header、Bearer token、token prefix、请求体、`sourcePath`、`targetPath`、NAS endpoint 或 credential-like 字段。
 - **Gold 边界**：这仍只是 `security-auth` 的 partial evidence；还缺少用户、角色权限、token rotation、secret management、生产级审计、分布式 rate limiting 和生产安全评审。
 
+### Auth status readiness API
+
+V0.62 增加只读 GET `/api/auth-status`，用于让受控本地操作者确认当前服务是否启用了 auth scope，而不暴露任何 token material。响应由 `buildAuthStatusResponse` 构造。
+
+- **只读接口**：GET `/api/auth-status` 不写入 metadata、设备数据、快照数据或审计成功事件；POST/PUT/PATCH/DELETE 返回 404。
+- **响应字段**：返回 `status`、`service`、`version`、`auth.enabled`、`auth.configuredScopes`、`auth.writeRoutes` 与 `safety`。
+- **configuredScopes**：只返回 `full` / `read` / `write` 是否配置的布尔值，不返回 env 名称对应的实际 token 值。
+- **writeRoutes**：列出当前被视为写入 API 的路由：`POST /api/heartbeat`、`POST /api/backups`、`POST /api/restore`。
+- **tokenValuesReturned**：`safety.tokenValuesReturned` 固定为 `false`；响应不返回 Authorization header、Bearer token、token prefix、`LINKE_AUTH_TOKEN`、`LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 的值。
+- **认证边界**：启用任一 token 后，GET `/api/auth-status` 仍复用 `/api/*` Bearer gate；read token 可读取该状态，未知或缺失 token 返回 `401 Unauthorized` 并记录 `auth.denied`。
+- **Gold 边界**：auth-status 仍只是 `security-auth` 的 partial evidence；它不实现用户、角色权限、token rotation、secret management、生产级鉴权、生产级审计或 distributed rate limiting，Gold 发布仍 blocked。
+
 ### 服务端请求/错误硬化
 
 V0.55 增加基础服务端硬化，目标是降低意外大请求和内部错误细节外泄风险。
@@ -862,7 +876,7 @@ V0.60 增加可选 audit retention foundation，用于把本地 `dataDir/audit/e
 V0.46 实现了发布健康检查端点 `/api/health`。
 
 - 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
-- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.61"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.62"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
 - 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
 
 ### 发布健康检查安全边界
@@ -981,7 +995,7 @@ V0.52 新增只读 GET /api/gold-readiness 端点，并在 Web Console 增加 `g
 - **API 说明**：GET /api/gold-readiness 返回静态 code-owned、人工维护的 scorecard，包含 `status`、`version`、`generatedAt`、`summary` 与 `items`；`generatedAt` 仅表示报告生成时间，不代表实时检查时间。
 - **面板说明**：Gold readiness Web panel 只在用户点击“检查 Gold”时手动请求 GET /api/gold-readiness，展示 ready / partial / blocked / total 计数、每个 capability/blocker 项、证据与下一步。
 - **与 release-readiness 的区别**：`release-readiness` 是 runtime/version gate，用于检查当前运行服务、版本和发布就绪信号；`gold-readiness` 是 capability/blocker scorecard，用于评估完整 Gold 软件发布目标。即使 release-readiness healthy / passing / ok，Gold readiness 也可以因为未实现关键能力而保持 blocked。
-- **Gold blockers**：V0.61 将 `security-auth` 与 `production-hardening` 标为 partial，明确当前只有可选 API Bearer token 骨架、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、403 `Forbidden` / `auth.forbidden` 越权拒绝、Agent CLI token 支持、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；`real-nas-remote-backup` 仍为 blocked。
+- **Gold blockers**：V0.62 将 `security-auth` 与 `production-hardening` 标为 partial，明确当前只有可选 API Bearer token 骨架、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` auth-status readiness API、`buildAuthStatusResponse`、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、Agent CLI token 支持、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；`real-nas-remote-backup` 仍为 blocked。
 - **静态维护规则**：scorecard 的 item list 为静态 code-owned、人工维护清单；每次版本新增能力、变更 ready/partial/blocked 状态、修改 README/API claim 或调整 Gold blocker set 时，必须同步维护该静态清单和测试证据。
 
 ### Gold readiness 安全边界
@@ -994,7 +1008,7 @@ Gold readiness scorecard 具备以下安全保证：
 - **不写入任何元数据**：不会写入 metadata、设备数据、快照数据或本地配置。
 - **不建立真实 NAS 连接**：不会连接 Synology、Ugreen 或其他 NAS，也不会调用 NAS app。
 - **不执行备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照、不执行真实 NAS 远程备份。
-- **认证和生产硬化仍是 partial**：V0.61 只包含 `/api/*` 的可选 Bearer token 检查、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、403 `Forbidden` / `auth.forbidden` 越权拒绝、Agent CLI `--token`、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；没有用户、角色权限、生产级审计、secret management、token 轮换、distributed rate limiting、监控或 recovery supervisor。
+- **认证和生产硬化仍是 partial**：V0.62 只包含 `/api/*` 的可选 Bearer token 检查、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` 认证状态只读接口、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、Agent CLI `--token`、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；没有用户、角色权限、生产级审计、secret management、token 轮换、distributed rate limiting、监控或 recovery supervisor。
 - **不承诺生产级能力**：该面板不包含生产部署、生产级 authorization、生产级审计、secret management、监控或 recovery supervisor；不得将当前版本用于生产场景。
 
 ### Web Console 设备筛选摘要状态
@@ -1235,6 +1249,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 | GET    | /api/health                                 | 发布健康检查       |
 | GET    | /api/release-readiness                      | 发布就绪检查       |
 | GET    | /api/gold-readiness                         | Gold readiness scorecard |
+| GET    | /api/auth-status                            | 认证状态只读检查   |
 | GET    | /api/audit-log                              | 本地审计日志只读查询 |
 | POST   | /api/heartbeat                              | 记录心跳           |
 | POST   | /api/backups                                | 创建备份快照       |
@@ -1247,7 +1262,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`、Web Console 内存态 API token UX、API read/write token foundation、`LINKE_READ_TOKEN`、`LINKE_WRITE_TOKEN`、403 `Forbidden`、auth.forbidden、请求体上限 413、未知 500 `Internal Server Error` 脱敏、`LINKE_RESTORE_ROOT` 恢复目标 guard、restoreRoot symlink 逃逸拒绝、目标文件 symlink 拒绝、中间目录 symlink 拒绝、`O_NOFOLLOW` restore 写入防护、本地 audit log foundation、GET /api/audit-log、JSONL 事件 allowlist、auth.denied、敏感字段不落盘、API rate-limit foundation、`LINKE_RATE_LIMIT_PER_MINUTE`、429 `Rate limit exceeded`、`api.rate_limited`、audit retention foundation、`LINKE_AUDIT_MAX_EVENTS`、最新 N 条审计事件保留、审计保留并发 append 串行化。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`、Web Console 内存态 API token UX、API read/write token foundation、`LINKE_READ_TOKEN`、`LINKE_WRITE_TOKEN`、403 `Forbidden`、auth.forbidden、auth status readiness API、GET /api/auth-status、buildAuthStatusResponse、configuredScopes、writeRoutes、tokenValuesReturned:false、请求体上限 413、未知 500 `Internal Server Error` 脱敏、`LINKE_RESTORE_ROOT` 恢复目标 guard、restoreRoot symlink 逃逸拒绝、目标文件 symlink 拒绝、中间目录 symlink 拒绝、`O_NOFOLLOW` restore 写入防护、本地 audit log foundation、GET /api/audit-log、JSONL 事件 allowlist、auth.denied、敏感字段不落盘、API rate-limit foundation、`LINKE_RATE_LIMIT_PER_MINUTE`、429 `Rate limit exceeded`、`api.rate_limited`、audit retention foundation、`LINKE_AUDIT_MAX_EVENTS`、最新 N 条审计事件保留、审计保留并发 append 串行化。
 
 ## 技术约束
 

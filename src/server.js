@@ -239,6 +239,36 @@ export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) 
   };
 }
 
+export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {}) {
+  const normAuth = normalizeAuthToken(authToken);
+  const normRead = normalizeReadToken(readToken);
+  const normWrite = normalizeWriteToken(writeToken);
+  const enabled = Boolean(normAuth || normRead || normWrite);
+
+  return {
+    status: 'ok',
+    service: 'linke',
+    version: LINKE_RELEASE_VERSION,
+    auth: {
+      enabled,
+      configuredScopes: {
+        full: Boolean(normAuth),
+        read: Boolean(normRead),
+        write: Boolean(normWrite),
+      },
+      writeRoutes: [
+        'POST /api/heartbeat',
+        'POST /api/backups',
+        'POST /api/restore',
+      ],
+    },
+    safety: {
+      tokenValuesReturned: false,
+      successAuditEvent: false,
+    },
+  };
+}
+
 async function isDataDirReadable(dataDir) {
   try {
     await access(dataDir, constants.R_OK);
@@ -335,6 +365,15 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
       if (method === 'GET' && pathname === '/api/health') {
         const dataDirReadable = await isDataDirReadable(dataDir);
         return sendJSON(res, 200, buildHealthResponse({ dataDirReadable }));
+      }
+
+      // GET /api/auth-status
+      if (method === 'GET' && pathname === '/api/auth-status') {
+        return sendJSON(res, 200, buildAuthStatusResponse({
+          authToken: expectedAuthToken,
+          readToken: expectedReadToken,
+          writeToken: expectedWriteToken,
+        }));
       }
 
       // GET /api/release-readiness

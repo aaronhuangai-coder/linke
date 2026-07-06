@@ -266,6 +266,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.61/, 'V0.61');
   });
 
+  it('mentions V0.62 (auth status readiness API)', () => {
+    assertReadmeContains(/V0\.62/, 'V0.62');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1484,14 +1488,14 @@ describe('README — V0.60 audit retention foundation', () => {
 });
 
 describe('README — V0.61 API read/write token foundation', () => {
-  it('title and badge claim V0.61 as current', () => {
-    assert.match(readme, /^# Linke V0\.61/m);
-    assert.match(readme, /当前版本：V0\.61/);
+  it('title and badge no longer claim V0.61 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.61/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.61/);
   });
 
-  it('version table marks V0.60 historical and V0.61 current', () => {
+  it('version table marks V0.60 and V0.61 historical', () => {
     assert.match(readme, /\| V0\.60 \| 历史版本 \|[^|]*(audit.*retention|审计.*保留|LINKE_AUDIT_MAX_EVENTS|最新 N 条)/i);
-    assert.match(readme, /\| V0\.61 \| 当前版本 \|[^|]*(read\/write|读\/写|读写|LINKE_READ_TOKEN|LINKE_WRITE_TOKEN|403|auth\.forbidden)/i);
+    assert.match(readme, /\| V0\.61 \| 历史版本 \|[^|]*(read\/write|读\/写|读写|LINKE_READ_TOKEN|LINKE_WRITE_TOKEN|403|auth\.forbidden)/i);
   });
 
   it('documents read/write token configuration and scoped behavior', () => {
@@ -1508,6 +1512,32 @@ describe('README — V0.61 API read/write token foundation', () => {
     assert.match(readme, /security-auth[\s\S]*(partial|部分)|读\/写 token[\s\S]*(partial|部分)/i);
     assert.match(readme, /token rotation|轮换|secret management|密钥管理|production-grade authorization|生产级鉴权/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.62 auth status readiness API', () => {
+  it('title and badge claim V0.62 as current', () => {
+    assert.match(readme, /^# Linke V0\.62/m);
+    assert.match(readme, /当前版本：V0\.62/);
+  });
+
+  it('version table marks V0.61 historical and V0.62 current', () => {
+    assert.match(readme, /\| V0\.61 \| 历史版本 \|[^|]*(read\/write|读\/写|读写|LINKE_READ_TOKEN|LINKE_WRITE_TOKEN|403|auth\.forbidden)/i);
+    assert.match(readme, /\| V0\.62 \| 当前版本 \|[^|]*(auth-status|auth status|认证状态|GET \/api\/auth-status|buildAuthStatusResponse)/i);
+  });
+
+  it('documents auth-status API and sanitized response boundary', () => {
+    assert.match(readme, /GET\s+\/api\/auth-status/);
+    assert.match(readme, /buildAuthStatusResponse|auth status|认证状态/i);
+    assert.match(readme, /configuredScopes|writeRoutes|写入路由/i);
+    assert.match(readme, /不返回.*token|no.*token|tokenValuesReturned/i);
+    assert.match(readme, /不写入.*metadata|只读|read-only/i);
+  });
+
+  it('keeps Gold readiness blocked and documents auth-status limits', () => {
+    assert.match(readme, /security-auth[\s\S]*(partial|部分)|auth-status[\s\S]*(partial|部分)/i);
+    assert.match(readme, /不.*token rotation|token rotation|secret management|生产级鉴权/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });
 });
