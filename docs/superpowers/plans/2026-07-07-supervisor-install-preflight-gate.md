@@ -66,7 +66,7 @@
 - Produces: `buildSupervisorInstallPreflight()` returning `{ mode, state, blockedCount, readyCount, checkedCount, checks, safety }`
 - Produces: `plan.installPreflight` in full dry-run output only
 
-- [ ] **Step 1: Add RED expected preflight fixture**
+- [x] **Step 1: Add RED expected preflight fixture**
 
 In `test/agent-supervisor-install-dry-run.test.js`, add this constant after `EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW`:
 
@@ -143,7 +143,7 @@ const EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT = Object.freeze({
 });
 ```
 
-- [ ] **Step 2: Add RED no-sensitive-evidence helper**
+- [x] **Step 2: Add RED no-sensitive-evidence helper**
 
 In `test/agent-supervisor-install-dry-run.test.js`, add this helper after `escapeRegExp(value)`:
 
@@ -160,7 +160,7 @@ function assertNoSensitivePreflightEvidence(preflight) {
 
 This deliberately treats token-like words and host/path markers as banned inside `evidence`. Keep generic labels separate from generic evidence copy.
 
-- [ ] **Step 3: Add RED pure helper/full plan assertions**
+- [x] **Step 3: Add RED pure helper/full plan assertions**
 
 In the first test, after the existing `buildSupervisorInstallCommandPreview` line, add:
 
@@ -206,7 +206,7 @@ assert.deepStrictEqual(plan.installPreflight.safety, EXPECTED_SUPERVISOR_INSTALL
 assertNoSensitivePreflightEvidence(plan.installPreflight);
 ```
 
-- [ ] **Step 4: Add RED CLI assertions**
+- [x] **Step 4: Add RED CLI assertions**
 
 In the “prints sanitized JSON and does not write files next to the config” test, after command preview assertions, add:
 
@@ -253,7 +253,7 @@ assert.strictEqual(body.installPreflight, undefined);
 
 The existing full CLI test already proves exit code `0` without `--fail-on-blocked`, because `runAgent()` would throw on non-zero exit.
 
-- [ ] **Step 5: Run RED test**
+- [x] **Step 5: Run RED test**
 
 Run:
 
@@ -263,7 +263,7 @@ node --test test/agent-supervisor-install-dry-run.test.js
 
 Expected: FAIL with `buildSupervisorInstallPreflight is not defined in src/agent.js` or a missing `installPreflight` assertion.
 
-- [ ] **Step 6: Implement static preflight helper**
+- [x] **Step 6: Implement static preflight helper**
 
 In `src/agent.js`, add this constant after `SUPERVISOR_INSTALL_COMMAND_PREVIEW_ACTIONS`:
 
@@ -352,7 +352,7 @@ Do not change CLI branch logic. The existing line keeps summary-only behavior co
 const output = args['readiness-summary'] === true ? result.readinessSummary : result;
 ```
 
-- [ ] **Step 7: Run GREEN test**
+- [x] **Step 7: Run GREEN test**
 
 Run:
 
@@ -362,7 +362,7 @@ node --test test/agent-supervisor-install-dry-run.test.js
 
 Expected: PASS. If the no-sensitive evidence helper fails because evidence contains banned words, revise only the generic `evidence` strings in both test fixture and source constant; do not weaken the helper without PM review.
 
-- [ ] **Step 8: Commit Task 1**
+- [x] **Step 8: Commit Task 1**
 
 Run:
 
@@ -373,6 +373,14 @@ git push
 ```
 
 Expected: commit and push succeed.
+
+Observed:
+- AGY implementer returned `DONE` and committed `cdafba0 feat: add supervisor install preflight gate`.
+- RED evidence from AGY report: `node --test test/agent-supervisor-install-dry-run.test.js` failed with `buildSupervisorInstallPreflight is not defined in src/agent.js`.
+- GREEN evidence from AGY report and PM rerun: `node --test test/agent-supervisor-install-dry-run.test.js` passed 9/9.
+- PM diff review confirmed only `src/agent.js` and `test/agent-supervisor-install-dry-run.test.js` changed in the task commit.
+- `git diff --check d7b47b2..cdafba0` exited 0.
+- Qwen read-only Task 1 review returned `VERDICT: PASS`, `REQUIRED CHANGES: none`, `CONFIDENCE: high`. PM rejected Qwen's minor note that direct helper coverage was missing because the test directly asserts `buildSupervisorInstallPreflight()`.
 
 ---
 
