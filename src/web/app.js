@@ -2447,6 +2447,28 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     if (nasDryRunJobCountEl) nasDryRunJobCountEl.textContent = String(jobs.length);
     clearElement(nasDryRunResultEl);
 
+    if (plan.executionGate) {
+      const gateRow = doc.createElement('div');
+      gateRow.className = 'nas-dry-run-gate-row';
+
+      const statusSpan = doc.createElement('span');
+      statusSpan.className = 'nas-gate-status';
+      statusSpan.textContent = '远程执行：' + (plan.executionGate.remoteExecutionAllowed ? '已允许' : '已阻止');
+
+      const reasonSpan = doc.createElement('span');
+      reasonSpan.className = 'nas-gate-reason';
+      reasonSpan.textContent = ' (阻止原因：' + (plan.executionGate.blockingReason || '无') + ')';
+
+      const typeSpan = doc.createElement('span');
+      typeSpan.className = 'nas-gate-type';
+      typeSpan.textContent = ' · 当前仍为 dry-run 预检计划';
+
+      gateRow.appendChild(statusSpan);
+      gateRow.appendChild(reasonSpan);
+      gateRow.appendChild(typeSpan);
+      nasDryRunResultEl.appendChild(gateRow);
+    }
+
     if (targets.length === 0) {
       const placeholder = doc.createElement('p');
       placeholder.className = 'placeholder';
@@ -2481,6 +2503,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
       item.appendChild(nameRow);
       item.appendChild(detail);
+
+      const credRow = doc.createElement('div');
+      credRow.className = 'nas-dry-run-cred-row';
+      credRow.textContent = '凭证引用：' + (target.credentialRefConfigured ? '已配置' : '未配置');
+      item.appendChild(credRow);
 
       const adapter = doc.createElement('div');
       adapter.className = 'nas-dry-run-adapter-plan';

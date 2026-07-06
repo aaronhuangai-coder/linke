@@ -1197,6 +1197,33 @@ ul {
   overflow-wrap: anywhere;
 }
 
+.nas-dry-run-gate-row {
+  border: 1px solid #f87171;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nas-gate-status {
+  font-weight: 800;
+}
+
+.nas-gate-reason {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.nas-dry-run-cred-row {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: #4b5563;
+}
+
 .nas-dry-run-safety-note {
   margin-top: 12px;
   border-left: 3px solid #c2932b;

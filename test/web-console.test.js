@@ -1422,7 +1422,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.64/);
+    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.65/);
     assert.match(html, /LINKE_READ_TOKEN/);
     assert.match(html, /LINKE_WRITE_TOKEN/);
     assert.match(html, /403\s+Forbidden|auth\.forbidden/);
@@ -1434,7 +1434,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.62|V0\.63|V0\.64/);
+    assert.match(html, /V0\.62|V0\.63|V0\.65/);
     assert.match(html, /GET \/api\/auth-status|auth-status/);
     assert.match(html, /configuredScopes|writeRoutes|认证状态|写入路由/);
     assert.match(html, /不返回.*token|tokenValuesReturned|不暴露.*token/i);
@@ -1445,18 +1445,18 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.63|V0\.64/);
+    assert.match(html, /V0\.63|V0\.65/);
     assert.match(html, /API_WRITE_ROUTES|isApiWriteRoute|write-route|写入路由/);
     assert.match(html, /共享|同一来源|registry|注册表/i);
     assert.match(html, /partial|完整鉴权|生产级审计|生产硬化|production/i);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 
-  it('HTML safety notes document V0.64 NAS credential reference gate without exposing credentialRef values', async () => {
+  it('HTML safety notes document V0.65 NAS credential reference gate without exposing credentialRef values', async () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.64/);
+    assert.match(html, /V0\.65/);
     assert.match(html, /credentialRef|credentialRefConfigured|executionGate/);
     assert.match(html, /remoteExecutionAllowed|真实 NAS|real NAS/i);
     assert.match(html, /不回显|不返回|不暴露|non-secret|非密钥/i);
@@ -2905,6 +2905,174 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.match(text, /wouldInvokeApp:false|不调用/);
     assert.match(text, /prepare-app-request/);
     assert.match(text, /未配置应用适配器/);
+  });
+
+  it('renders top-level executionGate and blocking reason', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            executionGate: {
+              remoteExecutionAllowed: false,
+              blockingReason: 'real NAS transport not implemented'
+            },
+            targets: [],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const text = doc.getElementById('nas-dry-run-result').textContent;
+    assert.match(text, /远程执行：已阻止/);
+    assert.match(text, /阻止原因：real NAS transport not implemented/);
+    assert.match(text, /dry-run/);
+  });
+
+  it('renders credentialRefConfigured true/false rendering without leaking raw credentialRef', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            executionGate: {
+              remoteExecutionAllowed: false,
+              blockingReason: 'real NAS transport not implemented'
+            },
+            targets: [
+              {
+                name: 'synology-configured',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: true,
+              },
+              {
+                name: 'synology-unconfigured',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.101:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/plain',
+                enabled: true,
+                credentialRefConfigured: false,
+              },
+            ],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [
+        {
+          name: 'synology-configured',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'my-secret-credential-slug'
+        }
+      ],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const text = doc.getElementById('nas-dry-run-result').textContent;
+    assert.match(text, /凭证引用：已配置/);
+    assert.match(text, /凭证引用：未配置/);
+    assert.ok(!text.includes('my-secret-credential-slug'), 'must not render or leak the raw credentialRef value');
+  });
+
+  it('does not render raw credentialRef slug from input config in the result area', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            executionGate: {
+              remoteExecutionAllowed: false,
+              blockingReason: 'real NAS transport not implemented'
+            },
+            targets: [
+              {
+                name: 'synology-configured',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: true,
+              }
+            ],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [
+        {
+          name: 'synology-configured',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'very-secret-ref-slug-abc'
+        }
+      ],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resultEl = doc.getElementById('nas-dry-run-result');
+    const resultText = resultEl.textContent + ' ' + resultEl.innerHTML;
+    assert.ok(!resultText.includes('very-secret-ref-slug-abc'), 'very-secret-ref-slug-abc must not leak into the DOM result rendering');
   });
 
   it('search and status filter update device list and filter count', async () => {
