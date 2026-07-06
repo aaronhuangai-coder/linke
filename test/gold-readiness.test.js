@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.58', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.58');
+  it('expects LINKE_RELEASE_VERSION to be V0.59', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.59');
   });
 
-  it('expects report.version to be V0.58', () => {
+  it('expects report.version to be V0.59', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.58');
+    assert.strictEqual(report.version, 'V0.59');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -147,7 +147,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('O_NOFOLLOW'));
     assert.ok(hardeningEvidence.includes('src/audit-log.js'));
     assert.ok(hardeningEvidence.includes('GET /api/audit-log'));
+    assert.ok(hardeningEvidence.includes('src/rate-limit.js'));
+    assert.ok(hardeningEvidence.includes('LINKE_RATE_LIMIT_PER_MINUTE'));
+    assert.ok(hardeningEvidence.includes('429 Rate limit exceeded'));
     assert.ok(hardeningEvidence.includes('test/audit-log.test.js'));
+    assert.ok(hardeningEvidence.includes('test/rate-limit.test.js'));
     assert.ok(hardeningEvidence.includes('Internal Server Error'));
     assert.ok(hardeningEvidence.includes('test/security.test.js'));
     assert.ok(hardeningEvidence.includes('test/restore.test.js'));

@@ -23,6 +23,7 @@ import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
 import { appendAuditEvent, readAuditEvents } from './audit-log.js';
+import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -70,6 +71,10 @@ function errorStatusCode(err) {
 
 function auditDeviceId(deviceId) {
   return typeof deviceId === 'string' && deviceId.trim() ? slugify(deviceId) : undefined;
+}
+
+function isApiPath(pathname) {
+  return pathname === '/api' || pathname.startsWith('/api/');
 }
 
 function isPathInsideRoot(root, candidate) {
@@ -223,10 +228,11 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = {}) {
+export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rateLimit } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
+  const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -235,7 +241,22 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
 
     try {
       // ── API Routes ──────────────────────────────────────────
-      if ((pathname === '/api' || pathname.startsWith('/api/')) && !isAuthorizedRequest(req, expectedAuthToken)) {
+      if (isApiPath(pathname) && apiRateLimiter) {
+        const decision = apiRateLimiter.check(req.socket?.remoteAddress || 'unknown');
+        if (!decision.allowed) {
+          await recordAudit(dataDir, {
+            type: 'api.rate_limited',
+            method,
+            path: pathname,
+            statusCode: 429,
+            outcome: 'limited',
+            requestId,
+          });
+          return sendError(res, 429, 'Rate limit exceeded');
+        }
+      }
+
+      if (isApiPath(pathname) && !isAuthorizedRequest(req, expectedAuthToken)) {
         await recordAudit(dataDir, {
           type: 'auth.denied',
           method,
@@ -615,8 +636,9 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
+  const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
 
-  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot });
+  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot, rateLimit });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
@@ -625,6 +647,9 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
     }
     if (normalizeAuthToken(authToken)) {
       console.log('API bearer token authentication: enabled');
+    }
+    if (rateLimit) {
+      console.log(`API rate limit: ${rateLimit.maxRequests} requests per minute`);
     }
   });
 }
