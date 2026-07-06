@@ -1742,15 +1742,24 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.82 Supervisor install preflight gate', () => {
-  it('title and badge claim V0.82 as current', () => {
-    assertReadmeContains(/# Linke V0\.82/, 'README title should mention V0.82');
-    assertReadmeContains(/\*\*当前版本：V0\.82\*\*/, 'README badge should mention V0.82');
+describe('README — V0.83 Supervisor install approval manifest', () => {
+  it('title and badge claim V0.83 as current', () => {
+    assertReadmeContains(/# Linke V0\.83/, 'README title should mention V0.83');
+    assertReadmeContains(/\*\*当前版本：V0\.83\*\*/, 'README badge should mention V0.83');
   });
 
-  it('version table marks V0.81 historical and V0.82 current', () => {
-    assertReadmeContains(/\| V0\.81 \| 历史版本 \|[^|]*(installCommandPreview|command preview|wouldRun:false|wouldWrite:false|blocked)/i, 'V0.81 should be historical command preview milestone');
-    assertReadmeContains(/\| V0\.82 \| 当前版本 \|[^|]*(installPreflight|preflight|requiredForInstall:true|blocked)/i, 'V0.82 should be current preflight gate milestone');
+  it('version table marks V0.82 historical and V0.83 current', () => {
+    assertReadmeContains(/\| V0\.82 \| 历史版本 \|[^|]*(installPreflight|preflight|requiredForInstall:true|blocked)/i, 'V0.82 should become historical preflight gate milestone');
+    assertReadmeContains(/\| V0\.83 \| 当前版本 \|[^|]*(installApprovalManifest|approval|rollback|blocked)/i, 'V0.83 should be current approval manifest milestone');
+  });
+
+  it('documents installApprovalManifest as full-output only and dry-run-only', () => {
+    assertReadmeContains(/installApprovalManifest\.state:"blocked"/, 'README should document blocked approval manifest state');
+    assertReadmeContains(/installApprovalManifest\.approval\.approved:false/, 'README should document unapproved operator approval state');
+    assertReadmeContains(/installApprovalManifest\.rollback\.available:false/, 'README should document unavailable rollback state');
+    assertReadmeContains(/--readiness-summary[^\\n]*(不输出|excludes)[^\\n]*installApprovalManifest/i, 'README should say readiness summary excludes installApprovalManifest');
+    assertReadmeContains(/不收集批准|approvalCollected:false|approvalPersisted:false/i, 'README should document no approval collection or persistence');
+    assertReadmeContains(/rollbackExecuted:false|uninstallExecuted:false|recoverySupervisorStarted:false/i, 'README should document no rollback, uninstall, or recovery supervisor execution');
   });
 
   it('documents installPreflight as full-output only and dry-run-only', () => {
@@ -1811,12 +1820,12 @@ describe('README — V0.82 Supervisor install preflight gate', () => {
     assertReadmeContains(/Agent gold-readiness CLI|Agent gold-readiness fail-on-blocked/, 'README should document Agent gold-readiness test coverage');
   });
 
-  it('keeps later Gold readiness sections synced to V0.82 preflight evidence', () => {
-    assertReadmeContains(/Agent CLI[\s\S]*?V0\.82[\s\S]*?installPreflight/i, 'README Agent CLI Gold section should mention V0.82 installPreflight');
-    assertReadmeContains(/Gold blockers[\s\S]*?V0\.82[\s\S]*?buildSupervisorInstallPreflight[\s\S]*?installPreflight\.state:"blocked"[\s\S]*?installPreflight\.checks:requiredForInstall:true/i, 'README Gold blockers section should mention V0.82 preflight evidence');
-    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.82[\s\S]*?buildSupervisorInstallPreflight[\s\S]*?installPreflight\.state:"blocked"[\s\S]*?installPreflight\.checks:requiredForInstall:true/i, 'README partial hardening section should mention V0.82 preflight evidence');
-    assertReadmeDoesNotContain(/Gold blockers\*\*：V0\.81 基于/, 'README Gold blockers section should not keep V0.81 as current evidence');
-    assertReadmeDoesNotContain(/NAS、认证和生产硬化仍是 partial\*\*：V0\.81 基于/, 'README partial hardening section should not keep V0.81 as current evidence');
+  it('keeps later Gold readiness sections synced to V0.83 approval manifest evidence', () => {
+    assertReadmeContains(/Agent CLI[\s\S]*?V0\.83[\s\S]*?installApprovalManifest/i, 'README Agent CLI Gold section should mention V0.83 installApprovalManifest');
+    assertReadmeContains(/Gold blockers[\s\S]*?V0\.83[\s\S]*?buildSupervisorInstallApprovalManifest[\s\S]*?installApprovalManifest\.state:"blocked"[\s\S]*?installApprovalManifest\.approval\.approved:false/i, 'README Gold blockers section should mention V0.83 approval manifest evidence');
+    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.83[\s\S]*?buildSupervisorInstallApprovalManifest[\s\S]*?installApprovalManifest\.state:"blocked"/i, 'README partial hardening section should mention V0.83 approval manifest evidence');
+    assertReadmeDoesNotContain(/Gold blockers\*\*：V0\.82 基于/, 'README Gold blockers section should not keep V0.82 as current evidence');
+    assertReadmeDoesNotContain(/NAS、认证和生产硬化仍是 partial\*\*：V0\.82 基于/, 'README partial hardening section should not keep V0.82 as current evidence');
   });
 
   it('documents Agent auth-status CLI safety boundaries', () => {
@@ -1869,7 +1878,7 @@ describe('README — V0.82 Supervisor install preflight gate', () => {
     assertReadmeContains(/state:"blocked"|state:'blocked'|state.*blocked|blocked.*state/i, 'README should document blocked readiness state');
     assertReadmeContains(/wouldRun:false|wouldWrite:false|non-runnable|不可执行/i, 'README should document non-runnable command preview flags');
     assertReadmeContains(/退出码\s*2|exit code\s*2|exits?\s*2/i, 'README should document fail-on-blocked exit code 2');
-    assertReadmeContains(/buildSupervisorInstallDryRunPlan|buildSupervisorInstallReadinessSummary|buildSupervisorInstallCommandPreview|test\/agent-supervisor-install-dry-run\.test\.js/, 'README should document supervisor-install-dry-run test coverage');
+    assertReadmeContains(/buildSupervisorInstallDryRunPlan|buildSupervisorInstallReadinessSummary|buildSupervisorInstallCommandPreview|buildSupervisorInstallPreflight|buildSupervisorInstallApprovalManifest|test\/agent-supervisor-install-dry-run\.test\.js/, 'README should document supervisor-install-dry-run test coverage');
     assertReadmeContains(/wouldInstall:false|不安装/i, 'README should document no install');
     assertReadmeContains(/wouldStart:false|不启动/i, 'README should document no start');
     assertReadmeContains(/launchctlCalled:false|不调用 launchctl/i, 'README should document no launchctl call');
@@ -1882,7 +1891,7 @@ describe('README — V0.82 Supervisor install preflight gate', () => {
     assertReadmeContains(/--output.*not supported|不支持 --output|不会写输出文件/i, 'README should document --output is not supported');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.82', () => {
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.83', () => {
     assertReadmeContains(/Gold[^\\n]*(blocked|阻塞|依旧 blocked|仍 blocked)/i, 'README should keep Gold blocked');
     assertReadmeContains(/真实 installer|real installer|真实安装/, 'README should say real installer remains future work');
     assertReadmeContains(/watchdog|monitoring|recovery supervisor|secret management/i, 'README should list remaining hardening gaps');

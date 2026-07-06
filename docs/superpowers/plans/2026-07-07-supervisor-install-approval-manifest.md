@@ -435,7 +435,7 @@ Append a short Task 1 execution note to this plan:
 - Produces: Gold evidence strings for `installApprovalManifest`
 - Produces: README version/docs coverage for V0.83
 
-- [ ] **Step 1: Update version expectation test first**
+- [x] **Step 1: Update version expectation test first**
 
 In `test/version.test.js`, change:
 
@@ -453,7 +453,7 @@ it('LINKE_RELEASE_VERSION is the V0.83 milestone', () => {
 });
 ```
 
-- [ ] **Step 2: Add Gold readiness RED assertions**
+- [x] **Step 2: Add Gold readiness RED assertions**
 
 In `test/gold-readiness.test.js`, inside the `automation-installation` test after the preflight assertions, add:
 
@@ -479,7 +479,7 @@ assert.ok(hardeningItem.nextStep.includes('rollback'));
 assert.ok(hardeningItem.nextStep.includes('uninstall'));
 ```
 
-- [ ] **Step 3: Add README RED assertions**
+- [x] **Step 3: Add README RED assertions**
 
 In `test/readme.test.js`, in `describe('README — V0.82 Supervisor install preflight gate', ...)`, rename the describe title to:
 
@@ -518,7 +518,7 @@ Extend the existing supervisor-install-dry-run docs coverage assertion so it inc
 assertReadmeContains(/buildSupervisorInstallDryRunPlan|buildSupervisorInstallReadinessSummary|buildSupervisorInstallCommandPreview|buildSupervisorInstallPreflight|buildSupervisorInstallApprovalManifest|test\/agent-supervisor-install-dry-run\.test\.js/, 'README should document supervisor-install-dry-run test coverage');
 ```
 
-- [ ] **Step 4: Run RED docs/version tests**
+- [x] **Step 4: Run RED docs/version tests**
 
 Run:
 
@@ -528,7 +528,7 @@ node --test test/gold-readiness.test.js test/readme.test.js test/version.test.js
 
 Expected result: FAIL because version/docs/Gold evidence still describe V0.82.
 
-- [ ] **Step 5: Update `src/version.js`**
+- [x] **Step 5: Update `src/version.js`**
 
 Change:
 
@@ -542,7 +542,7 @@ to:
 export const LINKE_RELEASE_VERSION = 'V0.83';
 ```
 
-- [ ] **Step 6: Update Gold readiness evidence**
+- [x] **Step 6: Update Gold readiness evidence**
 
 In `src/gold-readiness.js`, add these evidence strings to both `automation-installation.evidence` and `production-hardening.evidence`, immediately after the V0.82 preflight evidence:
 
@@ -565,7 +565,7 @@ Update `production-hardening.nextStep` to include the new V0.83 scope:
 nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, and a dry-run approval/rollback manifest; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
 ```
 
-- [ ] **Step 7: Update README version and feature docs**
+- [x] **Step 7: Update README version and feature docs**
 
 In `README.md`:
 
@@ -592,7 +592,7 @@ buildSupervisorInstallApprovalManifest、installApprovalManifest.state:"blocked"
 
 Keep all production/Gold disclaimers negative.
 
-- [ ] **Step 8: Run GREEN docs/version tests**
+- [x] **Step 8: Run GREEN docs/version tests**
 
 Run:
 
@@ -602,7 +602,7 @@ node --test test/gold-readiness.test.js test/readme.test.js test/version.test.js
 
 Expected result: PASS.
 
-- [ ] **Step 9: Run full verification**
+- [x] **Step 9: Run full verification**
 
 Run:
 
@@ -618,7 +618,7 @@ Expected result:
 - `git diff --check` exits `0`.
 - `rg` finds only negative boundary language or scan-list mentions; any positive claim blocks the task.
 
-- [ ] **Step 10: Update plan progress**
+- [x] **Step 10: Update plan progress**
 
 Append:
 
@@ -631,12 +631,22 @@ Append:
 - Safety: Gold remained blocked; `automation-installation` and `production-hardening` remained partial; `real-nas-remote-backup` remained blocked.
 ```
 
+## Task 2 Execution Evidence Actual
+
+- Worker recovery: AGY first Task 2 run exited `0` with no final output, left an incomplete uncommitted diff, and did not replace the stale V0.21 report. AGY fix retry then failed with `authentication failed or timed out`. PM took over the bounded version/docs/test completion to avoid loop stalling.
+- RED: `node --test --test-reporter=dot test/gold-readiness.test.js test/readme.test.js test/version.test.js` failed before README V0.83 docs were added and before the precise `available:false` schema evidence exception was applied.
+- GREEN: `node --test --test-reporter=dot test/gold-readiness.test.js test/readme.test.js test/version.test.js` passed after V0.83 version/docs/Gold updates.
+- FULL: `node --test --test-reporter=dot test/*.test.js` passed.
+- DIFF: `git diff --check` passed.
+- Safety scan: overclaim scan only matched negative constraints in `docs/superpowers/specs/2026-07-07-supervisor-install-approval-manifest-design.md`.
+- Safety: Gold remained blocked; `automation-installation` and `production-hardening` remained partial; `real-nas-remote-backup` remained blocked.
+
 ---
 
 ## Review And Closure Gates
 
-- [ ] **AGY/ayg implementer gate:** AGY executes Task 1 and Task 2 only. It may modify only the files listed in each task. It must not edit `.env`, secrets, `.git`, `node_modules`, or unrelated project files.
-- [ ] **PM local verification gate:** Codex PM reruns the focused task tests, full `node --test test/*.test.js`, `git diff --check`, and overclaim scan.
-- [ ] **Qwen adversarial review gate:** Qwen reviews the final diff read-only and returns `VERDICT: PASS` before commit.
-- [ ] **DeepSeek closure gate:** DeepSeek receives the final diff and PM evidence and returns `VERDICT: PASS`, `COMMIT_READY: yes`.
+- [x] **AGY/ayg implementer gate:** AGY completed Task 1. AGY Task 2 failed twice (`no final output/stale report`, then `authentication failed or timed out`), so PM takeover was recorded and bounded to the Task 2 file list.
+- [x] **PM local verification gate:** Codex PM reran focused docs/version tests, full `node --test test/*.test.js`, `git diff --check`, and overclaim scan.
+- [x] **Qwen adversarial review gate:** Qwen reviewed the final diff read-only and returned `VERDICT: PASS`, `REQUIRED CHANGES: none`, `CONFIDENCE: high`.
+- [x] **DeepSeek closure gate:** DeepSeek received the final diff and PM evidence and returned `VERDICT: PASS`, `COMMIT_READY: yes`, `CONFIDENCE: high`.
 - [ ] **Commit/push gate:** Commit message should be `feat: add supervisor approval manifest dry-run`; push to `origin/linke-v0.12-web-panel`.
