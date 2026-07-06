@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
@@ -52,9 +52,10 @@ async function listRelativeFiles(dir, base = dir) {
   return result.sort();
 }
 
-async function createRestoreDryRunFixture(deviceId = 'restore-dry-run-device') {
+async function createRestoreDryRunFixture(deviceId = 'restore-dry-run-device', options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'linke-restore-dry-run-'));
-  const server = createServer({ dataDir });
+  const restoreRoot = options.restoreRoot || null;
+  const server = createServer({ dataDir, restoreRoot });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
 
@@ -67,7 +68,7 @@ async function createRestoreDryRunFixture(deviceId = 'restore-dry-run-device') {
   assert.strictEqual(backupRes.status, 201);
   const snapshot = await backupRes.json();
 
-  const targetDir = join(dataDir, 'target');
+  const targetDir = restoreRoot ? join(restoreRoot, 'target') : join(dataDir, 'target');
   await mkdir(targetDir, { recursive: true });
   await writeFile(join(targetDir, 'alpha.txt'), 'existing target alpha');
 
@@ -77,6 +78,7 @@ async function createRestoreDryRunFixture(deviceId = 'restore-dry-run-device') {
     dataDir,
     server,
     port,
+    restoreRoot,
     deviceId,
     snapshotId: snapshot.snapshotId,
     targetDir,
@@ -88,6 +90,9 @@ async function cleanupFixture(fixture) {
   if (!fixture) return;
   await closeServer(fixture.server);
   await rm(fixture.dataDir, { recursive: true, force: true });
+  if (fixture.restoreRoot) {
+    await rm(fixture.restoreRoot, { recursive: true, force: true });
+  }
 }
 
 // ── Pure function ──────────────────────────────────────────────────
@@ -201,6 +206,46 @@ describe('restore-dry-run API', () => {
         `http://127.0.0.1:${fixture.port}/api/devices/${fixture.deviceId}/snapshots/00000000-0000-0000-0000-000000000000/restore-dry-run?targetPath=${encodeURIComponent(fixture.targetDir)}`,
       );
       assert.strictEqual(res.status, 404);
+    } finally {
+      await cleanupFixture(fixture);
+    }
+  });
+
+  it('rejects targetPath outside restoreRoot before reading the target tree', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-outside-'));
+    const fixture = await createRestoreDryRunFixture('restore-dry-run-root-device', { restoreRoot });
+    try {
+      await mkdir(join(outsideRoot, 'large-tree'), { recursive: true });
+      await writeFile(join(outsideRoot, 'large-tree', 'secret-name.txt'), 'not for dry-run scan');
+
+      const res = await fetch(
+        `http://127.0.0.1:${fixture.port}/api/devices/${fixture.deviceId}/snapshots/${fixture.snapshotId}/restore-dry-run?targetPath=${encodeURIComponent(join(outsideRoot, 'large-tree'))}`,
+      );
+
+      assert.strictEqual(res.status, 400);
+      assert.deepStrictEqual(await res.json(), {
+        error: 'targetPath is outside the allowed restore root',
+      });
+    } finally {
+      await cleanupFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not echo filesystem paths when an allowed targetPath cannot be read', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const fixture = await createRestoreDryRunFixture('restore-dry-run-error-device', { restoreRoot });
+    try {
+      const fileTarget = join(await realpath(fixture.restoreRoot), 'not-a-directory.txt');
+      await writeFile(fileTarget, 'not a directory');
+
+      const res = await fetch(
+        `http://127.0.0.1:${fixture.port}/api/devices/${fixture.deviceId}/snapshots/${fixture.snapshotId}/restore-dry-run?targetPath=${encodeURIComponent(fileTarget)}`,
+      );
+
+      assert.strictEqual(res.status, 400);
+      assert.deepStrictEqual(await res.json(), { error: 'Unable to read targetPath' });
     } finally {
       await cleanupFixture(fixture);
     }

@@ -242,6 +242,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.55/, 'V0.55');
   });
 
+  it('mentions V0.56 (restore target guard)', () => {
+    assertReadmeContains(/V0\.56/, 'V0.56');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1295,14 +1299,14 @@ describe('README — V0.53 optional bearer token auth skeleton', () => {
 });
 
 describe('README — V0.55 server request/error hardening', () => {
-  it('title and badge claim V0.55 as current', () => {
-    assert.match(readme, /^# Linke V0\.55/m);
-    assert.match(readme, /当前版本：V0\.55/);
+  it('title and badge no longer claim V0.55 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.55/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.55/);
   });
 
-  it('version table marks V0.54 historical and V0.55 current', () => {
+  it('version table marks V0.54 and V0.55 historical', () => {
     assert.match(readme, /\| V0\.54 \| 历史版本 \|[^|]*(Web Console|API token|内存态|token UX)/i);
-    assert.match(readme, /\| V0\.55 \| 当前版本 \|[^|]*(body|请求体|413|500|Internal Server Error|错误)/i);
+    assert.match(readme, /\| V0\.55 \| 历史版本 \|[^|]*(body|请求体|413|500|Internal Server Error|错误)/i);
   });
 
   it('documents request body size limit and sanitized unexpected 500 responses', () => {
@@ -1310,6 +1314,34 @@ describe('README — V0.55 server request/error hardening', () => {
     assert.match(readme, /413|Request body too large/);
     assert.match(readme, /Internal Server Error/);
     assert.match(readme, /不.*暴露.*内部|不.*回显.*内部|sanitize|sanitized/i);
+  });
+
+  it('keeps Gold readiness blocked while production hardening is only partial', () => {
+    assert.match(readme, /production-hardening[\s\S]*(partial|部分)|生产.*硬化[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.56 restore target guard', () => {
+  it('title and badge claim V0.56 as current', () => {
+    assert.match(readme, /^# Linke V0\.56/m);
+    assert.match(readme, /当前版本：V0\.56/);
+  });
+
+  it('version table marks V0.55 historical and V0.56 current', () => {
+    assert.match(readme, /\| V0\.55 \| 历史版本 \|[^|]*(请求体|body|413|500|Internal Server Error)/i);
+    assert.match(readme, /\| V0\.56 \| 当前版本 \|[^|]*(LINKE_RESTORE_ROOT|restoreRoot|targetPath|symlink|恢复)/i);
+  });
+
+  it('documents restoreRoot guard behavior and safe failure', () => {
+    assert.match(readme, /LINKE_RESTORE_ROOT/);
+    assert.match(readme, /\/api\/restore/);
+    assert.match(readme, /restore-dry-run/);
+    assert.match(readme, /targetPath/);
+    assert.match(readme, /symlink|realpath/i);
+    assert.match(readme, /targetPath is outside the allowed restore root/);
+    assert.match(readme, /400/);
   });
 
   it('keeps Gold readiness blocked while production hardening is only partial', () => {

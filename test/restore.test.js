@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm, symlink, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -16,6 +16,53 @@ function postJSON(port, path, body) {
 
 function sha256(buf) {
   return createHash('sha256').update(buf).digest('hex');
+}
+
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createRestoreFixture(options = {}) {
+  const dataDir = await mkdtemp(join(tmpdir(), 'linke-rest-'));
+  const restoreRoot = options.restoreRoot || null;
+  const server = createServer({ dataDir, restoreRoot });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+
+  const sourceDir = join(dataDir, 'source');
+  await mkdir(sourceDir, { recursive: true });
+  const sourceFile = join(sourceDir, 'important.txt');
+  await writeFile(sourceFile, options.content || 'restore-root-guard-content');
+
+  const backupRes = await postJSON(port, '/api/backups', {
+    deviceId: 'restore-root-guard',
+    sourcePath: sourceFile,
+  });
+  assert.strictEqual(backupRes.status, 201);
+  const snapshot = await backupRes.json();
+
+  return {
+    dataDir,
+    restoreRoot,
+    server,
+    port,
+    snapshotId: snapshot.snapshotId,
+    content: options.content || 'restore-root-guard-content',
+  };
+}
+
+async function cleanupRestoreFixture(fixture) {
+  if (!fixture) return;
+  await new Promise((r) => fixture.server.close(r));
+  await rm(fixture.dataDir, { recursive: true, force: true });
+  if (fixture.restoreRoot) {
+    await rm(fixture.restoreRoot, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -85,5 +132,92 @@ describe('Restore truth — source deleted after backup', () => {
       targetPath: targetDir,
     });
     assert.strictEqual(res.status, 500);
+  });
+});
+
+describe('Restore target guard — optional restoreRoot', () => {
+  it('keeps existing unrestricted restore behavior when restoreRoot is not configured', async () => {
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-legacy-target-'));
+    const fixture = await createRestoreFixture();
+    try {
+      const legacyTarget = join(outsideRoot, 'legacy-allowed');
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: legacyTarget,
+      });
+
+      assert.strictEqual(restoreRes.status, 200);
+      assert.strictEqual(await readFile(join(legacyTarget, 'important.txt'), 'utf-8'), fixture.content);
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('allows relative restore targets inside restoreRoot when configured', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const fixture = await createRestoreFixture({ restoreRoot });
+    try {
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'allowed-relative',
+      });
+
+      assert.strictEqual(restoreRes.status, 200);
+      const result = await restoreRes.json();
+      const expectedTarget = join(await realpath(restoreRoot), 'allowed-relative');
+      assert.strictEqual(result.targetPath, expectedTarget);
+      assert.strictEqual(await readFile(join(expectedTarget, 'important.txt'), 'utf-8'), fixture.content);
+    } finally {
+      await cleanupRestoreFixture(fixture);
+    }
+  });
+
+  it('rejects absolute restore targets outside restoreRoot without writing files', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-outside-'));
+    const fixture = await createRestoreFixture({ restoreRoot });
+    try {
+      const blockedTarget = join(outsideRoot, 'blocked');
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: blockedTarget,
+      });
+
+      assert.strictEqual(restoreRes.status, 400);
+      assert.deepStrictEqual(await restoreRes.json(), {
+        error: 'targetPath is outside the allowed restore root',
+      });
+      assert.strictEqual(await pathExists(join(blockedTarget, 'important.txt')), false);
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects restore targets that escape restoreRoot through a symlink ancestor', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-outside-'));
+    const fixture = await createRestoreFixture({ restoreRoot });
+    try {
+      await symlink(outsideRoot, join(restoreRoot, 'linked-outside'), 'dir');
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'linked-outside/blocked',
+      });
+
+      assert.strictEqual(restoreRes.status, 400);
+      assert.deepStrictEqual(await restoreRes.json(), {
+        error: 'targetPath is outside the allowed restore root',
+      });
+      assert.strictEqual(await pathExists(join(outsideRoot, 'blocked', 'important.txt')), false);
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -1,7 +1,7 @@
 import { createServer as createHttpServer } from 'node:http';
-import { constants } from 'node:fs';
-import { readFile, access } from 'node:fs/promises';
-import { join, dirname, resolve } from 'node:path';
+import { constants, realpathSync, statSync } from 'node:fs';
+import { readFile, access, realpath } from 'node:fs/promises';
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
@@ -33,6 +33,7 @@ const MIME = {
 };
 
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const RESTORE_ROOT_ERROR = 'targetPath is outside the allowed restore root';
 
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
@@ -51,6 +52,67 @@ function createHttpError(statusCode, message) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
+}
+
+function isPathInsideRoot(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+export function normalizeRestoreRoot(restoreRoot) {
+  if (restoreRoot === undefined || restoreRoot === null || restoreRoot === '') return '';
+  if (typeof restoreRoot !== 'string') throw new Error('restoreRoot must be a string');
+  const trimmed = restoreRoot.trim();
+  if (!trimmed) throw new Error('restoreRoot must be a non-empty string when provided');
+
+  const resolved = resolve(trimmed);
+  let stats;
+  try {
+    stats = statSync(resolved);
+  } catch {
+    throw new Error('restoreRoot must exist and be a directory');
+  }
+  if (!stats.isDirectory()) throw new Error('restoreRoot must exist and be a directory');
+  return realpathSync(resolved);
+}
+
+async function realpathNearestExisting(candidate) {
+  let current = candidate;
+  while (true) {
+    try {
+      return await realpath(current);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      const parent = dirname(current);
+      if (parent === current) throw createHttpError(400, RESTORE_ROOT_ERROR);
+      current = parent;
+    }
+  }
+}
+
+export async function resolveRestoreTargetPath(targetPath, restoreRoot = '') {
+  if (typeof targetPath !== 'string' || !targetPath.trim()) {
+    throw createHttpError(400, 'targetPath is required');
+  }
+
+  const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
+  if (!normalizedRestoreRoot) return targetPath;
+
+  const trimmedTargetPath = targetPath.trim();
+  const resolvedTarget = isAbsolute(trimmedTargetPath)
+    ? resolve(trimmedTargetPath)
+    : resolve(normalizedRestoreRoot, trimmedTargetPath);
+
+  if (!isPathInsideRoot(normalizedRestoreRoot, resolvedTarget)) {
+    throw createHttpError(400, RESTORE_ROOT_ERROR);
+  }
+
+  const nearestExisting = await realpathNearestExisting(resolvedTarget);
+  if (!isPathInsideRoot(normalizedRestoreRoot, nearestExisting)) {
+    throw createHttpError(400, RESTORE_ROOT_ERROR);
+  }
+
+  return resolvedTarget;
 }
 
 function normalizeAuthToken(authToken) {
@@ -143,9 +205,10 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks, authToken } = {}) {
+export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
+  const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -248,10 +311,11 @@ export function createServer({ dataDir, backupHooks, authToken } = {}) {
         if (!body.deviceId || !body.snapshotId || !body.targetPath) {
           return sendError(res, 400, 'deviceId, snapshotId, and targetPath are required');
         }
+        const targetPath = await resolveRestoreTargetPath(body.targetPath, normalizedRestoreRoot);
         const result = await restoreSnapshot(dataDir, {
           deviceId: body.deviceId,
           snapshotId: body.snapshotId,
-          targetPath: body.targetPath,
+          targetPath,
         });
         return sendJSON(res, 200, result);
       }
@@ -303,6 +367,7 @@ export function createServer({ dataDir, backupHooks, authToken } = {}) {
 
         const targetPath = url.searchParams.get('targetPath');
         if (!targetPath) return sendError(res, 400, 'targetPath is required');
+        const resolvedTargetPath = await resolveRestoreTargetPath(targetPath, normalizedRestoreRoot);
 
         let manifest;
         try {
@@ -317,14 +382,14 @@ export function createServer({ dataDir, backupHooks, authToken } = {}) {
 
         let existingTargetPaths;
         try {
-          existingTargetPaths = await collectExistingTargetPaths(targetPath);
-        } catch (err) {
-          return sendError(res, 400, `Unable to read targetPath: ${err.message}`);
+          existingTargetPaths = await collectExistingTargetPaths(resolvedTargetPath);
+        } catch {
+          return sendError(res, 400, 'Unable to read targetPath');
         }
 
         let plan;
         try {
-          plan = buildRestoreDryRunPlan(deviceId, manifest, targetPath, existingTargetPaths);
+          plan = buildRestoreDryRunPlan(deviceId, manifest, resolvedTargetPath, existingTargetPaths);
         } catch (err) {
           if (err.message.startsWith('Invalid manifest file path:')) {
             return sendError(res, 400, err.message);
@@ -419,11 +484,16 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const host = process.env.HOST || '127.0.0.1';
   const dataDir = process.env.DATA_DIR || resolve(join(process.cwd(), 'data'));
   const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
+  const restoreRoot = process.env.LINKE_RESTORE_ROOT;
+  const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
 
-  const server = createServer({ dataDir, authToken });
+  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
+    if (normalizedRestoreRoot) {
+      console.log(`Restore root: ${normalizedRestoreRoot}`);
+    }
     if (normalizeAuthToken(authToken)) {
       console.log('API bearer token authentication: enabled');
     }

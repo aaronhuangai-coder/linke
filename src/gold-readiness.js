@@ -59,7 +59,7 @@ const GOLD_READINESS_ITEMS = [
       'test/nas-dry-run.test.js',
       'test/config.test.js',
     ],
-    nextStep: 'No real NAS connection is made in V0.55; implement authenticated NAS connection separately.',
+    nextStep: 'No real NAS connection is made in V0.56; implement authenticated NAS connection separately.',
   },
   {
     id: 'automation-installation',
@@ -106,10 +106,14 @@ const GOLD_READINESS_ITEMS = [
     status: 'partial',
     evidence: [
       'src/server.js MAX_JSON_BODY_BYTES',
+      'src/server.js LINKE_RESTORE_ROOT',
+      'src/server.js resolveRestoreTargetPath',
       '413 Request body too large',
       'Internal Server Error',
       'README production safety boundary',
       'test/security.test.js',
+      'test/restore.test.js',
+      'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
     nextStep: 'Add deployment hardening, audit trail, secret management, monitoring, and recovery supervisor.',

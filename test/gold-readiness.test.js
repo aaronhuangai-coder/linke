@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.55', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.55');
+  it('expects LINKE_RELEASE_VERSION to be V0.56', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.56');
   });
 
-  it('expects report.version to be V0.55', () => {
+  it('expects report.version to be V0.56', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.55');
+    assert.strictEqual(report.version, 'V0.56');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -141,8 +141,12 @@ describe('Gold Readiness Report', () => {
     assert.strictEqual(hardeningItem.status, 'partial');
     const hardeningEvidence = evidenceText(hardeningItem);
     assert.ok(hardeningEvidence.includes('MAX_JSON_BODY_BYTES'));
+    assert.ok(hardeningEvidence.includes('LINKE_RESTORE_ROOT'));
+    assert.ok(hardeningEvidence.includes('resolveRestoreTargetPath'));
     assert.ok(hardeningEvidence.includes('Internal Server Error'));
     assert.ok(hardeningEvidence.includes('test/security.test.js'));
+    assert.ok(hardeningEvidence.includes('test/restore.test.js'));
+    assert.ok(hardeningEvidence.includes('test/restore-dry-run.test.js'));
     assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|audit/i);
 
     const nasItem = report.items.find(item => item.id === 'real-nas-remote-backup');
