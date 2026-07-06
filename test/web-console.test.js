@@ -1417,6 +1417,18 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('data-testid="api-token-status"'), 'must have api-token-status');
     assert.ok(html.includes('data-testid="api-token-safety-note"'), 'must have api-token-safety-note');
   });
+
+  it('HTML safety notes document V0.61 read/write token boundary without claiming production readiness', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.match(html, /V0\.61/);
+    assert.match(html, /LINKE_READ_TOKEN/);
+    assert.match(html, /LINKE_WRITE_TOKEN/);
+    assert.match(html, /403\s+Forbidden|auth\.forbidden/);
+    assert.match(html, /完整鉴权|生产级审计|生产硬化|production/i);
+    assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 

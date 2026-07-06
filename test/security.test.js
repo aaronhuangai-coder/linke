@@ -380,6 +380,164 @@ describe('Security — optional bearer token authentication', () => {
     }
   });
 
+  it('accepts readToken for read-scope API requests', async () => {
+    const server = createServer({ dataDir, readToken: 'read-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer read-token',
+        },
+      });
+      assert.strictEqual(res.status, 200);
+      assert.ok(Array.isArray(await res.json()));
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects readToken for write-scope API requests with 403 before writing device data', async () => {
+    const server = createServer({ dataDir, readToken: 'read-token', writeToken: 'write-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const beforeEntries = await readdir(dataDir);
+      const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer read-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'read-token-write-blocked', hostname: 'blocked' }),
+      });
+
+      assert.strictEqual(res.status, 403);
+      assert.deepStrictEqual(await res.json(), { error: 'Forbidden' });
+      const afterEntries = await readdir(dataDir);
+      assert.deepStrictEqual(afterEntries.filter((entry) => entry !== 'audit'), beforeEntries.filter((entry) => entry !== 'audit'));
+      assert.strictEqual(await pathExists(join(dataDir, 'repo', 'devices', 'read-token-write-blocked')), false);
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.forbidden');
+      assert.strictEqual(events[0].path, '/api/heartbeat');
+      assert.strictEqual(events[0].statusCode, 403);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('accepts writeToken for read-scope and write-scope API requests', async () => {
+    const server = createServer({ dataDir, readToken: 'read-token', writeToken: 'write-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const readRes = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer write-token',
+        },
+      });
+      assert.strictEqual(readRes.status, 200);
+
+      const writeRes = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer write-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'write-token-device', hostname: 'allowed' }),
+      });
+      assert.strictEqual(writeRes.status, 200);
+      const body = await writeRes.json();
+      assert.strictEqual(body.deviceId, 'write-token-device');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('keeps authToken as full-access compatibility token when scoped tokens are configured', async () => {
+    const server = createServer({
+      dataDir,
+      authToken: 'full-token',
+      readToken: 'read-token',
+      writeToken: 'write-token',
+    });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer full-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'full-token-device', hostname: 'allowed' }),
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.strictEqual(body.deviceId, 'full-token-device');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects unknown scoped Bearer token with 401', async () => {
+    const server = createServer({ dataDir, readToken: 'read-token', writeToken: 'write-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer unknown-token',
+        },
+      });
+      assert.strictEqual(res.status, 401);
+      assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.denied');
+      assert.strictEqual(events[0].statusCode, 401);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('uses broadest scope when readToken and writeToken have the same value', async () => {
+    const server = createServer({ dataDir, readToken: 'shared-token', writeToken: 'shared-token' });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer shared-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'shared-token-device', hostname: 'allowed' }),
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.strictEqual(body.deviceId, 'shared-token-device');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('fails fast when readToken or writeToken is only whitespace', () => {
+    assert.throws(
+      () => createServer({ dataDir, readToken: '   ' }),
+      /readToken must be a non-empty string/,
+    );
+    assert.throws(
+      () => createServer({ dataDir, writeToken: '   ' }),
+      /writeToken must be a non-empty string/,
+    );
+  });
+
   it('when no authToken is provided, existing unauthenticated localhost behavior remains allowed', async () => {
     const server = createServer({ dataDir });
     await new Promise((r) => server.listen(0, r));

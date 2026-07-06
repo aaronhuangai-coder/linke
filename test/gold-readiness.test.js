@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.60', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.60');
+  it('expects LINKE_RELEASE_VERSION to be V0.61', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.61');
   });
 
-  it('expects report.version to be V0.60', () => {
+  it('expects report.version to be V0.61', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.60');
+    assert.strictEqual(report.version, 'V0.61');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -133,6 +133,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(securityEvidence.includes('test/web-console.test.js'));
     assert.ok(securityEvidence.includes('src/web/app.js'));
     assert.ok(securityEvidence.includes('Authorization: Bearer'));
+    assert.ok(securityEvidence.includes('LINKE_READ_TOKEN'));
+    assert.ok(securityEvidence.includes('LINKE_WRITE_TOKEN'));
+    assert.ok(securityEvidence.includes('403 Forbidden'));
+    assert.ok(securityEvidence.includes('auth.forbidden'));
     assert.doesNotMatch(securityItem.nextStep, /Web token UX/i);
     assert.match(securityItem.nextStep, /authorization|secret|production/i);
 

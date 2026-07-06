@@ -148,6 +148,26 @@ function normalizeAuthToken(authToken) {
   return token;
 }
 
+function normalizeReadToken(readToken) {
+  if (readToken === undefined || readToken === null) return '';
+  if (typeof readToken !== 'string') throw new Error('readToken must be a string');
+  const token = readToken.trim();
+  if (readToken.length > 0 && !token) {
+    throw new Error('readToken must be a non-empty string when provided');
+  }
+  return token;
+}
+
+function normalizeWriteToken(writeToken) {
+  if (writeToken === undefined || writeToken === null) return '';
+  if (typeof writeToken !== 'string') throw new Error('writeToken must be a string');
+  const token = writeToken.trim();
+  if (writeToken.length > 0 && !token) {
+    throw new Error('writeToken must be a non-empty string when provided');
+  }
+  return token;
+}
+
 function authTokensMatch(actualToken, expectedToken) {
   const actual = Buffer.from(actualToken);
   const expected = Buffer.from(expectedToken);
@@ -228,9 +248,11 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rateLimit, auditRetention } = {}) {
+export function createServer({ dataDir, backupHooks, authToken, readToken, writeToken, restoreRoot, rateLimit, auditRetention } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
+  const expectedReadToken = normalizeReadToken(readToken);
+  const expectedWriteToken = normalizeWriteToken(writeToken);
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
 
@@ -256,16 +278,57 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
         }
       }
 
-      if (isApiPath(pathname) && !isAuthorizedRequest(req, expectedAuthToken)) {
-        await recordAudit(dataDir, {
-          type: 'auth.denied',
-          method,
-          path: pathname,
-          statusCode: 401,
-          outcome: 'denied',
-          requestId,
-        }, auditRetention);
-        return sendError(res, 401, 'Unauthorized');
+      if (isApiPath(pathname)) {
+        const hasAuth = expectedAuthToken || expectedReadToken || expectedWriteToken;
+        if (hasAuth) {
+          const header = req.headers.authorization;
+          let authorized = false;
+          let isWriteAllowed = false;
+
+          if (typeof header === 'string' && header.startsWith('Bearer ')) {
+            const token = header.slice('Bearer '.length);
+
+            const matchesAuth = expectedAuthToken && authTokensMatch(token, expectedAuthToken);
+            const matchesWrite = expectedWriteToken && authTokensMatch(token, expectedWriteToken);
+            const matchesRead = expectedReadToken && authTokensMatch(token, expectedReadToken);
+
+            if (matchesAuth || matchesWrite) {
+              authorized = true;
+              isWriteAllowed = true;
+            } else if (matchesRead) {
+              authorized = true;
+              isWriteAllowed = false;
+            }
+          }
+
+          if (!authorized) {
+            await recordAudit(dataDir, {
+              type: 'auth.denied',
+              method,
+              path: pathname,
+              statusCode: 401,
+              outcome: 'denied',
+              requestId,
+            }, auditRetention);
+            return sendError(res, 401, 'Unauthorized');
+          }
+
+          if (!isWriteAllowed) {
+            const isWriteRoute =
+              (method === 'POST' && (pathname === '/api/heartbeat' || pathname === '/api/backups' || pathname === '/api/restore'));
+            if (isWriteRoute) {
+              await recordAudit(dataDir, {
+                type: 'auth.forbidden',
+                method,
+                path: pathname,
+                statusCode: 403,
+                outcome: 'forbidden',
+                requestId,
+              }, auditRetention);
+              return sendError(res, 403, 'Forbidden');
+            }
+          }
+        }
       }
 
       // GET /api/health
@@ -634,19 +697,21 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const host = process.env.HOST || '127.0.0.1';
   const dataDir = process.env.DATA_DIR || resolve(join(process.cwd(), 'data'));
   const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
+  const readToken = process.env.LINKE_READ_TOKEN;
+  const writeToken = process.env.LINKE_WRITE_TOKEN;
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
   const auditRetention = parseAuditRetentionMaxEvents(process.env.LINKE_AUDIT_MAX_EVENTS);
 
-  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot, rateLimit, auditRetention });
+  const server = createServer({ dataDir, authToken, readToken, writeToken, restoreRoot: normalizedRestoreRoot, rateLimit, auditRetention });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
     if (normalizedRestoreRoot) {
       console.log(`Restore root: ${normalizedRestoreRoot}`);
     }
-    if (normalizeAuthToken(authToken)) {
+    if (authToken || readToken || writeToken) {
       console.log('API bearer token authentication: enabled');
     }
     if (rateLimit) {
