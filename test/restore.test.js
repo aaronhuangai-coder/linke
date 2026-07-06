@@ -56,6 +56,34 @@ async function createRestoreFixture(options = {}) {
   };
 }
 
+async function createDirectoryRestoreFixture(options = {}) {
+  const dataDir = await mkdtemp(join(tmpdir(), 'linke-rest-'));
+  const restoreRoot = options.restoreRoot || null;
+  const server = createServer({ dataDir, restoreRoot });
+  await new Promise((r) => server.listen(0, r));
+  const port = server.address().port;
+
+  const sourceDir = join(dataDir, 'source-tree');
+  await mkdir(join(sourceDir, 'nested'), { recursive: true });
+  await writeFile(join(sourceDir, 'nested', 'inside.txt'), options.content || 'nested restore content');
+
+  const backupRes = await postJSON(port, '/api/backups', {
+    deviceId: 'restore-root-guard',
+    sourcePath: sourceDir,
+  });
+  assert.strictEqual(backupRes.status, 201);
+  const snapshot = await backupRes.json();
+
+  return {
+    dataDir,
+    restoreRoot,
+    server,
+    port,
+    snapshotId: snapshot.snapshotId,
+    content: options.content || 'nested restore content',
+  };
+}
+
 async function cleanupRestoreFixture(fixture) {
   if (!fixture) return;
   await new Promise((r) => fixture.server.close(r));
@@ -215,6 +243,56 @@ describe('Restore target guard — optional restoreRoot', () => {
         error: 'targetPath is outside the allowed restore root',
       });
       assert.strictEqual(await pathExists(join(outsideRoot, 'blocked', 'important.txt')), false);
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects existing destination file symlinks without overwriting root-outside files', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-outside-'));
+    const fixture = await createRestoreFixture({ restoreRoot });
+    try {
+      const targetDir = join(await realpath(restoreRoot), 'symlink-file-target');
+      await mkdir(targetDir, { recursive: true });
+      const outsideFile = join(outsideRoot, 'outside.txt');
+      await writeFile(outsideFile, 'outside original');
+      await symlink(outsideFile, join(targetDir, 'important.txt'), 'file');
+
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'symlink-file-target',
+      });
+
+      assert.strictEqual(restoreRes.status, 400);
+      assert.deepStrictEqual(await restoreRes.json(), { error: 'Restore target path is not allowed' });
+      assert.strictEqual(await readFile(outsideFile, 'utf-8'), 'outside original');
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects destination parent symlinks without writing nested files outside restoreRoot', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-restore-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-restore-outside-'));
+    const fixture = await createDirectoryRestoreFixture({ restoreRoot });
+    try {
+      const targetDir = join(await realpath(restoreRoot), 'symlink-parent-target');
+      await mkdir(targetDir, { recursive: true });
+      await symlink(outsideRoot, join(targetDir, 'nested'), 'dir');
+
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'symlink-parent-target',
+      });
+
+      assert.strictEqual(restoreRes.status, 400);
+      assert.deepStrictEqual(await restoreRes.json(), { error: 'Restore target path is not allowed' });
+      assert.strictEqual(await pathExists(join(outsideRoot, 'inside.txt')), false);
     } finally {
       await cleanupRestoreFixture(fixture);
       await rm(outsideRoot, { recursive: true, force: true });

@@ -246,6 +246,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.56/, 'V0.56');
   });
 
+  it('mentions V0.57 (restore destination symlink defense)', () => {
+    assertReadmeContains(/V0\.57/, 'V0.57');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1324,14 +1328,14 @@ describe('README — V0.55 server request/error hardening', () => {
 });
 
 describe('README — V0.56 restore target guard', () => {
-  it('title and badge claim V0.56 as current', () => {
-    assert.match(readme, /^# Linke V0\.56/m);
-    assert.match(readme, /当前版本：V0\.56/);
+  it('title and badge no longer claim V0.56 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.56/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.56/);
   });
 
-  it('version table marks V0.55 historical and V0.56 current', () => {
+  it('version table marks V0.55 and V0.56 historical', () => {
     assert.match(readme, /\| V0\.55 \| 历史版本 \|[^|]*(请求体|body|413|500|Internal Server Error)/i);
-    assert.match(readme, /\| V0\.56 \| 当前版本 \|[^|]*(LINKE_RESTORE_ROOT|restoreRoot|targetPath|symlink|恢复)/i);
+    assert.match(readme, /\| V0\.56 \| 历史版本 \|[^|]*(LINKE_RESTORE_ROOT|restoreRoot|targetPath|symlink|恢复)/i);
   });
 
   it('documents restoreRoot guard behavior and safe failure', () => {
@@ -1342,6 +1346,32 @@ describe('README — V0.56 restore target guard', () => {
     assert.match(readme, /symlink|realpath/i);
     assert.match(readme, /targetPath is outside the allowed restore root/);
     assert.match(readme, /400/);
+  });
+
+  it('keeps Gold readiness blocked while production hardening is only partial', () => {
+    assert.match(readme, /production-hardening[\s\S]*(partial|部分)|生产.*硬化[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.57 restore destination symlink defense', () => {
+  it('title and badge claim V0.57 as current', () => {
+    assert.match(readme, /^# Linke V0\.57/m);
+    assert.match(readme, /当前版本：V0\.57/);
+  });
+
+  it('version table marks V0.56 historical and V0.57 current', () => {
+    assert.match(readme, /\| V0\.56 \| 历史版本 \|[^|]*(LINKE_RESTORE_ROOT|restoreRoot|targetPath|symlink|恢复)/i);
+    assert.match(readme, /\| V0\.57 \| 当前版本 \|[^|]*(O_NOFOLLOW|symlink|Restore|恢复|写入)/i);
+  });
+
+  it('documents destination symlink write protection and compatibility boundary', () => {
+    assert.match(readme, /O_NOFOLLOW/);
+    assert.match(readme, /目标文件.*symlink|symlink.*目标文件/i);
+    assert.match(readme, /中间目录.*symlink|symlink.*中间目录/i);
+    assert.match(readme, /Restore target path is not allowed/);
+    assert.match(readme, /未设置.*LINKE_RESTORE_ROOT|without.*LINKE_RESTORE_ROOT|localhost.*兼容/i);
   });
 
   it('keeps Gold readiness blocked while production hardening is only partial', () => {

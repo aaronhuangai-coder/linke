@@ -1,5 +1,7 @@
-import { mkdir, readFile, writeFile, rename, readdir, stat, copyFile } from 'node:fs/promises';
-import { join, resolve, normalize, basename, relative } from 'node:path';
+import { constants } from 'node:fs';
+import { mkdir, readFile, writeFile, rename, readdir, stat, copyFile, lstat, realpath, open } from 'node:fs/promises';
+import { join, resolve, normalize, basename, relative, dirname, isAbsolute } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 
@@ -50,9 +52,90 @@ async function ensureDir(dir) {
   await mkdir(dir, { recursive: true });
 }
 
-async function copyFileSafe(src, dest) {
-  await ensureDir(resolve(dest, '..'));
-  await copyFile(src, dest);
+export class RestoreTargetError extends Error {
+  constructor() {
+    super('Restore target path is not allowed');
+    this.statusCode = 400;
+  }
+}
+
+function isPathInsideRoot(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+async function ensureDirInsideRestoreRoot(dir, restoreRoot) {
+  const root = resolve(restoreRoot);
+  const targetDir = resolve(dir);
+  if (!isPathInsideRoot(root, targetDir)) throw new RestoreTargetError();
+
+  const rel = relative(root, targetDir);
+  let current = root;
+  for (const part of rel ? rel.split('/') : []) {
+    if (!part) continue;
+    current = join(current, part);
+    let entry;
+    try {
+      entry = await lstat(current);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      try {
+        await mkdir(current);
+      } catch (mkdirErr) {
+        if (mkdirErr.code !== 'EEXIST') throw mkdirErr;
+      }
+      try {
+        entry = await lstat(current);
+      } catch (lstatErr) {
+        if (lstatErr.code === 'ENOENT') throw new RestoreTargetError();
+        throw lstatErr;
+      }
+    }
+
+    if (entry.isSymbolicLink() || !entry.isDirectory()) throw new RestoreTargetError();
+    const realCurrent = await realpath(current);
+    if (!isPathInsideRoot(root, realCurrent)) throw new RestoreTargetError();
+  }
+}
+
+async function copyFileNoFollow(src, dest) {
+  let sourceHandle;
+  let targetHandle;
+  try {
+    sourceHandle = await open(src, 'r');
+    targetHandle = await open(
+      dest,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o666,
+    );
+    await pipeline(sourceHandle.createReadStream(), targetHandle.createWriteStream());
+  } catch (err) {
+    if (err.code === 'ELOOP') throw new RestoreTargetError();
+    throw err;
+  } finally {
+    await Promise.allSettled([
+      sourceHandle?.close(),
+      targetHandle?.close(),
+    ]);
+  }
+}
+
+async function copyFileSafe(src, dest, options = {}) {
+  const restoreRoot = options.restoreRoot;
+  if (!restoreRoot) {
+    await ensureDir(resolve(dest, '..'));
+    await copyFile(src, dest);
+    return;
+  }
+
+  await ensureDirInsideRestoreRoot(dirname(dest), restoreRoot);
+  try {
+    const entry = await lstat(dest);
+    if (entry.isSymbolicLink() || entry.isDirectory()) throw new RestoreTargetError();
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  await copyFileNoFollow(src, dest);
 }
 
 /**
@@ -73,17 +156,21 @@ export function shouldExclude(name, excludePatterns) {
   return false;
 }
 
-async function copyDirRecursive(src, dest, excludePatterns = []) {
-  await ensureDir(dest);
+async function copyDirRecursive(src, dest, excludePatterns = [], options = {}) {
+  if (options.restoreRoot) {
+    await ensureDirInsideRestoreRoot(dest, options.restoreRoot);
+  } else {
+    await ensureDir(dest);
+  }
   const entries = await readdir(src, { withFileTypes: true });
   for (const entry of entries) {
     if (shouldExclude(entry.name, excludePatterns)) continue;
     const srcPath = join(src, entry.name);
     const destPath = join(dest, entry.name);
     if (entry.isDirectory()) {
-      await copyDirRecursive(srcPath, destPath, excludePatterns);
+      await copyDirRecursive(srcPath, destPath, excludePatterns, options);
     } else {
-      await copyFileSafe(srcPath, destPath);
+      await copyFileSafe(srcPath, destPath, options);
     }
   }
 }
@@ -262,7 +349,7 @@ export async function getSnapshotManifest(dataDir, deviceId, snapshotId) {
 
 // ── Restore ────────────────────────────────────────────────────────
 
-export async function restoreSnapshot(dataDir, { deviceId, snapshotId, targetPath }) {
+export async function restoreSnapshot(dataDir, { deviceId, snapshotId, targetPath, restoreRoot }) {
   const { deviceDir } = safeDevicePath(dataDir, deviceId);
 
   // Validate snapshotId format (UUID-like, no traversal)
@@ -280,8 +367,12 @@ export async function restoreSnapshot(dataDir, { deviceId, snapshotId, targetPat
     throw new Error(`Snapshot not found: ${snapshotId}`);
   }
 
-  await ensureDir(targetPath);
-  await copyDirRecursive(filesDir, targetPath);
+  if (restoreRoot) {
+    await ensureDirInsideRestoreRoot(targetPath, restoreRoot);
+  } else {
+    await ensureDir(targetPath);
+  }
+  await copyDirRecursive(filesDir, targetPath, [], { restoreRoot });
 
   return { restored: true, snapshotId, targetPath };
 }

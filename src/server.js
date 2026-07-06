@@ -316,6 +316,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot } = 
           deviceId: body.deviceId,
           snapshotId: body.snapshotId,
           targetPath,
+          restoreRoot: normalizedRestoreRoot,
         });
         return sendJSON(res, 200, result);
       }
