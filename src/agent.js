@@ -18,6 +18,7 @@
  *   health              — check release health status
  *   auth-status         — show sanitized auth status
  *   hardening-status    — show sanitized hardening status
+ *   supervisor-status   — show sanitized supervisor status
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -52,6 +53,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = resolve(join(__dirname, '..'));
 const GOLD_READINESS_STATUSES = new Set(['ready', 'partial', 'blocked']);
+const SUPERVISOR_FALSE_FIELDS = [
+  'installed',
+  'managed',
+  'launchdConfigured',
+  'watchdogConfigured',
+  'monitoringConfigured',
+  'recoveryConfigured',
+];
+const SUPERVISOR_SAFETY_FALSE_FIELDS = [
+  'launchctlCalled',
+  'processListRead',
+  'supervisorInstalled',
+  'metadataWritten',
+  'nasConnected',
+  'backupTriggered',
+  'restoreTriggered',
+  'remoteCommandExecuted',
+];
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
@@ -71,6 +90,26 @@ async function request(server, path, method, body, options = {}) {
 function validateGoldReadinessReport(report) {
   if (!report || typeof report !== 'object' || !GOLD_READINESS_STATUSES.has(report.status)) {
     throw new Error('gold-readiness response has invalid status');
+  }
+  return report;
+}
+
+function hasOnlyFalseBooleans(obj, fields) {
+  return fields.every((field) => obj?.[field] === false);
+}
+
+function validateSupervisorStatusResponse(report) {
+  if (
+    !report ||
+    typeof report !== 'object' ||
+    report.status !== 'partial' ||
+    report.service !== 'linke' ||
+    typeof report.version !== 'string' ||
+    report.supervisor?.state !== 'not_configured' ||
+    !hasOnlyFalseBooleans(report.supervisor, SUPERVISOR_FALSE_FIELDS) ||
+    !hasOnlyFalseBooleans(report.safety, SUPERVISOR_SAFETY_FALSE_FIELDS)
+  ) {
+    throw new Error('supervisor-status response has invalid schema');
   }
   return report;
 }
@@ -232,6 +271,7 @@ Commands:
   health              Check release health status
   auth-status         Show sanitized auth status
   hardening-status    Show sanitized hardening status
+  supervisor-status   Show sanitized supervisor status
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -452,6 +492,12 @@ export async function main() {
 
       case 'hardening-status': {
         const result = await apiRequest('/api/hardening-status', 'GET');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'supervisor-status': {
+        const result = validateSupervisorStatusResponse(await apiRequest('/api/supervisor-status', 'GET'));
         console.log(JSON.stringify(result, null, 2));
         break;
       }

@@ -283,6 +283,33 @@ export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {
   };
 }
 
+export function buildSupervisorStatusResponse() {
+  return {
+    status: 'partial',
+    service: 'linke',
+    version: LINKE_RELEASE_VERSION,
+    supervisor: {
+      installed: false,
+      managed: false,
+      launchdConfigured: false,
+      watchdogConfigured: false,
+      monitoringConfigured: false,
+      recoveryConfigured: false,
+      state: 'not_configured',
+    },
+    safety: {
+      launchctlCalled: false,
+      processListRead: false,
+      supervisorInstalled: false,
+      metadataWritten: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+    },
+  };
+}
+
 export function buildHardeningStatusResponse({
   authToken,
   readToken,
@@ -440,6 +467,11 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           rateLimit: apiRateLimiter,
           auditRetention,
         }));
+      }
+
+      // GET /api/supervisor-status
+      if (method === 'GET' && pathname === '/api/supervisor-status') {
+        return sendJSON(res, 200, buildSupervisorStatusResponse());
       }
 
       // GET /api/release-readiness

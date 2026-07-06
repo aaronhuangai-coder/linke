@@ -1737,16 +1737,16 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.76 Agent auth-status CLI', () => {
-  it('title and badge claim V0.76 as current', () => {
-    assertReadmeContains(/# Linke V0\.76/, 'README title should mention V0.76');
-    assertReadmeContains(/\*\*当前版本：V0\.76\*\*/, 'README badge should mention V0.76');
+describe('README — V0.77 Supervisor status API/CLI', () => {
+  it('title and badge claim V0.77 as current', () => {
+    assertReadmeContains(/# Linke V0\.77/, 'README title should mention V0.77');
+    assertReadmeContains(/\*\*当前版本：V0\.77\*\*/, 'README badge should mention V0.77');
   });
 
-  it('version table marks V0.75 historical and V0.76 current', () => {
-    assertReadmeContains(/\| V0\.74 \| 历史版本 \|[^|]*(audit-log|审计日志|Web|面板)/i, 'V0.74 should be historical audit-log Web panel milestone');
+  it('version table marks V0.75 and V0.76 historical and V0.77 current', () => {
     assertReadmeContains(/\| V0\.75 \| 历史版本 \|[^|]*(gold-readiness|Gold readiness|fail-on-blocked|自动化门禁)/i, 'V0.75 should be historical Agent Gold readiness CLI milestone');
-    assertReadmeContains(/\| V0\.76 \| 当前版本 \|[^|]*(auth-status|认证状态|--token|token material)/i, 'V0.76 should be current Agent auth-status CLI milestone');
+    assertReadmeContains(/\| V0\.76 \| 历史版本 \|[^|]*(auth-status|认证状态|--token|token material)/i, 'V0.76 should be historical Agent auth-status CLI milestone');
+    assertReadmeContains(/\| V0\.77 \| 当前版本 \|[^|]*(supervisor-status|supervisor|not_configured|托管|守护)/i, 'V0.77 should be current supervisor-status milestone');
   });
 
   it('keeps documenting hardening-status API, CLI, and Web panel safety boundaries', () => {
@@ -1808,7 +1808,21 @@ describe('README — V0.76 Agent auth-status CLI', () => {
     assertReadmeContains(/Agent auth-status CLI/, 'README should document Agent auth-status test coverage');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.76', () => {
+  it('documents supervisor-status API and CLI safety boundaries', () => {
+    assertReadmeContains(/agent\.js supervisor-status|node src\/agent\.js supervisor-status/, 'README should document supervisor-status CLI');
+    assertReadmeContains(/GET \/api\/supervisor-status/, 'README should document supervisor-status endpoint');
+    assertReadmeContains(/--token/, 'README should document supervisor-status token option');
+    assertReadmeContains(/not_configured|installed:false|managed:false/, 'README should document not_configured supervisor state');
+    assertReadmeContains(/launchctlCalled:false|不调用 launchctl/i, 'README should document no launchctl call');
+    assertReadmeContains(/processListRead:false|不读取进程/i, 'README should document no process list read');
+    assertReadmeContains(/supervisorInstalled:false|不安装/i, 'README should document no supervisor installation');
+    assertReadmeContains(/metadataWritten:false|不写入\s*metadata|不写入\s*元数据/i, 'README should document no metadata writes');
+    assertReadmeContains(/nasConnected:false|不连接 NAS/i, 'README should document no NAS connection');
+    assertReadmeContains(/backupTriggered:false|restoreTriggered:false|remoteCommandExecuted:false|不触发备份|不触发恢复|不执行远程命令/i, 'README should document no backup/restore/remote command');
+    assertReadmeContains(/Agent supervisor-status CLI|buildSupervisorStatusResponse|GET \/api\/supervisor-status/, 'README should document supervisor-status test coverage');
+  });
+
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.77', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

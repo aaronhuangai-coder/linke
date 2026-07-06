@@ -532,3 +532,111 @@ describe('GET /api/hardening-status', () => {
     }
   });
 });
+
+describe('GET /api/supervisor-status', () => {
+  it('returns sanitized not-configured supervisor status and does not mutate dataDir', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-status-open-'));
+    const server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      assert.deepStrictEqual(await readdir(dataDir), []);
+      const res = await fetch(`http://localhost:${port}/api/supervisor-status`);
+      assert.strictEqual(res.status, 200);
+      assert.match(res.headers.get('content-type') || '', /application\/json/);
+      const body = await res.json();
+
+      assert.deepStrictEqual(body, {
+        status: 'partial',
+        service: 'linke',
+        version: LINKE_RELEASE_VERSION,
+        supervisor: {
+          installed: false,
+          managed: false,
+          launchdConfigured: false,
+          watchdogConfigured: false,
+          monitoringConfigured: false,
+          recoveryConfigured: false,
+          state: 'not_configured',
+        },
+        safety: {
+          launchctlCalled: false,
+          processListRead: false,
+          supervisorInstalled: false,
+          metadataWritten: false,
+          nasConnected: false,
+          backupTriggered: false,
+          restoreTriggered: false,
+          remoteCommandExecuted: false,
+        },
+      });
+      assert.ok(!JSON.stringify(body).includes(dataDir), 'response must not leak dataDir');
+      assert.deepStrictEqual(await readdir(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows readToken to read supervisor status without returning token material', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-status-read-'));
+    const server = createServer({ dataDir, readToken: 'read-supervisor-token', writeToken: 'write-supervisor-token' });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/supervisor-status`, {
+        headers: { Authorization: 'Bearer read-supervisor-token' },
+      });
+      assert.strictEqual(res.status, 200);
+      const bodyText = await res.text();
+      const body = JSON.parse(bodyText);
+
+      assert.strictEqual(body.supervisor.state, 'not_configured');
+      assert.doesNotMatch(bodyText, /read-supervisor-token|write-supervisor-token|Bearer/);
+      assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unknown tokens before returning supervisor fields', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-status-denied-'));
+    const server = createServer({ dataDir, readToken: 'read-supervisor-token' });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/supervisor-status`, {
+        headers: { Authorization: 'Bearer unknown-supervisor-token' },
+      });
+      assert.strictEqual(res.status, 401);
+      const body = await res.json();
+      assert.deepStrictEqual(body, { error: 'Unauthorized' });
+      assert.doesNotMatch(JSON.stringify(body), /supervisor|read-supervisor-token|unknown-supervisor-token/);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not implement mutating methods for /api/supervisor-status', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-supervisor-status-methods-'));
+    const server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+        const res = await fetch(`http://localhost:${port}/api/supervisor-status`, { method });
+        assert.strictEqual(res.status, 404, `${method} /api/supervisor-status must return 404`);
+        assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});

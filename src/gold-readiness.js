@@ -86,8 +86,15 @@ const GOLD_READINESS_ITEMS = [
     evidence: [
       'test/agent-run-once.test.js',
       'test/launchd-dry-run.test.js',
+      'GET /api/supervisor-status',
+      'src/server.js buildSupervisorStatusResponse',
+      'src/agent.js supervisor-status',
+      'test/agent-supervisor-status.test.js',
+      'test/health.test.js supervisor-status',
+      'supervisor.state:not_configured',
+      'supervisorInstalled:false',
     ],
-    nextStep: 'Add installer and managed daemon lifecycle only after auth and production boundaries are designed.',
+    nextStep: 'V0.77 only reports a sanitized not_configured supervisor status; add installer, launchd install/start, watchdog, monitoring, and managed daemon lifecycle only after auth and production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -154,6 +161,12 @@ const GOLD_READINESS_ITEMS = [
       'src/server.js buildHardeningStatusResponse',
       'test/agent-hardening-status.test.js',
       'src/agent.js hardening-status',
+      'GET /api/supervisor-status',
+      'src/server.js buildSupervisorStatusResponse',
+      'test/agent-supervisor-status.test.js',
+      'src/agent.js supervisor-status',
+      'supervisor.state:not_configured',
+      'supervisorInstalled:false',
       'src/web/app.js buildHardeningStatusViewModel',
       'test/web-console.test.js hardening-status panel',
       'LINKE_AUDIT_MAX_EVENTS',
@@ -170,7 +183,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 
