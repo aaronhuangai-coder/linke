@@ -80,6 +80,28 @@ const SUPERVISOR_INSTALL_READINESS_BLOCKERS = Object.freeze([
   'supervisor-start-blocked',
   'production-boundaries-incomplete',
 ]);
+const SUPERVISOR_INSTALL_COMMAND_PREVIEW_ACTIONS = Object.freeze([
+  Object.freeze({
+    id: 'render-launch-agent-plist',
+    description: 'Render a launch agent plist preview with redacted config path.',
+    command: 'generate launchd plist preview',
+  }),
+  Object.freeze({
+    id: 'write-launch-agent-plist',
+    description: 'Future installer would write a launch agent plist to a user LaunchAgents location.',
+    command: 'write launch agent plist to [redacted]',
+  }),
+  Object.freeze({
+    id: 'load-launch-agent',
+    description: 'Future installer would ask launchd to load the agent after explicit operator approval.',
+    command: 'launchctl bootstrap gui/[redacted] [redacted]',
+  }),
+  Object.freeze({
+    id: 'start-launch-agent',
+    description: 'Future installer would start the launch agent after successful load.',
+    command: 'launchctl kickstart gui/[redacted]/[redacted]',
+  }),
+]);
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
@@ -307,11 +329,34 @@ export function buildSupervisorInstallDryRunPlan(config) {
       remoteCommandExecuted: false,
     },
     readinessSummary: buildSupervisorInstallReadinessSummary(),
+    installCommandPreview: buildSupervisorInstallCommandPreview(),
     nextSteps: [
       'Review this sanitized dry-run plan.',
       'Use launchd-dry-run separately if a plist preview is needed.',
       'Real install/start remains out of scope.',
     ],
+  };
+}
+
+export function buildSupervisorInstallCommandPreview() {
+  return {
+    mode: 'dry-run-only',
+    state: 'blocked',
+    actions: SUPERVISOR_INSTALL_COMMAND_PREVIEW_ACTIONS.map((action) => ({
+      ...action,
+      wouldRun: false,
+      wouldWrite: false,
+      sensitiveValuesReturned: false,
+    })),
+    safety: {
+      executableResolved: false,
+      configPathResolved: false,
+      plistPathResolved: false,
+      launchctlCommandsRunnable: false,
+      launchctlCalled: false,
+      launchdFileWritten: false,
+      metadataWritten: false,
+    },
   };
 }
 

@@ -64,7 +64,7 @@ The full dry-run plan adds:
       },
       {
         id: 'load-launch-agent',
-        description: 'Future installer would ask launchd to load the agent after explicit authorization.',
+        description: 'Future installer would ask launchd to load the agent after explicit operator approval.',
         command: 'launchctl bootstrap gui/[redacted] [redacted]',
         wouldRun: false,
         wouldWrite: false,

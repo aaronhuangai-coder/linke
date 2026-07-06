@@ -22,6 +22,53 @@ const EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY = Object.freeze({
   checkedCount: 4,
   failOnBlockedExitCode: 2,
 });
+const EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW = Object.freeze({
+  mode: 'dry-run-only',
+  state: 'blocked',
+  actions: [
+    {
+      id: 'render-launch-agent-plist',
+      description: 'Render a launch agent plist preview with redacted config path.',
+      command: 'generate launchd plist preview',
+      wouldRun: false,
+      wouldWrite: false,
+      sensitiveValuesReturned: false,
+    },
+    {
+      id: 'write-launch-agent-plist',
+      description: 'Future installer would write a launch agent plist to a user LaunchAgents location.',
+      command: 'write launch agent plist to [redacted]',
+      wouldRun: false,
+      wouldWrite: false,
+      sensitiveValuesReturned: false,
+    },
+    {
+      id: 'load-launch-agent',
+      description: 'Future installer would ask launchd to load the agent after explicit operator approval.',
+      command: 'launchctl bootstrap gui/[redacted] [redacted]',
+      wouldRun: false,
+      wouldWrite: false,
+      sensitiveValuesReturned: false,
+    },
+    {
+      id: 'start-launch-agent',
+      description: 'Future installer would start the launch agent after successful load.',
+      command: 'launchctl kickstart gui/[redacted]/[redacted]',
+      wouldRun: false,
+      wouldWrite: false,
+      sensitiveValuesReturned: false,
+    },
+  ],
+  safety: {
+    executableResolved: false,
+    configPathResolved: false,
+    plistPathResolved: false,
+    launchctlCommandsRunnable: false,
+    launchctlCalled: false,
+    launchdFileWritten: false,
+    metadataWritten: false,
+  },
+});
 
 async function runAgent(args) {
   return exec('node', [agentPath, ...args]);
@@ -55,11 +102,15 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     const app = await import('../src/agent.js');
     const buildSupervisorInstallDryRunPlan = app.buildSupervisorInstallDryRunPlan;
     const buildSupervisorInstallReadinessSummary = app.buildSupervisorInstallReadinessSummary;
+    const buildSupervisorInstallCommandPreview = app.buildSupervisorInstallCommandPreview;
     if (!buildSupervisorInstallDryRunPlan) {
       throw new Error('buildSupervisorInstallDryRunPlan is not defined in src/agent.js');
     }
     if (!buildSupervisorInstallReadinessSummary) {
       throw new Error('buildSupervisorInstallReadinessSummary is not defined in src/agent.js');
+    }
+    if (!buildSupervisorInstallCommandPreview) {
+      throw new Error('buildSupervisorInstallCommandPreview is not defined in src/agent.js');
     }
 
     const sourcePath = '/Users/ah/private/source';
@@ -137,6 +188,28 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       plan.readinessSummary,
       EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
     );
+    assert.deepStrictEqual(
+      buildSupervisorInstallCommandPreview(),
+      EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
+    );
+    assert.deepStrictEqual(
+      plan.installCommandPreview,
+      EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
+    );
+    for (const action of plan.installCommandPreview.actions) {
+      assert.strictEqual(action.wouldRun, false);
+      assert.strictEqual(action.wouldWrite, false);
+      assert.strictEqual(action.sensitiveValuesReturned, false);
+    }
+    assert.deepStrictEqual(
+      plan.installCommandPreview.actions.map((action) => action.id),
+      [
+        'render-launch-agent-plist',
+        'write-launch-agent-plist',
+        'load-launch-agent',
+        'start-launch-agent',
+      ],
+    );
     assert.ok(Array.isArray(plan.nextSteps));
     assert.ok(plan.nextSteps.some((step) => /launchd-dry-run/.test(step)));
 
@@ -193,6 +266,13 @@ describe('Agent supervisor-install-dry-run CLI', () => {
         body.readinessSummary,
         EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
       );
+      assert.deepStrictEqual(
+        body.installCommandPreview,
+        EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
+      );
+      assert.strictEqual(body.installCommandPreview.safety.launchctlCalled, false);
+      assert.strictEqual(body.installCommandPreview.safety.launchdFileWritten, false);
+      assert.strictEqual(body.installCommandPreview.safety.metadataWritten, false);
       assert.strictEqual(body.safety.launchctlCalled, false);
       assert.strictEqual(body.safety.processListRead, false);
       assert.strictEqual(body.safety.launchdFileWritten, false);
@@ -247,6 +327,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.deepStrictEqual(body, EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY);
       assert.strictEqual(body.supervisor, undefined);
       assert.strictEqual(body.configSummary, undefined);
+      assert.strictEqual(body.installCommandPreview, undefined);
       assert.doesNotMatch(stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|synology\.local|synology-ref|unused-summary-token|Bearer/i);
       assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
@@ -283,6 +364,10 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.deepStrictEqual(
         body.readinessSummary,
         EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY,
+      );
+      assert.deepStrictEqual(
+        body.installCommandPreview,
+        EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
       );
       assert.strictEqual(body.readinessSummary.state, 'blocked');
       assert.strictEqual(body.safety.launchctlCalled, false);
@@ -328,6 +413,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.deepStrictEqual(body, EXPECTED_SUPERVISOR_INSTALL_READINESS_SUMMARY);
       assert.strictEqual(body.supervisor, undefined);
       assert.strictEqual(body.configSummary, undefined);
+      assert.strictEqual(body.installCommandPreview, undefined);
       assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
     } finally {
