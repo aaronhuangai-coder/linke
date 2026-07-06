@@ -1811,6 +1811,14 @@ describe('README — V0.82 Supervisor install preflight gate', () => {
     assertReadmeContains(/Agent gold-readiness CLI|Agent gold-readiness fail-on-blocked/, 'README should document Agent gold-readiness test coverage');
   });
 
+  it('keeps later Gold readiness sections synced to V0.82 preflight evidence', () => {
+    assertReadmeContains(/Agent CLI[\s\S]*?V0\.82[\s\S]*?installPreflight/i, 'README Agent CLI Gold section should mention V0.82 installPreflight');
+    assertReadmeContains(/Gold blockers[\s\S]*?V0\.82[\s\S]*?buildSupervisorInstallPreflight[\s\S]*?installPreflight\.state:"blocked"[\s\S]*?installPreflight\.checks:requiredForInstall:true/i, 'README Gold blockers section should mention V0.82 preflight evidence');
+    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.82[\s\S]*?buildSupervisorInstallPreflight[\s\S]*?installPreflight\.state:"blocked"[\s\S]*?installPreflight\.checks:requiredForInstall:true/i, 'README partial hardening section should mention V0.82 preflight evidence');
+    assertReadmeDoesNotContain(/Gold blockers\*\*：V0\.81 基于/, 'README Gold blockers section should not keep V0.81 as current evidence');
+    assertReadmeDoesNotContain(/NAS、认证和生产硬化仍是 partial\*\*：V0\.81 基于/, 'README partial hardening section should not keep V0.81 as current evidence');
+  });
+
   it('documents Agent auth-status CLI safety boundaries', () => {
     assertReadmeContains(/agent\.js auth-status|node src\/agent\.js auth-status/, 'README should document auth-status CLI');
     assertReadmeContains(/GET \/api\/auth-status/, 'README should document auth-status endpoint');
