@@ -399,7 +399,7 @@ Observed:
 - Consumes: `LINKE_RELEASE_VERSION`, `buildGoldReadinessReport({ now })`, README contract tests
 - Produces: V0.82 version metadata, README current version row, Gold evidence strings for `buildSupervisorInstallPreflight` and `installPreflight.state:blocked`
 
-- [ ] **Step 1: Update RED version tests**
+- [x] **Step 1: Update RED version tests**
 
 In `test/version.test.js`, change:
 
@@ -436,7 +436,7 @@ Do not change the summary count test; expected summary remains:
 assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
 ```
 
-- [ ] **Step 2: Add RED Gold evidence assertions**
+- [x] **Step 2: Add RED Gold evidence assertions**
 
 In `test/gold-readiness.test.js`, find the automation-installation / production-hardening evidence tests. Add assertions equivalent to:
 
@@ -466,7 +466,7 @@ assert.ok(hardeningItem.nextStep.includes('recovery supervisor'));
 
 Use the existing local test structure rather than creating duplicate `report` variables if that file already groups these items.
 
-- [ ] **Step 3: Add RED README tests**
+- [x] **Step 3: Add RED README tests**
 
 In `test/readme.test.js`, update V0.81 current-version expectations to V0.82. Add or update a section named:
 
@@ -502,7 +502,7 @@ describe('README — V0.82 Supervisor install preflight gate', () => {
 
 If helpers are named differently, use the existing `assertReadmeContains` / `assertReadmeDoesNotContain` helpers already present in `test/readme.test.js`.
 
-- [ ] **Step 4: Run RED docs/version tests**
+- [x] **Step 4: Run RED docs/version tests**
 
 Run:
 
@@ -512,7 +512,7 @@ node --test test/version.test.js test/gold-readiness.test.js test/readme.test.js
 
 Expected: FAIL because source version, README, and Gold evidence still say V0.81 and do not document `installPreflight`.
 
-- [ ] **Step 5: Bump release version**
+- [x] **Step 5: Bump release version**
 
 In `src/version.js`, change:
 
@@ -526,7 +526,7 @@ to:
 export const LINKE_RELEASE_VERSION = 'V0.82';
 ```
 
-- [ ] **Step 6: Update Gold readiness evidence**
+- [x] **Step 6: Update Gold readiness evidence**
 
 In `src/gold-readiness.js`, add these evidence strings to both `automation-installation.evidence` and `production-hardening.evidence` near the existing supervisor install dry-run entries:
 
@@ -556,7 +556,7 @@ status: 'partial',
 
 for both `automation-installation` and `production-hardening`; keep `real-nas-remote-backup` status `blocked`.
 
-- [ ] **Step 7: Update README**
+- [x] **Step 7: Update README**
 
 Update README consistently:
 
@@ -597,7 +597,7 @@ Update Gold boundary bullet:
 
 Search README for V0.81 current phrasing and update it to V0.82. V0.81 must be historical.
 
-- [ ] **Step 8: Run GREEN docs/version tests**
+- [x] **Step 8: Run GREEN docs/version tests**
 
 Run:
 
@@ -607,7 +607,7 @@ node --test test/version.test.js test/gold-readiness.test.js test/readme.test.js
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit Task 2**
+- [x] **Step 9: Commit Task 2**
 
 Run:
 

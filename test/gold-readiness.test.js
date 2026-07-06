@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.81', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.81');
+  it('expects LINKE_RELEASE_VERSION to be V0.82', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.82');
   });
 
-  it('expects report.version to be V0.81', () => {
-    const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.81');
+  it('expects report.version to be V0.82', () => {
+    const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
+    assert.strictEqual(report.version, 'V0.82');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -166,6 +166,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/health.test.js supervisor-status'));
     assert.ok(automationEvidence.includes('supervisor.state:not_configured'));
     assert.ok(automationEvidence.includes('supervisorInstalled:false'));
+    assert.ok(automationEvidence.includes('src/agent.js buildSupervisorInstallPreflight'));
+    assert.ok(automationEvidence.includes('installPreflight.state:blocked'));
+    assert.ok(automationEvidence.includes('installPreflight.checks:requiredForInstall:true'));
+    assert.ok(automationItem.nextStep.includes('V0.82'));
+    assert.ok(automationItem.nextStep.includes('preflight'));
+    assert.ok(automationItem.nextStep.includes('real installer'));
     assert.match(automationItem.nextStep, /readiness|gate|dry-run|not_configured|installer|launchd|watchdog|monitoring|managed daemon/i);
   });
 
@@ -245,6 +251,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor-status panel'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildHardeningStatusViewModel'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js hardening-status panel'));
+    assert.ok(hardeningEvidence.includes('src/agent.js buildSupervisorInstallPreflight'));
+    assert.ok(hardeningEvidence.includes('installPreflight.state:blocked'));
+    assert.ok(hardeningItem.nextStep.includes('preflight'));
+    assert.ok(hardeningItem.nextStep.includes('secret management'));
+    assert.ok(hardeningItem.nextStep.includes('monitoring'));
+    assert.ok(hardeningItem.nextStep.includes('recovery supervisor'));
     assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|rotation|retention|hardening-status/i);
 
     const nasItem = report.items.find(item => item.id === 'real-nas-remote-backup');

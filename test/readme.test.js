@@ -19,6 +19,11 @@ function assertReadmeContains(pattern, label) {
   assert.ok(re.test(readme), `README must mention: ${label}`);
 }
 
+function assertReadmeDoesNotContain(pattern, label) {
+  const re = typeof pattern === 'string' ? new RegExp(pattern, 'i') : pattern;
+  assert.ok(!re.test(readme), `README must NOT mention: ${label}`);
+}
+
 // ── Version coverage: V0.1 – V0.5 ──────────────────────────────────
 
 describe('README — version coverage', () => {
@@ -1737,20 +1742,24 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.81 Supervisor install command preview', () => {
-  it('title and badge claim V0.81 as current', () => {
-    assertReadmeContains(/# Linke V0\.81/, 'README title should mention V0.81');
-    assertReadmeContains(/\*\*当前版本：V0\.81\*\*/, 'README badge should mention V0.81');
+describe('README — V0.82 Supervisor install preflight gate', () => {
+  it('title and badge claim V0.82 as current', () => {
+    assertReadmeContains(/# Linke V0\.82/, 'README title should mention V0.82');
+    assertReadmeContains(/\*\*当前版本：V0\.82\*\*/, 'README badge should mention V0.82');
   });
 
-  it('version table marks V0.75 through V0.80 historical and V0.81 current', () => {
-    assertReadmeContains(/\| V0\.75 \| 历史版本 \|[^|]*(gold-readiness|Gold readiness|fail-on-blocked|自动化门禁)/i, 'V0.75 should be historical Agent Gold readiness CLI milestone');
-    assertReadmeContains(/\| V0\.76 \| 历史版本 \|[^|]*(auth-status|认证状态|--token|token material)/i, 'V0.76 should be historical Agent auth-status CLI milestone');
-    assertReadmeContains(/\| V0\.77 \| 历史版本 \|[^|]*(supervisor-status|supervisor|not_configured|托管|守护)/i, 'V0.77 should be historical supervisor-status API/CLI milestone');
-    assertReadmeContains(/\| V0\.78 \| 历史版本 \|[^|]*(supervisor-status-panel|Web Console|supervisor-status|not_configured)/i, 'V0.78 should be historical supervisor-status Web panel milestone');
-    assertReadmeContains(/\| V0\.79 \| 历史版本 \|[^|]*(supervisor-install-dry-run|install dry-run|安装计划|dry-run)/i, 'V0.79 should be historical supervisor-install-dry-run milestone');
-    assertReadmeContains(/\| V0\.80 \| 历史版本 \|[^|]*(readinessSummary|readiness-summary|fail-on-blocked|退出码 2|blocked)/i, 'V0.80 should be historical supervisor install readiness gate milestone');
-    assertReadmeContains(/\| V0\.81 \| 当前版本 \|[^|]*(installCommandPreview|command preview|wouldRun:false|wouldWrite:false|blocked)/i, 'V0.81 should be current supervisor install command preview milestone');
+  it('version table marks V0.81 historical and V0.82 current', () => {
+    assertReadmeContains(/\| V0\.81 \| 历史版本 \|[^|]*(installCommandPreview|command preview|wouldRun:false|wouldWrite:false|blocked)/i, 'V0.81 should be historical command preview milestone');
+    assertReadmeContains(/\| V0\.82 \| 当前版本 \|[^|]*(installPreflight|preflight|requiredForInstall:true|blocked)/i, 'V0.82 should be current preflight gate milestone');
+  });
+
+  it('documents installPreflight as full-output only and dry-run-only', () => {
+    assertReadmeContains(/installPreflight\.state:"blocked"/, 'README should document blocked preflight state');
+    assertReadmeContains(/installPreflight\.checks:requiredForInstall:true/, 'README should document required preflight checks');
+    assertReadmeContains(/--readiness-summary[^\\n]*(不输出|excludes)[^\\n]*installPreflight/i, 'README should say readiness summary excludes installPreflight');
+    assertReadmeContains(/不调用 launchctl|launchctlCalled:false/, 'README should keep launchctl boundary');
+    assertReadmeContains(/不写 LaunchAgents|launchdFileWritten:false/, 'README should keep launchd write boundary');
+    assertReadmeContains(/不连接 NAS|nasConnected:false/, 'README should keep NAS boundary');
   });
 
   it('keeps documenting hardening-status API, CLI, and Web panel safety boundaries', () => {
@@ -1865,9 +1874,11 @@ describe('README — V0.81 Supervisor install command preview', () => {
     assertReadmeContains(/--output.*not supported|不支持 --output|不会写输出文件/i, 'README should document --output is not supported');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.81', () => {
-    assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
-    assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.82', () => {
+    assertReadmeContains(/Gold[^\\n]*(blocked|阻塞|依旧 blocked|仍 blocked)/i, 'README should keep Gold blocked');
+    assertReadmeContains(/真实 installer|real installer|真实安装/, 'README should say real installer remains future work');
+    assertReadmeContains(/watchdog|monitoring|recovery supervisor|secret management/i, 'README should list remaining hardening gaps');
+    assertReadmeDoesNotContain(/Gold ready|production ready|real NAS remote backup ready|daemon installed|launchd installed|always-running|real installer implemented|production-ready supervisor|真实 NAS 备份已实现|生产可用/i, 'README should not claim production readiness');
   });
 });
 

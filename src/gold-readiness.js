@@ -96,6 +96,9 @@ const GOLD_READINESS_ITEMS = [
       'readinessSummary.state:blocked',
       'installCommandPreview.state:blocked',
       'installCommandPreview.actions:wouldRun:false',
+      'src/agent.js buildSupervisorInstallPreflight',
+      'installPreflight.state:blocked',
+      'installPreflight.checks:requiredForInstall:true',
       'GET /api/supervisor-status',
       'src/server.js buildSupervisorStatusResponse',
       'src/agent.js supervisor-status',
@@ -107,7 +110,7 @@ const GOLD_READINESS_ITEMS = [
       'supervisor.state:not_configured',
       'supervisorInstalled:false',
     ],
-    nextStep: 'V0.81 adds a sanitized non-runnable supervisor install command preview but still only reports not_configured supervisor state and blocked readiness; add real installer, launchd install/start, watchdog, monitoring, and managed daemon lifecycle only after auth and production boundaries are designed.',
+    nextStep: 'V0.82 adds a sanitized supervisor install preflight gate but still only reports blocked readiness and not_configured supervisor state; add real installer, launchd install/start, watchdog, monitoring, rollback, secret management, and managed daemon lifecycle only after production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -188,6 +191,9 @@ const GOLD_READINESS_ITEMS = [
       'readinessSummary.state:blocked',
       'installCommandPreview.state:blocked',
       'installCommandPreview.actions:wouldRun:false',
+      'src/agent.js buildSupervisorInstallPreflight',
+      'installPreflight.state:blocked',
+      'installPreflight.checks:requiredForInstall:true',
       'supervisor.state:not_configured',
       'supervisorInstalled:false',
       'src/web/app.js buildSupervisorStatusViewModel',
@@ -209,7 +215,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, and blocked install preflight checks; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, rollback, and recovery supervisor.',
   },
 ];
 
