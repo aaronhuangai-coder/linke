@@ -19,6 +19,8 @@ import { buildSnapshotDiffDryRunPlan } from './snapshot-diff.js';
 import { buildRestoreDryRunPlan, collectExistingTargetPaths } from './restore-dry-run.js';
 import { runBackupPreflightDryRun } from './backup-preflight.js';
 import { buildNasDryRunPlan } from './nas.js';
+import { validateConfig } from './config.js';
+import { buildSupervisorInstallDryRunPlan } from './agent.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
@@ -610,6 +612,29 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
 
         try {
           const plan = buildNasDryRunPlan(body);
+          return sendJSON(res, 200, plan);
+        } catch (err) {
+          return sendError(res, 400, err.message);
+        }
+      }
+
+      // POST /api/supervisor-install-dry-run
+      // Dry-run preview only. This POST is not a write operation and must not
+      // be copied for mutating routes without also updating API_WRITE_ROUTES.
+      if (method === 'POST' && pathname === '/api/supervisor-install-dry-run') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400) {
+            return sendError(res, 400, err.message);
+          }
+          throw err;
+        }
+
+        try {
+          const config = validateConfig(body);
+          const plan = buildSupervisorInstallDryRunPlan(config);
           return sendJSON(res, 200, plan);
         } catch (err) {
           return sendError(res, 400, err.message);

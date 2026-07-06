@@ -833,7 +833,125 @@ describe('Web Console / API contract', () => {
     assert.ok(!/password|token|apiKey|secret|accessKey|refreshToken/.test(panelMatch[0]), 'sample must not include credential fields');
   });
 
+  // ── V0.84 POST /api/supervisor-install-dry-run ─────────────────
+
+  it('POST /api/supervisor-install-dry-run returns a sanitized blocked dry-run supervisor install plan', async () => {
+    const res = await fetch(`http://localhost:${port}/api/supervisor-install-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        serverUrl: 'http://localhost:3000',
+        deviceId: 'web-supervisor-dry-run',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+        excludePatterns: ['*.tmp'],
+        scheduleSeconds: 3600,
+        nasTargets: [
+          {
+            name: 'synology-web',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            enabled: true,
+            credentialRef: 'nas-ref',
+          },
+        ],
+      }),
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.status, 'partial');
+    assert.strictEqual(body.command, 'supervisor-install-dry-run');
+    assert.strictEqual(body.supervisor.state, 'not_configured');
+    assert.strictEqual(body.supervisor.wouldInstall, false);
+    assert.strictEqual(body.supervisor.wouldStart, false);
+    assert.strictEqual(body.safety.launchctlCalled, false);
+    assert.strictEqual(body.safety.processListRead, false);
+    assert.strictEqual(body.safety.launchdFileWritten, false);
+    assert.strictEqual(body.safety.metadataWritten, false);
+    assert.strictEqual(body.safety.nasConnected, false);
+    assert.strictEqual(body.safety.backupTriggered, false);
+    assert.strictEqual(body.safety.restoreTriggered, false);
+    assert.strictEqual(body.safety.remoteCommandExecuted, false);
+    assert.strictEqual(body.readinessSummary.state, 'blocked');
+    assert.strictEqual(body.installCommandPreview.state, 'blocked');
+    assert.ok(body.installCommandPreview.actions.every((action) => action.wouldRun === false));
+    assert.ok(body.installCommandPreview.actions.every((action) => action.wouldWrite === false));
+    assert.strictEqual(body.installPreflight.state, 'blocked');
+    assert.strictEqual(body.installApprovalManifest.state, 'blocked');
+    assert.strictEqual(body.installApprovalManifest.approval.approved, false);
+    assert.strictEqual(body.installApprovalManifest.rollback.available, false);
+
+    assert.ok(!text.includes('/tmp/linke-documents'), 'must not echo sourcePath');
+    assert.ok(!text.includes('http://localhost:3000'), 'must not echo serverUrl');
+    assert.ok(!text.includes('192.168.1.100'), 'must not echo NAS endpoint');
+    assert.ok(!text.includes('nas-ref'), 'must not echo credentialRef');
+  });
+
+  it('POST /api/supervisor-install-dry-run rejects invalid JSON body', async () => {
+    const res = await fetch(`http://localhost:${port}/api/supervisor-install-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{ invalid json',
+    });
+    const body = await res.json();
+
+    assert.strictEqual(res.status, 400);
+    assert.match(body.error, /Invalid JSON body/);
+  });
+
+  it('POST /api/supervisor-install-dry-run rejects invalid config without echoing submitted values', async () => {
+    const res = await fetch(`http://localhost:${port}/api/supervisor-install-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        serverUrl: 'not-a-url-secret-like-value',
+        deviceId: 'web-supervisor-dry-run',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+      }),
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 400);
+    assert.match(body.error, /serverUrl/i);
+    assert.ok(!text.includes('not-a-url-secret-like-value'), 'must not echo invalid serverUrl value');
+    assert.ok(!text.includes('/tmp/linke-documents'), 'must not echo sourcePath on validation errors');
+  });
+
+  it('POST /api/supervisor-install-dry-run rejects credential-like NAS fields without echoing secret values', async () => {
+    const res = await fetch(`http://localhost:${port}/api/supervisor-install-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        serverUrl: 'http://localhost:3000',
+        deviceId: 'web-supervisor-dry-run',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+        nasTargets: [
+          {
+            name: 'synology-web',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            password: 'do-not-echo-this-secret',
+          },
+        ],
+      }),
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 400);
+    assert.match(body.error, /credential|not allowed|forbidden|password/i);
+    assert.ok(!text.includes('do-not-echo-this-secret'), 'must not echo submitted secret value');
+    assert.ok(!text.includes('192.168.1.100'), 'must not echo NAS endpoint on validation errors');
+  });
+
   // ── V0.15 Device detail Web Console panel ───────────────────────
+
 
   it('HTML contains device detail panel with required data-testid hooks', async () => {
     const res = await fetch(`http://localhost:${port}/`);
