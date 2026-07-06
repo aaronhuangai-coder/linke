@@ -2469,6 +2469,35 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       nasDryRunResultEl.appendChild(gateRow);
     }
 
+    if (plan.readinessSummary) {
+      const summaryDiv = doc.createElement('div');
+      summaryDiv.className = 'nas-readiness-summary';
+
+      const title = doc.createElement('h3');
+      title.textContent = 'NAS 执行就绪性摘要';
+      summaryDiv.appendChild(title);
+
+      const countsRow = doc.createElement('div');
+      countsRow.className = 'nas-readiness-counts';
+      countsRow.textContent = `状态: ${plan.readinessSummary.state} | ` +
+        `总目标: ${plan.readinessSummary.totalTargets} | ` +
+        `已启用: ${plan.readinessSummary.enabledTargets} | ` +
+        `已禁用: ${plan.readinessSummary.disabledTargets} | ` +
+        `凭证配置: ${plan.readinessSummary.credentialRefConfiguredTargets} | ` +
+        `启用缺凭证: ${plan.readinessSummary.enabledCredentialRefMissingTargets} | ` +
+        `受阻目标: ${plan.readinessSummary.blockedTargets}`;
+      summaryDiv.appendChild(countsRow);
+
+      if (plan.readinessSummary.blockers && plan.readinessSummary.blockers.length > 0) {
+        const blockersDiv = doc.createElement('div');
+        blockersDiv.className = 'nas-readiness-blockers';
+        blockersDiv.textContent = '就绪性卡点: ' + plan.readinessSummary.blockers.join(', ');
+        summaryDiv.appendChild(blockersDiv);
+      }
+
+      nasDryRunResultEl.appendChild(summaryDiv);
+    }
+
     if (targets.length === 0) {
       const placeholder = doc.createElement('p');
       placeholder.className = 'placeholder';
@@ -2508,6 +2537,16 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       credRow.className = 'nas-dry-run-cred-row';
       credRow.textContent = '凭证引用：' + (target.credentialRefConfigured ? '已配置' : '未配置');
       item.appendChild(credRow);
+
+      if (target.executionReadiness) {
+        const readinessRow = doc.createElement('div');
+        readinessRow.className = 'nas-dry-run-readiness-row';
+        readinessRow.textContent = `执行就绪状态: ${target.executionReadiness.state}` +
+          (target.executionReadiness.blockers && target.executionReadiness.blockers.length > 0
+            ? ` (卡点: ${target.executionReadiness.blockers.join(', ')})`
+            : '');
+        item.appendChild(readinessRow);
+      }
 
       const adapter = doc.createElement('div');
       adapter.className = 'nas-dry-run-adapter-plan';

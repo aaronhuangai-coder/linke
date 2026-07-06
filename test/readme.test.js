@@ -286,6 +286,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.66/, 'V0.66');
   });
 
+  it('mentions V0.67 (NAS execution readiness summary)', () => {
+    assertReadmeContains(/V0\.67/, 'V0.67');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1651,15 +1655,15 @@ describe('README — V0.65 Web NAS execution gate display', () => {
   });
 });
 
-describe('README — V0.66 NAS credential denylist hardening', () => {
-  it('title and badge claim V0.66 as current', () => {
-    assert.match(readme, /^# Linke V0\.66/m);
-    assert.match(readme, /当前版本：V0\.66/);
+describe('README — V0.67 NAS execution readiness summary', () => {
+  it('title and badge claim V0.67 as current', () => {
+    assert.match(readme, /^# Linke V0\.67/m);
+    assert.match(readme, /当前版本：V0\.67/);
   });
 
-  it('version table marks V0.65 historical and V0.66 current', () => {
-    assert.match(readme, /\| V0\.65 \| 历史版本 \|[^|]*(executionGate|credentialRefConfigured|Web.*执行门禁|execution gate display)/i);
-    assert.match(readme, /\| V0\.66 \| 当前版本 \|[^|]*(denylist|credential-like|凭证字段|FORBIDDEN_NAS_CREDENTIAL_FIELDS)/i);
+  it('version table marks V0.66 historical and V0.67 current', () => {
+    assert.match(readme, /\| V0\.66 \| 历史版本 \|[^|]*(denylist|credential-like|凭证字段|FORBIDDEN_NAS_CREDENTIAL_FIELDS)/i);
+    assert.match(readme, /\| V0\.67 \| 当前版本 \|[^|]*(readinessSummary|executionReadiness|就绪性摘要|就绪性状态)/i);
   });
 
   it('documents the complete 15-field NAS credential denylist', () => {
@@ -1681,7 +1685,17 @@ describe('README — V0.66 NAS credential denylist hardening', () => {
     assert.ok(!/从 env 读取凭证|读取 secret manager|解析 credential store 凭证/i.test(readme));
   });
 
-  it('keeps Gold blocked and rejects real NAS overclaims for V0.66', () => {
+  it('documents V0.67 readiness summary as dry-run-only with fixed blocker codes', () => {
+    assert.match(readme, /readinessSummary/);
+    assert.match(readme, /executionReadiness/);
+    assert.match(readme, /target-disabled/);
+    assert.match(readme, /credential-ref-missing/);
+    assert.match(readme, /remote-execution-blocked/);
+    assert.match(readme, /ready[\s\S]*(不可达|unreachable)|不可达[\s\S]*ready/i);
+    assert.match(readme, /dry-run[\s\S]*(配置完备|configuration completeness|只读|blocked)/i);
+  });
+
+  it('keeps Gold blocked and rejects real NAS overclaims for V0.67', () => {
     assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.ok(!/真实 NAS 远程备份已完成|real NAS remote backup ready|production ready|无安全隐患/i.test(readme));

@@ -620,10 +620,32 @@ describe('Web Console / API contract', () => {
     assert.strictEqual(body.deviceId, 'web-console-dry-run');
     assert.strictEqual(body.wouldConnect, false);
     assert.strictEqual(body.wouldWrite, false);
+    assert.strictEqual(body.executionGate.remoteExecutionAllowed, false);
     assert.strictEqual(body.targets.length, 2);
     assert.strictEqual(body.jobs.length, 1);
     assert.strictEqual(body.targets[0].provider, 'synology');
     assert.strictEqual(body.targets[1].provider, 'ugreen');
+
+    // Readiness fields
+    assert.ok(body.readinessSummary);
+    assert.strictEqual(body.readinessSummary.mode, 'dry-run');
+    assert.strictEqual(body.readinessSummary.state, 'blocked');
+    assert.strictEqual(body.readinessSummary.totalTargets, 2);
+    assert.strictEqual(body.readinessSummary.enabledTargets, 1);
+    assert.strictEqual(body.readinessSummary.disabledTargets, 1);
+    assert.strictEqual(body.readinessSummary.credentialRefConfiguredTargets, 0);
+    assert.strictEqual(body.readinessSummary.enabledCredentialRefMissingTargets, 1);
+    assert.strictEqual(body.readinessSummary.blockedTargets, 2);
+    assert.strictEqual(body.readinessSummary.remoteExecutionBlocked, true);
+    assert.deepStrictEqual(body.readinessSummary.blockers.sort(), ['credential-ref-missing', 'remote-execution-blocked', 'target-disabled'].sort());
+
+    assert.ok(body.targets[0].executionReadiness);
+    assert.strictEqual(body.targets[0].executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(body.targets[0].executionReadiness.blockers.sort(), ['credential-ref-missing', 'remote-execution-blocked'].sort());
+
+    assert.ok(body.targets[1].executionReadiness);
+    assert.strictEqual(body.targets[1].executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(body.targets[1].executionReadiness.blockers.sort(), ['remote-execution-blocked', 'target-disabled'].sort());
   });
 
   it('POST /api/nas-dry-run rejects invalid JSON body', async () => {
@@ -1449,7 +1471,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.65|V0\.66/);
+    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.65|V0\.66|V0\.67/);
     assert.match(html, /LINKE_READ_TOKEN/);
     assert.match(html, /LINKE_WRITE_TOKEN/);
     assert.match(html, /403\s+Forbidden|auth\.forbidden/);
@@ -1461,7 +1483,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.62|V0\.63|V0\.65|V0\.66/);
+    assert.match(html, /V0\.62|V0\.63|V0\.65|V0\.66|V0\.67/);
     assert.match(html, /GET \/api\/auth-status|auth-status/);
     assert.match(html, /configuredScopes|writeRoutes|认证状态|写入路由/);
     assert.match(html, /不返回.*token|tokenValuesReturned|不暴露.*token/i);
@@ -1472,7 +1494,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.63|V0\.65|V0\.66/);
+    assert.match(html, /V0\.63|V0\.65|V0\.66|V0\.67/);
     assert.match(html, /API_WRITE_ROUTES|isApiWriteRoute|write-route|写入路由/);
     assert.match(html, /共享|同一来源|registry|注册表/i);
     assert.match(html, /partial|完整鉴权|生产级审计|生产硬化|production/i);
@@ -1483,12 +1505,21 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.66/);
+    assert.match(html, /V0\.66|V0\.67/);
     assert.match(html, /credentialRef|credentialRefConfigured|executionGate/);
     assert.match(html, /credential-like|15 个|FORBIDDEN_NAS_CREDENTIAL_FIELDS|凭证字段/i);
     assert.match(html, /remoteExecutionAllowed|真实 NAS|real NAS/i);
     assert.match(html, /不回显|不返回|不暴露|non-secret|非密钥/i);
     assert.match(html, /blocked|阻塞|不连接 NAS|不写远端/i);
+    assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
+  });
+
+  it('HTML safety notes document V0.67 NAS execution readiness summary without claiming production readiness', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.match(html, /V0\.67/);
+    assert.match(html, /readinessSummary|executionReadiness|就绪性摘要|阻碍卡点代码/);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 });
@@ -2861,6 +2892,133 @@ describe('initConsole DOM data-testid hooks', () => {
 
     assert.match(doc.getElementById('nas-dry-run-result').textContent, /endpoint must be a valid URL/);
   });
+
+  it('DOM test: renders NAS execution readiness summary and target blockers without leaking credentialRef', async () => {
+    const doc = buildMockDoc();
+    const calls = [];
+    const mockFetch = async (url, options) => {
+      calls.push({ url, options });
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            executionGate: {
+              remoteExecutionAllowed: false,
+              blockingReason: 'real NAS transport not implemented',
+            },
+            readinessSummary: {
+              mode: 'dry-run',
+              state: 'blocked',
+              totalTargets: 3,
+              enabledTargets: 2,
+              disabledTargets: 1,
+              credentialRefConfiguredTargets: 1,
+              enabledCredentialRefMissingTargets: 1,
+              blockedTargets: 3,
+              remoteExecutionBlocked: true,
+              blockers: ['remote-execution-blocked', 'credential-ref-missing', 'target-disabled'],
+            },
+            targets: [
+              {
+                name: 'synology-configured',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: true,
+                executionReadiness: {
+                  state: 'blocked',
+                  blockers: ['remote-execution-blocked'],
+                },
+              },
+              {
+                name: 'synology-missing',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: false,
+                executionReadiness: {
+                  state: 'blocked',
+                  blockers: ['credential-ref-missing', 'remote-execution-blocked'],
+                },
+              },
+              {
+                name: 'synology-disabled',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: false,
+                credentialRefConfigured: false,
+                executionReadiness: {
+                  state: 'blocked',
+                  blockers: ['target-disabled', 'remote-execution-blocked'],
+                },
+              },
+            ],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [
+        {
+          name: 'synology-configured',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology', // should not be leaked in UI text content
+        }
+      ],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resultText = doc.getElementById('nas-dry-run-result').textContent;
+
+    // Assert readiness summary text
+    assert.match(resultText, /NAS 执行就绪性摘要/);
+    assert.match(resultText, /状态:\s*blocked/);
+    assert.match(resultText, /总目标:\s*3/);
+    assert.match(resultText, /已启用:\s*2/);
+    assert.match(resultText, /已禁用:\s*1/);
+    assert.match(resultText, /凭证配置:\s*1/);
+    assert.match(resultText, /启用缺凭证:\s*1/);
+    assert.match(resultText, /受阻目标:\s*3/);
+    assert.match(resultText, /就绪性卡点:\s*remote-execution-blocked,\s*credential-ref-missing,\s*target-disabled/);
+
+    // Assert per-target text
+    assert.match(resultText, /synology-configured/);
+    assert.match(resultText, /synology-missing/);
+    assert.match(resultText, /synology-disabled/);
+    assert.match(resultText, /执行就绪状态:\s*blocked/);
+    assert.match(resultText, /卡点:\s*remote-execution-blocked/);
+    assert.match(resultText, /卡点:\s*credential-ref-missing/);
+    assert.match(resultText, /卡点:\s*target-disabled/);
+
+    // Verify credentialRef name is not leaked
+    assert.strictEqual(resultText.includes('home-synology'), false, 'must not leak raw credentialRef values');
+  });
+
 
   it('renders NAS app adapter dry-run plan details', async () => {
     const doc = buildMockDoc();

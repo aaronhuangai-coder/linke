@@ -662,7 +662,110 @@ describe('buildNasDryRunPlan', () => {
     assert.ok(typeof plan.executionGate.blockingReason === 'string');
     assert.ok(plan.executionGate.blockingReason.length > 0);
   });
+
+  it('includes top-level readinessSummary counts and blockers', () => {
+    const config = {
+      deviceId: 'test-device',
+      nasTargets: [
+        {
+          name: 'target1',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+        {
+          name: 'target2',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+        },
+        {
+          name: 'target3',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: false,
+        },
+      ],
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    };
+
+    const plan = buildNasDryRunPlan(config);
+    assert.ok(plan.readinessSummary);
+    assert.strictEqual(plan.readinessSummary.mode, 'dry-run');
+    assert.strictEqual(plan.readinessSummary.state, 'blocked');
+    assert.strictEqual(plan.readinessSummary.totalTargets, 3);
+    assert.strictEqual(plan.readinessSummary.enabledTargets, 2);
+    assert.strictEqual(plan.readinessSummary.disabledTargets, 1);
+    assert.strictEqual(plan.readinessSummary.credentialRefConfiguredTargets, 1);
+    assert.strictEqual(plan.readinessSummary.enabledCredentialRefMissingTargets, 1);
+    assert.strictEqual(plan.readinessSummary.blockedTargets, 3);
+    assert.strictEqual(plan.readinessSummary.remoteExecutionBlocked, true);
+
+    const blockers = plan.readinessSummary.blockers || [];
+    assert.ok(blockers.includes('remote-execution-blocked'));
+    assert.ok(blockers.includes('credential-ref-missing'));
+    assert.ok(blockers.includes('target-disabled'));
+    assert.strictEqual(blockers.length, 3);
+  });
+
+  it('determines per-target executionReadiness blockers', () => {
+    const config = {
+      deviceId: 'test-device',
+      nasTargets: [
+        {
+          name: 'enabled-missing-cred',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+        },
+        {
+          name: 'enabled-configured-cred',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+        {
+          name: 'disabled-target',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: false,
+        },
+      ],
+    };
+
+    const plan = buildNasDryRunPlan(config);
+    const target1 = plan.targets.find(t => t.name === 'enabled-missing-cred');
+    const target2 = plan.targets.find(t => t.name === 'enabled-configured-cred');
+    const target3 = plan.targets.find(t => t.name === 'disabled-target');
+
+    assert.ok(target1.executionReadiness);
+    assert.strictEqual(target1.executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(target1.executionReadiness.blockers, ['credential-ref-missing', 'remote-execution-blocked']);
+
+    assert.ok(target2.executionReadiness);
+    assert.strictEqual(target2.executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(target2.executionReadiness.blockers, ['remote-execution-blocked']);
+
+    assert.ok(target3.executionReadiness);
+    assert.strictEqual(target3.executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(target3.executionReadiness.blockers, ['target-disabled', 'remote-execution-blocked']);
+  });
 });
+
 
 // ── runNasDryRunFromConfig ─────────────────────────────────────────
 

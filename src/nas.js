@@ -35,6 +35,12 @@ const NAS_EXECUTION_GATE = Object.freeze({
   blockingReason: 'real NAS transport not implemented',
 });
 
+export const NAS_EXECUTION_READINESS_BLOCKERS = Object.freeze({
+  TARGET_DISABLED: 'target-disabled',
+  CREDENTIAL_REF_MISSING: 'credential-ref-missing',
+  REMOTE_EXECUTION_BLOCKED: 'remote-execution-blocked',
+});
+
 function validateNasAppAdapter(provider, appAdapter) {
   if (appAdapter === undefined || appAdapter === null) return null;
   if (!appAdapter || typeof appAdapter !== 'object' || Array.isArray(appAdapter)) {
@@ -133,6 +139,86 @@ export function validateNasTarget(target) {
 }
 
 /**
+ * Derive target execution readiness from enabled state, credential ref configured status,
+ * and the global remote execution gate.
+ */
+export function getTargetExecutionReadiness(target, remoteExecutionAllowed) {
+  const blockers = [];
+  if (!target.enabled) {
+    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.TARGET_DISABLED);
+  }
+  const credentialRefConfigured = Boolean(target.credentialRef);
+  if (target.enabled && !credentialRefConfigured) {
+    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.CREDENTIAL_REF_MISSING);
+  }
+  if (!remoteExecutionAllowed) {
+    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.REMOTE_EXECUTION_BLOCKED);
+  }
+  const state = blockers.length > 0 ? 'blocked' : 'ready';
+  return {
+    state,
+    blockers,
+  };
+}
+
+/**
+ * Build readiness summary counts and aggregated blockers from target readiness rows.
+ */
+export function buildReadinessSummary(targets, remoteExecutionAllowed) {
+  const totalTargets = targets.length;
+  let enabledTargets = 0;
+  let disabledTargets = 0;
+  let credentialRefConfiguredTargets = 0;
+  let enabledCredentialRefMissingTargets = 0;
+  let blockedTargets = 0;
+  const uniqueBlockers = new Set();
+
+  if (!remoteExecutionAllowed) {
+    uniqueBlockers.add(NAS_EXECUTION_READINESS_BLOCKERS.REMOTE_EXECUTION_BLOCKED);
+  }
+
+  for (const t of targets) {
+    if (t.enabled) {
+      enabledTargets++;
+    } else {
+      disabledTargets++;
+    }
+
+    if (t.credentialRefConfigured) {
+      credentialRefConfiguredTargets++;
+    }
+
+    if (t.enabled && !t.credentialRefConfigured) {
+      enabledCredentialRefMissingTargets++;
+    }
+
+    if (t.executionReadiness.state === 'blocked') {
+      blockedTargets++;
+    }
+
+    for (const b of t.executionReadiness.blockers) {
+      uniqueBlockers.add(b);
+    }
+  }
+
+  const blockers = Array.from(uniqueBlockers);
+  const state = blockers.length > 0 ? 'blocked' : 'ready';
+
+  return {
+    mode: 'dry-run',
+    state,
+    totalTargets,
+    enabledTargets,
+    disabledTargets,
+    credentialRefConfiguredTargets,
+    enabledCredentialRefMissingTargets,
+    blockedTargets,
+    remoteExecutionBlocked: !remoteExecutionAllowed,
+    blockers,
+  };
+}
+
+/**
  * Build a NAS dry-run plan from a validated config object.
  * The plan describes what *would* happen without connecting or writing.
  */
@@ -140,23 +226,33 @@ export function buildNasDryRunPlan(config) {
   const nasTargets = config.nasTargets || [];
   const validatedTargets = nasTargets.map((t) => validateNasTarget(t));
 
-  return {
-    mode: 'dry-run',
-    deviceId: config.deviceId,
-    wouldConnect: false,
-    wouldWrite: false,
-    executionGate: { ...NAS_EXECUTION_GATE },
-    targets: validatedTargets.map((t) => ({
+  const targets = validatedTargets.map((t) => {
+    const credentialRefConfigured = Boolean(t.credentialRef);
+    const executionReadiness = getTargetExecutionReadiness(t, NAS_EXECUTION_GATE.remoteExecutionAllowed);
+    return {
       provider: t.provider,
       name: t.name,
       endpoint: t.endpoint,
       shareName: t.shareName,
       remotePath: t.remotePath,
       enabled: t.enabled,
-      credentialRefConfigured: Boolean(t.credentialRef),
+      credentialRefConfigured,
+      executionReadiness,
       appAdapter: t.appAdapter,
       adapterPlan: buildNasAppAdapterDryRunPlan(t, config.backupJobs || []),
-    })),
+    };
+  });
+
+  const readinessSummary = buildReadinessSummary(targets, NAS_EXECUTION_GATE.remoteExecutionAllowed);
+
+  return {
+    mode: 'dry-run',
+    deviceId: config.deviceId,
+    wouldConnect: false,
+    wouldWrite: false,
+    executionGate: { ...NAS_EXECUTION_GATE },
+    readinessSummary,
+    targets,
     jobs: (config.backupJobs || []).map((j) => ({
       name: j.name,
       sourcePath: j.sourcePath,
