@@ -70,6 +70,77 @@ const EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW = Object.freeze({
   },
 });
 
+const EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT = Object.freeze({
+  mode: 'dry-run-only',
+  state: 'blocked',
+  blockedCount: 6,
+  readyCount: 0,
+  checkedCount: 6,
+  checks: [
+    {
+      id: 'installer-implementation',
+      label: 'Real installer implementation',
+      status: 'blocked',
+      blockerCode: 'real-install-not-implemented',
+      requiredForInstall: true,
+      evidence: 'No install command or launchd write path exists in this release.',
+    },
+    {
+      id: 'launchd-lifecycle',
+      label: 'Launchd install/start lifecycle',
+      status: 'blocked',
+      blockerCode: 'launchd-lifecycle-blocked',
+      requiredForInstall: true,
+      evidence: 'launchctl execution, plist writes, and daemon start remain disabled.',
+    },
+    {
+      id: 'operator-approval',
+      label: 'Explicit operator approval gate',
+      status: 'blocked',
+      blockerCode: 'operator-approval-required',
+      requiredForInstall: true,
+      evidence: 'No approved write path or production install confirmation flow exists.',
+    },
+    {
+      id: 'secret-management',
+      label: 'Production secret management',
+      status: 'blocked',
+      blockerCode: 'secret-management-incomplete',
+      requiredForInstall: true,
+      evidence: 'Secret rotation, protected storage, and secret handling are not production-grade.',
+    },
+    {
+      id: 'monitoring-watchdog',
+      label: 'Monitoring and watchdog',
+      status: 'blocked',
+      blockerCode: 'monitoring-watchdog-incomplete',
+      requiredForInstall: true,
+      evidence: 'No watchdog, health recovery loop, alerting, or managed daemon monitoring is implemented.',
+    },
+    {
+      id: 'rollback-recovery',
+      label: 'Rollback and recovery plan',
+      status: 'blocked',
+      blockerCode: 'rollback-recovery-incomplete',
+      requiredForInstall: true,
+      evidence: 'No rollback, uninstall, or recovery supervisor lifecycle is implemented.',
+    },
+  ],
+  safety: {
+    dryRun: true,
+    preflightOnly: true,
+    launchctlCalled: false,
+    processListRead: false,
+    filesystemWritten: false,
+    metadataWritten: false,
+    nasConnected: false,
+    backupTriggered: false,
+    restoreTriggered: false,
+    remoteCommandExecuted: false,
+    sensitiveValuesReturned: false,
+  },
+});
+
 async function runAgent(args) {
   return exec('node', [agentPath, ...args]);
 }
@@ -97,6 +168,15 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function assertNoSensitivePreflightEvidence(preflight) {
+  for (const check of preflight.checks) {
+    assert.strictEqual(typeof check.evidence, 'string');
+    assert.doesNotMatch(check.evidence, /\/Users\/|\/private\/|~\/|https?:\/\//i);
+    assert.doesNotMatch(check.evidence, /token|bearer|authorization|credentialRef|secret-ref|nas\.local/i);
+    assert.doesNotMatch(check.evidence, /config\.json|LaunchAgents|\.plist/);
+  }
+}
+
 describe('Agent supervisor-install-dry-run CLI', () => {
   it('buildSupervisorInstallDryRunPlan returns a sanitized dry-run plan without sensitive config values', async () => {
     const app = await import('../src/agent.js');
@@ -111,6 +191,10 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     }
     if (!buildSupervisorInstallCommandPreview) {
       throw new Error('buildSupervisorInstallCommandPreview is not defined in src/agent.js');
+    }
+    const buildSupervisorInstallPreflight = app.buildSupervisorInstallPreflight;
+    if (!buildSupervisorInstallPreflight) {
+      throw new Error('buildSupervisorInstallPreflight is not defined in src/agent.js');
     }
 
     const sourcePath = '/Users/ah/private/source';
@@ -196,6 +280,36 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       plan.installCommandPreview,
       EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
     );
+    assert.deepStrictEqual(
+      buildSupervisorInstallPreflight(),
+      EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT,
+    );
+    assert.deepStrictEqual(
+      plan.installPreflight,
+      EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT,
+    );
+    assert.strictEqual(plan.installPreflight.blockedCount, plan.installPreflight.checks.length);
+    assert.strictEqual(plan.installPreflight.readyCount, 0);
+    assert.strictEqual(plan.installPreflight.checkedCount, plan.installPreflight.checks.length);
+    assert.deepStrictEqual(
+      plan.installPreflight.checks.map((check) => check.id),
+      [
+        'installer-implementation',
+        'launchd-lifecycle',
+        'operator-approval',
+        'secret-management',
+        'monitoring-watchdog',
+        'rollback-recovery',
+      ],
+    );
+    for (const check of plan.installPreflight.checks) {
+      assert.strictEqual(check.status, 'blocked');
+      assert.strictEqual(check.requiredForInstall, true);
+      assert.strictEqual(typeof check.blockerCode, 'string');
+      assert.ok(check.blockerCode.length > 0);
+    }
+    assert.deepStrictEqual(plan.installPreflight.safety, EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT.safety);
+    assertNoSensitivePreflightEvidence(plan.installPreflight);
     for (const action of plan.installCommandPreview.actions) {
       assert.strictEqual(action.wouldRun, false);
       assert.strictEqual(action.wouldWrite, false);
@@ -270,6 +384,22 @@ describe('Agent supervisor-install-dry-run CLI', () => {
         body.installCommandPreview,
         EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
       );
+      assert.deepStrictEqual(
+        body.installPreflight,
+        EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT,
+      );
+      assert.strictEqual(body.installPreflight.safety.dryRun, true);
+      assert.strictEqual(body.installPreflight.safety.preflightOnly, true);
+      assert.strictEqual(body.installPreflight.safety.launchctlCalled, false);
+      assert.strictEqual(body.installPreflight.safety.processListRead, false);
+      assert.strictEqual(body.installPreflight.safety.filesystemWritten, false);
+      assert.strictEqual(body.installPreflight.safety.metadataWritten, false);
+      assert.strictEqual(body.installPreflight.safety.nasConnected, false);
+      assert.strictEqual(body.installPreflight.safety.backupTriggered, false);
+      assert.strictEqual(body.installPreflight.safety.restoreTriggered, false);
+      assert.strictEqual(body.installPreflight.safety.remoteCommandExecuted, false);
+      assert.strictEqual(body.installPreflight.safety.sensitiveValuesReturned, false);
+      assertNoSensitivePreflightEvidence(body.installPreflight);
       assert.strictEqual(body.installCommandPreview.safety.launchctlCalled, false);
       assert.strictEqual(body.installCommandPreview.safety.launchdFileWritten, false);
       assert.strictEqual(body.installCommandPreview.safety.metadataWritten, false);
@@ -328,6 +458,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.supervisor, undefined);
       assert.strictEqual(body.configSummary, undefined);
       assert.strictEqual(body.installCommandPreview, undefined);
+      assert.strictEqual(body.installPreflight, undefined);
       assert.doesNotMatch(stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|synology\.local|synology-ref|unused-summary-token|Bearer/i);
       assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
@@ -369,6 +500,11 @@ describe('Agent supervisor-install-dry-run CLI', () => {
         body.installCommandPreview,
         EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW,
       );
+      assert.deepStrictEqual(
+        body.installPreflight,
+        EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT,
+      );
+      assertNoSensitivePreflightEvidence(body.installPreflight);
       assert.strictEqual(body.readinessSummary.state, 'blocked');
       assert.strictEqual(body.safety.launchctlCalled, false);
       assert.strictEqual(body.safety.processListRead, false);
@@ -414,6 +550,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.supervisor, undefined);
       assert.strictEqual(body.configSummary, undefined);
       assert.strictEqual(body.installCommandPreview, undefined);
+      assert.strictEqual(body.installPreflight, undefined);
       assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
     } finally {

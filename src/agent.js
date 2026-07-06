@@ -103,6 +103,45 @@ const SUPERVISOR_INSTALL_COMMAND_PREVIEW_ACTIONS = Object.freeze([
   }),
 ]);
 
+const SUPERVISOR_INSTALL_PREFLIGHT_CHECKS = Object.freeze([
+  Object.freeze({
+    id: 'installer-implementation',
+    label: 'Real installer implementation',
+    blockerCode: 'real-install-not-implemented',
+    evidence: 'No install command or launchd write path exists in this release.',
+  }),
+  Object.freeze({
+    id: 'launchd-lifecycle',
+    label: 'Launchd install/start lifecycle',
+    blockerCode: 'launchd-lifecycle-blocked',
+    evidence: 'launchctl execution, plist writes, and daemon start remain disabled.',
+  }),
+  Object.freeze({
+    id: 'operator-approval',
+    label: 'Explicit operator approval gate',
+    blockerCode: 'operator-approval-required',
+    evidence: 'No approved write path or production install confirmation flow exists.',
+  }),
+  Object.freeze({
+    id: 'secret-management',
+    label: 'Production secret management',
+    blockerCode: 'secret-management-incomplete',
+    evidence: 'Secret rotation, protected storage, and secret handling are not production-grade.',
+  }),
+  Object.freeze({
+    id: 'monitoring-watchdog',
+    label: 'Monitoring and watchdog',
+    blockerCode: 'monitoring-watchdog-incomplete',
+    evidence: 'No watchdog, health recovery loop, alerting, or managed daemon monitoring is implemented.',
+  }),
+  Object.freeze({
+    id: 'rollback-recovery',
+    label: 'Rollback and recovery plan',
+    blockerCode: 'rollback-recovery-incomplete',
+    evidence: 'No rollback, uninstall, or recovery supervisor lifecycle is implemented.',
+  }),
+]);
+
 // ── HTTP helper ────────────────────────────────────────────────────
 
 async function request(server, path, method, body, options = {}) {
@@ -330,6 +369,7 @@ export function buildSupervisorInstallDryRunPlan(config) {
     },
     readinessSummary: buildSupervisorInstallReadinessSummary(),
     installCommandPreview: buildSupervisorInstallCommandPreview(),
+    installPreflight: buildSupervisorInstallPreflight(),
     nextSteps: [
       'Review this sanitized dry-run plan.',
       'Use launchd-dry-run separately if a plist preview is needed.',
@@ -356,6 +396,34 @@ export function buildSupervisorInstallCommandPreview() {
       launchctlCalled: false,
       launchdFileWritten: false,
       metadataWritten: false,
+    },
+  };
+}
+
+export function buildSupervisorInstallPreflight() {
+  return {
+    mode: 'dry-run-only',
+    state: 'blocked',
+    blockedCount: SUPERVISOR_INSTALL_PREFLIGHT_CHECKS.length,
+    readyCount: 0,
+    checkedCount: SUPERVISOR_INSTALL_PREFLIGHT_CHECKS.length,
+    checks: SUPERVISOR_INSTALL_PREFLIGHT_CHECKS.map((check) => ({
+      ...check,
+      status: 'blocked',
+      requiredForInstall: true,
+    })),
+    safety: {
+      dryRun: true,
+      preflightOnly: true,
+      launchctlCalled: false,
+      processListRead: false,
+      filesystemWritten: false,
+      metadataWritten: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+      sensitiveValuesReturned: false,
     },
   };
 }
