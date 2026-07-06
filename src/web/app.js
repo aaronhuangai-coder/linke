@@ -1049,9 +1049,27 @@ export function filterVersionConsistencyGroups(consistency, controls) {
   return filteredGroups.slice().sort((a, b) => compareVersionConsistencyGroups(a, b, sort));
 }
 
+export function isApiRequestUrl(url) {
+  const value = String(url || '');
+  const path = value.split('?')[0];
+  return path === '/api' || path.startsWith('/api/');
+}
+
+export function buildApiFetchOptions(url, options = undefined, apiAuthToken = '') {
+  if (!apiAuthToken || !isApiRequestUrl(url)) return options;
+  const nextOptions = { ...(options || {}) };
+  nextOptions.headers = { ...(nextOptions.headers || {}) };
+  nextOptions.headers.Authorization = 'Bearer ' + apiAuthToken;
+  return nextOptions;
+}
+
 // ── Console Initializer ───────────────────────────────────────────
 
 export function initConsole(doc, fetchImpl, intervalImpl) {
+  const apiTokenInput = doc.getElementById('api-token-input');
+  const apiTokenApplyButton = doc.getElementById('api-token-apply');
+  const apiTokenClearButton = doc.getElementById('api-token-clear');
+  const apiTokenStatusEl = doc.getElementById('api-token-status');
   const releaseHealthPanelEl = doc.getElementById('release-health-panel');
   const releaseHealthStatusEl = doc.getElementById('release-health-status');
   const releaseHealthVersionEl = doc.getElementById('release-health-version');
@@ -1078,6 +1096,39 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const goldReadinessListEl = doc.getElementById('gold-readiness-list');
   const goldReadinessMessageEl = doc.getElementById('gold-readiness-message');
   const goldReadinessRefreshButton = doc.getElementById('gold-readiness-refresh');
+
+  let apiAuthToken = '';
+
+  function renderApiTokenStatus(message, state = 'unset') {
+    if (!apiTokenStatusEl) return;
+    apiTokenStatusEl.textContent = message;
+    if (apiTokenStatusEl.setAttribute) {
+      apiTokenStatusEl.setAttribute('data-state', state);
+    }
+  }
+
+  function setApiToken(token) {
+    apiAuthToken = String(token || '').trim();
+    if (apiAuthToken) {
+      renderApiTokenStatus('已设置', 'set');
+    } else {
+      renderApiTokenStatus('未设置', 'unset');
+    }
+  }
+
+  function clearApiToken(message = '已清除') {
+    apiAuthToken = '';
+    if (apiTokenInput) apiTokenInput.value = '';
+    renderApiTokenStatus(message, message.includes('失败') ? 'error' : 'unset');
+  }
+
+  async function apiFetch(url, options = undefined) {
+    const res = await fetchImpl(url, buildApiFetchOptions(url, options, apiAuthToken));
+    if (res && res.status === 401 && apiAuthToken) {
+      clearApiToken('认证失败，请重新输入');
+    }
+    return res;
+  }
 
   const deviceListEl = doc.getElementById('device-list');
   const deviceDetailContentEl = doc.getElementById('device-detail-content');
@@ -1352,7 +1403,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
 
   async function fetchDevices() {
     try {
-      const res = await fetchImpl('/api/devices');
+      const res = await apiFetch('/api/devices');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const devices = await res.json();
       cachedDevices = devices;
@@ -1713,7 +1764,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       const deviceId = String(device?.deviceId || '').trim();
       if (!deviceId) return null;
       try {
-        const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
+        const res = await apiFetch('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const snapshots = await res.json();
         return [deviceId, Array.isArray(snapshots) ? snapshots : [], false];
@@ -1968,7 +2019,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setBackupJobDetailPlaceholder('加载中…', deviceId);
 
     try {
-      const res = await fetchImpl('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
+      const res = await apiFetch('/api/devices/' + encodeURIComponent(deviceId) + '/snapshots');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snapshots = await res.json();
       cachedSnapshots = Array.isArray(snapshots) ? snapshots : [];
@@ -2063,7 +2114,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setSnapshotDetailPlaceholder('加载中...');
 
     try {
-      const res = await fetchImpl(
+      const res = await apiFetch(
         '/api/devices/' + encodeURIComponent(deviceId)
         + '/snapshots/' + encodeURIComponent(snapshotId)
         + '/manifest',
@@ -2168,7 +2219,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setRestoreDryRunPlaceholder('加载中...');
 
     try {
-      const res = await fetchImpl(
+      const res = await apiFetch(
         '/api/devices/' + encodeURIComponent(deviceId)
         + '/snapshots/' + encodeURIComponent(snapshotId)
         + '/restore-dry-run?targetPath=' + encodeURIComponent(targetPath),
@@ -2283,7 +2334,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setBackupPreflightPlaceholder('加载中...');
 
     try {
-      const res = await fetchImpl('/api/backup-preflight-dry-run?' + params.toString());
+      const res = await apiFetch('/api/backup-preflight-dry-run?' + params.toString());
       if (!res.ok) throw new Error(await readErrorMessage(res));
       const plan = await res.json();
       renderBackupPreflightPlan(plan);
@@ -2475,7 +2526,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     nasDryRunResultEl.appendChild(loading);
 
     try {
-      const res = await fetchImpl('/api/nas-dry-run', {
+      const res = await apiFetch('/api/nas-dry-run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed.config),
@@ -2557,7 +2608,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setSnapshotDiffPlaceholder('加载中...');
 
     try {
-      const res = await fetchImpl(
+      const res = await apiFetch(
         '/api/devices/' + encodeURIComponent(deviceId)
         + '/snapshots/diff-dry-run?from=' + encodeURIComponent(fromSnapshotId)
         + '&to=' + encodeURIComponent(toSnapshotId),
@@ -2650,7 +2701,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     setRetentionPlaceholder('加载中...');
 
     try {
-      const res = await fetchImpl(
+      const res = await apiFetch(
         '/api/devices/' + encodeURIComponent(deviceId) + '/retention-dry-run?keepLast=' + keepLast,
       );
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -2828,7 +2879,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     releaseHealthInFlight = true;
     setReleaseHealthRefreshBusy(true);
     try {
-      const res = await fetchImpl('/api/health');
+      const res = await apiFetch('/api/health');
       if (!res.ok) {
         let msg = 'HTTP ' + res.status;
         try {
@@ -2912,7 +2963,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     releaseReadinessInFlight = true;
     setReleaseReadinessRefreshBusy(true);
     try {
-      const res = await fetchImpl('/api/release-readiness');
+      const res = await apiFetch('/api/release-readiness');
       if (!res.ok) {
         let msg = 'HTTP ' + res.status;
         try {
@@ -2995,7 +3046,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     goldReadinessInFlight = true;
     setGoldReadinessRefreshBusy(true);
     try {
-      const res = await fetchImpl('/api/gold-readiness');
+      const res = await apiFetch('/api/gold-readiness');
       if (!res.ok) {
         let msg = 'HTTP ' + res.status;
         try {
@@ -3020,6 +3071,24 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  if (apiTokenApplyButton?.addEventListener) {
+    apiTokenApplyButton.addEventListener('click', () => {
+      const token = apiTokenInput ? apiTokenInput.value : '';
+      if (!String(token || '').trim()) {
+        clearApiToken('Token 为空');
+        return;
+      }
+      setApiToken(token);
+    });
+  }
+
+  if (apiTokenClearButton?.addEventListener) {
+    apiTokenClearButton.addEventListener('click', () => {
+      clearApiToken('已清除');
+    });
+  }
+
+  renderApiTokenStatus('未设置', 'unset');
   renderReleaseHealth(buildReleaseHealthViewModel(null));
   renderReleaseReadiness(buildReleaseReadinessViewModel(null));
   renderGoldReadiness(buildGoldReadinessViewModel(null));

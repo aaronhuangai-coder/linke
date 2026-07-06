@@ -234,6 +234,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.53/, 'V0.53');
   });
 
+  it('mentions V0.54 (Web Console in-memory API token UX)', () => {
+    assertReadmeContains(/V0\.54/, 'V0.54');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1248,13 +1252,17 @@ describe('README — V0.50 release readiness CLI', () => {
 });
 
 describe('README — V0.53 optional bearer token auth skeleton', () => {
-  it('title and badge claim V0.53 as current', () => {
-    assert.match(readme, /^# Linke V0\.53/m);
-    assert.match(readme, /当前版本：V0\.53/);
+  it('title and badge no longer claim V0.53 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.53/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.53/);
   });
 
-  it('version table has V0.53 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.53 \| 当前版本 \|[^|]*(Bearer|token|认证|auth)/i);
+  it('version table has V0.53 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.53 \| 历史版本 \|[^|]*(Bearer|token|认证|auth)/i);
+  });
+
+  it('version table has V0.54 row with 当前版本 milestone', () => {
+    assert.match(readme, /\| V0\.54 \| 当前版本 \|[^|]*(Web Console|API token|内存态|token UX)/i);
   });
 
   it('version table has V0.52 row with 历史版本 milestone', () => {
@@ -1276,7 +1284,9 @@ describe('README — V0.53 optional bearer token auth skeleton', () => {
   it('states bearer token auth remains partial and not production-grade authorization', () => {
     assert.match(readme, /partial|部分|骨架|prototype|原型/i);
     assert.match(readme, /不是.*生产级|not.*production|不.*完整.*鉴权|not.*complete.*authorization/i);
-    assert.match(readme, /Web.*(未|not).*token|token.*Web.*(未|not)|浏览器.*token/i);
+    assert.match(readme, /Web Console|浏览器.*token|token.*浏览器/i);
+    assert.match(readme, /内存|memory/i);
+    assert.match(readme, /localStorage|sessionStorage|cookie/);
   });
 });
 

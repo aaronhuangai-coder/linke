@@ -25,6 +25,14 @@ body {
   color: #fff;
   padding: 16px 24px;
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.brand-block {
+  display: flex;
   align-items: baseline;
   gap: 16px;
 }
@@ -37,6 +45,62 @@ body {
 .app-header .subtitle {
   font-size: 0.85rem;
   opacity: 0.7;
+}
+
+.api-token-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 620px;
+}
+
+.api-token-controls label,
+.api-token-controls span,
+.api-token-safety-note {
+  font-size: 0.78rem;
+}
+
+.api-token-controls input {
+  width: 190px;
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.api-token-controls input::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.api-token-controls button {
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+}
+
+.api-token-controls button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.api-token-status[data-state="set"] {
+  color: #8ce99a;
+}
+
+.api-token-status[data-state="error"] {
+  color: #ffb4a2;
+}
+
+.api-token-safety-note {
+  flex-basis: 100%;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.4;
 }
 
 .app-main {

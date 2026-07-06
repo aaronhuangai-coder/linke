@@ -9,8 +9,18 @@
 <body>
   <div data-testid="linke-app" class="app">
     <header class="app-header">
-      <h1>Linke</h1>
-      <span class="subtitle">备份管理控制台</span>
+      <div class="brand-block">
+        <h1>Linke</h1>
+        <span class="subtitle">备份管理控制台</span>
+      </div>
+      <div class="api-token-controls" data-testid="api-token-controls">
+        <label for="api-token-input">API Token</label>
+        <input id="api-token-input" data-testid="api-token-input" type="password" autocomplete="off" placeholder="Bearer token">
+        <button id="api-token-apply" data-testid="api-token-apply" type="button">应用</button>
+        <button id="api-token-clear" data-testid="api-token-clear" type="button">清除</button>
+        <span id="api-token-status" class="api-token-status" data-testid="api-token-status">未设置</span>
+        <p class="api-token-safety-note" data-testid="api-token-safety-note">Token 仅保存在当前页面内存中，刷新后需重新输入；不会写入 localStorage、sessionStorage、cookie 或 metadata。</p>
+      </div>
     </header>
     <main class="app-main">
       <section class="panel fleet-panel" data-testid="fleet-summary">
@@ -103,7 +113,7 @@
         </ul>
         <p id="gold-readiness-message" class="gold-readiness-message" data-testid="gold-readiness-message">点击检查 Gold 获取 /api/gold-readiness</p>
         <p class="gold-readiness-safety-note" data-testid="gold-readiness-safety-note">
-          Gold 就绪评分卡为只读人工维护静态清单，仅手动 GET /api/gold-readiness，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；V0.53 只有 partial Bearer token API 认证骨架，Web token 输入与完整鉴权未完成，不声明任何生产就绪。
+          Gold 就绪评分卡为只读人工维护静态清单，仅手动 GET /api/gold-readiness，无启动请求、不自动轮询、不写入 metadata、不连接 NAS、不执行备份或恢复、不执行远程命令；V0.54 包含 partial Bearer token API 认证骨架与内存态 Web token 输入/清除，完整鉴权仍未完成，不声明任何生产就绪。
         </p>
       </section>
       <section class="panel devices-panel">

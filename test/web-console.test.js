@@ -27,9 +27,11 @@ import {
   DEVICE_FILTER_SORT_LABELS,
   getDeviceManagementState,
   getDeviceManagementStateKey,
+  buildApiFetchOptions,
   buildDeviceManagementSummary,
   buildDeviceManagementSummaryScope,
   initConsole,
+  isApiRequestUrl,
   matchesDeviceSearch,
   normalizeDeviceStatus,
   parseBackupPreflightExcludePatterns,
@@ -1403,6 +1405,18 @@ describe('Web Console / API contract', () => {
     assert.ok(css.includes('.gold-readiness-panel[data-status="blocked"]'), 'styles.css must contain blocked status styling');
     assert.ok(css.includes('.gold-readiness-panel[data-status="error"]'), 'styles.css must contain error status styling');
   });
+
+  // ── V0.54 API Token UX HTML contract ─────────────────────────────
+  it('HTML contains V0.54 API token controls with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="api-token-input"'), 'must have api-token-input');
+    assert.ok(html.includes('data-testid="api-token-apply"'), 'must have api-token-apply');
+    assert.ok(html.includes('data-testid="api-token-clear"'), 'must have api-token-clear');
+    assert.ok(html.includes('data-testid="api-token-status"'), 'must have api-token-status');
+    assert.ok(html.includes('data-testid="api-token-safety-note"'), 'must have api-token-safety-note');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 
@@ -1591,6 +1605,44 @@ describe('parseNasDryRunConfig', () => {
 
     assert.strictEqual(result.ok, false);
     assert.match(result.error, /JSON 格式错误/);
+  });
+});
+
+describe('API token fetch helpers', () => {
+  it('treats only relative /api and /api/* URLs as API requests', () => {
+    assert.strictEqual(isApiRequestUrl('/api'), true);
+    assert.strictEqual(isApiRequestUrl('/api/health'), true);
+    assert.strictEqual(isApiRequestUrl('/api/nas-dry-run?x=1'), true);
+    assert.strictEqual(isApiRequestUrl('/api?x=1'), true);
+    assert.strictEqual(isApiRequestUrl('/app.js'), false);
+    assert.strictEqual(isApiRequestUrl('/apix/health'), false);
+    assert.strictEqual(isApiRequestUrl('https://example.com/api/health'), false);
+  });
+
+  it('does not add Authorization to non-API URLs even when a token exists', () => {
+    const originalOptions = { headers: { 'X-Test': '1' } };
+    const result = buildApiFetchOptions('/app.js', originalOptions, 'secret-token-123');
+
+    assert.strictEqual(result, originalOptions);
+    assert.deepStrictEqual(originalOptions.headers, { 'X-Test': '1' });
+  });
+
+  it('adds Authorization to API POST requests while preserving existing headers without mutating input', () => {
+    const originalOptions = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    };
+
+    const result = buildApiFetchOptions('/api/nas-dry-run', originalOptions, 'secret-token-123');
+
+    assert.notStrictEqual(result, originalOptions);
+    assert.notStrictEqual(result.headers, originalOptions.headers);
+    assert.strictEqual(result.method, 'POST');
+    assert.strictEqual(result.body, '{}');
+    assert.strictEqual(result.headers['Content-Type'], 'application/json');
+    assert.strictEqual(result.headers.Authorization, 'Bearer secret-token-123');
+    assert.deepStrictEqual(originalOptions.headers, { 'Content-Type': 'application/json' });
   });
 });
 
@@ -7126,5 +7178,249 @@ describe('DOM test: gold readiness panel interactions', () => {
     assert.strictEqual(panel._attrs['data-status'] || panel.dataset.status, 'error');
     assert.strictEqual(statusEl.textContent, '检查失败');
     assert.ok(messageEl.textContent.includes('失败') || messageEl.textContent.includes('500'));
+  });
+});
+
+// ── V0.54 DOM test: API token UX interactions ─────────────────────
+describe('DOM test: API token UX interactions', () => {
+  it('entering token and clicking apply causes later /api/health fetch to include Authorization: Bearer <token>', async () => {
+    const doc = buildMockDoc();
+    let lastHeaders = null;
+    const mockFetch = async (url, options) => {
+      if (url.includes('/api/health')) {
+        lastHeaders = options?.headers;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const tokenInput = doc.getElementById('api-token-input');
+    const applyBtn = doc.getElementById('api-token-apply');
+    const refreshBtn = doc.getElementById('release-health-refresh');
+
+    tokenInput.value = 'secret-token-123';
+    if (applyBtn._listeners.click) {
+      await applyBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(lastHeaders, 'headers should be passed to fetch');
+    assert.strictEqual(lastHeaders['Authorization'], 'Bearer secret-token-123');
+  });
+
+  it('no token means /api/health fetch has no Authorization header', async () => {
+    const doc = buildMockDoc();
+    let lastHeaders = null;
+    const mockFetch = async (url, options) => {
+      if (url.includes('/api/health')) {
+        lastHeaders = options?.headers;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const refreshBtn = doc.getElementById('release-health-refresh');
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (lastHeaders) {
+      assert.ok(!lastHeaders['Authorization'], 'should not have Authorization header');
+    }
+  });
+
+  it('clicking clear removes token and later /api/health fetch has no Authorization header', async () => {
+    const doc = buildMockDoc();
+    let lastHeaders = null;
+    const mockFetch = async (url, options) => {
+      if (url.includes('/api/health')) {
+        lastHeaders = options?.headers;
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const tokenInput = doc.getElementById('api-token-input');
+    const applyBtn = doc.getElementById('api-token-apply');
+    const clearBtn = doc.getElementById('api-token-clear');
+    const refreshBtn = doc.getElementById('release-health-refresh');
+
+    tokenInput.value = 'secret-token-123';
+    if (applyBtn._listeners.click) {
+      await applyBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (clearBtn._listeners.click) {
+      await clearBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(tokenInput.value, '');
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (lastHeaders) {
+      assert.ok(!lastHeaders['Authorization'], 'should not have Authorization header after clearing');
+    }
+  });
+
+  it('a 401 response clears token and status says authentication failed', async () => {
+    const doc = buildMockDoc();
+    let lastHeaders = null;
+    let fetchCount = 0;
+    const mockFetch = async (url, options) => {
+      if (url.includes('/api/health')) {
+        fetchCount++;
+        lastHeaders = options?.headers;
+        if (fetchCount === 1) {
+          return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, mockFetch, () => 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const tokenInput = doc.getElementById('api-token-input');
+    const applyBtn = doc.getElementById('api-token-apply');
+    const refreshBtn = doc.getElementById('release-health-refresh');
+    const statusEl = doc.getElementById('api-token-status');
+
+    tokenInput.value = 'secret-token-123';
+    if (applyBtn._listeners.click) {
+      await applyBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.strictEqual(tokenInput.value, '', 'token value should be cleared on 401');
+    assert.ok(
+      statusEl.textContent.toLowerCase().includes('failed') ||
+      statusEl.textContent.includes('失败') ||
+      statusEl.textContent.includes('未授权'),
+      'status should indicate authentication failed'
+    );
+
+    lastHeaders = null;
+    if (refreshBtn._listeners.click) {
+      await refreshBtn._listeners.click();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (lastHeaders) {
+      assert.ok(!lastHeaders['Authorization'], 'later fetch should not contain Authorization header');
+    }
+  });
+
+  it('token is not written to localStorage/sessionStorage/cookie if those APIs are present in the mock doc/window', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+
+    const originalLocalStorage = globalThis.localStorage;
+    const originalSessionStorage = globalThis.sessionStorage;
+    const originalWindow = globalThis.window;
+    const originalDocument = globalThis.document;
+
+    let localStorageWritten = false;
+    let sessionStorageWritten = false;
+    let cookieWritten = false;
+
+    try {
+      globalThis.localStorage = {
+        setItem(key, value) {
+          localStorageWritten = true;
+        },
+        getItem(key) { return null; },
+        removeItem(key) {}
+      };
+
+      globalThis.sessionStorage = {
+        setItem(key, value) {
+          sessionStorageWritten = true;
+        },
+        getItem(key) { return null; },
+        removeItem(key) {}
+      };
+
+      globalThis.window = {
+        localStorage: globalThis.localStorage,
+        sessionStorage: globalThis.sessionStorage,
+      };
+
+      globalThis.document = doc;
+
+      Object.defineProperty(doc, 'cookie', {
+        get() { return ''; },
+        set(val) {
+          cookieWritten = true;
+        },
+        configurable: true
+      });
+
+      initConsole(doc, mockFetch, () => 0);
+      await new Promise((r) => setTimeout(r, 20));
+
+      const tokenInput = doc.getElementById('api-token-input');
+      const applyBtn = doc.getElementById('api-token-apply');
+
+      tokenInput.value = 'secret-token-123';
+      if (applyBtn._listeners.click) {
+        await applyBtn._listeners.click();
+      }
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.strictEqual(localStorageWritten, false, 'should not write to localStorage');
+      assert.strictEqual(sessionStorageWritten, false, 'should not write to sessionStorage');
+      assert.strictEqual(cookieWritten, false, 'should not write to cookie');
+    } finally {
+      if (originalLocalStorage === undefined) {
+        delete globalThis.localStorage;
+      } else {
+        globalThis.localStorage = originalLocalStorage;
+      }
+
+      if (originalSessionStorage === undefined) {
+        delete globalThis.sessionStorage;
+      } else {
+        globalThis.sessionStorage = originalSessionStorage;
+      }
+
+      if (originalWindow === undefined) {
+        delete globalThis.window;
+      } else {
+        globalThis.window = originalWindow;
+      }
+
+      if (originalDocument === undefined) {
+        delete globalThis.document;
+      } else {
+        globalThis.document = originalDocument;
+      }
+    }
   });
 });

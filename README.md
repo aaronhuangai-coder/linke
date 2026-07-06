@@ -1,8 +1,8 @@
-# Linke V0.53
+# Linke V0.54
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.53** — 单机 localhost 原型阶段，具备可选 Bearer token API 认证骨架，但尚未具备完整生产级鉴权。
+> **当前版本：V0.54** — 单机 localhost 原型阶段，具备可选 Bearer token API 认证骨架与 Web Console 内存态 token UX，但尚未具备完整生产级鉴权。
 
 ## 版本演进
 
@@ -60,7 +60,8 @@
 | V0.50 | 历史版本 | 发布就绪检查 CLI：`release-readiness` 基于 `/api/health` 输出 sanitized readiness report，并用退出码 0/2/1 区分 ready、not ready 和请求错误 |
 | V0.51 | 历史版本 | 发布就绪网页控制台：新增 GET `/api/release-readiness` 与 `release-health-panel` 内的 release readiness panel，手动检查发布就绪状态 |
 | V0.52 | 历史版本 | Gold readiness Web panel：新增 GET `/api/gold-readiness` 与 `gold-readiness-panel`，展示 Gold readiness scorecard docs、capability/blocker 评分卡和 Gold blockers |
-| V0.53 | 当前版本 | Optional Bearer token auth skeleton：`LINKE_AUTH_TOKEN` / `LINKE_TOKEN` 启用 API Bearer token 检查，Agent CLI 支持 `--token <token>` |
+| V0.53 | 历史版本 | Optional Bearer token auth skeleton：`LINKE_AUTH_TOKEN` / `LINKE_TOKEN` 启用 API Bearer token 检查，Agent CLI 支持 `--token <token>` |
+| V0.54 | 当前版本 | Web Console in-memory API token UX：浏览器可输入/清除 API token，内存态发送 `Authorization: Bearer <token>`，不写 localStorage、sessionStorage、cookie 或 metadata |
 
 ## 特性
 
@@ -98,7 +99,7 @@
 - **事件日志面板增强** — Web Console 事件日志面板增强，展示前端内存态结构化事件、累计计数、最近事件和 50 条可见上限
 - **快照备份** — 将本地文件备份到仓库，支持并发隔离
 - **快照恢复** — 从快照精确恢复文件（sha256 校验）
-- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志面板增强 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线 / 备份任务时间线 snapshot 联动 / 设备备份健康 / 备份版本一致性 / 版本一致性 snapshot 联动 / 版本一致性筛选与搜索 / 版本一致性非最新摘要 / 版本一致性排序控制 / 覆盖缺口摘要 / 版本一致性覆盖筛选 / 版本一致性覆盖缺口排序 / 版本一致性覆盖率显示 / 版本一致性无可观测设备回退 / 版本一致性无可观测设备筛选 / 统一管理态 / 管理态筛选 / 管理态分桶统计 / 管理态分桶选中态 / 管理态分桶作用域 / 管理态判定提示 / 设备列表空态筛选上下文 / 设备筛选重置 / 设备筛选重置状态 / 设备筛选摘要 / 设备筛选摘要状态 / 设备筛选计数状态 / 设备筛选计数指标
+- **Web Console** — 管理界面：设备列表 / 设备详情 / 快照列表 / 快照清单详情 / 恢复预检 / 备份预检 / NAS 预检 / 快照差异预览 / 事件日志面板增强 / 保留计划面板 / 备份任务概览 / 备份任务详情时间线 / 备份任务时间线 snapshot 联动 / 设备备份健康 / 备份版本一致性 / 版本一致性 snapshot 联动 / 版本一致性筛选与搜索 / 版本一致性非最新摘要 / 版本一致性排序控制 / 覆盖缺口摘要 / 版本一致性覆盖筛选 / 版本一致性覆盖缺口排序 / 版本一致性覆盖率显示 / 版本一致性无可观测设备回退 / 版本一致性无可观测设备筛选 / 统一管理态 / 管理态筛选 / 管理态分桶统计 / 管理态分桶选中态 / 管理态分桶作用域 / 管理态判定提示 / 设备列表空态筛选上下文 / 设备筛选重置 / 设备筛选重置状态 / 设备筛选摘要 / 设备筛选摘要状态 / 设备筛选计数状态 / 设备筛选计数指标 / API token 内存态输入
 - **原子写入** — 元数据写入使用 tmp + rename，保证一致性
 - **路径安全** — deviceId slug 化，防止 path traversal
 - **保留计划预览** — Web Console 与 CLI 均可查看 retention dry-run 结果，不执行删除
@@ -111,8 +112,9 @@
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
 - **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
-- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.53 将 `security-auth` 标为 partial，`real-nas-remote-backup` 与 `production-hardening` 仍为 Gold blockers
+- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.54 将 `security-auth` 标为 partial，`real-nas-remote-backup` 与 `production-hardening` 仍为 Gold blockers
 - **可选 Bearer token API 认证骨架** — 服务端可通过 `LINKE_AUTH_TOKEN` 或 `LINKE_TOKEN` 为 `/api/*` 请求启用 `Authorization: Bearer <token>` 检查，Agent CLI 支持 `--token <token>`；这仍是 partial auth，不是完整生产级 authorization
+- **Web Console 内存态 API Token UX** — 页面顶部提供 API Token 输入、应用、清除与状态提示；token 只保存在当前页面内存中，刷新后需重新输入，不写 localStorage、sessionStorage、cookie 或 metadata；401 会清空 token 并提示认证失败
 
 ## 快速开始
 
@@ -132,7 +134,7 @@ HOST=0.0.0.0 PORT=3000 node src/server.js
 
 > **默认只监听 127.0.0.1**，不暴露到局域网/公网。如需局域网测试可设置 `HOST=0.0.0.0`，仅限受控测试环境使用。
 
-> 设置 `LINKE_AUTH_TOKEN` 或兼容变量 `LINKE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。当前 Web Console 还没有浏览器 token 输入/保存流程，因此 auth mode 主要供 Agent CLI 和自动化检查使用。
+> 设置 `LINKE_AUTH_TOKEN` 或兼容变量 `LINKE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
 
 ## Agent CLI
 
@@ -178,8 +180,8 @@ node src/agent.js health --server http://localhost:3000 --token dev-test-token
 
 # release-readiness：发布就绪检查 CLI（只读 GET /api/health，输出 sanitized JSON）
 node src/agent.js release-readiness --server http://localhost:3000
-node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.53
-node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.53 --token dev-test-token
+node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.54
+node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.54 --token dev-test-token
 ```
 
 ### run-once
@@ -741,15 +743,16 @@ V0.45 为设备列表的设备筛选计数（`device-filter-count`）增加只�
 - 不连接 NAS。
 - 不执行远程命令。
 
-### 可选 Bearer token API 认证骨架
+### 可选 Bearer token API 认证骨架与 Web Token UX
 
-V0.53 增加可选 Bearer token auth skeleton。它的目标是防止未带 token 的 Agent CLI / 自动化请求直接访问 `/api/*`，为后续完整鉴权打基础。
+V0.53 增加可选 Bearer token auth skeleton。V0.54 在 Web Console 中补齐内存态 API Token UX，让浏览器请求也能在受控本地测试中带上 Bearer header。它的目标是防止未带 token 的 Agent CLI / 自动化请求直接访问 `/api/*`，为后续完整鉴权打基础。
 
 - **启用方式**：设置 `LINKE_AUTH_TOKEN`，或兼容使用 `LINKE_TOKEN`。
 - **请求格式**：所有 `/api/*` 请求必须带 `Authorization: Bearer <token>`；缺失、格式错误或 token 不匹配会返回 `401 Unauthorized`。
 - **Agent CLI**：多数需要访问 Linke Server 的命令可用 `--token <token>` 发送 Bearer header，例如 `health`、`release-readiness`、`heartbeat`、`backup`、`restore-dry-run`、`retention-dry-run`。
+- **Web Console**：页面顶部提供 API Token 输入、应用、清除与状态提示；token 仅保存在当前页面内存中，刷新后需重新输入。
+- **浏览器持久化边界**：Web Console 不会把 token 写入 `localStorage`、`sessionStorage`、`cookie` 或 metadata；收到 401 后会清空内存 token 并提示认证失败。
 - **默认兼容**：未设置 token 时，仍保持 V0.x localhost 原型的无 token 本地行为。
-- **Web Console 边界**：当前 Web Console 尚未实现浏览器 token 输入/保存流程；启用 token 后，浏览器界面的 API 请求会被 401 拒绝，后续版本需要补 Web token UX。
 - **Gold 边界**：这是 partial auth，不是完整生产级 authorization；还缺少角色权限、token 轮换、secret management、审计、速率限制和生产安全评审。
 
 ### 发布健康检查
@@ -757,7 +760,7 @@ V0.53 增加可选 Bearer token auth skeleton。它的目标是防止未带 toke
 V0.46 实现了发布健康检查端点 `/api/health`。
 
 - 提供只读 GET `/api/health` 接口，用以检查服务运行状况。
-- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.53"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
+- 返回的健康数据包含：`status`（当 `dataDir` 可读时为 `"ok"`，不可读/不可用时为 `"degraded"`）、服务标识 `"linke"`、当前发布版本号（当前为 `"V0.54"`）、检查详情 `checks`（包含 `http` 和 `dataDirReadable`）、以及当前 ISO 时间戳 `timestamp`。
 - 如果数据目录 `dataDir` 不可用，`checks.dataDirReadable` 将显示为 `"unavailable"`。
 
 ### 发布健康检查安全边界
@@ -829,8 +832,8 @@ V0.50 新增发布就绪检查命令 `agent.js release-readiness`。
 - **命令示例**：
   ```bash
   node src/agent.js release-readiness --server http://localhost:3000
-  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.53
-  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.53 --token dev-test-token
+  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.54
+  node src/agent.js release-readiness --server http://localhost:3000 --expected-version V0.54 --token dev-test-token
   ```
 - **说明**：此命令执行一次只读 `GET /api/health`，根据固定 health schema、`status`、`service`、版本号、`checks.http`、`checks.dataDirReadable` 和 `timestamp` 生成 sanitized readiness report。
 - **版本期望**：默认使用当前 `LINKE_RELEASE_VERSION`；滚动更新或外部部署检查可通过 `--expected-version` 显式指定期望版本。
@@ -876,7 +879,7 @@ V0.52 新增只读 GET /api/gold-readiness 端点，并在 Web Console 增加 `g
 - **API 说明**：GET /api/gold-readiness 返回静态 code-owned、人工维护的 scorecard，包含 `status`、`version`、`generatedAt`、`summary` 与 `items`；`generatedAt` 仅表示报告生成时间，不代表实时检查时间。
 - **面板说明**：Gold readiness Web panel 只在用户点击“检查 Gold”时手动请求 GET /api/gold-readiness，展示 ready / partial / blocked / total 计数、每个 capability/blocker 项、证据与下一步。
 - **与 release-readiness 的区别**：`release-readiness` 是 runtime/version gate，用于检查当前运行服务、版本和发布就绪信号；`gold-readiness` 是 capability/blocker scorecard，用于评估完整 Gold 软件发布目标。即使 release-readiness healthy / passing / ok，Gold readiness 也可以因为未实现关键能力而保持 blocked。
-- **Gold blockers**：V0.53 将 `security-auth` 标为 partial，明确它只有可选 API Bearer token 骨架；`real-nas-remote-backup` 与 `production-hardening` 仍为 blocked。
+- **Gold blockers**：V0.54 将 `security-auth` 标为 partial，明确它只有可选 API Bearer token 骨架、Agent CLI token 支持和 Web Console 内存态 token UX；`real-nas-remote-backup` 与 `production-hardening` 仍为 blocked。
 - **静态维护规则**：scorecard 的 item list 为静态 code-owned、人工维护清单；每次版本新增能力、变更 ready/partial/blocked 状态、修改 README/API claim 或调整 Gold blocker set 时，必须同步维护该静态清单和测试证据。
 
 ### Gold readiness 安全边界
@@ -889,7 +892,7 @@ Gold readiness scorecard 具备以下安全保证：
 - **不写入任何元数据**：不会写入 metadata、设备数据、快照数据或本地配置。
 - **不建立真实 NAS 连接**：不会连接 Synology、Ugreen 或其他 NAS，也不会调用 NAS app。
 - **不执行备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照、不执行真实 NAS 远程备份。
-- **认证仍是 partial**：V0.53 只包含 `/api/*` 的可选 Bearer token 检查和 Agent CLI `--token`，Web Console 尚未实现浏览器 token 输入/保存流程，且没有角色权限、审计或 secret management。
+- **认证仍是 partial**：V0.54 只包含 `/api/*` 的可选 Bearer token 检查、Agent CLI `--token` 和 Web Console 内存态 token UX；没有用户、角色权限、审计、secret management、token 轮换或 rate limiting。
 - **不承诺生产级能力**：该面板不包含生产部署、生产级 authorization、审计、secret management、监控或 recovery supervisor；不得将当前版本用于生产场景。
 
 ### Web Console 设备筛选摘要状态
@@ -969,7 +972,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 
 - **可选 Bearer token 仅覆盖 `/api/*`**，未设置 token 时仍是 localhost 原型行为
 - **不是完整生产级鉴权**，没有用户、角色权限、审计、secret management、token 轮换或 rate limiting
-- **Web Console 尚未支持 token 输入/保存**，启用 token 后浏览器 API 请求会被拒绝
+- **Web Console 仅支持内存态 token 输入/清除**，不持久保存 token，刷新后需重新输入
 - **不可直接暴露到网络**（公网或不受信任的局域网）
 
 ### API 路径风险
@@ -1140,7 +1143,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`、Web Console 内存态 API token UX。
 
 ## 技术约束
 
