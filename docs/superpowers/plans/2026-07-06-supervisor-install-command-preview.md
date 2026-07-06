@@ -385,6 +385,9 @@ Run ZAI final closure with a strict English evidence prompt. Require structured 
 Observed:
 - Qwen read-only adversarial review returned `VERDICT: PASS`, `FINDINGS: none`, `TEST GAPS: none`, `CONFIDENCE: high`.
 - ZAI was attempted three times with strict JSON-only prompts, but each response returned the fixed generic sentence `I understand, but I don't have a specific response.` and was not accepted as an effective closure verdict.
+- PM decision after user-selected option 2: ZAI is downgraded to `verifier inconclusive` for this milestone and DeepSeek CLI is used as auxiliary closure verifier.
+- DeepSeek first verifier attempt returned `INCONCLUSIVE` because the PM evidence summary was too coarse for behavioral acceptance.
+- DeepSeek second verifier attempt used specific source/test evidence and returned structured JSON with `verdict:"PASS"`, `accepted:true`, no blocking findings, `gold_status:"blocked"`, `risk:"low"`, and no unverified items. PM accepts this as auxiliary closure evidence, with final fact judgment still based on local verification plus Qwen review.
 
 - [x] **Step 3: Commit and push**
 
