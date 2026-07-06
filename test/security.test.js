@@ -1,9 +1,10 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { request } from 'node:http';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer } from '../src/server.js';
+import { createServer, MAX_JSON_BODY_BYTES } from '../src/server.js';
 import { slugify, safeDevicePath, createBackup } from '../src/storage.js';
 
 function postJSON(port, path, body) {
@@ -11,6 +12,41 @@ function postJSON(port, path, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+}
+
+function postRawJSON(port, path, body) {
+  return fetch(`http://localhost:${port}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+}
+
+function postRawJSONWithoutContentLength(port, path, body) {
+  return new Promise((resolve, reject) => {
+    const req = request({
+      hostname: 'localhost',
+      port,
+      path,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf-8');
+        resolve({
+          status: res.statusCode,
+          json: async () => JSON.parse(text),
+        });
+      });
+    });
+
+    req.on('error', reject);
+    const splitAt = Math.floor(body.length / 2);
+    req.write(body.slice(0, splitAt));
+    req.end(body.slice(splitAt));
   });
 }
 
@@ -338,5 +374,126 @@ describe('Security — optional bearer token authentication', () => {
     } finally {
       await new Promise((r) => server.close(r));
     }
+  });
+});
+
+describe('Security — API request body and error hardening', () => {
+  async function withServer(fn) {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-hardening-'));
+    const server = createServer({ dataDir });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      return await fn({ dataDir, port });
+    } finally {
+      await new Promise((r) => server.close(r));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  it('rejects oversized JSON request bodies with 413 and does not mutate dataDir', async () => {
+    await withServer(async ({ dataDir, port }) => {
+      assert.deepStrictEqual(await readdir(dataDir), []);
+      const body = JSON.stringify({
+        deviceId: 'oversized-device',
+        padding: 'x'.repeat(MAX_JSON_BODY_BYTES),
+      });
+
+      const res = await postRawJSON(port, '/api/heartbeat', body);
+
+      assert.strictEqual(res.status, 413);
+      assert.deepStrictEqual(await res.json(), { error: 'Request body too large' });
+      assert.deepStrictEqual(await readdir(dataDir), []);
+    });
+  });
+
+  it('enforces the JSON body limit even when Content-Length is missing', async () => {
+    await withServer(async ({ dataDir, port }) => {
+      assert.deepStrictEqual(await readdir(dataDir), []);
+      const body = JSON.stringify({
+        deviceId: 'chunked-oversized-device',
+        padding: 'x'.repeat(MAX_JSON_BODY_BYTES),
+      });
+
+      const res = await postRawJSONWithoutContentLength(port, '/api/heartbeat', body);
+
+      assert.strictEqual(res.status, 413);
+      assert.deepStrictEqual(await res.json(), { error: 'Request body too large' });
+      assert.deepStrictEqual(await readdir(dataDir), []);
+    });
+  });
+
+  it('accepts JSON request bodies at exactly the configured byte limit', async () => {
+    await withServer(async ({ port }) => {
+      const baseBody = JSON.stringify({
+        deviceId: 'exact-limit-device',
+        padding: '',
+      });
+      const paddingLength = MAX_JSON_BODY_BYTES - Buffer.byteLength(baseBody);
+      const body = JSON.stringify({
+        deviceId: 'exact-limit-device',
+        padding: 'x'.repeat(paddingLength),
+      });
+      assert.strictEqual(Buffer.byteLength(body), MAX_JSON_BODY_BYTES);
+
+      const res = await postRawJSON(port, '/api/heartbeat', body);
+
+      assert.strictEqual(res.status, 200);
+      const payload = await res.json();
+      assert.strictEqual(payload.deviceId, 'exact-limit-device');
+    });
+  });
+
+  it('accepts JSON request bodies at or below the configured limit', async () => {
+    await withServer(async ({ port }) => {
+      let paddingLength = MAX_JSON_BODY_BYTES - 128;
+      let body = '';
+      do {
+        body = JSON.stringify({
+          deviceId: 'large-ok-device',
+          padding: 'x'.repeat(paddingLength),
+        });
+        paddingLength -= 1;
+      } while (Buffer.byteLength(body) > MAX_JSON_BODY_BYTES);
+
+      const res = await postRawJSON(port, '/api/heartbeat', body);
+
+      assert.strictEqual(res.status, 200);
+      const payload = await res.json();
+      assert.strictEqual(payload.deviceId, 'large-ok-device');
+    });
+  });
+
+  it('keeps intentional invalid JSON as a 400 response with its specific message', async () => {
+    await withServer(async ({ port }) => {
+      const res = await postRawJSON(port, '/api/heartbeat', '{');
+
+      assert.strictEqual(res.status, 400);
+      assert.deepStrictEqual(await res.json(), { error: 'Invalid JSON body' });
+    });
+  });
+
+  it('keeps intentional missing-field validation as a 400 response with its specific message', async () => {
+    await withServer(async ({ port }) => {
+      const res = await postJSON(port, '/api/heartbeat', {});
+
+      assert.strictEqual(res.status, 400);
+      assert.deepStrictEqual(await res.json(), { error: 'deviceId is required' });
+    });
+  });
+
+  it('sanitizes unexpected 500 responses without exposing internal error details', async () => {
+    await withServer(async ({ dataDir, port }) => {
+      const res = await postJSON(port, '/api/restore', {
+        deviceId: 'restore-test',
+        snapshotId: '00000000-0000-0000-0000-000000000000',
+        targetPath: join(dataDir, 'restore-fail'),
+      });
+
+      assert.strictEqual(res.status, 500);
+      const body = await res.json();
+      assert.deepStrictEqual(body, { error: 'Internal Server Error' });
+    });
   });
 });

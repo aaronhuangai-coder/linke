@@ -238,6 +238,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.54/, 'V0.54');
   });
 
+  it('mentions V0.55 (server hardening body limit and sanitized 500 errors)', () => {
+    assertReadmeContains(/V0\.55/, 'V0.55');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1261,8 +1265,8 @@ describe('README — V0.53 optional bearer token auth skeleton', () => {
     assert.match(readme, /\| V0\.53 \| 历史版本 \|[^|]*(Bearer|token|认证|auth)/i);
   });
 
-  it('version table has V0.54 row with 当前版本 milestone', () => {
-    assert.match(readme, /\| V0\.54 \| 当前版本 \|[^|]*(Web Console|API token|内存态|token UX)/i);
+  it('version table has V0.54 row with 历史版本 milestone', () => {
+    assert.match(readme, /\| V0\.54 \| 历史版本 \|[^|]*(Web Console|API token|内存态|token UX)/i);
   });
 
   it('version table has V0.52 row with 历史版本 milestone', () => {
@@ -1287,6 +1291,31 @@ describe('README — V0.53 optional bearer token auth skeleton', () => {
     assert.match(readme, /Web Console|浏览器.*token|token.*浏览器/i);
     assert.match(readme, /内存|memory/i);
     assert.match(readme, /localStorage|sessionStorage|cookie/);
+  });
+});
+
+describe('README — V0.55 server request/error hardening', () => {
+  it('title and badge claim V0.55 as current', () => {
+    assert.match(readme, /^# Linke V0\.55/m);
+    assert.match(readme, /当前版本：V0\.55/);
+  });
+
+  it('version table marks V0.54 historical and V0.55 current', () => {
+    assert.match(readme, /\| V0\.54 \| 历史版本 \|[^|]*(Web Console|API token|内存态|token UX)/i);
+    assert.match(readme, /\| V0\.55 \| 当前版本 \|[^|]*(body|请求体|413|500|Internal Server Error|错误)/i);
+  });
+
+  it('documents request body size limit and sanitized unexpected 500 responses', () => {
+    assert.match(readme, /1\s*MiB|1048576|请求体.*上限|body.*limit/i);
+    assert.match(readme, /413|Request body too large/);
+    assert.match(readme, /Internal Server Error/);
+    assert.match(readme, /不.*暴露.*内部|不.*回显.*内部|sanitize|sanitized/i);
+  });
+
+  it('keeps Gold readiness blocked while production hardening is only partial', () => {
+    assert.match(readme, /production-hardening[\s\S]*(partial|部分)|生产.*硬化[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });
 });
 

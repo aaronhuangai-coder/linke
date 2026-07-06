@@ -32,6 +32,8 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
 };
 
+export const MAX_JSON_BODY_BYTES = 1024 * 1024;
+
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -43,6 +45,12 @@ function sendJSON(res, status, data) {
 
 function sendError(res, status, message) {
   sendJSON(res, status, { error: message });
+}
+
+function createHttpError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
 }
 
 function normalizeAuthToken(authToken) {
@@ -72,14 +80,26 @@ export function isAuthorizedRequest(req, authToken) {
 
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  const contentLength = req.headers['content-length'];
+  if (typeof contentLength === 'string' && Number(contentLength) > MAX_JSON_BODY_BYTES) {
+    throw createHttpError(413, 'Request body too large');
+  }
+
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      throw createHttpError(413, 'Request body too large');
+    }
+    chunks.push(buffer);
+  }
+
   const text = Buffer.concat(chunks).toString('utf-8') || '{}';
   try {
     return JSON.parse(text);
   } catch {
-    const err = new Error('Invalid JSON body');
-    err.statusCode = 400;
-    throw err;
+    throw createHttpError(400, 'Invalid JSON body');
   }
 }
 
@@ -379,8 +399,12 @@ export function createServer({ dataDir, backupHooks, authToken } = {}) {
       // ── 404 ─────────────────────────────────────────────────
       sendError(res, 404, 'Not Found');
     } catch (err) {
+      const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : 500;
+      if (statusCode >= 400 && statusCode < 500) {
+        return sendError(res, statusCode, err.message);
+      }
       console.error('Server error:', err.message);
-      sendError(res, 500, err.message);
+      return sendError(res, 500, 'Internal Server Error');
     }
   });
 

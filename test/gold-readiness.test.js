@@ -15,19 +15,19 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.54', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.54');
+  it('expects LINKE_RELEASE_VERSION to be V0.55', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.55');
   });
 
-  it('expects report.version to be V0.54', () => {
+  it('expects report.version to be V0.55', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.54');
+    assert.strictEqual(report.version, 'V0.55');
   });
 
   it('expects status blocked and correct summary count', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     assert.strictEqual(report.status, 'blocked');
-    assert.deepStrictEqual(report.summary, { ready: 4, partial: 3, blocked: 2, total: 9 });
+    assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
   });
 
   it('verifies generatedAt timestamp is parsed from options.now', () => {
@@ -122,7 +122,7 @@ describe('Gold Readiness Report', () => {
     );
   });
 
-  it('verifies security-auth is partial while real-nas-remote-backup and production-hardening remain blocked', () => {
+  it('verifies security-auth and production-hardening are partial while real-nas-remote-backup remains blocked', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const securityItem = report.items.find(item => item.id === 'security-auth');
     assert.ok(securityItem, 'security-auth should exist');
@@ -136,12 +136,18 @@ describe('Gold Readiness Report', () => {
     assert.doesNotMatch(securityItem.nextStep, /Web token UX/i);
     assert.match(securityItem.nextStep, /authorization|secret|production/i);
 
-    const blockedIds = ['real-nas-remote-backup', 'production-hardening'];
-    for (const id of blockedIds) {
-      const item = report.items.find(item => item.id === id);
-      assert.ok(item, `${id} should exist`);
-      assert.strictEqual(item.status, 'blocked');
-    }
+    const hardeningItem = report.items.find(item => item.id === 'production-hardening');
+    assert.ok(hardeningItem, 'production-hardening should exist');
+    assert.strictEqual(hardeningItem.status, 'partial');
+    const hardeningEvidence = evidenceText(hardeningItem);
+    assert.ok(hardeningEvidence.includes('MAX_JSON_BODY_BYTES'));
+    assert.ok(hardeningEvidence.includes('Internal Server Error'));
+    assert.ok(hardeningEvidence.includes('test/security.test.js'));
+    assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|audit/i);
+
+    const nasItem = report.items.find(item => item.id === 'real-nas-remote-backup');
+    assert.ok(nasItem, 'real-nas-remote-backup should exist');
+    assert.strictEqual(nasItem.status, 'blocked');
   });
 
   it('rejects vague evidence strings like implemented, works, done, available', () => {
