@@ -1737,16 +1737,16 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.75 Agent Gold readiness CLI', () => {
-  it('title and badge claim V0.75 as current', () => {
-    assertReadmeContains(/# Linke V0\.75/, 'README title should mention V0.75');
-    assertReadmeContains(/\*\*当前版本：V0\.75\*\*/, 'README badge should mention V0.75');
+describe('README — V0.76 Agent auth-status CLI', () => {
+  it('title and badge claim V0.76 as current', () => {
+    assertReadmeContains(/# Linke V0\.76/, 'README title should mention V0.76');
+    assertReadmeContains(/\*\*当前版本：V0\.76\*\*/, 'README badge should mention V0.76');
   });
 
-  it('version table marks V0.74 historical and V0.75 current', () => {
-    assertReadmeContains(/\| V0\.73 \| 历史版本 \|/, 'V0.73 should be historical');
+  it('version table marks V0.75 historical and V0.76 current', () => {
     assertReadmeContains(/\| V0\.74 \| 历史版本 \|[^|]*(audit-log|审计日志|Web|面板)/i, 'V0.74 should be historical audit-log Web panel milestone');
-    assertReadmeContains(/\| V0\.75 \| 当前版本 \|[^|]*(gold-readiness|Gold readiness|fail-on-blocked|自动化门禁)/i, 'V0.75 should be current Agent Gold readiness CLI milestone');
+    assertReadmeContains(/\| V0\.75 \| 历史版本 \|[^|]*(gold-readiness|Gold readiness|fail-on-blocked|自动化门禁)/i, 'V0.75 should be historical Agent Gold readiness CLI milestone');
+    assertReadmeContains(/\| V0\.76 \| 当前版本 \|[^|]*(auth-status|认证状态|--token|token material)/i, 'V0.76 should be current Agent auth-status CLI milestone');
   });
 
   it('keeps documenting hardening-status API, CLI, and Web panel safety boundaries', () => {
@@ -1798,7 +1798,17 @@ describe('README — V0.75 Agent Gold readiness CLI', () => {
     assertReadmeContains(/Agent gold-readiness CLI|Agent gold-readiness fail-on-blocked/, 'README should document Agent gold-readiness test coverage');
   });
 
-  it('keeps Gold blocked and rejects production hardening overclaims for V0.75', () => {
+  it('documents Agent auth-status CLI safety boundaries', () => {
+    assertReadmeContains(/agent\.js auth-status|node src\/agent\.js auth-status/, 'README should document auth-status CLI');
+    assertReadmeContains(/GET \/api\/auth-status/, 'README should document auth-status endpoint');
+    assertReadmeContains(/--token/, 'README should document auth-status token option');
+    assertReadmeContains(/tokenValuesReturned:false|不返回 token|token material/i, 'README should document token material exclusion');
+    assertReadmeContains(/不写入\s*metadata|不写入\s*元数据|no metadata/i, 'README should document no metadata writes');
+    assertReadmeContains(/不连接 NAS|no NAS/i, 'README should document no NAS connection');
+    assertReadmeContains(/Agent auth-status CLI/, 'README should document Agent auth-status test coverage');
+  });
+
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.76', () => {
     assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
     assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });

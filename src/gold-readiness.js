@@ -102,6 +102,7 @@ const GOLD_READINESS_ITEMS = [
       'src/server.js formatApiRoute',
       'src/server.js buildAuthStatusResponse',
       'GET /api/auth-status',
+      'src/agent.js auth-status',
       'src/agent.js --token option',
       'src/web/app.js in-memory API token header',
       'Authorization: Bearer header',
@@ -115,6 +116,7 @@ const GOLD_READINESS_ITEMS = [
       'test/security.test.js',
       'test/health.test.js',
       'test/agent-health.test.js',
+      'test/agent-auth-status.test.js',
       'test/web-console.test.js',
     ],
     nextStep: 'Add role-based authorization, token rotation, secret management, production-grade audit, distributed rate limiting, and production security review before any Gold release claim.',
@@ -168,7 +170,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'V0.75 adds a read-only Agent Gold readiness CLI gate; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 
