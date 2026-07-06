@@ -19,6 +19,7 @@
  *   hardening-status    — show sanitized hardening status
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
+ *   gold-readiness      — show Gold readiness blocker scorecard
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000)
@@ -35,7 +36,7 @@
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
  *   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
- *   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
+ *   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state or gold-readiness status is blocked
  *   --token <token>      Bearer token for authenticated Linke Server requests
  */
 
@@ -49,6 +50,7 @@ import { buildReleaseReadinessReport } from './release-readiness.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = resolve(join(__dirname, '..'));
+const GOLD_READINESS_STATUSES = new Set(['ready', 'partial', 'blocked']);
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
@@ -63,6 +65,13 @@ async function request(server, path, method, body, options = {}) {
     throw new Error(data.error || `HTTP ${res.status}`);
   }
   return data;
+}
+
+function validateGoldReadinessReport(report) {
+  if (!report || typeof report !== 'object' || !GOLD_READINESS_STATUSES.has(report.status)) {
+    throw new Error('gold-readiness response has invalid status');
+  }
+  return report;
 }
 
 // ── Arg parsing ────────────────────────────────────────────────────
@@ -223,6 +232,7 @@ Commands:
   hardening-status    Show sanitized hardening status
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
+  gold-readiness      Show Gold readiness blocker scorecard
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000)
@@ -239,7 +249,7 @@ Options:
   --limit <n>          Limit read-only audit-log events
   --expected-version <version> Expected release version (for release-readiness)
   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
-  --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
+  --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state or gold-readiness status is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
 `);
 }
@@ -465,6 +475,18 @@ export async function main() {
         });
         console.log(JSON.stringify(report, null, 2));
         if (!report.ready) {
+          process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'gold-readiness': {
+        if (args['fail-on-blocked'] !== undefined && args['fail-on-blocked'] !== true) {
+          throw new Error('--fail-on-blocked does not accept a value');
+        }
+        const report = validateGoldReadinessReport(await apiRequest('/api/gold-readiness', 'GET'));
+        console.log(JSON.stringify(report, null, 2));
+        if (args['fail-on-blocked'] === true && report?.status === 'blocked') {
           process.exitCode = 2;
         }
         break;

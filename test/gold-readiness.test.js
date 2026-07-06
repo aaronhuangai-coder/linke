@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.74', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.74');
+  it('expects LINKE_RELEASE_VERSION to be V0.75', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.75');
   });
 
-  it('expects report.version to be V0.74', () => {
+  it('expects report.version to be V0.75', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.74');
+    assert.strictEqual(report.version, 'V0.75');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -75,9 +75,12 @@ describe('Gold Readiness Report', () => {
     const rrEvidence = evidenceText(rrItem);
     assert.ok(rrEvidence.includes('test/release-readiness.test.js'));
     assert.ok(rrEvidence.includes('test/agent-release-readiness.test.js'));
+    assert.ok(rrEvidence.includes('test/agent-gold-readiness.test.js'));
     assert.ok(rrEvidence.includes('test/health.test.js'));
     assert.ok(rrEvidence.includes('GET /api/health'));
     assert.ok(rrEvidence.includes('GET /api/release-readiness'));
+    assert.ok(rrEvidence.includes('GET /api/gold-readiness'));
+    assert.ok(rrEvidence.includes('src/agent.js gold-readiness --fail-on-blocked'));
 
     const lbrItem = report.items.find(item => item.id === 'local-backup-restore');
     assert.ok(lbrItem, 'local-backup-restore item should exist');

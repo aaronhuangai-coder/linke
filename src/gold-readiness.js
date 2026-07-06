@@ -9,11 +9,14 @@ const GOLD_READINESS_ITEMS = [
     evidence: [
       'test/release-readiness.test.js',
       'test/agent-release-readiness.test.js',
+      'test/agent-gold-readiness.test.js',
       'test/health.test.js',
       'GET /api/health',
       'GET /api/release-readiness',
+      'GET /api/gold-readiness',
+      'src/agent.js gold-readiness --fail-on-blocked',
     ],
-    nextStep: 'Keep runtime release checks and version guard coverage aligned.',
+    nextStep: 'Keep runtime release checks, Gold blocker automation, and version guard coverage aligned.',
   },
   {
     id: 'local-backup-restore',
@@ -165,7 +168,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'V0.74 adds a manual Web Console audit-log panel for sanitized local audit visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'V0.75 adds a read-only Agent Gold readiness CLI gate; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 
