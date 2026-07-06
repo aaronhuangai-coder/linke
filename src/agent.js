@@ -19,6 +19,7 @@
  *   auth-status         — show sanitized auth status
  *   hardening-status    — show sanitized hardening status
  *   supervisor-status   — show sanitized supervisor status
+ *   supervisor-install-dry-run — show sanitized supervisor install plan
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -48,6 +49,7 @@ import { writeFile } from 'node:fs/promises';
 import { loadConfig, validateConfig } from './config.js';
 import { runNasDryRunFromConfig } from './nas.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
+import { LINKE_RELEASE_VERSION } from './version.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -71,6 +73,7 @@ const SUPERVISOR_SAFETY_FALSE_FIELDS = [
   'restoreTriggered',
   'remoteCommandExecuted',
 ];
+const SUPERVISOR_INSTALL_DRY_RUN_CONFIG_ERROR = 'supervisor-install-dry-run failed; verify --config points to a readable valid Linke config';
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
@@ -247,6 +250,74 @@ export async function writeLaunchdDryRun(configPath, outputPath) {
   return plist;
 }
 
+export function buildSupervisorInstallDryRunPlan(config) {
+  const safeConfig = config && typeof config === 'object' ? config : {};
+  const backupJobs = Array.isArray(safeConfig.backupJobs) ? safeConfig.backupJobs : [];
+  const nasTargets = Array.isArray(safeConfig.nasTargets) ? safeConfig.nasTargets : [];
+  const excludePatterns = Array.isArray(safeConfig.excludePatterns) ? safeConfig.excludePatterns : [];
+
+  return {
+    status: 'partial',
+    service: 'linke',
+    version: LINKE_RELEASE_VERSION,
+    command: 'supervisor-install-dry-run',
+    supervisor: {
+      state: 'not_configured',
+      installPlan: 'dry_run_only',
+      label: String(safeConfig.launchdLabel || `com.linke.agent.${safeConfig.deviceId || 'unknown'}`),
+      scheduleSeconds: Number.isInteger(safeConfig.scheduleSeconds) && safeConfig.scheduleSeconds > 0
+        ? safeConfig.scheduleSeconds
+        : 3600,
+      target: 'user-launch-agent',
+      program: 'node src/agent.js run-once --config [redacted]',
+      wouldInstall: false,
+      wouldStart: false,
+      wouldCallLaunchctl: false,
+      wouldWriteLaunchAgent: false,
+      wouldWriteMetadata: false,
+    },
+    configSummary: {
+      deviceId: String(safeConfig.deviceId || 'unknown'),
+      backupJobCount: backupJobs.length,
+      nasTargetCount: nasTargets.length,
+      excludePatternCount: excludePatterns.length,
+    },
+    safety: {
+      dryRun: true,
+      configPathReturned: false,
+      sourcePathsReturned: false,
+      serverUrlReturned: false,
+      nasEndpointsReturned: false,
+      credentialRefsReturned: false,
+      tokenValuesReturned: false,
+      launchctlCalled: false,
+      processListRead: false,
+      supervisorInstalled: false,
+      launchdFileWritten: false,
+      metadataWritten: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+    },
+    nextSteps: [
+      'Review this sanitized dry-run plan.',
+      'Use launchd-dry-run separately if a plist preview is needed.',
+      'Real install/start remains out of scope.',
+    ],
+  };
+}
+
+export async function runSupervisorInstallDryRun(configPath) {
+  try {
+    const raw = await loadConfig(configPath);
+    const config = validateConfig(raw);
+    return buildSupervisorInstallDryRunPlan(config);
+  } catch {
+    throw new Error(SUPERVISOR_INSTALL_DRY_RUN_CONFIG_ERROR);
+  }
+}
+
 // ── Usage ──────────────────────────────────────────────────────────
 
 function printUsage() {
@@ -272,6 +343,7 @@ Commands:
   auth-status         Show sanitized auth status
   hardening-status    Show sanitized hardening status
   supervisor-status   Show sanitized supervisor status
+  supervisor-install-dry-run Show sanitized supervisor install dry-run plan
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -285,7 +357,7 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, nas-dry-run)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
@@ -498,6 +570,16 @@ export async function main() {
 
       case 'supervisor-status': {
         const result = validateSupervisorStatusResponse(await apiRequest('/api/supervisor-status', 'GET'));
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'supervisor-install-dry-run': {
+        if (!args.config) throw new Error('--config is required');
+        if (args.output !== undefined) {
+          throw new Error('--output is not supported by supervisor-install-dry-run');
+        }
+        const result = await runSupervisorInstallDryRun(args.config);
         console.log(JSON.stringify(result, null, 2));
         break;
       }

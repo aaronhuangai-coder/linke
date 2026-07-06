@@ -86,6 +86,9 @@ const GOLD_READINESS_ITEMS = [
     evidence: [
       'test/agent-run-once.test.js',
       'test/launchd-dry-run.test.js',
+      'test/agent-supervisor-install-dry-run.test.js',
+      'src/agent.js supervisor-install-dry-run',
+      'src/agent.js buildSupervisorInstallDryRunPlan',
       'GET /api/supervisor-status',
       'src/server.js buildSupervisorStatusResponse',
       'src/agent.js supervisor-status',
@@ -97,7 +100,7 @@ const GOLD_READINESS_ITEMS = [
       'supervisor.state:not_configured',
       'supervisorInstalled:false',
     ],
-    nextStep: 'V0.78 only reports a sanitized not_configured supervisor status through API, CLI, and manual Web visibility; add installer, launchd install/start, watchdog, monitoring, and managed daemon lifecycle only after auth and production boundaries are designed.',
+    nextStep: 'V0.79 adds a sanitized supervisor install dry-run plan but still only reports not_configured supervisor state; add real installer, launchd install/start, watchdog, monitoring, and managed daemon lifecycle only after auth and production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -168,6 +171,9 @@ const GOLD_READINESS_ITEMS = [
       'src/server.js buildSupervisorStatusResponse',
       'test/agent-supervisor-status.test.js',
       'src/agent.js supervisor-status',
+      'test/agent-supervisor-install-dry-run.test.js',
+      'src/agent.js supervisor-install-dry-run',
+      'src/agent.js buildSupervisorInstallDryRunPlan',
       'supervisor.state:not_configured',
       'supervisorInstalled:false',
       'src/web/app.js buildSupervisorStatusViewModel',
@@ -189,7 +195,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured Web panel reporting, and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, and blocker gates; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 
