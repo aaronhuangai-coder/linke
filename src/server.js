@@ -22,7 +22,7 @@ import { buildNasDryRunPlan } from './nas.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
-import { appendAuditEvent, readAuditEvents } from './audit-log.js';
+import { appendAuditEvent, parseAuditRetentionMaxEvents, readAuditEvents } from './audit-log.js';
 import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -57,9 +57,9 @@ function createHttpError(statusCode, message) {
   return err;
 }
 
-async function recordAudit(dataDir, event) {
+async function recordAudit(dataDir, event, retention) {
   try {
-    await appendAuditEvent(dataDir, event);
+    await appendAuditEvent(dataDir, event, { retention });
   } catch (err) {
     console.error('Audit log write failed:', err.message);
   }
@@ -228,7 +228,7 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rateLimit } = {}) {
+export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rateLimit, auditRetention } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
@@ -251,7 +251,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             statusCode: 429,
             outcome: 'limited',
             requestId,
-          });
+          }, auditRetention);
           return sendError(res, 429, 'Rate limit exceeded');
         }
       }
@@ -264,7 +264,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
           statusCode: 401,
           outcome: 'denied',
           requestId,
-        });
+        }, auditRetention);
         return sendError(res, 401, 'Unauthorized');
       }
 
@@ -305,7 +305,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             outcome: 'failure',
             requestId,
             message: 'deviceId is required',
-          });
+          }, auditRetention);
           return sendError(res, 400, 'deviceId is required');
         }
         const info = await recordHeartbeat(dataDir, body.deviceId, body.hostname, body.ipAddress);
@@ -317,7 +317,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
           outcome: 'success',
           requestId,
           deviceId: info.deviceId,
-        });
+        }, auditRetention);
         return sendJSON(res, 200, info);
       }
 
@@ -334,7 +334,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             requestId,
             deviceId: auditDeviceId(body.deviceId),
             message: 'deviceId and sourcePath are required',
-          });
+          }, auditRetention);
           return sendError(res, 400, 'deviceId and sourcePath are required');
         }
         let snapshot;
@@ -362,7 +362,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             requestId,
             deviceId: auditDeviceId(body.deviceId),
             message: statusCode >= 500 ? 'Internal Server Error' : err.message,
-          });
+          }, auditRetention);
           throw err;
         }
         await recordAudit(dataDir, {
@@ -375,7 +375,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
           deviceId: auditDeviceId(body.deviceId),
           snapshotId: snapshot.snapshotId,
           fileCount: snapshot.fileCount,
-        });
+        }, auditRetention);
         return sendJSON(res, 201, snapshot);
       }
 
@@ -432,7 +432,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
               deviceId: auditDeviceId(body.deviceId),
               snapshotId: body.snapshotId,
               message: 'deviceId, snapshotId, and targetPath are required',
-            });
+            }, auditRetention);
             return sendError(res, 400, 'deviceId, snapshotId, and targetPath are required');
           }
           const targetPath = await resolveRestoreTargetPath(body.targetPath, normalizedRestoreRoot);
@@ -451,7 +451,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             requestId,
             deviceId: auditDeviceId(body.deviceId),
             snapshotId: body.snapshotId,
-          });
+          }, auditRetention);
           return sendJSON(res, 200, result);
         } catch (err) {
           const statusCode = errorStatusCode(err);
@@ -465,7 +465,7 @@ export function createServer({ dataDir, backupHooks, authToken, restoreRoot, rat
             deviceId: auditDeviceId(body.deviceId),
             snapshotId: body.snapshotId,
             message: statusCode >= 500 ? 'Internal Server Error' : err.message,
-          });
+          }, auditRetention);
           throw err;
         }
       }
@@ -637,8 +637,9 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
+  const auditRetention = parseAuditRetentionMaxEvents(process.env.LINKE_AUDIT_MAX_EVENTS);
 
-  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot, rateLimit });
+  const server = createServer({ dataDir, authToken, restoreRoot: normalizedRestoreRoot, rateLimit, auditRetention });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
@@ -650,6 +651,9 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
     }
     if (rateLimit) {
       console.log(`API rate limit: ${rateLimit.maxRequests} requests per minute`);
+    }
+    if (auditRetention) {
+      console.log(`Audit retention: newest ${auditRetention.maxEvents} events`);
     }
   });
 }

@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { appendAuditEvent, readAuditEvents, sanitizeAuditEvent } from '../src/audit-log.js';
+import {
+  appendAuditEvent,
+  normalizeAuditRetention,
+  parseAuditRetentionMaxEvents,
+  readAuditEvents,
+  sanitizeAuditEvent,
+} from '../src/audit-log.js';
 import { createServer } from '../src/server.js';
 
 async function pathExists(path) {
@@ -43,6 +49,7 @@ async function createAuditServer(options = {}) {
     dataDir,
     authToken: options.authToken,
     restoreRoot,
+    auditRetention: options.auditRetention,
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
@@ -162,6 +169,106 @@ describe('audit log module', () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  it('parses audit retention configuration values', () => {
+    assert.equal(parseAuditRetentionMaxEvents(undefined), null);
+    assert.equal(parseAuditRetentionMaxEvents(null), null);
+    assert.equal(parseAuditRetentionMaxEvents(''), null);
+    assert.equal(parseAuditRetentionMaxEvents('0'), null);
+    assert.deepEqual(parseAuditRetentionMaxEvents('3'), { maxEvents: 3 });
+
+    assert.equal(normalizeAuditRetention(undefined), null);
+    assert.equal(normalizeAuditRetention(null), null);
+    assert.equal(normalizeAuditRetention(false), null);
+    assert.equal(normalizeAuditRetention({ maxEvents: 0 }), null);
+    assert.deepEqual(normalizeAuditRetention({ maxEvents: 2 }), { maxEvents: 2 });
+
+    for (const value of ['-1', '1.5', 'abc']) {
+      assert.throws(
+        () => parseAuditRetentionMaxEvents(value),
+        /LINKE_AUDIT_MAX_EVENTS must be a non-negative integer/,
+      );
+    }
+  });
+
+  it('keeps default append behavior unbounded when retention is disabled', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-retention-disabled-'));
+    try {
+      for (let index = 0; index < 4; index++) {
+        await appendAuditEvent(dataDir, {
+          type: 'api.heartbeat.success',
+          method: 'POST',
+          path: '/api/heartbeat',
+          statusCode: 200,
+          outcome: 'success',
+          requestId: `req-disabled-${index}`,
+        });
+      }
+
+      const raw = await readFile(join(dataDir, 'audit', 'events.jsonl'), 'utf-8');
+      assert.equal(raw.trim().split('\n').length, 4);
+      assert.equal((await readAuditEvents(dataDir, { limit: 10 })).length, 4);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retains only the newest audit events and keeps read order newest first', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-retention-'));
+    try {
+      for (let index = 0; index < 5; index++) {
+        await appendAuditEvent(dataDir, {
+          type: 'api.heartbeat.success',
+          method: 'POST',
+          path: '/api/heartbeat',
+          statusCode: 200,
+          outcome: 'success',
+          requestId: `req-retained-${index}`,
+          createdAt: `2026-07-06T12:0${index}:00.000Z`,
+        }, { retention: { maxEvents: 3 } });
+      }
+
+      const raw = await readFile(join(dataDir, 'audit', 'events.jsonl'), 'utf-8');
+      const lines = raw.trim().split('\n').map((line) => JSON.parse(line));
+      assert.deepEqual(lines.map((event) => event.requestId), [
+        'req-retained-2',
+        'req-retained-3',
+        'req-retained-4',
+      ]);
+
+      const events = await readAuditEvents(dataDir, { limit: 10 });
+      assert.deepEqual(events.map((event) => event.requestId), [
+        'req-retained-4',
+        'req-retained-3',
+        'req-retained-2',
+      ]);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes concurrent retained appends without exceeding maxEvents', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-retention-concurrent-'));
+    try {
+      await Promise.all(Array.from({ length: 10 }, (_, index) => appendAuditEvent(dataDir, {
+        type: 'api.heartbeat.success',
+        method: 'POST',
+        path: '/api/heartbeat',
+        statusCode: 200,
+        outcome: 'success',
+        requestId: `req-concurrent-retained-${index}`,
+      }, { retention: { maxEvents: 4 } })));
+
+      const events = await readAuditEvents(dataDir, { limit: 10 });
+      assert.equal(events.length, 4);
+      assert.equal(new Set(events.map((event) => event.requestId)).size, 4);
+      for (const event of events) {
+        assert.match(event.requestId, /^req-concurrent-retained-/);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('audit log API', () => {
@@ -197,6 +304,59 @@ describe('audit log API', () => {
       assert.equal(audit.status, 200);
       const body = await audit.json();
       assert.equal(body.events.some((event) => event.type === 'auth.denied'), false);
+    } finally {
+      await cleanupAuditServer(fixture);
+    }
+  });
+
+  it('applies audit retention to server-generated audit events', async () => {
+    const fixture = await createAuditServer({
+      authToken: 'audit-token',
+      auditRetention: { maxEvents: 2 },
+    });
+    try {
+      for (let index = 0; index < 3; index++) {
+        const res = await postJSON(fixture.base, '/api/heartbeat', 'audit-token', {
+          deviceId: `retained-server-device-${index}`,
+        });
+        assert.equal(res.status, 200);
+      }
+
+      const audit = await getJSON(fixture.base, '/api/audit-log?limit=10', 'audit-token');
+      assert.equal(audit.status, 200);
+      const body = await audit.json();
+      assert.deepEqual(body.events.map((event) => event.deviceId), [
+        'retained-server-device-2',
+        'retained-server-device-1',
+      ]);
+      assert.doesNotMatch(JSON.stringify(body.events), /audit-token|Authorization|Bearer/);
+    } finally {
+      await cleanupAuditServer(fixture);
+    }
+  });
+
+  it('treats server auditRetention maxEvents 0 as disabled', async () => {
+    const fixture = await createAuditServer({
+      authToken: 'audit-token',
+      auditRetention: { maxEvents: 0 },
+    });
+    try {
+      for (let index = 0; index < 3; index++) {
+        const res = await postJSON(fixture.base, '/api/heartbeat', 'audit-token', {
+          deviceId: `unbounded-server-device-${index}`,
+        });
+        assert.equal(res.status, 200);
+      }
+
+      const audit = await getJSON(fixture.base, '/api/audit-log?limit=10', 'audit-token');
+      assert.equal(audit.status, 200);
+      const body = await audit.json();
+      assert.equal(body.events.length, 3);
+      assert.deepEqual(body.events.map((event) => event.deviceId), [
+        'unbounded-server-device-2',
+        'unbounded-server-device-1',
+        'unbounded-server-device-0',
+      ]);
     } finally {
       await cleanupAuditServer(fixture);
     }

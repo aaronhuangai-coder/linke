@@ -113,6 +113,8 @@ const GOLD_READINESS_ITEMS = [
       'src/audit-log.js',
       'src/rate-limit.js',
       'GET /api/audit-log',
+      'LINKE_AUDIT_MAX_EVENTS',
+      'Audit retention newest events',
       'LINKE_RATE_LIMIT_PER_MINUTE',
       '413 Request body too large',
       '429 Rate limit exceeded',
@@ -125,7 +127,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'Add deployment hardening, audit rotation and retention, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'Add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 
