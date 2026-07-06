@@ -197,6 +197,89 @@ describe('validateNasTarget', () => {
     );
   });
 
+  // ── credentialRef 校验 ─────────────────────────────────────────
+
+  it('accepts valid credentialRef "home-synology"', () => {
+    const result = validateNasTarget({
+      name: 'syno',
+      provider: 'synology',
+      endpoint: 'http://192.168.1.100:5000',
+      shareName: 'backup',
+      remotePath: '/volume1/backup',
+      enabled: true,
+      credentialRef: 'home-synology',
+    });
+    assert.strictEqual(result.credentialRef, 'home-synology');
+  });
+
+  it('accepts valid credentialRef "nas-01"', () => {
+    const result = validateNasTarget({
+      name: 'syno',
+      provider: 'synology',
+      endpoint: 'http://192.168.1.100:5000',
+      shareName: 'backup',
+      remotePath: '/volume1/backup',
+      enabled: true,
+      credentialRef: 'nas-01',
+    });
+    assert.strictEqual(result.credentialRef, 'nas-01');
+  });
+
+  const INVALID_REFS = [
+    '',
+    '   ',
+    'home synology',
+    'home-synology ',
+    ' home-synology',
+    'Home-synology',
+    'home-Synology',
+    'NAS-01',
+    '../escape',
+    'home/synology',
+    'home.synology',
+    'home@synology',
+    'home$synology',
+    'a'.repeat(32),
+    '1nas',
+    '01-nas',
+    '9-synology',
+  ];
+
+  for (const ref of INVALID_REFS) {
+    it(`rejects invalid credentialRef "${ref}"`, () => {
+      assert.throws(
+        () =>
+          validateNasTarget({
+            name: 'syno',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            enabled: true,
+            credentialRef: ref,
+          }),
+        /credentialRef/i,
+      );
+    });
+  }
+
+  it('rejects co-existence of credentialRef and forbidden credential fields (like password)', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+          password: 'some-password',
+        }),
+      /credentialRef|credential|forbidden|password/i,
+    );
+  });
+
   // ── appAdapter validation ─────────────────────────────────────
 
   it('accepts a valid synology appAdapter', () => {
@@ -430,6 +513,108 @@ describe('buildNasDryRunPlan', () => {
     });
 
     assert.strictEqual(plan.targets[0].adapterPlan, null);
+  });
+
+  // ── dry-run plan 中的 credentialRef 与 executionGate ───────────
+
+  it('sets credentialRefConfigured to true when valid credentialRef is provided, but omits raw credentialRef from the plan and JSON serialization', () => {
+    const config = {
+      deviceId: 'test-device',
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+      ],
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    };
+    const plan = buildNasDryRunPlan(config);
+
+    assert.strictEqual(plan.targets[0].credentialRefConfigured, true);
+    assert.strictEqual(plan.targets[0].credentialRef, undefined);
+    assert.strictEqual(JSON.stringify(plan).includes('home-synology'), false);
+
+    const jsonPlan = JSON.parse(JSON.stringify(plan));
+    assert.strictEqual(jsonPlan.targets[0].credentialRefConfigured, true);
+    assert.strictEqual(jsonPlan.targets[0].credentialRef, undefined);
+    assert.strictEqual(JSON.stringify(jsonPlan).includes('home-synology'), false);
+  });
+
+  it('sets credentialRefConfigured to false when credentialRef is not provided', () => {
+    const config = {
+      deviceId: 'test-device',
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+        },
+      ],
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    };
+    const plan = buildNasDryRunPlan(config);
+
+    assert.strictEqual(plan.targets[0].credentialRefConfigured, false);
+    assert.strictEqual(plan.targets[0].credentialRef, undefined);
+
+    const jsonPlan = JSON.parse(JSON.stringify(plan));
+    assert.strictEqual(jsonPlan.targets[0].credentialRefConfigured, false);
+    assert.strictEqual(jsonPlan.targets[0].credentialRef, undefined);
+  });
+
+  it('always returns top-level executionGate with remoteExecutionAllowed false and non-empty blockingReason', () => {
+    const config = {
+      deviceId: 'test-device',
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+      ],
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    };
+    const plan = buildNasDryRunPlan(config);
+    assert.ok(plan.executionGate);
+    assert.strictEqual(plan.executionGate.remoteExecutionAllowed, false);
+    assert.ok(typeof plan.executionGate.blockingReason === 'string');
+    assert.ok(plan.executionGate.blockingReason.length > 0);
+  });
+
+  it('cannot override remoteExecutionAllowed with input executionGate: true', () => {
+    const config = {
+      deviceId: 'test-device',
+      executionGate: true,
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+      ],
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    };
+    const plan = buildNasDryRunPlan(config);
+    assert.ok(plan.executionGate);
+    assert.strictEqual(plan.executionGate.remoteExecutionAllowed, false);
+    assert.ok(typeof plan.executionGate.blockingReason === 'string');
+    assert.ok(plan.executionGate.blockingReason.length > 0);
   });
 });
 

@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.63', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.63');
+  it('expects LINKE_RELEASE_VERSION to be V0.64', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.64');
   });
 
-  it('expects report.version to be V0.63', () => {
+  it('expects report.version to be V0.64', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.63');
+    assert.strictEqual(report.version, 'V0.64');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -111,6 +111,10 @@ describe('Gold Readiness Report', () => {
     const nasEvidence = evidenceText(nasItem);
     assert.ok(nasEvidence.includes('test/nas-dry-run.test.js'));
     assert.ok(nasEvidence.includes('test/config.test.js'));
+    assert.ok(nasEvidence.includes('validateNasCredentialRef'));
+    assert.ok(nasEvidence.includes('ALLOWED_NAS_CREDENTIAL_REF_PATTERN'));
+    assert.ok(nasEvidence.includes('credentialRefConfigured'));
+    assert.ok(nasEvidence.includes('executionGate'));
 
     const nasCombined = `${nasItem.label || ''} ${nasItem.nextStep || ''} ${nasEvidence}`;
     assert.ok(nasCombined.toLowerCase().includes('real nas connection'));

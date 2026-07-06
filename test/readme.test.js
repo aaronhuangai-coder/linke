@@ -274,6 +274,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.63/, 'V0.63');
   });
 
+  it('mentions V0.64 (NAS credential reference gate)', () => {
+    assertReadmeContains(/V0\.64/, 'V0.64');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1547,14 +1551,13 @@ describe('README — V0.62 auth status readiness API', () => {
 });
 
 describe('README — V0.63 shared write-route registry', () => {
-  it('title and badge claim V0.63 as current', () => {
-    assert.match(readme, /^# Linke V0\.63/m);
-    assert.match(readme, /当前版本：V0\.63/);
+  it('version table marks V0.63 historical', () => {
+    assert.match(readme, /\| V0\.63 \| 历史版本 \|[^|]*(write-route|write route|写入路由|API_WRITE_ROUTES|isApiWriteRoute)/i);
   });
 
-  it('version table marks V0.62 historical and V0.63 current', () => {
+  it('version table marks V0.62 historical and keeps V0.63 shared registry docs', () => {
     assert.match(readme, /\| V0\.62 \| 历史版本 \|[^|]*(auth-status|auth status|认证状态|GET \/api\/auth-status|buildAuthStatusResponse)/i);
-    assert.match(readme, /\| V0\.63 \| 当前版本 \|[^|]*(write-route|write route|写入路由|API_WRITE_ROUTES|isApiWriteRoute)/i);
+    assert.match(readme, /\| V0\.63 \| 历史版本 \|[^|]*(write-route|write route|写入路由|API_WRITE_ROUTES|isApiWriteRoute)/i);
   });
 
   it('documents shared write-route registry and auth-status alignment', () => {
@@ -1570,6 +1573,40 @@ describe('README — V0.63 shared write-route registry', () => {
     assert.match(readme, /security-auth[\s\S]*(partial|部分)|write-route[\s\S]*(foundation|基础)/i);
     assert.match(readme, /不是完整生产级鉴权|不.*production-grade authorization|not production-grade authorization|token rotation|secret management/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.64 NAS credential reference gate', () => {
+  it('title and badge claim V0.64 as current', () => {
+    assert.match(readme, /^# Linke V0\.64/m);
+    assert.match(readme, /当前版本：V0\.64/);
+  });
+
+  it('version table marks V0.63 historical and V0.64 current', () => {
+    assert.match(readme, /\| V0\.63 \| 历史版本 \|[^|]*(write-route|write route|写入路由|API_WRITE_ROUTES|isApiWriteRoute)/i);
+    assert.match(readme, /\| V0\.64 \| 当前版本 \|[^|]*(credentialRef|executionGate|NAS.*凭证引用|credential reference)/i);
+  });
+
+  it('documents credentialRef as a non-secret slug and never as a credential value', () => {
+    assert.match(readme, /credentialRef/);
+    assert.match(readme, /ALLOWED_NAS_CREDENTIAL_REF_PATTERN|validateNasCredentialRef|\^\[a-z\]\[a-z0-9-\]\{1,30\}\$/);
+    assert.match(readme, /非密钥|non-secret|引用|reference/i);
+    assert.match(readme, /不读取.*env|不读取.*环境变量|does not read.*env/i);
+    assert.match(readme, /不回显|不返回.*credentialRef|credentialRefConfigured/i);
+  });
+
+  it('documents executionGate while keeping real NAS execution blocked', () => {
+    assert.match(readme, /executionGate/);
+    assert.match(readme, /remoteExecutionAllowed[\s\S]*false/);
+    assert.match(readme, /real NAS transport not implemented|真实 NAS.*未实现|真实.*传输.*未实现/i);
+    assert.match(readme, /wouldConnect:false|wouldWrite:false|不连接 NAS|不写远端/i);
+  });
+
+  it('keeps Gold blocked and rejects real NAS overclaims', () => {
+    assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+    assert.ok(!/真实 NAS 远程备份已完成|real NAS remote backup ready|production ready/i.test(readme));
   });
 });
 

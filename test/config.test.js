@@ -466,4 +466,115 @@ describe('Config module', () => {
       /credential|userinfo|user.*pass|not allowed|forbidden/i,
     );
   });
+
+  // ── nasTargets credentialRef 校验 ───────────────────────────────
+
+  it('accepts config with valid credentialRef "home-synology" in nasTargets', () => {
+    const cfg = validateConfig({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'd',
+      backupJobs: [{ name: 'j', sourcePath: '/s' }],
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+        },
+      ],
+    });
+    assert.strictEqual(cfg.nasTargets[0].credentialRef, 'home-synology');
+  });
+
+  it('accepts config with valid credentialRef "nas-01" in nasTargets', () => {
+    const cfg = validateConfig({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'd',
+      backupJobs: [{ name: 'j', sourcePath: '/s' }],
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'nas-01',
+        },
+      ],
+    });
+    assert.strictEqual(cfg.nasTargets[0].credentialRef, 'nas-01');
+  });
+
+  const CONFIG_INVALID_REFS = [
+    '',
+    '   ',
+    'home synology',
+    'home-synology ',
+    ' home-synology',
+    'Home-synology',
+    'home-Synology',
+    'NAS-01',
+    '../escape',
+    'home/synology',
+    'home.synology',
+    'home@synology',
+    'home$synology',
+    'a'.repeat(32),
+    '1nas',
+    '01-nas',
+    '9-synology',
+  ];
+
+  for (const ref of CONFIG_INVALID_REFS) {
+    it(`rejects config with invalid credentialRef "${ref}" in nasTargets`, () => {
+      assert.throws(
+        () =>
+          validateConfig({
+            serverUrl: 'http://localhost:3000',
+            deviceId: 'd',
+            backupJobs: [{ name: 'j', sourcePath: '/s' }],
+            nasTargets: [
+              {
+                name: 'syno',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRef: ref,
+              },
+            ],
+          }),
+        /credentialRef/i,
+      );
+    });
+  }
+
+  it('rejects config when credentialRef and password co-exist in nasTargets', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              enabled: true,
+              credentialRef: 'home-synology',
+              password: 'some-password',
+            },
+          ],
+        }),
+      /credentialRef|credential|forbidden|password/i,
+    );
+  });
 });

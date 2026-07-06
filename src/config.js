@@ -6,6 +6,8 @@ export const FORBIDDEN_NAS_CREDENTIAL_FIELDS = Object.freeze([
   'username', 'password', 'token', 'apiKey', 'secret', 'accessKey', 'refreshToken',
 ]);
 
+export const ALLOWED_NAS_CREDENTIAL_REF_PATTERN = /^[a-z][a-z0-9-]{1,30}$/;
+
 /**
  * Throw if a NAS target object contains credential-like fields or an
  * endpoint URL with embedded userinfo (user:pass@host).
@@ -32,6 +34,17 @@ export function assertNoCredentials(target) {
       // URL parse errors handled elsewhere; ignore here.
     }
   }
+}
+
+/**
+ * 校验 NAS 凭证引用名；这里只接受非密钥 slug，不读取或解析任何凭证值。
+ */
+export function validateNasCredentialRef(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !ALLOWED_NAS_CREDENTIAL_REF_PATTERN.test(value)) {
+    throw new Error('nasTargets[].credentialRef must match ^[a-z][a-z0-9-]{1,30}$');
+  }
+  return value;
 }
 
 /**
@@ -170,6 +183,7 @@ export function validateConfig(config) {
           operation: t.appAdapter.operation || 'backup-plan',
         };
       }
+      const credentialRef = validateNasCredentialRef(t.credentialRef);
 
       nasTargets.push({
         name: t.name,
@@ -179,6 +193,7 @@ export function validateConfig(config) {
         remotePath: t.remotePath,
         enabled: t.enabled !== undefined ? Boolean(t.enabled) : true,
         appAdapter,
+        credentialRef,
       });
     }
   }

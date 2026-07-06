@@ -58,8 +58,12 @@ const GOLD_READINESS_ITEMS = [
     evidence: [
       'test/nas-dry-run.test.js',
       'test/config.test.js',
+      'src/config.js validateNasCredentialRef',
+      'src/config.js ALLOWED_NAS_CREDENTIAL_REF_PATTERN',
+      'credentialRefConfigured',
+      'executionGate',
     ],
-    nextStep: 'No real NAS connection is made in V0.57; implement authenticated NAS connection separately.',
+    nextStep: 'No real NAS connection is made in V0.64; credentialRef is only a non-secret reference foundation and executionGate keeps real NAS transport blocked.',
   },
   {
     id: 'automation-installation',

@@ -7,7 +7,7 @@
  * Supported providers: synology, ugreen
  */
 
-import { loadConfig, validateConfig, assertNoCredentials } from './config.js';
+import { loadConfig, validateConfig, assertNoCredentials, validateNasCredentialRef } from './config.js';
 
 const VALID_PROVIDERS = ['synology', 'ugreen'];
 
@@ -29,6 +29,11 @@ const FILES_ADAPTER_STEPS = Object.freeze([
   'map-share-and-path',
   'preview-file-operation',
 ]);
+
+const NAS_EXECUTION_GATE = Object.freeze({
+  remoteExecutionAllowed: false,
+  blockingReason: 'real NAS transport not implemented',
+});
 
 function validateNasAppAdapter(provider, appAdapter) {
   if (appAdapter === undefined || appAdapter === null) return null;
@@ -112,6 +117,7 @@ export function validateNasTarget(target) {
   // ── enabled (default true) ────────────────────────────────────
   const enabled = target.enabled !== undefined ? Boolean(target.enabled) : true;
 
+  const credentialRef = validateNasCredentialRef(target.credentialRef);
   const appAdapter = validateNasAppAdapter(target.provider, target.appAdapter);
 
   return {
@@ -122,6 +128,7 @@ export function validateNasTarget(target) {
     remotePath: target.remotePath,
     enabled,
     appAdapter,
+    credentialRef,
   };
 }
 
@@ -138,6 +145,7 @@ export function buildNasDryRunPlan(config) {
     deviceId: config.deviceId,
     wouldConnect: false,
     wouldWrite: false,
+    executionGate: { ...NAS_EXECUTION_GATE },
     targets: validatedTargets.map((t) => ({
       provider: t.provider,
       name: t.name,
@@ -145,6 +153,7 @@ export function buildNasDryRunPlan(config) {
       shareName: t.shareName,
       remotePath: t.remotePath,
       enabled: t.enabled,
+      credentialRefConfigured: Boolean(t.credentialRef),
       appAdapter: t.appAdapter,
       adapterPlan: buildNasAppAdapterDryRunPlan(t, config.backupJobs || []),
     })),
