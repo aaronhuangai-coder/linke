@@ -32,6 +32,7 @@
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --expected-version <version> Expected release version (release-readiness)
  *   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
+ *   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
  *   --token <token>      Bearer token for authenticated Linke Server requests
  */
 
@@ -232,6 +233,7 @@ Options:
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --expected-version <version> Expected release version (for release-readiness)
   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
+  --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
 `);
 }
@@ -367,15 +369,23 @@ export async function main() {
         if (args['readiness-summary'] !== undefined && args['readiness-summary'] !== true) {
           throw new Error('--readiness-summary does not accept a value');
         }
+        if (args['fail-on-blocked'] !== undefined && args['fail-on-blocked'] !== true) {
+          throw new Error('--fail-on-blocked does not accept a value');
+        }
         const plan = await runNasDryRunFromConfig(args.config);
+        const needsReadinessSummary = args['readiness-summary'] === true || args['fail-on-blocked'] === true;
+        const readinessSummary = plan.readinessSummary;
+        if (needsReadinessSummary && !readinessSummary) {
+          throw new Error('readinessSummary missing from dry-run plan');
+        }
         let output = plan;
         if (args['readiness-summary'] === true) {
-          if (!plan.readinessSummary) {
-            throw new Error('readinessSummary missing from dry-run plan');
-          }
-          output = plan.readinessSummary;
+          output = readinessSummary;
         }
         console.log(JSON.stringify(output, null, 2));
+        if (args['fail-on-blocked'] === true && readinessSummary.state === 'blocked') {
+          process.exitCode = 2;
+        }
         break;
       }
 

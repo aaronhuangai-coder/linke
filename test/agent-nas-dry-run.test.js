@@ -149,4 +149,72 @@ describe('Agent nas-dry-run CLI', () => {
       await rm(rootDir, { recursive: true, force: true });
     }
   });
+
+  it('exits 2 after printing the full plan when --fail-on-blocked sees blocked readiness', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'linke-agent-nas-fail-blocked-'));
+
+    try {
+      const configPath = await writeNasConfig(rootDir);
+      const err = await rejectAgent(['nas-dry-run', '--config', configPath, '--fail-on-blocked'], 2);
+      const plan = JSON.parse(err.stdout);
+
+      assert.strictEqual(err.stderr, '');
+      assert.strictEqual(plan.mode, 'dry-run');
+      assert.strictEqual(plan.wouldConnect, false);
+      assert.strictEqual(plan.wouldWrite, false);
+      assert.strictEqual(plan.readinessSummary.state, 'blocked');
+      assert.strictEqual(plan.readinessSummary.remoteExecutionBlocked, true);
+      assert.ok(Array.isArray(plan.targets), 'full plan must still include targets');
+      assert.ok(!err.stdout.includes('home-backup'), 'full plan must not echo raw credentialRef');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 2 with summary-only JSON when --readiness-summary and --fail-on-blocked are combined', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'linke-agent-nas-summary-fail-blocked-'));
+
+    try {
+      const configPath = await writeNasConfig(rootDir);
+      const err = await rejectAgent([
+        'nas-dry-run',
+        '--config',
+        configPath,
+        '--readiness-summary',
+        '--fail-on-blocked',
+      ], 2);
+      const summary = JSON.parse(err.stdout);
+
+      assert.strictEqual(err.stderr, '');
+      assert.strictEqual(summary.mode, 'dry-run');
+      assert.strictEqual(summary.state, 'blocked');
+      assert.strictEqual(summary.remoteExecutionBlocked, true);
+      assert.ok(!Object.hasOwn(summary, 'targets'), 'summary output must not include targets');
+      assert.ok(!Object.hasOwn(summary, 'jobs'), 'summary output must not include jobs');
+      assert.ok(!err.stdout.includes('home-backup'), 'summary must not echo raw credentialRef');
+      assert.ok(!err.stdout.includes('192.168.50.10'), 'summary must not echo endpoint');
+      assert.ok(!err.stdout.includes('/volume1/linke'), 'summary must not echo remotePath');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a value after --fail-on-blocked', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'linke-agent-nas-fail-blocked-value-'));
+
+    try {
+      const configPath = await writeNasConfig(rootDir);
+      const err = await rejectAgent([
+        'nas-dry-run',
+        '--config',
+        configPath,
+        '--fail-on-blocked',
+        'true',
+      ], 1);
+
+      assert.match(err.stderr, /--fail-on-blocked does not accept a value/);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
 });

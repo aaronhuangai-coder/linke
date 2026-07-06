@@ -1702,22 +1702,22 @@ describe('README — V0.67 NAS execution readiness summary', () => {
   });
 });
 
-describe('README — V0.68 NAS CLI readiness summary option', () => {
-  it('title and badge claim V0.68 as current', () => {
-    assert.match(readme, /^# Linke V0\.68/m);
-    assert.match(readme, /当前版本：V0\.68/);
+describe('README — V0.69 NAS CLI fail on blocked option', () => {
+  it('title and badge claim V0.69 as current', () => {
+    assert.match(readme, /# Linke V0\.69/);
+    assert.match(readme, /\*\*当前版本：V0\.69\*\*/);
   });
 
-  it('version table marks V0.67 historical and V0.68 current', () => {
-    assert.match(readme, /\| V0\.67 \| 历史版本 \|[^|]*(readinessSummary|executionReadiness|就绪性摘要|就绪性状态)/i);
-    assert.match(readme, /\| V0\.68 \| 当前版本 \|[^|]*(readiness-summary|readinessSummary|CLI|摘要)/i);
+  it('version table marks V0.68 historical and V0.69 current', () => {
+    assert.match(readme, /\| V0\.68 \| 历史版本 \|/);
+    assert.match(readme, /\| V0\.69 \| 当前版本 \|[^|]*(fail-on-blocked|exit code|退出码|自动化门禁)/i);
   });
 
-  it('documents --readiness-summary command usage', () => {
-    assert.match(readme, /nas-dry-run[\s\S]*--readiness-summary[\s\S]*readinessSummary/i);
+  it('documents --fail-on-blocked command usage', () => {
+    assert.match(readme, /nas-dry-run[\s\S]*--fail-on-blocked[\s\S]*(exit code|退出码|2)/i);
   });
 
-  it('keeps Gold blocked and rejects real NAS overclaims for V0.68', () => {
+  it('keeps Gold blocked and rejects real NAS overclaims for V0.69', () => {
     const forbiddenOverclaims = [
       ['production', 'ready'].join(' '),
       ['production', 'ready'].join('-'),
@@ -1728,8 +1728,8 @@ describe('README — V0.68 NAS CLI readiness summary option', () => {
     ].join('|');
     assert.doesNotMatch(readme, new RegExp(forbiddenOverclaims, 'i'));
     assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
-    assert.match(readme, /Gold blockers[\s\S]*V0\.68[\s\S]*CLI readiness-summary/i);
-    assert.match(readme, /NAS、认证和生产硬化仍是 partial[\s\S]*V0\.68[\s\S]*CLI readiness-summary/i);
+    assert.match(readme, /Gold blockers[\s\S]*V0\.69[\s\S]*CLI fail-on-blocked/i);
+    assert.match(readme, /NAS、认证和生产硬化仍是 partial[\s\S]*V0\.69[\s\S]*CLI fail-on-blocked/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });

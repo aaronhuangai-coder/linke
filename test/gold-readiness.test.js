@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.68', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.68');
+  it('expects LINKE_RELEASE_VERSION to be V0.69', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.69');
   });
 
-  it('expects report.version to be V0.68', () => {
+  it('expects report.version to be V0.69', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.68');
+    assert.strictEqual(report.version, 'V0.69');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -112,6 +112,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(nasEvidence.includes('test/nas-dry-run.test.js'));
     assert.ok(nasEvidence.includes('test/agent-nas-dry-run.test.js'));
     assert.ok(nasEvidence.includes('src/agent.js nas-dry-run --readiness-summary'));
+    assert.ok(nasEvidence.includes('src/agent.js nas-dry-run --fail-on-blocked'));
     assert.ok(nasEvidence.includes('test/config.test.js'));
     assert.ok(nasEvidence.includes('validateNasCredentialRef'));
     assert.ok(nasEvidence.includes('ALLOWED_NAS_CREDENTIAL_REF_PATTERN'));
