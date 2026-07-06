@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.83', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.83');
+  it('expects LINKE_RELEASE_VERSION to be V0.84', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.84');
   });
 
-  it('expects report.version to be V0.83', () => {
+  it('expects report.version to be V0.84', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.83');
+    assert.strictEqual(report.version, 'V0.84');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -173,7 +173,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('installApprovalManifest.state:blocked'));
     assert.ok(automationEvidence.includes('installApprovalManifest.approval.approved:false'));
     assert.ok(automationEvidence.includes('installApprovalManifest.rollback.available:false'));
-    assert.ok(automationItem.nextStep.includes('V0.83'));
+    assert.ok(automationEvidence.includes('POST /api/supervisor-install-dry-run'));
+    assert.ok(automationEvidence.includes('Web Console supervisor-install-dry-run-panel'));
+    assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorInstallDryRunViewModel'));
+    assert.ok(automationItem.nextStep.includes('V0.84'));
+    assert.ok(automationItem.nextStep.includes('Web Console'));
     assert.ok(automationItem.nextStep.includes('approval'));
     assert.ok(automationItem.nextStep.includes('rollback'));
     assert.ok(automationItem.nextStep.includes('preflight'));
@@ -263,9 +267,14 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('installApprovalManifest.state:blocked'));
     assert.ok(hardeningEvidence.includes('installApprovalManifest.approval.approved:false'));
     assert.ok(hardeningEvidence.includes('installApprovalManifest.rollback.available:false'));
+    assert.ok(hardeningEvidence.includes('POST /api/supervisor-install-dry-run'));
+    assert.ok(hardeningEvidence.includes('Web Console supervisor-install-dry-run-panel'));
+    assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorInstallDryRunViewModel'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V0.84'));
+    assert.ok(hardeningItem.nextStep.includes('Web dry-run panel'));
     assert.ok(hardeningItem.nextStep.includes('uninstall'));
     assert.ok(hardeningItem.nextStep.includes('secret management'));
     assert.ok(hardeningItem.nextStep.includes('monitoring'));
