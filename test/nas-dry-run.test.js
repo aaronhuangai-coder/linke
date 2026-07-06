@@ -147,6 +147,8 @@ describe('validateNasTarget', () => {
 
   const CREDENTIAL_FIELDS = [
     'username', 'password', 'token', 'apiKey', 'secret', 'accessKey', 'refreshToken',
+    'privateKey', 'clientSecret', 'connectionString', 'accessToken', 'idToken',
+    'secretKey', 'sshKey', 'passphrase',
   ];
 
   for (const field of CREDENTIAL_FIELDS) {
@@ -166,6 +168,31 @@ describe('validateNasTarget', () => {
       );
     });
   }
+
+  it('accepts near credential-like field names without substring rejection in nasTarget and appAdapter', () => {
+    const result = validateNasTarget({
+      name: 'syno',
+      provider: 'synology',
+      endpoint: 'http://192.168.1.100:5000',
+      shareName: 'backup',
+      remotePath: '/volume1/backup',
+      enabled: true,
+      secretKeyName: 'primary-signing-key',
+      tokenCount: 2,
+      connectionStringLabel: 'primary-nas',
+      appAdapter: {
+        appId: 'synology-backup',
+        secretKeyName: 'adapter-key-label',
+        tokenCount: 2,
+      },
+    });
+
+    assert.strictEqual(result.name, 'syno');
+    assert.deepStrictEqual(result.appAdapter, {
+      appId: 'synology-backup',
+      operation: 'backup-plan',
+    });
+  });
 
   it('rejects endpoint URL containing userinfo (user:pass@host)', () => {
     assert.throws(
@@ -280,6 +307,23 @@ describe('validateNasTarget', () => {
     );
   });
 
+  it('rejects co-existence of credentialRef and new forbidden credential fields (like passphrase)', () => {
+    assert.throws(
+      () =>
+        validateNasTarget({
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          credentialRef: 'home-synology',
+          passphrase: 'some-passphrase',
+        }),
+      /credentialRef|credential|forbidden|passphrase/i,
+    );
+  });
+
   // ── appAdapter validation ─────────────────────────────────────
 
   it('accepts a valid synology appAdapter', () => {
@@ -370,23 +414,25 @@ describe('validateNasTarget', () => {
     );
   });
 
-  it('rejects credential-like fields inside appAdapter', () => {
-    assert.throws(
-      () =>
-        validateNasTarget({
-          name: 'syno',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
-          appAdapter: {
-            appId: 'synology-backup',
-            token: 'do-not-accept',
-          },
-        }),
-      /credential|not allowed|forbidden/i,
-    );
-  });
+  for (const field of CREDENTIAL_FIELDS) {
+    it(`rejects credential-like field "${field}" inside appAdapter`, () => {
+      assert.throws(
+        () =>
+          validateNasTarget({
+            name: 'syno',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            appAdapter: {
+              appId: 'synology-backup',
+              [field]: 'do-not-accept',
+            },
+          }),
+        /credential|not allowed|forbidden/i,
+      );
+    });
+  }
 });
 
 // ── buildNasDryRunPlan ─────────────────────────────────────────────

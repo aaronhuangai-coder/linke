@@ -4,6 +4,9 @@ import { hostname as osHostname, networkInterfaces } from 'node:os';
 /** Credential-like field names that must never appear in a nasTarget. */
 export const FORBIDDEN_NAS_CREDENTIAL_FIELDS = Object.freeze([
   'username', 'password', 'token', 'apiKey', 'secret', 'accessKey', 'refreshToken',
+  // 精确键名拒绝：connectionString 常嵌入凭证；secretKey 与 secret 是不同键名。
+  'privateKey', 'clientSecret', 'connectionString', 'accessToken', 'idToken',
+  'secretKey', 'sshKey', 'passphrase',
 ]);
 
 export const ALLOWED_NAS_CREDENTIAL_REF_PATTERN = /^[a-z][a-z0-9-]{1,30}$/;

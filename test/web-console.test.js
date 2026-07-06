@@ -687,6 +687,33 @@ describe('Web Console / API contract', () => {
     assert.match(body.error, /credential|not allowed|forbidden/i);
   });
 
+  it('POST /api/nas-dry-run rejects new credential-like fields without echoing field values', async () => {
+    const res = await fetch(`http://localhost:${port}/api/nas-dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: 'web-console-dry-run',
+        nasTargets: [
+          {
+            name: 'synology-web',
+            provider: 'synology',
+            endpoint: 'http://192.168.1.100:5000',
+            shareName: 'backup',
+            remotePath: '/volume1/backup',
+            connectionString: 'nas://user:secret-value@192.168.1.100/backup',
+          },
+        ],
+        backupJobs: [{ name: 'documents', sourcePath: '/Users/ah/Documents' }],
+      }),
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 400);
+    assert.match(body.error, /credential|not allowed|forbidden|connectionString/i);
+    assert.ok(!text.includes('secret-value'), 'must not echo forbidden credential-like field values');
+  });
+
   it('POST /api/nas-dry-run rejects endpoint URL userinfo', async () => {
     const res = await fetch(`http://localhost:${port}/api/nas-dry-run`, {
       method: 'POST',
@@ -1422,7 +1449,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.65/);
+    assert.match(html, /V0\.61|V0\.62|V0\.63|V0\.65|V0\.66/);
     assert.match(html, /LINKE_READ_TOKEN/);
     assert.match(html, /LINKE_WRITE_TOKEN/);
     assert.match(html, /403\s+Forbidden|auth\.forbidden/);
@@ -1434,7 +1461,7 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.62|V0\.63|V0\.65/);
+    assert.match(html, /V0\.62|V0\.63|V0\.65|V0\.66/);
     assert.match(html, /GET \/api\/auth-status|auth-status/);
     assert.match(html, /configuredScopes|writeRoutes|认证状态|写入路由/);
     assert.match(html, /不返回.*token|tokenValuesReturned|不暴露.*token/i);
@@ -1445,19 +1472,20 @@ describe('Web Console / API contract', () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.63|V0\.65/);
+    assert.match(html, /V0\.63|V0\.65|V0\.66/);
     assert.match(html, /API_WRITE_ROUTES|isApiWriteRoute|write-route|写入路由/);
     assert.match(html, /共享|同一来源|registry|注册表/i);
     assert.match(html, /partial|完整鉴权|生产级审计|生产硬化|production/i);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
 
-  it('HTML safety notes document V0.65 NAS credential reference gate without exposing credentialRef values', async () => {
+  it('HTML safety notes document V0.66 NAS credential reference gate without exposing credentialRef values', async () => {
     const res = await fetch(`http://localhost:${port}/`);
     const html = await res.text();
 
-    assert.match(html, /V0\.65/);
+    assert.match(html, /V0\.66/);
     assert.match(html, /credentialRef|credentialRefConfigured|executionGate/);
+    assert.match(html, /credential-like|15 个|FORBIDDEN_NAS_CREDENTIAL_FIELDS|凭证字段/i);
     assert.match(html, /remoteExecutionAllowed|真实 NAS|real NAS/i);
     assert.match(html, /不回显|不返回|不暴露|non-secret|非密钥/i);
     assert.match(html, /blocked|阻塞|不连接 NAS|不写远端/i);

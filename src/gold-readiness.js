@@ -64,8 +64,9 @@ const GOLD_READINESS_ITEMS = [
       'executionGate',
       'src/web/app.js executionGate and credentialRefConfigured rendering',
       'test/web-console.test.js executionGate DOM tests',
+      'src/config.js FORBIDDEN_NAS_CREDENTIAL_FIELDS 15 exact keys',
     ],
-    nextStep: 'No real NAS connection is made in V0.65; credentialRef is only a non-secret reference foundation and executionGate keeps real NAS transport blocked.',
+    nextStep: 'No real NAS connection is made in V0.66; credentialRef is only a non-secret reference foundation, FORBIDDEN_NAS_CREDENTIAL_FIELDS rejects 15 exact keys, and executionGate keeps real NAS transport blocked.',
   },
   {
     id: 'automation-installation',

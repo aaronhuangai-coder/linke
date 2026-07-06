@@ -396,6 +396,8 @@ describe('Config module', () => {
 
   const CREDENTIAL_FIELDS = [
     'username', 'password', 'token', 'apiKey', 'secret', 'accessKey', 'refreshToken',
+    'privateKey', 'clientSecret', 'connectionString', 'accessToken', 'idToken',
+    'secretKey', 'sshKey', 'passphrase',
   ];
 
   for (const field of CREDENTIAL_FIELDS) {
@@ -422,6 +424,38 @@ describe('Config module', () => {
       );
     });
   }
+
+  it('accepts near credential-like field names without substring rejection in nasTargets and appAdapter', () => {
+    const cfg = validateConfig({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'd',
+      backupJobs: [{ name: 'j', sourcePath: '/s' }],
+      nasTargets: [
+        {
+          name: 'syno',
+          provider: 'synology',
+          endpoint: 'http://192.168.1.100:5000',
+          shareName: 'backup',
+          remotePath: '/volume1/backup',
+          enabled: true,
+          secretKeyName: 'primary-signing-key',
+          tokenCount: 2,
+          connectionStringLabel: 'primary-nas',
+          appAdapter: {
+            appId: 'synology-backup',
+            secretKeyName: 'adapter-key-label',
+            tokenCount: 2,
+          },
+        },
+      ],
+    });
+
+    assert.strictEqual(cfg.nasTargets[0].name, 'syno');
+    assert.deepStrictEqual(cfg.nasTargets[0].appAdapter, {
+      appId: 'synology-backup',
+      operation: 'backup-plan',
+    });
+  });
 
   it('rejects nasTarget endpoint URL containing userinfo (user:pass@host)', () => {
     assert.throws(
@@ -575,6 +609,30 @@ describe('Config module', () => {
           ],
         }),
       /credentialRef|credential|forbidden|password/i,
+    );
+  });
+
+  it('rejects config when credentialRef and passphrase co-exist in nasTargets', () => {
+    assert.throws(
+      () =>
+        validateConfig({
+          serverUrl: 'http://localhost:3000',
+          deviceId: 'd',
+          backupJobs: [{ name: 'j', sourcePath: '/s' }],
+          nasTargets: [
+            {
+              name: 'syno',
+              provider: 'synology',
+              endpoint: 'http://192.168.1.100:5000',
+              shareName: 'backup',
+              remotePath: '/volume1/backup',
+              enabled: true,
+              credentialRef: 'home-synology',
+              passphrase: 'some-passphrase',
+            },
+          ],
+        }),
+      /credentialRef|credential|forbidden|passphrase/i,
     );
   });
 });

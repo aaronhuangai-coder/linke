@@ -282,6 +282,10 @@ describe('README — version coverage', () => {
     assertReadmeContains(/V0\.65/, 'V0.65');
   });
 
+  it('mentions V0.66 (NAS credential denylist hardening)', () => {
+    assertReadmeContains(/V0\.66/, 'V0.66');
+  });
+
   it('mentions LINKE_RELEASE_VERSION', () => {
     const escapedVersion = LINKE_RELEASE_VERSION.replace(/\./g, '\\.');
     assertReadmeContains(new RegExp(escapedVersion), LINKE_RELEASE_VERSION);
@@ -1615,14 +1619,14 @@ describe('README — V0.64 NAS credential reference gate', () => {
 });
 
 describe('README — V0.65 Web NAS execution gate display', () => {
-  it('title and badge claim V0.65 as current', () => {
-    assert.match(readme, /^# Linke V0\.65/m);
-    assert.match(readme, /当前版本：V0\.65/);
+  it('title and badge no longer claim V0.65 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.65/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.65/);
   });
 
-  it('version table marks V0.64 historical and V0.65 current', () => {
+  it('version table marks V0.64 and V0.65 historical', () => {
     assert.match(readme, /\| V0\.64 \| 历史版本 \|[^|]*(credentialRef|executionGate|NAS.*凭证引用|credential reference)/i);
-    assert.match(readme, /\| V0\.65 \| 当前版本 \|[^|]*(executionGate|credentialRefConfigured|Web.*执行门禁|execution gate display)/i);
+    assert.match(readme, /\| V0\.65 \| 历史版本 \|[^|]*(executionGate|credentialRefConfigured|Web.*执行门禁|execution gate display)/i);
   });
 
   it('documents Web NAS execution gate display and credentialRefConfigured boolean rendering', () => {
@@ -1636,13 +1640,50 @@ describe('README — V0.65 Web NAS execution gate display', () => {
     assert.match(readme, /remoteExecutionAllowed[\s\S]*false/);
     assert.match(readme, /real NAS transport not implemented|真实 NAS.*未实现|真实.*传输.*未实现/i);
     assert.match(readme, /wouldConnect:false|wouldWrite:false|不连接 NAS|不写远端/i);
-    assert.match(readme, /当前发布版本号[\s\S]*"V0\.65"/);
+    assert.match(readme, /当前发布版本号[\s\S]*"V0\.66"/);
   });
 
   it('keeps Gold blocked and rejects real NAS overclaims for V0.65', () => {
     assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+    assert.ok(!/真实 NAS 远程备份已完成|real NAS remote backup ready|production ready|无安全隐患/i.test(readme));
+  });
+});
+
+describe('README — V0.66 NAS credential denylist hardening', () => {
+  it('title and badge claim V0.66 as current', () => {
+    assert.match(readme, /^# Linke V0\.66/m);
+    assert.match(readme, /当前版本：V0\.66/);
+  });
+
+  it('version table marks V0.65 historical and V0.66 current', () => {
+    assert.match(readme, /\| V0\.65 \| 历史版本 \|[^|]*(executionGate|credentialRefConfigured|Web.*执行门禁|execution gate display)/i);
+    assert.match(readme, /\| V0\.66 \| 当前版本 \|[^|]*(denylist|credential-like|凭证字段|FORBIDDEN_NAS_CREDENTIAL_FIELDS)/i);
+  });
+
+  it('documents the complete 15-field NAS credential denylist', () => {
+    const fields = [
+      'username', 'password', 'token', 'apiKey', 'secret', 'accessKey', 'refreshToken',
+      'privateKey', 'clientSecret', 'connectionString', 'accessToken', 'idToken',
+      'secretKey', 'sshKey', 'passphrase',
+    ];
+    for (const field of fields) {
+      assert.match(readme, new RegExp(field));
+    }
+    assert.match(readme, /15\s*个|15-field|15 fields/i);
+  });
+
+  it('explains connectionString and secretKey denylist rationale without adding credential resolution claims', () => {
+    assert.match(readme, /connectionString[\s\S]*(凭证|credential|用户名|密码|token)/i);
+    assert.match(readme, /secretKey[\s\S]*(secret|独立键名|exact-key|精确)/i);
+    assert.match(readme, /不读取 env|不访问 secret manager|不解析 credential store/i);
+    assert.ok(!/从 env 读取凭证|读取 secret manager|解析 credential store 凭证/i.test(readme));
+  });
+
+  it('keeps Gold blocked and rejects real NAS overclaims for V0.66', () => {
+    assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.ok(!/真实 NAS 远程备份已完成|real NAS remote backup ready|production ready|无安全隐患/i.test(readme));
   });
 });
