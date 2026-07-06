@@ -141,6 +141,80 @@ const EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT = Object.freeze({
   },
 });
 
+const EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST = Object.freeze({
+  mode: 'dry-run-only',
+  state: 'blocked',
+  approval: {
+    required: true,
+    approved: false,
+    source: 'not-collected',
+    approverReturned: false,
+    timestampReturned: false,
+    blockerCode: 'operator-approval-required',
+    evidence: 'No operator approval workflow or durable approval record exists in this release.',
+  },
+  rollback: {
+    required: true,
+    available: false,
+    uninstallSupported: false,
+    recoverySupervisorSupported: false,
+    previousPlistRestoreSupported: false,
+    blockerCode: 'rollback-recovery-incomplete',
+    evidence: 'No uninstall, rollback, previous plist restore, or recovery supervisor lifecycle exists in this release.',
+  },
+  controls: [
+    {
+      id: 'explicit-operator-approval',
+      status: 'blocked',
+      requiredForInstall: true,
+      blockerCode: 'operator-approval-required',
+      evidence: 'Install approval is not collected or persisted.',
+    },
+    {
+      id: 'rollback-plan',
+      status: 'blocked',
+      requiredForInstall: true,
+      blockerCode: 'rollback-plan-missing',
+      evidence: 'Rollback steps are not implemented.',
+    },
+    {
+      id: 'uninstall-plan',
+      status: 'blocked',
+      requiredForInstall: true,
+      blockerCode: 'uninstall-plan-missing',
+      evidence: 'Uninstall steps are not implemented.',
+    },
+    {
+      id: 'recovery-supervisor',
+      status: 'blocked',
+      requiredForInstall: true,
+      blockerCode: 'recovery-supervisor-missing',
+      evidence: 'Recovery supervisor lifecycle is not implemented.',
+    },
+  ],
+  safety: {
+    dryRun: true,
+    manifestOnly: true,
+    approvalCollected: false,
+    approvalPersisted: false,
+    rollbackExecuted: false,
+    uninstallExecuted: false,
+    recoverySupervisorStarted: false,
+    launchctlCalled: false,
+    processListRead: false,
+    filesystemWritten: false,
+    metadataWritten: false,
+    supervisorInstalled: false,
+    supervisorStarted: false,
+    nasConnected: false,
+    backupTriggered: false,
+    restoreTriggered: false,
+    remoteCommandExecuted: false,
+    sensitiveValuesReturned: false,
+  },
+});
+
+
 async function runAgent(args) {
   return exec('node', [agentPath, ...args]);
 }
@@ -177,6 +251,22 @@ function assertNoSensitivePreflightEvidence(preflight) {
   }
 }
 
+function assertNoSensitiveApprovalManifestEvidence(manifest) {
+  const evidenceValues = [
+    manifest.approval.evidence,
+    manifest.rollback.evidence,
+    ...manifest.controls.map((control) => control.evidence),
+  ];
+
+  for (const evidence of evidenceValues) {
+    assert.strictEqual(typeof evidence, 'string');
+    assert.doesNotMatch(evidence, /\/Users\/|\/private\/|~\/|https?:\/\//i);
+    assert.doesNotMatch(evidence, /token|bearer|authorization|credentialRef|secret-ref|nas\.local/i);
+    assert.doesNotMatch(evidence, /config\.json|LaunchAgents|\.plist/);
+    assert.doesNotMatch(evidence, /approver|timestamp|hostname|username/i);
+  }
+}
+
 describe('Agent supervisor-install-dry-run CLI', () => {
   it('buildSupervisorInstallDryRunPlan returns a sanitized dry-run plan without sensitive config values', async () => {
     const app = await import('../src/agent.js');
@@ -195,6 +285,10 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     const buildSupervisorInstallPreflight = app.buildSupervisorInstallPreflight;
     if (!buildSupervisorInstallPreflight) {
       throw new Error('buildSupervisorInstallPreflight is not defined in src/agent.js');
+    }
+    const buildSupervisorInstallApprovalManifest = app.buildSupervisorInstallApprovalManifest;
+    if (!buildSupervisorInstallApprovalManifest) {
+      throw new Error('buildSupervisorInstallApprovalManifest is not defined in src/agent.js');
     }
 
     const sourcePath = '/Users/ah/private/source';
@@ -310,6 +404,62 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     }
     assert.deepStrictEqual(plan.installPreflight.safety, EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT.safety);
     assertNoSensitivePreflightEvidence(plan.installPreflight);
+
+    assert.deepStrictEqual(
+      buildSupervisorInstallApprovalManifest(),
+      EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST,
+    );
+    assert.deepStrictEqual(
+      plan.installApprovalManifest,
+      EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST,
+    );
+    assert.strictEqual(plan.installApprovalManifest.approval.approved, false);
+    assert.strictEqual(plan.installApprovalManifest.rollback.available, false);
+    assert.deepStrictEqual(
+      plan.installApprovalManifest.controls.map((control) => control.id),
+      [
+        'explicit-operator-approval',
+        'rollback-plan',
+        'uninstall-plan',
+        'recovery-supervisor',
+      ],
+    );
+    for (const control of plan.installApprovalManifest.controls) {
+      assert.strictEqual(control.status, 'blocked');
+      assert.strictEqual(control.requiredForInstall, true);
+      assert.strictEqual(typeof control.blockerCode, 'string');
+      assert.ok(control.blockerCode.length > 0);
+    }
+    assert.strictEqual(
+      plan.installApprovalManifest.approval.blockerCode,
+      plan.installPreflight.checks.find((check) => check.id === 'operator-approval').blockerCode,
+    );
+    assert.notStrictEqual(
+      plan.installApprovalManifest.controls.find((control) => control.id === 'rollback-plan').blockerCode,
+      plan.installPreflight.checks.find((check) => check.id === 'rollback-recovery').blockerCode,
+    );
+    assert.deepStrictEqual(plan.safety, {
+      dryRun: true,
+      configPathReturned: false,
+      sourcePathsReturned: false,
+      serverUrlReturned: false,
+      nasEndpointsReturned: false,
+      credentialRefsReturned: false,
+      tokenValuesReturned: false,
+      launchctlCalled: false,
+      processListRead: false,
+      supervisorInstalled: false,
+      launchdFileWritten: false,
+      metadataWritten: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+    });
+    assert.deepStrictEqual(plan.installCommandPreview.safety, EXPECTED_SUPERVISOR_INSTALL_COMMAND_PREVIEW.safety);
+    assert.deepStrictEqual(plan.installPreflight.safety, EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT.safety);
+    assert.deepStrictEqual(plan.installApprovalManifest.safety, EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST.safety);
+    assertNoSensitiveApprovalManifestEvidence(plan.installApprovalManifest);
     for (const action of plan.installCommandPreview.actions) {
       assert.strictEqual(action.wouldRun, false);
       assert.strictEqual(action.wouldWrite, false);
@@ -400,6 +550,30 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.installPreflight.safety.remoteCommandExecuted, false);
       assert.strictEqual(body.installPreflight.safety.sensitiveValuesReturned, false);
       assertNoSensitivePreflightEvidence(body.installPreflight);
+
+      assert.deepStrictEqual(
+        body.installApprovalManifest,
+        EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST,
+      );
+      assert.strictEqual(body.installApprovalManifest.safety.dryRun, true);
+      assert.strictEqual(body.installApprovalManifest.safety.manifestOnly, true);
+      assert.strictEqual(body.installApprovalManifest.safety.approvalCollected, false);
+      assert.strictEqual(body.installApprovalManifest.safety.approvalPersisted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.rollbackExecuted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.uninstallExecuted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.recoverySupervisorStarted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.launchctlCalled, false);
+      assert.strictEqual(body.installApprovalManifest.safety.processListRead, false);
+      assert.strictEqual(body.installApprovalManifest.safety.filesystemWritten, false);
+      assert.strictEqual(body.installApprovalManifest.safety.metadataWritten, false);
+      assert.strictEqual(body.installApprovalManifest.safety.supervisorInstalled, false);
+      assert.strictEqual(body.installApprovalManifest.safety.supervisorStarted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.nasConnected, false);
+      assert.strictEqual(body.installApprovalManifest.safety.backupTriggered, false);
+      assert.strictEqual(body.installApprovalManifest.safety.restoreTriggered, false);
+      assert.strictEqual(body.installApprovalManifest.safety.remoteCommandExecuted, false);
+      assert.strictEqual(body.installApprovalManifest.safety.sensitiveValuesReturned, false);
+      assertNoSensitiveApprovalManifestEvidence(body.installApprovalManifest);
       assert.strictEqual(body.installCommandPreview.safety.launchctlCalled, false);
       assert.strictEqual(body.installCommandPreview.safety.launchdFileWritten, false);
       assert.strictEqual(body.installCommandPreview.safety.metadataWritten, false);
@@ -459,6 +633,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.configSummary, undefined);
       assert.strictEqual(body.installCommandPreview, undefined);
       assert.strictEqual(body.installPreflight, undefined);
+      assert.strictEqual(body.installApprovalManifest, undefined);
       assert.doesNotMatch(stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|synology\.local|synology-ref|unused-summary-token|Bearer/i);
       assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
@@ -505,6 +680,11 @@ describe('Agent supervisor-install-dry-run CLI', () => {
         EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT,
       );
       assertNoSensitivePreflightEvidence(body.installPreflight);
+      assert.deepStrictEqual(
+        body.installApprovalManifest,
+        EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST,
+      );
+      assertNoSensitiveApprovalManifestEvidence(body.installApprovalManifest);
       assert.strictEqual(body.readinessSummary.state, 'blocked');
       assert.strictEqual(body.safety.launchctlCalled, false);
       assert.strictEqual(body.safety.processListRead, false);
@@ -551,6 +731,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.configSummary, undefined);
       assert.strictEqual(body.installCommandPreview, undefined);
       assert.strictEqual(body.installPreflight, undefined);
+      assert.strictEqual(body.installApprovalManifest, undefined);
       assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
     } finally {

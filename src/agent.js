@@ -142,6 +142,29 @@ const SUPERVISOR_INSTALL_PREFLIGHT_CHECKS = Object.freeze([
   }),
 ]);
 
+const SUPERVISOR_INSTALL_APPROVAL_MANIFEST_CONTROLS = Object.freeze([
+  Object.freeze({
+    id: 'explicit-operator-approval',
+    blockerCode: 'operator-approval-required',
+    evidence: 'Install approval is not collected or persisted.',
+  }),
+  Object.freeze({
+    id: 'rollback-plan',
+    blockerCode: 'rollback-plan-missing',
+    evidence: 'Rollback steps are not implemented.',
+  }),
+  Object.freeze({
+    id: 'uninstall-plan',
+    blockerCode: 'uninstall-plan-missing',
+    evidence: 'Uninstall steps are not implemented.',
+  }),
+  Object.freeze({
+    id: 'recovery-supervisor',
+    blockerCode: 'recovery-supervisor-missing',
+    evidence: 'Recovery supervisor lifecycle is not implemented.',
+  }),
+]);
+
 // ── HTTP helper ────────────────────────────────────────────────────
 
 async function request(server, path, method, body, options = {}) {
@@ -370,6 +393,7 @@ export function buildSupervisorInstallDryRunPlan(config) {
     readinessSummary: buildSupervisorInstallReadinessSummary(),
     installCommandPreview: buildSupervisorInstallCommandPreview(),
     installPreflight: buildSupervisorInstallPreflight(),
+    installApprovalManifest: buildSupervisorInstallApprovalManifest(),
     nextSteps: [
       'Review this sanitized dry-run plan.',
       'Use launchd-dry-run separately if a plist preview is needed.',
@@ -419,6 +443,56 @@ export function buildSupervisorInstallPreflight() {
       processListRead: false,
       filesystemWritten: false,
       metadataWritten: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+      sensitiveValuesReturned: false,
+    },
+  };
+}
+
+export function buildSupervisorInstallApprovalManifest() {
+  return {
+    mode: 'dry-run-only',
+    state: 'blocked',
+    approval: {
+      required: true,
+      approved: false,
+      source: 'not-collected',
+      approverReturned: false,
+      timestampReturned: false,
+      blockerCode: 'operator-approval-required',
+      evidence: 'No operator approval workflow or durable approval record exists in this release.',
+    },
+    rollback: {
+      required: true,
+      available: false,
+      uninstallSupported: false,
+      recoverySupervisorSupported: false,
+      previousPlistRestoreSupported: false,
+      blockerCode: 'rollback-recovery-incomplete',
+      evidence: 'No uninstall, rollback, previous plist restore, or recovery supervisor lifecycle exists in this release.',
+    },
+    controls: SUPERVISOR_INSTALL_APPROVAL_MANIFEST_CONTROLS.map((control) => ({
+      ...control,
+      status: 'blocked',
+      requiredForInstall: true,
+    })),
+    safety: {
+      dryRun: true,
+      manifestOnly: true,
+      approvalCollected: false,
+      approvalPersisted: false,
+      rollbackExecuted: false,
+      uninstallExecuted: false,
+      recoverySupervisorStarted: false,
+      launchctlCalled: false,
+      processListRead: false,
+      filesystemWritten: false,
+      metadataWritten: false,
+      supervisorInstalled: false,
+      supervisorStarted: false,
       nasConnected: false,
       backupTriggered: false,
       restoreTriggered: false,

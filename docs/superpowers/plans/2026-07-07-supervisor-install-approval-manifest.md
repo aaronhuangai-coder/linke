@@ -67,7 +67,7 @@
 - Produces: `buildSupervisorInstallApprovalManifest()` returning `{ mode, state, approval, rollback, controls, safety }`
 - Produces: `plan.installApprovalManifest` in full dry-run output only
 
-- [ ] **Step 1: Add the failing approval manifest fixture**
+- [x] **Step 1: Add the failing approval manifest fixture**
 
 In `test/agent-supervisor-install-dry-run.test.js`, add this constant after `EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT`:
 
@@ -146,7 +146,7 @@ const EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST = Object.freeze({
 });
 ```
 
-- [ ] **Step 2: Add no-sensitive evidence helper**
+- [x] **Step 2: Add no-sensitive evidence helper**
 
 In `test/agent-supervisor-install-dry-run.test.js`, add this helper after `assertNoSensitivePreflightEvidence(preflight)`:
 
@@ -168,7 +168,7 @@ function assertNoSensitiveApprovalManifestEvidence(manifest) {
 }
 ```
 
-- [ ] **Step 3: Add failing pure helper/full plan assertions**
+- [x] **Step 3: Add failing pure helper/full plan assertions**
 
 In the first test, after the `buildSupervisorInstallPreflight` lookup, add:
 
@@ -239,7 +239,7 @@ assert.deepStrictEqual(plan.installApprovalManifest.safety, EXPECTED_SUPERVISOR_
 assertNoSensitiveApprovalManifestEvidence(plan.installApprovalManifest);
 ```
 
-- [ ] **Step 4: Add failing CLI assertions**
+- [x] **Step 4: Add failing CLI assertions**
 
 In the “prints sanitized JSON and does not write files next to the config” test, after the existing `body.installPreflight` assertions, add:
 
@@ -285,7 +285,7 @@ assert.deepStrictEqual(
 assertNoSensitiveApprovalManifestEvidence(body.installApprovalManifest);
 ```
 
-- [ ] **Step 5: Run RED test**
+- [x] **Step 5: Run RED test**
 
 Run:
 
@@ -295,7 +295,7 @@ node --test test/agent-supervisor-install-dry-run.test.js
 
 Expected result: FAIL because `buildSupervisorInstallApprovalManifest` is not exported and `plan.installApprovalManifest` does not exist yet.
 
-- [ ] **Step 6: Add static manifest definitions**
+- [x] **Step 6: Add static manifest definitions**
 
 In `src/agent.js`, add this constant after `SUPERVISOR_INSTALL_PREFLIGHT_CHECKS`:
 
@@ -324,7 +324,7 @@ const SUPERVISOR_INSTALL_APPROVAL_MANIFEST_CONTROLS = Object.freeze([
 ]);
 ```
 
-- [ ] **Step 7: Add helper implementation**
+- [x] **Step 7: Add helper implementation**
 
 In `src/agent.js`, add this exported helper after `buildSupervisorInstallPreflight()`:
 
@@ -380,7 +380,7 @@ export function buildSupervisorInstallApprovalManifest() {
 }
 ```
 
-- [ ] **Step 8: Wire manifest into full dry-run plan**
+- [x] **Step 8: Wire manifest into full dry-run plan**
 
 In `buildSupervisorInstallDryRunPlan(config)`, add this field immediately after `installPreflight`:
 
@@ -394,7 +394,7 @@ Do not change the CLI summary branch:
 const output = args['readiness-summary'] === true ? result.readinessSummary : result;
 ```
 
-- [ ] **Step 9: Run focused GREEN tests**
+- [x] **Step 9: Run focused GREEN tests**
 
 Run:
 
@@ -404,7 +404,7 @@ node --test test/agent-supervisor-install-dry-run.test.js
 
 Expected result: PASS.
 
-- [ ] **Step 10: Update plan progress**
+- [x] **Step 10: Update plan progress**
 
 Append a short Task 1 execution note to this plan:
 
