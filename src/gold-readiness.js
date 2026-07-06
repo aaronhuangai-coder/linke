@@ -141,6 +141,8 @@ const GOLD_READINESS_ITEMS = [
       'src/audit-log.js',
       'src/rate-limit.js',
       'GET /api/audit-log',
+      'GET /api/hardening-status',
+      'src/server.js buildHardeningStatusResponse',
       'LINKE_AUDIT_MAX_EVENTS',
       'Audit retention newest events',
       'LINKE_RATE_LIMIT_PER_MINUTE',
@@ -155,7 +157,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'Add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'V0.70 adds sanitized hardening-status visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 

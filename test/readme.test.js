@@ -1703,14 +1703,16 @@ describe('README — V0.67 NAS execution readiness summary', () => {
 });
 
 describe('README — V0.69 NAS CLI fail on blocked option', () => {
-  it('title and badge claim V0.69 as current', () => {
-    assert.match(readme, /# Linke V0\.69/);
-    assert.match(readme, /\*\*当前版本：V0\.69\*\*/);
+  it('title no longer claims V0.69 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.69/m);
   });
 
-  it('version table marks V0.68 historical and V0.69 current', () => {
-    assert.match(readme, /\| V0\.68 \| 历史版本 \|/);
-    assert.match(readme, /\| V0\.69 \| 当前版本 \|[^|]*(fail-on-blocked|exit code|退出码|自动化门禁)/i);
+  it('version badge no longer says 当前版本：V0.69', () => {
+    assert.doesNotMatch(readme, /当前版本：V0\.69/);
+  });
+
+  it('version table marks V0.69 historical', () => {
+    assert.match(readme, /\| V0\.69 \| 历史版本 \|[^|]*(fail-on-blocked|exit code|退出码|自动化门禁)/i);
   });
 
   it('documents --fail-on-blocked command usage', () => {
@@ -1732,6 +1734,30 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
     assert.match(readme, /NAS、认证和生产硬化仍是 partial[\s\S]*V0\.69[\s\S]*CLI fail-on-blocked/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
+  });
+});
+
+describe('README — V0.70 hardening status endpoint', () => {
+  it('title and badge claim V0.70 as current', () => {
+    assertReadmeContains(/# Linke V0\.70/, 'README title should mention V0.70');
+    assertReadmeContains(/\*\*当前版本：V0\.70\*\*/, 'README badge should mention V0.70');
+  });
+
+  it('version table marks V0.69 historical and V0.70 current', () => {
+    assertReadmeContains(/\| V0\.69 \| 历史版本 \|/, 'V0.69 should be historical');
+    assertReadmeContains(/\| V0\.70 \| 当前版本 \|[^|]*(hardening-status|硬化状态|生产硬化)/i, 'V0.70 should be current hardening-status milestone');
+  });
+
+  it('documents hardening-status endpoint safety boundaries', () => {
+    assertReadmeContains(/GET \/api\/hardening-status/, 'README should document hardening-status endpoint');
+    assertReadmeContains(/tokenValuesReturned:false/, 'README should document tokenValuesReturned false');
+    assertReadmeContains(/restoreRootValueReturned:false/, 'README should document restoreRootValueReturned false');
+    assertReadmeContains(/auditPathReturned:false/, 'README should document auditPathReturned false');
+  });
+
+  it('keeps Gold blocked and rejects production hardening overclaims for V0.70', () => {
+    assertReadmeContains(/real-nas-remote-backup[^\\n]*blocked|真实 NAS[^\\n]*blocked/i, 'README should keep real NAS blocked');
+    assert.doesNotMatch(readme, new RegExp('production[- ]ready|Gold[- ]ready|' + '无安全' + '隐患', 'i'));
   });
 });
 

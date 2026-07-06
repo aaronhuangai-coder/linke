@@ -1,8 +1,8 @@
-# Linke V0.69
+# Linke V0.70
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.69** — 单机 localhost 原型阶段，具备 nas-dry-run --fail-on-blocked 退出门禁、NAS CLI readiness-summary 摘要输出、NAS 执行就绪性摘要、目标就绪状态与 blocker codes 网页控制台只读展示、credentialRefConfigured sanitized dry-run 输出与网页展示、不泄露 credentialRef 原值、15 个 credential-like 字段精确拒绝与执行门禁网页展示、credentialRef 非密钥引用基础、固定 executionGate 远程执行阻塞、可选 Bearer token API 认证骨架、read/write token 授权基础、共享写入路由注册表、GET `/api/auth-status` 认证状态只读接口、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备真实 NAS 传输、完整生产级鉴权、分布式限流或生产级审计。
+> **当前版本：V0.70** — 单机 localhost 原型阶段，具备 GET `/api/hardening-status` 硬化状态只读接口与 buildHardeningStatusResponse 响应构建器、不泄露 token/restoreRoot 原值、nas-dry-run --fail-on-blocked 退出门禁、NAS CLI readiness-summary 摘要输出、NAS 执行就绪性摘要、目标就绪状态与 blocker codes 网页控制台只读展示、credentialRefConfigured sanitized dry-run 输出与网页展示、不泄露 credentialRef 原值、15 个 credential-like 字段精确拒绝与执行门禁网页展示、credentialRef 非密钥引用基础、固定 executionGate 远程执行阻塞、可选 Bearer token API 认证骨架、read/write token 授权基础、共享写入路由注册表、GET `/api/auth-status` 认证状态只读接口、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备真实 NAS 传输、完整生产级鉴权、分布式限流或生产级审计。
 
 ## 版本演进
 
@@ -76,7 +76,8 @@
 | V0.66 | 历史版本 | NAS credential denylist hardening：`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 扩展为 15 个 credential-like 精确键名，继续拒绝凭证字段且 Gold 依旧 blocked |
 | V0.67 | 历史版本 | NAS execution readiness summary：新增 top-level `readinessSummary` 与 per-target `executionReadiness`，提供 target 阻碍卡点代码与就绪状态只读展示，不启用真实 NAS 传输，不泄露凭证原值且 Gold 依旧 blocked |
 | V0.68 | 历史版本 | NAS CLI readiness summary：新增 `--readiness-summary` 命令行布尔参数，支持仅输出 `readinessSummary` 摘要，不泄露 target endpoint/paths 或凭证，Gold 依旧 blocked |
-| V0.69 | 当前版本 | NAS CLI fail-on-blocked：新增 `--fail-on-blocked` 命令行布尔参数，当 NAS readiness 状态为 blocked 时退出码设为 2 并正常打印 JSON，Gold 依旧 blocked |
+| V0.69 | 历史版本 | NAS CLI fail-on-blocked：新增 `--fail-on-blocked` 命令行布尔参数，当 NAS readiness 状态为 blocked 时退出码设为 2 并正常打印 JSON，Gold 依旧 blocked |
+| V0.70 | 当前版本 | Hardening-status endpoint：新增 GET `/api/hardening-status` 硬化状态只读接口，报告已配置硬化控制状态，不泄露 token/restoreRoot/auditPath 等敏感信息，Gold 依旧 blocked |
 
 
 ## 特性
@@ -128,10 +129,11 @@
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
 - **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
-- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.69 将 `nas-dry-run` (含 CLI fail-on-blocked 自动化门禁)、`security-auth` 与 `production-hardening` 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
+- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.70 将 `nas-dry-run` (含 CLI fail-on-blocked 自动化门禁)、`security-auth` 与 `production-hardening` (含 GET `/api/hardening-status` 硬化状态只读接口与 buildHardeningStatusResponse 响应构建器) 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
 - **可选 Bearer token API 认证骨架** — 服务端可通过 `LINKE_AUTH_TOKEN` 或 `LINKE_TOKEN` 为 `/api/*` 请求启用 `Authorization: Bearer <token>` 检查，Agent CLI 支持 `--token <token>`；这仍是 partial auth，不是完整生产级 authorization
 - **API read/write token foundation** — 服务端可通过 `LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 区分只读 API 与写入 API；读 token 访问写入 API 返回 403 `Forbidden` 并记录 `auth.forbidden`，旧 `LINKE_AUTH_TOKEN` / `LINKE_TOKEN` 仍作为 full-access 兼容 token
 - **Auth status readiness API** — GET `/api/auth-status` 返回 sanitized 认证状态（`enabled`、`configuredScopes`、`writeRoutes`），由 `buildAuthStatusResponse` 生成；启用 auth 时仍受 Bearer gate 保护，不返回 token 值、token prefix、Authorization header 或 env 原值，不写入 metadata
+- **Hardening status endpoint** — GET /api/hardening-status 只读接口，返回只读的 sanitized 本地硬化配置状态（`authConfigured`、`rateLimitConfigured`、`auditRetentionConfigured`、`restoreRootConfigured`、`requestBodyLimitBytes`、`writeRoutes` 等），由 `buildHardeningStatusResponse` 生成；启用 auth 时受 Bearer gate 保护，不返回 token 值、token prefix、restore root 路径、audit path、任何环境变量原值或 Authorization header，不写入 metadata 或修改 dataDir
 - **Shared write-route registry** — `API_WRITE_ROUTES` 是当前写入 API 的同一来源；`isApiWriteRoute` 供 Bearer auth gate 判断 read token 是否越权，`formatApiRoute` 供 GET `/api/auth-status` 输出 `writeRoutes`，避免写入路由授权与状态报告漂移
 - **Web Console 内存态 API Token UX** — 页面顶部提供 API Token 输入、应用、清除与状态提示；token 只保存在当前页面内存中，刷新后需重新输入，不写 localStorage、sessionStorage、cookie 或 metadata；401 会清空 token 并提示认证失败
 - **服务端请求/错误硬化** — JSON 请求体上限为 1 MiB，超限返回 413 `Request body too large` 且不写入 metadata；未知 500 响应统一为 `Internal Server Error`，不暴露 snapshotId、路径或内部错误消息；带 `statusCode` 的有意 4xx 仍保留具体业务错误
@@ -1042,7 +1044,7 @@ V0.52 新增只读 GET /api/gold-readiness 端点，并在 Web Console 增加 `g
 - **API 说明**：GET /api/gold-readiness 返回静态 code-owned、人工维护的 scorecard，包含 `status`、`version`、`generatedAt`、`summary` 与 `items`；`generatedAt` 仅表示报告生成时间，不代表实时检查时间。
 - **面板说明**：Gold readiness Web panel 只在用户点击“检查 Gold”时手动请求 GET /api/gold-readiness，展示 ready / partial / blocked / total 计数、每个 capability/blocker 项、证据与下一步。
 - **与 release-readiness 的区别**：`release-readiness` 是 runtime/version gate，用于检查当前运行服务、版本和发布就绪信号；`gold-readiness` 是 capability/blocker scorecard，用于评估完整 Gold 软件发布目标。即使 release-readiness healthy / passing / ok，Gold readiness 也可以因为未实现关键能力而保持 blocked。
-- **Gold blockers**：V0.69 将 `nas-dry-run` (包含 NAS CLI fail-on-blocked 自动化门禁、readiness-summary 摘要输出、网页执行门禁、凭证引用展示基础、15 个 credential-like 字段精确拒绝、`readinessSummary` 与 per-target `executionReadiness` dry-run 执行就绪性摘要)、`security-auth` 与 `production-hardening` 标为 partial，明确当前只有 NAS `credentialRef` 非密钥引用基础、`validateNasCredentialRef`、`ALLOWED_NAS_CREDENTIAL_REF_PATTERN`、`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 15 个 exact-key denylist、`credentialRefConfigured` sanitized 输出与网页展示、`executionGate` 网页展示与固定 `remoteExecutionAllowed:false`、固定 blocker codes 只读展示、可选 API Bearer token 骨架、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、`API_WRITE_ROUTES` 共享写入路由注册表、`isApiWriteRoute` 同一来源授权判断、`formatApiRoute` 与 GET `/api/auth-status` 的 `writeRoutes` 状态报告对齐、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` auth-status readiness API、`buildAuthStatusResponse`、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、Agent CLI token 支持、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；`real-nas-remote-backup` 仍为 blocked。
+- **Gold blockers**：V0.70 基于 V0.69 (包含 NAS CLI fail-on-blocked 自动化门禁、readiness-summary 摘要输出、网页执行门禁、凭证引用展示基础、15 个 credential-like 字段精确拒绝、`readinessSummary` 与 per-target `executionReadiness` dry-run 执行就绪性摘要) 基础，继续将 `nas-dry-run`、`security-auth` 与 `production-hardening` (包含 GET /api/hardening-status 硬化状态只读接口与 buildHardeningStatusResponse 响应构建器) 标为 partial，明确当前只有 NAS `credentialRef` 非密钥引用基础、`validateNasCredentialRef`、`ALLOWED_NAS_CREDENTIAL_REF_PATTERN`、`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 15 个 exact-key denylist、`credentialRefConfigured` sanitized 输出与网页展示、`executionGate` 网页展示与固定 `remoteExecutionAllowed:false`、固定 blocker codes 只读展示、可选 API Bearer token 骨架、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、`API_WRITE_ROUTES` 共享写入路由注册表、`isApiWriteRoute` 同一来源授权判断、`formatApiRoute` 与 GET `/api/auth-status` 的 `writeRoutes` 状态报告对齐、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` auth-status readiness API、GET /api/hardening-status 只读硬化状态接口、`buildAuthStatusResponse`、`buildHardeningStatusResponse`、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、`restoreRootValueReturned:false`、`auditPathReturned:false`、`environmentValuesReturned:false`、`successAuditEvent:false`、Agent CLI token 支持、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；`real-nas-remote-backup` 仍为 blocked。
 - **静态维护规则**：scorecard 的 item list 为静态 code-owned、人工维护清单；每次版本新增能力、变更 ready/partial/blocked 状态、修改 README/API claim 或调整 Gold blocker set 时，必须同步维护该静态清单和测试证据。
 
 ### Gold readiness 安全边界
@@ -1055,7 +1057,7 @@ Gold readiness scorecard 具备以下安全保证：
 - **不写入任何元数据**：不会写入 metadata、设备数据、快照数据或本地配置。
 - **不建立真实 NAS 连接**：不会连接 Synology、Ugreen 或其他 NAS，也不会调用 NAS app。
 - **不执行备份或恢复**：不创建快照、不复制文件、不覆盖文件、不删除快照、不执行真实 NAS 远程备份。
-- **NAS、认证和生产硬化仍是 partial**：V0.69 只包含 NAS CLI fail-on-blocked 自动化门禁、readiness-summary 摘要输出、NAS `credentialRef` 非密钥引用基础与网页展示、`credentialRefConfigured` sanitized dry-run 输出与网页展示、15 个 credential-like 字段精确拒绝、固定 `executionGate` 远程执行阻塞与网页展示、`readinessSummary` 与 per-target `executionReadiness` dry-run 执行就绪性摘要、固定 blocker codes 只读展示、`/api/*` 的可选 Bearer token 检查、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、`API_WRITE_ROUTES` 共享写入路由注册表、`isApiWriteRoute` 同一来源授权判断、`formatApiRoute` 与 GET `/api/auth-status` 的 `writeRoutes` 状态报告对齐、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` 认证状态只读接口、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、Agent CLI `--token`、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation；没有真实 NAS transport、用户、角色权限、生产级审计、secret management、token 轮换、distributed rate limiting、监控或 recovery supervisor。
+- **NAS、认证和生产硬化仍是 partial**：V0.70 基于 V0.69 (只包含 NAS CLI fail-on-blocked 自动化门禁、readiness-summary 摘要输出、NAS `credentialRef` 非密钥引用基础与网页展示、`credentialRefConfigured` sanitized dry-run 输出与网页展示、15 个 credential-like 字段精确拒绝、固定 `executionGate` 远程执行阻塞与网页展示、`readinessSummary` 与 per-target `executionReadiness` dry-run 执行就绪性摘要、固定 blocker codes 只读展示、`/api/*` 的可选 Bearer token 检查、`LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 读写 token foundation、`API_WRITE_ROUTES` 共享写入路由注册表、`isApiWriteRoute` 同一来源授权判断、`formatApiRoute` 与 GET `/api/auth-status` 的 `writeRoutes` 状态报告对齐、403 `Forbidden` / `auth.forbidden` 越权拒绝、GET `/api/auth-status` 认证状态只读接口、`configuredScopes` / `writeRoutes` sanitized 响应、`tokenValuesReturned:false`、`restoreRootValueReturned:false`、`auditPathReturned:false`、`environmentValuesReturned:false`、`successAuditEvent:false`、Agent CLI `--token`、Web Console 内存态 token UX、1 MiB 请求体上限、未知 500 `Internal Server Error` 脱敏、可选 `LINKE_RESTORE_ROOT` 恢复目标 guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 和可选 audit retention foundation) 基础，并新增 GET /api/hardening-status 硬化状态只读接口与 buildHardeningStatusResponse 响应构建器、`restoreRootValueReturned:false`、`auditPathReturned:false`、`environmentValuesReturned:false`、`successAuditEvent:false`；没有真实 NAS transport、用户、角色权限、生产级审计、secret management、token 轮换、distributed rate limiting、监控或 recovery supervisor。
 - **不承诺生产级能力**：该面板不包含生产部署、生产级 authorization、生产级审计、secret management、监控或 recovery supervisor；不得将当前版本用于生产场景。
 
 ### Web Console 设备筛选摘要状态
@@ -1297,6 +1299,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 | GET    | /api/release-readiness                      | 发布就绪检查       |
 | GET    | /api/gold-readiness                         | Gold readiness scorecard |
 | GET    | /api/auth-status                            | 认证状态只读检查   |
+| GET    | /api/hardening-status                       | 硬化状态只读检查   |
 | GET    | /api/audit-log                              | 本地审计日志只读查询 |
 | POST   | /api/heartbeat                              | 记录心跳           |
 | POST   | /api/backups                                | 创建备份快照       |

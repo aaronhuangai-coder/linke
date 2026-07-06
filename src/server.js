@@ -283,6 +283,48 @@ export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {
   };
 }
 
+export function buildHardeningStatusResponse({
+  authToken,
+  readToken,
+  writeToken,
+  restoreRoot,
+  rateLimit,
+  auditRetention,
+} = {}) {
+  const normAuth = normalizeAuthToken(authToken);
+  const normRead = normalizeReadToken(readToken);
+  const normWrite = normalizeWriteToken(writeToken);
+  const authConfigured = Boolean(normAuth || normRead || normWrite);
+  const auditRetentionConfigured = Boolean(Number.isInteger(auditRetention?.maxEvents) && auditRetention.maxEvents > 0);
+
+  return {
+    status: 'partial',
+    service: 'linke',
+    version: LINKE_RELEASE_VERSION,
+    hardening: {
+      authConfigured,
+      configuredAuthScopes: {
+        full: Boolean(normAuth),
+        read: Boolean(normRead),
+        write: Boolean(normWrite),
+      },
+      scopedTokensConfigured: Boolean(normRead || normWrite),
+      rateLimitConfigured: Boolean(rateLimit),
+      auditRetentionConfigured,
+      restoreRootConfigured: Boolean(restoreRoot),
+      requestBodyLimitBytes: MAX_JSON_BODY_BYTES,
+      writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
+    },
+    safety: {
+      tokenValuesReturned: false,
+      restoreRootValueReturned: false,
+      auditPathReturned: false,
+      environmentValuesReturned: false,
+      successAuditEvent: false,
+    },
+  };
+}
+
 async function isDataDirReadable(dataDir) {
   try {
     await access(dataDir, constants.R_OK);
@@ -385,6 +427,18 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           authToken: expectedAuthToken,
           readToken: expectedReadToken,
           writeToken: expectedWriteToken,
+        }));
+      }
+
+      // GET /api/hardening-status
+      if (method === 'GET' && pathname === '/api/hardening-status') {
+        return sendJSON(res, 200, buildHardeningStatusResponse({
+          authToken: expectedAuthToken,
+          readToken: expectedReadToken,
+          writeToken: expectedWriteToken,
+          restoreRoot: normalizedRestoreRoot,
+          rateLimit: apiRateLimiter,
+          auditRetention,
         }));
       }
 

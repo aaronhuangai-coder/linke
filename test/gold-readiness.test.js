@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.69', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.69');
+  it('expects LINKE_RELEASE_VERSION to be V0.70', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.70');
   });
 
-  it('expects report.version to be V0.69', () => {
+  it('expects report.version to be V0.70', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.69');
+    assert.strictEqual(report.version, 'V0.70');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -180,7 +180,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/security.test.js'));
     assert.ok(hardeningEvidence.includes('test/restore.test.js'));
     assert.ok(hardeningEvidence.includes('test/restore-dry-run.test.js'));
-    assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|rotation|retention/i);
+    assert.ok(hardeningEvidence.includes('GET /api/hardening-status'));
+    assert.ok(hardeningEvidence.includes('src/server.js buildHardeningStatusResponse'));
+    assert.match(hardeningItem.nextStep, /supervisor|monitoring|secret|deployment|rotation|retention|hardening-status/i);
 
     const nasItem = report.items.find(item => item.id === 'real-nas-remote-backup');
     assert.ok(nasItem, 'real-nas-remote-backup should exist');

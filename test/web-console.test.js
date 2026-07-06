@@ -1522,6 +1522,15 @@ describe('Web Console / API contract', () => {
     assert.match(html, /readinessSummary|executionReadiness|就绪性摘要|阻碍卡点代码/);
     assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
   });
+
+  it('HTML safety notes document V0.70 hardening status endpoint without claiming production readiness', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.match(html, /V0\.70/);
+    assert.match(html, /GET\s*\/api\/hardening-status|hardening-status|硬化状态/);
+    assert.ok(!/生产可用|production ready/i.test(html), 'HTML must not claim production ready');
+  });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
 

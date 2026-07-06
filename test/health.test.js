@@ -3,7 +3,16 @@ import assert from 'node:assert';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer, buildAuthStatusResponse, buildHealthResponse, API_WRITE_ROUTES, formatApiRoute, isApiWriteRoute } from '../src/server.js';
+import {
+  createServer,
+  buildAuthStatusResponse,
+  buildHardeningStatusResponse,
+  buildHealthResponse,
+  API_WRITE_ROUTES,
+  formatApiRoute,
+  isApiWriteRoute,
+  MAX_JSON_BODY_BYTES,
+} from '../src/server.js';
 import { LINKE_RELEASE_VERSION } from '../src/version.js';
 import { buildReleaseReadinessReport } from '../src/release-readiness.js';
 import { readAuditEvents } from '../src/audit-log.js';
@@ -331,6 +340,195 @@ describe('GET /api/gold-readiness', () => {
       const res = await fetch(`http://localhost:${port}/api/gold-readiness`, { method });
       assert.strictEqual(res.status, 404, `${method} /api/gold-readiness must return 404`);
       assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
+    }
+  });
+});
+
+describe('Hardening status response', () => {
+  it('buildHardeningStatusResponse returns sanitized disabled status by default', () => {
+    const body = buildHardeningStatusResponse();
+
+    assert.deepStrictEqual(body, {
+      status: 'partial',
+      service: 'linke',
+      version: LINKE_RELEASE_VERSION,
+      hardening: {
+        authConfigured: false,
+        configuredAuthScopes: {
+          full: false,
+          read: false,
+          write: false,
+        },
+        scopedTokensConfigured: false,
+        rateLimitConfigured: false,
+        auditRetentionConfigured: false,
+        restoreRootConfigured: false,
+        requestBodyLimitBytes: MAX_JSON_BODY_BYTES,
+        writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
+      },
+      safety: {
+        tokenValuesReturned: false,
+        restoreRootValueReturned: false,
+        auditPathReturned: false,
+        environmentValuesReturned: false,
+        successAuditEvent: false,
+      },
+    });
+  });
+
+  it('buildHardeningStatusResponse reports configured controls without values', () => {
+    const restoreRoot = '/private/tmp/linke-secret-restore-root';
+    const body = buildHardeningStatusResponse({
+      authToken: 'full-secret-token',
+      readToken: 'read-secret-token',
+      writeToken: 'write-secret-token',
+      restoreRoot,
+      rateLimit: { maxRequests: 3, windowMs: 60000 },
+      auditRetention: { maxEvents: 10 },
+    });
+    const serialized = JSON.stringify(body);
+
+    assert.strictEqual(body.status, 'partial');
+    assert.deepStrictEqual(body.hardening.configuredAuthScopes, {
+      full: true,
+      read: true,
+      write: true,
+    });
+    assert.strictEqual(body.hardening.authConfigured, true);
+    assert.strictEqual(body.hardening.scopedTokensConfigured, true);
+    assert.strictEqual(body.hardening.rateLimitConfigured, true);
+    assert.strictEqual(body.hardening.auditRetentionConfigured, true);
+    assert.strictEqual(body.hardening.restoreRootConfigured, true);
+    assert.doesNotMatch(serialized, /full-secret-token|read-secret-token|write-secret-token/);
+    assert.ok(!serialized.includes(restoreRoot));
+  });
+
+  it('buildHardeningStatusResponse treats auditRetention maxEvents 0 as disabled', () => {
+    const body = buildHardeningStatusResponse({
+      auditRetention: { maxEvents: 0 },
+    });
+
+    assert.strictEqual(body.hardening.auditRetentionConfigured, false);
+  });
+});
+
+describe('GET /api/hardening-status', () => {
+  it('returns sanitized hardening status in no-token localhost mode and does not mutate dataDir', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-hardening-status-open-'));
+    const server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      assert.deepStrictEqual(await readdir(dataDir), []);
+      const res = await fetch(`http://localhost:${port}/api/hardening-status`);
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+
+      assert.strictEqual(body.status, 'partial');
+      assert.strictEqual(body.service, 'linke');
+      assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
+      assert.strictEqual(body.hardening.authConfigured, false);
+      assert.strictEqual(body.hardening.rateLimitConfigured, false);
+      assert.strictEqual(body.hardening.auditRetentionConfigured, false);
+      assert.strictEqual(body.hardening.restoreRootConfigured, false);
+      assert.strictEqual(body.hardening.requestBodyLimitBytes, MAX_JSON_BODY_BYTES);
+      assert.deepStrictEqual(body.hardening.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
+      assert.deepStrictEqual(body.safety, {
+        tokenValuesReturned: false,
+        restoreRootValueReturned: false,
+        auditPathReturned: false,
+        environmentValuesReturned: false,
+        successAuditEvent: false,
+      });
+      assert.ok(!JSON.stringify(body).includes(dataDir));
+      assert.deepStrictEqual(await readdir(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows readToken to read hardening status without returning token or restoreRoot material', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-hardening-status-read-'));
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-hardening-restore-root-'));
+    const server = createServer({
+      dataDir,
+      readToken: 'read-hardening-token',
+      writeToken: 'write-hardening-token',
+      restoreRoot,
+      rateLimit: { maxRequests: 5, windowMs: 60000 },
+      auditRetention: { maxEvents: 5 },
+    });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/hardening-status`, {
+        headers: { Authorization: 'Bearer read-hardening-token' },
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      const serialized = JSON.stringify(body);
+
+      assert.strictEqual(body.hardening.authConfigured, true);
+      assert.deepStrictEqual(body.hardening.configuredAuthScopes, {
+        full: false,
+        read: true,
+        write: true,
+      });
+      assert.strictEqual(body.hardening.scopedTokensConfigured, true);
+      assert.strictEqual(body.hardening.rateLimitConfigured, true);
+      assert.strictEqual(body.hardening.auditRetentionConfigured, true);
+      assert.strictEqual(body.hardening.restoreRootConfigured, true);
+      assert.doesNotMatch(serialized, /read-hardening-token|write-hardening-token|Bearer/);
+      assert.ok(!serialized.includes(restoreRoot));
+      assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(restoreRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unknown tokens before returning hardening fields', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-hardening-status-denied-'));
+    const server = createServer({ dataDir, readToken: 'read-hardening-token' });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/hardening-status`, {
+        headers: { Authorization: 'Bearer unknown-hardening-token' },
+      });
+      assert.strictEqual(res.status, 401);
+      const body = await res.json();
+      assert.deepStrictEqual(body, { error: 'Unauthorized' });
+      assert.doesNotMatch(JSON.stringify(body), /hardening|configuredAuthScopes|read-hardening-token|unknown-hardening-token/);
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.denied');
+      assert.strictEqual(events[0].path, '/api/hardening-status');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not implement mutating methods for /api/hardening-status', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-hardening-status-methods-'));
+    const server = createServer({ dataDir });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+        const res = await fetch(`http://localhost:${port}/api/hardening-status`, { method });
+        assert.strictEqual(res.status, 404, `${method} /api/hardening-status must return 404`);
+        assert.deepStrictEqual(await res.json(), { error: 'Not Found' });
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 });
