@@ -141,6 +141,8 @@ const GOLD_READINESS_ITEMS = [
       'src/audit-log.js',
       'src/rate-limit.js',
       'GET /api/audit-log',
+      'test/agent-audit-log.test.js',
+      'src/agent.js audit-log',
       'GET /api/hardening-status',
       'src/server.js buildHardeningStatusResponse',
       'test/agent-hardening-status.test.js',
@@ -161,7 +163,7 @@ const GOLD_READINESS_ITEMS = [
       'test/restore-dry-run.test.js',
       'test/readme.test.js',
     ],
-    nextStep: 'V0.72 adds a manual Web Console hardening-status panel for sanitized visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
+    nextStep: 'V0.73 adds an Agent audit-log read-only CLI for sanitized local audit visibility; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, and recovery supervisor.',
   },
 ];
 

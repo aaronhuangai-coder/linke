@@ -17,6 +17,7 @@
  *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
  *   health              — check release health status
  *   hardening-status    — show sanitized hardening status
+ *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *
  * Options:
@@ -31,6 +32,7 @@
  *   --config <path>      Config file path (run-once, launchd-dry-run)
  *   --output <path>      Output path (launchd-dry-run)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
+ *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
  *   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
  *   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
@@ -219,6 +221,7 @@ Commands:
   retention-dry-run   Show retention dry-run plan (no delete, read-only)
   health              Check release health status
   hardening-status    Show sanitized hardening status
+  audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
 
 Options:
@@ -233,6 +236,7 @@ Options:
   --config <path>      Config file path (for run-once, launchd-dry-run, nas-dry-run)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
+  --limit <n>          Limit read-only audit-log events
   --expected-version <version> Expected release version (for release-readiness)
   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
   --fail-on-blocked   Exit 2 when nas-dry-run readinessSummary.state is blocked
@@ -430,6 +434,23 @@ export async function main() {
 
       case 'hardening-status': {
         const result = await apiRequest('/api/hardening-status', 'GET');
+        console.log(JSON.stringify(result, null, 2));
+        break;
+      }
+
+      case 'audit-log': {
+        const limitRaw = args.limit;
+        let path = '/api/audit-log';
+        if (limitRaw !== undefined) {
+          if (limitRaw === true) {
+            throw new Error('--limit requires a positive integer value');
+          }
+          if (typeof limitRaw !== 'string' || !/^\d+$/.test(limitRaw) || Number(limitRaw) <= 0) {
+            throw new Error('--limit must be a positive integer');
+          }
+          path += `?limit=${encodeURIComponent(limitRaw)}`;
+        }
+        const result = await apiRequest(path, 'GET');
         console.log(JSON.stringify(result, null, 2));
         break;
       }

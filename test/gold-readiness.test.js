@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.72', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.72');
+  it('expects LINKE_RELEASE_VERSION to be V0.73', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.73');
   });
 
-  it('expects report.version to be V0.72', () => {
+  it('expects report.version to be V0.73', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.72');
+    assert.strictEqual(report.version, 'V0.73');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -169,6 +169,8 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('O_NOFOLLOW'));
     assert.ok(hardeningEvidence.includes('src/audit-log.js'));
     assert.ok(hardeningEvidence.includes('GET /api/audit-log'));
+    assert.ok(hardeningEvidence.includes('test/agent-audit-log.test.js'));
+    assert.ok(hardeningEvidence.includes('src/agent.js audit-log'));
     assert.ok(hardeningEvidence.includes('LINKE_AUDIT_MAX_EVENTS'));
     assert.ok(hardeningEvidence.includes('Audit retention newest events'));
     assert.ok(hardeningEvidence.includes('src/rate-limit.js'));
