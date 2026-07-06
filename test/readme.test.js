@@ -1656,14 +1656,14 @@ describe('README — V0.65 Web NAS execution gate display', () => {
 });
 
 describe('README — V0.67 NAS execution readiness summary', () => {
-  it('title and badge claim V0.67 as current', () => {
-    assert.match(readme, /^# Linke V0\.67/m);
-    assert.match(readme, /当前版本：V0\.67/);
+  it('title and badge no longer claim V0.67 as current', () => {
+    assert.doesNotMatch(readme, /^# Linke V0\.67/m);
+    assert.doesNotMatch(readme, /当前版本：V0\.67/);
   });
 
-  it('version table marks V0.66 historical and V0.67 current', () => {
+  it('version table marks V0.66 and V0.67 historical', () => {
     assert.match(readme, /\| V0\.66 \| 历史版本 \|[^|]*(denylist|credential-like|凭证字段|FORBIDDEN_NAS_CREDENTIAL_FIELDS)/i);
-    assert.match(readme, /\| V0\.67 \| 当前版本 \|[^|]*(readinessSummary|executionReadiness|就绪性摘要|就绪性状态)/i);
+    assert.match(readme, /\| V0\.67 \| 历史版本 \|[^|]*(readinessSummary|executionReadiness|就绪性摘要|就绪性状态)/i);
   });
 
   it('documents the complete 15-field NAS credential denylist', () => {
@@ -1699,6 +1699,37 @@ describe('README — V0.67 NAS execution readiness summary', () => {
     assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
     assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
     assert.ok(!/真实 NAS 远程备份已完成|real NAS remote backup ready|production ready|无安全隐患/i.test(readme));
+  });
+});
+
+describe('README — V0.68 NAS CLI readiness summary option', () => {
+  it('title and badge claim V0.68 as current', () => {
+    assert.match(readme, /^# Linke V0\.68/m);
+    assert.match(readme, /当前版本：V0\.68/);
+  });
+
+  it('version table marks V0.67 historical and V0.68 current', () => {
+    assert.match(readme, /\| V0\.67 \| 历史版本 \|[^|]*(readinessSummary|executionReadiness|就绪性摘要|就绪性状态)/i);
+    assert.match(readme, /\| V0\.68 \| 当前版本 \|[^|]*(readiness-summary|readinessSummary|CLI|摘要)/i);
+  });
+
+  it('documents --readiness-summary command usage', () => {
+    assert.match(readme, /nas-dry-run[\s\S]*--readiness-summary[\s\S]*readinessSummary/i);
+  });
+
+  it('keeps Gold blocked and rejects real NAS overclaims for V0.68', () => {
+    const forbiddenOverclaims = [
+      ['production', 'ready'].join(' '),
+      ['production', 'ready'].join('-'),
+      ['Gold', 'ready'].join(' '),
+      ['Gold', 'ready'].join('-'),
+      ['real NAS remote backup', 'ready'].join(' '),
+      '无安全' + '隐患',
+    ].join('|');
+    assert.doesNotMatch(readme, new RegExp(forbiddenOverclaims, 'i'));
+    assert.match(readme, /nas-dry-run[\s\S]*(partial|部分)/i);
+    assert.match(readme, /real-nas-remote-backup[\s\S]*(blocked|阻塞)|真实 NAS[\s\S]*(blocked|阻塞)/i);
+    assert.match(readme, /Gold[\s\S]*(blocked|阻塞)|blocked[\s\S]*Gold/i);
   });
 });
 

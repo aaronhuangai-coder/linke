@@ -31,6 +31,7 @@
  *   --output <path>      Output path (launchd-dry-run)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --expected-version <version> Expected release version (release-readiness)
+ *   --readiness-summary  Print only NAS readinessSummary for nas-dry-run
  *   --token <token>      Bearer token for authenticated Linke Server requests
  */
 
@@ -230,6 +231,7 @@ Options:
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --expected-version <version> Expected release version (for release-readiness)
+  --readiness-summary  Print only NAS readinessSummary for nas-dry-run
   --token <token>      Bearer token for authenticated Linke Server requests
 `);
 }
@@ -362,8 +364,18 @@ export async function main() {
 
       case 'nas-dry-run': {
         if (!args.config) throw new Error('--config is required');
+        if (args['readiness-summary'] !== undefined && args['readiness-summary'] !== true) {
+          throw new Error('--readiness-summary does not accept a value');
+        }
         const plan = await runNasDryRunFromConfig(args.config);
-        console.log(JSON.stringify(plan, null, 2));
+        let output = plan;
+        if (args['readiness-summary'] === true) {
+          if (!plan.readinessSummary) {
+            throw new Error('readinessSummary missing from dry-run plan');
+          }
+          output = plan.readinessSummary;
+        }
+        console.log(JSON.stringify(output, null, 2));
         break;
       }
 

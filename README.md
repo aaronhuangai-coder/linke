@@ -1,8 +1,8 @@
-# Linke V0.67
+# Linke V0.68
 
 轻量级备份与恢复代理，带 Web 管理控制台。
 
-> **当前版本：V0.67** — 单机 localhost 原型阶段，具备 NAS 执行就绪性摘要、目标就绪状态与 blocker codes 网页控制台只读展示、credentialRefConfigured sanitized dry-run 输出与网页展示、不泄露 credentialRef 原值、15 个 credential-like 字段精确拒绝与执行门禁网页展示、credentialRef 非密钥引用基础、固定 executionGate 远程执行阻塞、可选 Bearer token API 认证骨架、read/write token 授权基础、共享写入路由注册表、GET `/api/auth-status` 认证状态只读接口、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备真实 NAS 传输、完整生产级鉴权、分布式限流或生产级审计。
+> **当前版本：V0.68** — 单机 localhost 原型阶段，具备 NAS CLI readiness-summary 摘要输出、NAS 执行就绪性摘要、目标就绪状态与 blocker codes 网页控制台只读展示、credentialRefConfigured sanitized dry-run 输出与网页展示、不泄露 credentialRef 原值、15 个 credential-like 字段精确拒绝与执行门禁网页展示、credentialRef 非密钥引用基础、固定 executionGate 远程执行阻塞、可选 Bearer token API 认证骨架、read/write token 授权基础、共享写入路由注册表、GET `/api/auth-status` 认证状态只读接口、Web Console 内存态 token UX、请求体上限、500 错误脱敏、可选恢复目标 root guard、恢复目标 symlink 写入防护、本地 audit log foundation、可选 API rate-limit foundation 与可选 audit retention foundation，但尚未具备真实 NAS 传输、完整生产级鉴权、分布式限流或生产级审计。
 
 ## 版本演进
 
@@ -74,7 +74,8 @@
 | V0.64 | 历史版本 | NAS credential reference gate：新增 `credentialRef` 非密钥 slug 校验、`credentialRefConfigured` sanitized dry-run 输出与固定 `executionGate`，真实 NAS 传输仍 blocked |
 | V0.65 | 历史版本 | Web NAS execution gate display：Web Console 支持展示 NAS 凭证配置状态与 executionGate 远程执行阻塞，不启用真实 NAS 传输，Gold 依旧 blocked |
 | V0.66 | 历史版本 | NAS credential denylist hardening：`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 扩展为 15 个 credential-like 精确键名，继续拒绝凭证字段且 Gold 依旧 blocked |
-| V0.67 | 当前版本 | NAS execution readiness summary：新增 top-level `readinessSummary` 与 per-target `executionReadiness`，提供 target 阻碍卡点代码与就绪状态只读展示，不启用真实 NAS 传输，不泄露凭证原值且 Gold 依旧 blocked |
+| V0.67 | 历史版本 | NAS execution readiness summary：新增 top-level `readinessSummary` 与 per-target `executionReadiness`，提供 target 阻碍卡点代码与就绪状态只读展示，不启用真实 NAS 传输，不泄露凭证原值且 Gold 依旧 blocked |
+| V0.68 | 当前版本 | NAS CLI readiness summary：新增 `--readiness-summary` 命令行布尔参数，支持仅输出 `readinessSummary` 摘要，不泄露 target endpoint/paths 或凭证，Gold 依旧 blocked |
 
 
 ## 特性
@@ -121,12 +122,12 @@
 - **快照差异预览** — Web Console 可按 manifest 文件路径比较两个快照的 added / removed / unchanged
 - **恢复预检** — API、CLI 与 Web Console 可预览 restore-dry-run 计划，显示 would-create / would-overwrite，不执行复制或覆盖
 - **备份预检** — API、CLI 与 Web Console 可预览 backup-preflight-dry-run 计划，显示 included / excluded，不创建快照、不复制文件、不写 metadata
-- **NAS dry-run** — API、CLI 与 Web Console 可验证 Synology / Ugreen 目标配置并输出计划；V0.67 支持 `readinessSummary` 与 per-target `executionReadiness` 执行就绪性摘要、固定 blocker codes、`credentialRef` 非密钥引用基础、15 个 credential-like 字段精确拒绝、`credentialRefConfigured` 网页展示与 `executionGate` 门禁展示，不连接 NAS、不写远端、不保存凭证、不回显引用原值
+- **NAS dry-run** — API、CLI 与 Web Console 可验证 Synology / Ugreen 目标配置并输出计划；V0.68 支持 `nas-dry-run --readiness-summary` 命令行布尔参数，支持仅输出 `readinessSummary` 摘要，不泄露 target endpoint/paths 或凭证；V0.67 引入 `readinessSummary` 与 per-target `executionReadiness` 执行就绪性摘要、固定 blocker codes、`credentialRef` 非密钥引用基础、15 个 credential-like 字段精确拒绝、`credentialRefConfigured` 网页展示与 `executionGate` 门禁展示，不连接 NAS、不写远端、不保存凭证、不回显引用原值
 - **NAS app adapter dry-run** — 为 Synology / Ugreen 目标生成 `adapterPlan`，显示 `wouldInvokeApp:false`，不调用 NAS app、不连接、不写远端
 - **发布版本一致性守卫** — `src/version.js` 提供当前发布版本单一来源，测试会校验 README、`/api/health`、Agent health 输出和 Web Console 版本示例保持一致
 - **发布就绪检查 CLI** — `agent.js release-readiness` 对 `/api/health` 执行一次只读检查，输出 sanitized readiness report，`ready:false` 时退出码 2，请求错误时退出码 1
 - **发布就绪网页控制台** — Web Console 在 `release-health-panel` 内提供发布就绪检查区块，手动 GET `/api/release-readiness` 并展示 ready、版本与失败检查项
-- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.67 将 `nas-dry-run`、`security-auth` 与 `production-hardening` 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
+- **Gold readiness scorecard** — Web Console 提供 `gold-readiness-panel`，手动 GET `/api/gold-readiness` 展示静态 code-owned capability/blocker scorecard；V0.68 将 `nas-dry-run` (含 CLI readiness summary 摘要)、`security-auth` 与 `production-hardening` 标为 partial，`real-nas-remote-backup` 仍为 Gold blocker
 - **可选 Bearer token API 认证骨架** — 服务端可通过 `LINKE_AUTH_TOKEN` 或 `LINKE_TOKEN` 为 `/api/*` 请求启用 `Authorization: Bearer <token>` 检查，Agent CLI 支持 `--token <token>`；这仍是 partial auth，不是完整生产级 authorization
 - **API read/write token foundation** — 服务端可通过 `LINKE_READ_TOKEN` / `LINKE_WRITE_TOKEN` 区分只读 API 与写入 API；读 token 访问写入 API 返回 403 `Forbidden` 并记录 `auth.forbidden`，旧 `LINKE_AUTH_TOKEN` / `LINKE_TOKEN` 仍作为 full-access 兼容 token
 - **Auth status readiness API** — GET `/api/auth-status` 返回 sanitized 认证状态（`enabled`、`configuredScopes`、`writeRoutes`），由 `buildAuthStatusResponse` 生成；启用 auth 时仍受 Bearer gate 保护，不返回 token 值、token prefix、Authorization header 或 env 原值，不写入 metadata
@@ -201,6 +202,7 @@ node src/agent.js launchd-dry-run --config linke.config.json --output ./scratch/
 
 # nas-dry-run：查看 NAS 备份计划（不连接 NAS、不写远端）
 node src/agent.js nas-dry-run --config linke.config.json
+node src/agent.js nas-dry-run --config linke.config.json --readiness-summary
 
 # retention-dry-run：查看快照保留计划（不删除、只读）
 node src/agent.js retention-dry-run --server http://localhost:3000 --device my-pc
@@ -249,6 +251,7 @@ node src/agent.js release-readiness --server http://localhost:3000 --expected-ve
 - **不会保存或允许凭证字段**（`username`、`password`、`token`、`apiKey`、`secret`、`accessKey`、`refreshToken`、`privateKey`、`clientSecret`、`connectionString`、`accessToken`、`idToken`、`secretKey`、`sshKey`、`passphrase` 共 15 个精确键名均被拒绝）
 - **拒绝 endpoint 中包含 userinfo**（如 `http://user:pass@host`）
 - 支持的 NAS provider：`synology`、`ugreen`
+- **就绪性摘要命令行模式**：支持添加 `--readiness-summary` 参数。启用时仅输出 top-level `readinessSummary`，不输出 `targets` 详细列表或 `jobs` 列表，从而避免泄漏目标端点、共享名、任务名称、源路径等敏感信息，并且绝不泄露 `credentialRef` 引用原值。
 
 ```json
 {
@@ -1302,7 +1305,7 @@ V0.10 在 Web Console 中增加恢复预检面板。选中设备和快照后，�
 npm test
 ```
 
-测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、NAS credentialRef 非密钥引用、`validateNasCredentialRef`、`ALLOWED_NAS_CREDENTIAL_REF_PATTERN`、`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 15 字段 denylist、`credentialRefConfigured`、`executionGate`、`readinessSummary`、per-target `executionReadiness`、固定 NAS blocker codes、Web NAS execution gate display、Web NAS execution readiness summary rendering、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`、Web Console 内存态 API token UX、API read/write token foundation、`LINKE_READ_TOKEN`、`LINKE_WRITE_TOKEN`、403 `Forbidden`、auth.forbidden、shared write-route registry、`API_WRITE_ROUTES`、`formatApiRoute`、`isApiWriteRoute`、auth status readiness API、GET /api/auth-status、buildAuthStatusResponse、configuredScopes、writeRoutes、tokenValuesReturned:false、请求体上限 413、未知 500 `Internal Server Error` 脱敏、`LINKE_RESTORE_ROOT` 恢复目标 guard、restoreRoot symlink 逃逸拒绝、目标文件 symlink 拒绝、中间目录 symlink 拒绝、`O_NOFOLLOW` restore 写入防护、本地 audit log foundation、GET /api/audit-log、JSONL 事件 allowlist、auth.denied、敏感字段不落盘、API rate-limit foundation、`LINKE_RATE_LIMIT_PER_MINUTE`、429 `Rate limit exceeded`、`api.rate_limited`、audit retention foundation、`LINKE_AUDIT_MAX_EVENTS`、最新 N 条审计事件保留、审计保留并发 append 串行化。
+测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、NAS credentialRef 非密钥引用、`validateNasCredentialRef`、`ALLOWED_NAS_CREDENTIAL_REF_PATTERN`、`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 15 字段 denylist、`credentialRefConfigured`、`executionGate`、`readinessSummary`、per-target `executionReadiness`、固定 NAS blocker codes、Web NAS execution gate display、Web NAS execution readiness summary rendering、Agent nas-dry-run CLI readiness summary、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、可选 Bearer token API 认证骨架、Agent CLI `--token`、Web Console 内存态 API token UX、API read/write token foundation、`LINKE_READ_TOKEN`、`LINKE_WRITE_TOKEN`、403 `Forbidden`、auth.forbidden、shared write-route registry、`API_WRITE_ROUTES`、`formatApiRoute`、`isApiWriteRoute`、auth status readiness API、GET /api/auth-status、buildAuthStatusResponse、configuredScopes、writeRoutes、tokenValuesReturned:false、请求体上限 413、未知 500 `Internal Server Error` 脱敏、`LINKE_RESTORE_ROOT` 恢复目标 guard、restoreRoot symlink 逃逸拒绝、目标文件 symlink 拒绝、中间目录 symlink 拒绝、`O_NOFOLLOW` restore 写入防护、本地 audit log foundation、GET /api/audit-log、JSONL 事件 allowlist、auth.denied、敏感字段不落盘、API rate-limit foundation、`LINKE_RATE_LIMIT_PER_MINUTE`、429 `Rate limit exceeded`、`api.rate_limited`、audit retention foundation、`LINKE_AUDIT_MAX_EVENTS`、最新 N 条审计事件保留、审计保留并发 append 串行化。
 
 ## 技术约束
 
