@@ -20,6 +20,7 @@
  *   hardening-status    — show sanitized hardening status
  *   supervisor-status   — show sanitized supervisor status
  *   supervisor-install-dry-run — show sanitized supervisor install plan
+ *   supervisor-lifecycle-apply — show blocked lifecycle apply plan
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -33,8 +34,9 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply)
  *   --output <path>      Output path (launchd-dry-run)
+ *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply)
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
@@ -45,11 +47,12 @@
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
 import { loadConfig, validateConfig } from './config.js';
 import { runNasDryRunFromConfig } from './nas.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
+import { buildSupervisorLifecycleApplyPlan } from './supervisor-lifecycle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -74,6 +77,15 @@ const SUPERVISOR_SAFETY_FALSE_FIELDS = [
   'remoteCommandExecuted',
 ];
 const SUPERVISOR_INSTALL_DRY_RUN_CONFIG_ERROR = 'supervisor-install-dry-run failed; verify --config points to a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_APPLY_CONFIG_ERROR = 'supervisor-lifecycle-apply failed; verify --config points to a readable valid Linke config';
+const FORBIDDEN_APPROVAL_PATH_SEGMENTS = new Set([
+  '.aws',
+  '.config',
+  '.ssh',
+  'credentials',
+  'gcloud',
+  'secrets',
+]);
 const SUPERVISOR_INSTALL_READINESS_BLOCKERS = Object.freeze([
   'real-install-not-implemented',
   'launchd-install-blocked',
@@ -218,6 +230,16 @@ function validateGoldReadinessReport(report) {
     throw new Error('gold-readiness response has invalid status');
   }
   return report;
+}
+
+function isForbiddenApprovalPath(filePath) {
+  const normalized = resolve(filePath);
+  const segments = normalized.split(/[\\/]+/).filter(Boolean);
+  const basename = segments.at(-1)?.toLowerCase() || '';
+  if (basename === '.env' || basename.startsWith('.env.') || basename.endsWith('.env')) {
+    return true;
+  }
+  return segments.some((segment) => FORBIDDEN_APPROVAL_PATH_SEGMENTS.has(segment.toLowerCase()));
 }
 
 function hasOnlyFalseBooleans(obj, fields) {
@@ -643,6 +665,7 @@ Commands:
   hardening-status    Show sanitized hardening status
   supervisor-status   Show sanitized supervisor status
   supervisor-install-dry-run Show sanitized supervisor install dry-run plan
+  supervisor-lifecycle-apply Apply supervisor lifecycle operations under LINKE_SUPERVISOR_LIFECYCLE_APPLY=enabled gate
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -656,7 +679,7 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
@@ -664,6 +687,7 @@ Options:
   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
   --fail-on-blocked   Exit 2 when nas-dry-run/supervisor-install-dry-run readinessSummary.state or gold-readiness status is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
+  --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply)
 `);
 }
 
@@ -676,9 +700,9 @@ export async function main() {
   const requestOptions = args.token && args.token !== true ? { authToken: args.token } : {};
   const apiRequest = (path, method, body) => request(server, path, method, body, requestOptions);
 
-  if (!command) {
+  if (!command || args.help || args.h || command === 'help') {
     printUsage();
-    process.exit(1);
+    process.exit(args.help || args.h || command === 'help' ? 0 : 1);
   }
 
   try {
@@ -932,6 +956,72 @@ export async function main() {
         const report = validateGoldReadinessReport(await apiRequest('/api/gold-readiness', 'GET'));
         console.log(JSON.stringify(report, null, 2));
         if (args['fail-on-blocked'] === true && report?.status === 'blocked') {
+          process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'supervisor-lifecycle-apply': {
+        if (!args.config) {
+          throw new Error('--config is required');
+        }
+        if (args.config === true) {
+          throw new Error('--config requires a path value');
+        }
+        if (!args.operation) {
+          throw new Error('--operation is required');
+        }
+        if (args.operation === true) {
+          throw new Error('--operation requires a value');
+        }
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(args.operation)) {
+          throw new Error('operation must be one of: install, uninstall, rollback, recover');
+        }
+        if (args.apply !== undefined && args.apply !== true) {
+          throw new Error('--apply does not accept a value');
+        }
+        if (args.approval === true) {
+          throw new Error('--approval requires a path value');
+        }
+        if (args['launchd-dir'] === true) {
+          throw new Error('--launchd-dir requires a path value');
+        }
+
+        let config;
+        try {
+          const raw = await loadConfig(args.config);
+          config = validateConfig(raw);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_APPLY_CONFIG_ERROR);
+        }
+
+        let approval = null;
+        if (args.approval) {
+          if (isForbiddenApprovalPath(args.approval)) {
+            throw new Error('approval path is not allowed');
+          }
+          try {
+            const rawApproval = await readFile(args.approval, 'utf-8');
+            approval = JSON.parse(rawApproval);
+          } catch (err) {
+            throw new Error('failed to read or parse approval file');
+          }
+        }
+
+        const envGateEnabled = process.env.LINKE_SUPERVISOR_LIFECYCLE_APPLY === 'enabled';
+
+        const plan = buildSupervisorLifecycleApplyPlan(config, {
+          operation: args.operation,
+          apply: args.apply === true,
+          envGateEnabled,
+          approval,
+          launchdDir: args['launchd-dir'] || undefined,
+        });
+
+        console.log(JSON.stringify(plan, null, 2));
+
+        if (args.apply === true) {
           process.exitCode = 2;
         }
         break;
