@@ -165,6 +165,39 @@ const SUPERVISOR_INSTALL_APPROVAL_MANIFEST_CONTROLS = Object.freeze([
   }),
 ]);
 
+const SUPERVISOR_ROLLBACK_UNINSTALL_ACTIONS = Object.freeze([
+  Object.freeze({
+    id: 'capture-current-state',
+    kind: 'rollback',
+    blockerCode: 'rollback-state-capture-missing',
+    evidence: 'Current supervisor state capture is not implemented.',
+  }),
+  Object.freeze({
+    id: 'unload-launch-agent',
+    kind: 'uninstall',
+    blockerCode: 'launchd-unload-blocked',
+    evidence: 'Launch agent unload behavior is not implemented.',
+  }),
+  Object.freeze({
+    id: 'remove-launch-agent-plist',
+    kind: 'uninstall',
+    blockerCode: 'launchd-remove-blocked',
+    evidence: 'Launch agent plist removal is not implemented.',
+  }),
+  Object.freeze({
+    id: 'restore-previous-plist',
+    kind: 'rollback',
+    blockerCode: 'previous-plist-unavailable',
+    evidence: 'Previous plist restore data is not captured.',
+  }),
+  Object.freeze({
+    id: 'start-recovery-supervisor',
+    kind: 'recovery',
+    blockerCode: 'recovery-supervisor-missing',
+    evidence: 'Recovery supervisor start behavior is not implemented.',
+  }),
+]);
+
 // ── HTTP helper ────────────────────────────────────────────────────
 
 async function request(server, path, method, body, options = {}) {
@@ -394,6 +427,7 @@ export function buildSupervisorInstallDryRunPlan(config) {
     installCommandPreview: buildSupervisorInstallCommandPreview(),
     installPreflight: buildSupervisorInstallPreflight(),
     installApprovalManifest: buildSupervisorInstallApprovalManifest(),
+    rollbackUninstallPlan: buildSupervisorRollbackUninstallPlan(),
     nextSteps: [
       'Review this sanitized dry-run plan.',
       'Use launchd-dry-run separately if a plist preview is needed.',
@@ -493,6 +527,66 @@ export function buildSupervisorInstallApprovalManifest() {
       metadataWritten: false,
       supervisorInstalled: false,
       supervisorStarted: false,
+      nasConnected: false,
+      backupTriggered: false,
+      restoreTriggered: false,
+      remoteCommandExecuted: false,
+      sensitiveValuesReturned: false,
+    },
+  };
+}
+
+export function buildSupervisorRollbackUninstallPlan() {
+  return {
+    mode: 'dry-run-only',
+    state: 'blocked',
+    rollback: {
+      requiredBeforeInstall: true,
+      available: false,
+      previousPlistAvailable: false,
+      wouldRestorePreviousPlist: false,
+      wouldRestartPreviousSupervisor: false,
+      blockerCode: 'rollback-not-implemented',
+      evidence: 'Rollback state capture, previous plist restore, and supervisor restart are not implemented.',
+    },
+    uninstall: {
+      requiredBeforeInstall: true,
+      available: false,
+      wouldUnloadLaunchAgent: false,
+      wouldRemoveLaunchAgent: false,
+      wouldRemoveMetadata: false,
+      blockerCode: 'uninstall-not-implemented',
+      evidence: 'Launch agent unload, plist removal, and supervisor metadata removal are not implemented.',
+    },
+    recovery: {
+      requiredBeforeInstall: true,
+      available: false,
+      supervisorAvailable: false,
+      wouldStartRecoverySupervisor: false,
+      blockerCode: 'recovery-supervisor-not-implemented',
+      evidence: 'Recovery supervisor lifecycle is not implemented.',
+    },
+    actions: SUPERVISOR_ROLLBACK_UNINSTALL_ACTIONS.map((action) => ({
+      ...action,
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+    })),
+    safety: {
+      dryRun: true,
+      planOnly: true,
+      rollbackExecuted: false,
+      uninstallExecuted: false,
+      recoverySupervisorStarted: false,
+      launchctlCalled: false,
+      processListRead: false,
+      filesystemWritten: false,
+      metadataWritten: false,
+      supervisorInstalled: false,
+      supervisorStarted: false,
+      launchdFileWritten: false,
+      launchdFileRemoved: false,
+      previousPlistRestored: false,
       nasConnected: false,
       backupTriggered: false,
       restoreTriggered: false,

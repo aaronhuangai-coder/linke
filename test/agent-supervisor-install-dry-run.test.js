@@ -214,6 +214,105 @@ const EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST = Object.freeze({
   },
 });
 
+const EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN = Object.freeze({
+  mode: 'dry-run-only',
+  state: 'blocked',
+  rollback: {
+    requiredBeforeInstall: true,
+    available: false,
+    previousPlistAvailable: false,
+    wouldRestorePreviousPlist: false,
+    wouldRestartPreviousSupervisor: false,
+    blockerCode: 'rollback-not-implemented',
+    evidence: 'Rollback state capture, previous plist restore, and supervisor restart are not implemented.',
+  },
+  uninstall: {
+    requiredBeforeInstall: true,
+    available: false,
+    wouldUnloadLaunchAgent: false,
+    wouldRemoveLaunchAgent: false,
+    wouldRemoveMetadata: false,
+    blockerCode: 'uninstall-not-implemented',
+    evidence: 'Launch agent unload, plist removal, and supervisor metadata removal are not implemented.',
+  },
+  recovery: {
+    requiredBeforeInstall: true,
+    available: false,
+    supervisorAvailable: false,
+    wouldStartRecoverySupervisor: false,
+    blockerCode: 'recovery-supervisor-not-implemented',
+    evidence: 'Recovery supervisor lifecycle is not implemented.',
+  },
+  actions: [
+    {
+      id: 'capture-current-state',
+      kind: 'rollback',
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'rollback-state-capture-missing',
+      evidence: 'Current supervisor state capture is not implemented.',
+    },
+    {
+      id: 'unload-launch-agent',
+      kind: 'uninstall',
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'launchd-unload-blocked',
+      evidence: 'Launch agent unload behavior is not implemented.',
+    },
+    {
+      id: 'remove-launch-agent-plist',
+      kind: 'uninstall',
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'launchd-remove-blocked',
+      evidence: 'Launch agent plist removal is not implemented.',
+    },
+    {
+      id: 'restore-previous-plist',
+      kind: 'rollback',
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'previous-plist-unavailable',
+      evidence: 'Previous plist restore data is not captured.',
+    },
+    {
+      id: 'start-recovery-supervisor',
+      kind: 'recovery',
+      status: 'blocked',
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'recovery-supervisor-missing',
+      evidence: 'Recovery supervisor start behavior is not implemented.',
+    },
+  ],
+  safety: {
+    dryRun: true,
+    planOnly: true,
+    rollbackExecuted: false,
+    uninstallExecuted: false,
+    recoverySupervisorStarted: false,
+    launchctlCalled: false,
+    processListRead: false,
+    filesystemWritten: false,
+    metadataWritten: false,
+    supervisorInstalled: false,
+    supervisorStarted: false,
+    launchdFileWritten: false,
+    launchdFileRemoved: false,
+    previousPlistRestored: false,
+    nasConnected: false,
+    backupTriggered: false,
+    restoreTriggered: false,
+    remoteCommandExecuted: false,
+    sensitiveValuesReturned: false,
+  },
+});
+
 
 async function runAgent(args) {
   return exec('node', [agentPath, ...args]);
@@ -267,6 +366,24 @@ function assertNoSensitiveApprovalManifestEvidence(manifest) {
   }
 }
 
+function assertNoSensitiveRollbackUninstallEvidence(plan) {
+  const evidenceValues = [
+    plan.rollback.evidence,
+    plan.uninstall.evidence,
+    plan.recovery.evidence,
+    ...plan.actions.map((action) => action.evidence),
+  ];
+
+  for (const evidence of evidenceValues) {
+    assert.strictEqual(typeof evidence, 'string');
+    assert.doesNotMatch(evidence, /\/Users\/|\/private\/|~\/|https?:\/\//i);
+    assert.doesNotMatch(evidence, /token|bearer|authorization|credentialRef|secret-ref|nas\.local/i);
+    assert.doesNotMatch(evidence, /config\.json|LaunchAgents|\.plist/i);
+    assert.doesNotMatch(evidence, /approver|timestamp|hostname|username|process|pid/i);
+    assert.doesNotMatch(evidence, /launchctl\s|rm\s|mv\s|cp\s|unlink\s/i);
+  }
+}
+
 describe('Agent supervisor-install-dry-run CLI', () => {
   it('buildSupervisorInstallDryRunPlan returns a sanitized dry-run plan without sensitive config values', async () => {
     const app = await import('../src/agent.js');
@@ -289,6 +406,11 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     const buildSupervisorInstallApprovalManifest = app.buildSupervisorInstallApprovalManifest;
     if (!buildSupervisorInstallApprovalManifest) {
       throw new Error('buildSupervisorInstallApprovalManifest is not defined in src/agent.js');
+    }
+
+    const buildSupervisorRollbackUninstallPlan = app.buildSupervisorRollbackUninstallPlan;
+    if (!buildSupervisorRollbackUninstallPlan) {
+      throw new Error('buildSupervisorRollbackUninstallPlan is not defined in src/agent.js');
     }
 
     const sourcePath = '/Users/ah/private/source';
@@ -460,6 +582,38 @@ describe('Agent supervisor-install-dry-run CLI', () => {
     assert.deepStrictEqual(plan.installPreflight.safety, EXPECTED_SUPERVISOR_INSTALL_PREFLIGHT.safety);
     assert.deepStrictEqual(plan.installApprovalManifest.safety, EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST.safety);
     assertNoSensitiveApprovalManifestEvidence(plan.installApprovalManifest);
+
+    assert.deepStrictEqual(
+      buildSupervisorRollbackUninstallPlan(),
+      EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN,
+    );
+    assert.deepStrictEqual(
+      plan.rollbackUninstallPlan,
+      EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN,
+    );
+    assert.strictEqual(plan.rollbackUninstallPlan.rollback.available, false);
+    assert.strictEqual(plan.rollbackUninstallPlan.uninstall.available, false);
+    assert.strictEqual(plan.rollbackUninstallPlan.recovery.available, false);
+    assert.deepStrictEqual(
+      plan.rollbackUninstallPlan.actions.map((action) => action.id),
+      [
+        'capture-current-state',
+        'unload-launch-agent',
+        'remove-launch-agent-plist',
+        'restore-previous-plist',
+        'start-recovery-supervisor',
+      ],
+    );
+    for (const action of plan.rollbackUninstallPlan.actions) {
+      assert.strictEqual(action.status, 'blocked');
+      assert.strictEqual(action.wouldRun, false);
+      assert.strictEqual(action.wouldWrite, false);
+      assert.strictEqual(typeof action.blockerCode, 'string');
+      assert.ok(action.blockerCode.length > 0);
+    }
+    assert.deepStrictEqual(plan.rollbackUninstallPlan.safety, EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN.safety);
+    assertNoSensitiveRollbackUninstallEvidence(plan.rollbackUninstallPlan);
+
     for (const action of plan.installCommandPreview.actions) {
       assert.strictEqual(action.wouldRun, false);
       assert.strictEqual(action.wouldWrite, false);
@@ -574,6 +728,32 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.installApprovalManifest.safety.remoteCommandExecuted, false);
       assert.strictEqual(body.installApprovalManifest.safety.sensitiveValuesReturned, false);
       assertNoSensitiveApprovalManifestEvidence(body.installApprovalManifest);
+
+      assert.deepStrictEqual(
+        body.rollbackUninstallPlan,
+        EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN,
+      );
+      assert.strictEqual(body.rollbackUninstallPlan.safety.dryRun, true);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.planOnly, true);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.rollbackExecuted, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.uninstallExecuted, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.recoverySupervisorStarted, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.launchctlCalled, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.processListRead, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.filesystemWritten, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.metadataWritten, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.supervisorInstalled, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.supervisorStarted, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.launchdFileWritten, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.launchdFileRemoved, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.previousPlistRestored, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.nasConnected, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.backupTriggered, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.restoreTriggered, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.remoteCommandExecuted, false);
+      assert.strictEqual(body.rollbackUninstallPlan.safety.sensitiveValuesReturned, false);
+      assertNoSensitiveRollbackUninstallEvidence(body.rollbackUninstallPlan);
+
       assert.strictEqual(body.installCommandPreview.safety.launchctlCalled, false);
       assert.strictEqual(body.installCommandPreview.safety.launchdFileWritten, false);
       assert.strictEqual(body.installCommandPreview.safety.metadataWritten, false);
@@ -634,6 +814,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.installCommandPreview, undefined);
       assert.strictEqual(body.installPreflight, undefined);
       assert.strictEqual(body.installApprovalManifest, undefined);
+      assert.strictEqual(body.rollbackUninstallPlan, undefined);
       assert.doesNotMatch(stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(stdout, /private-source|config\.json|127\.0\.0\.1|3000|synology\.local|synology-ref|unused-summary-token|Bearer/i);
       assert.deepStrictEqual((await readdir(dataDir)).sort(), ['config.json', 'private-source']);
@@ -685,6 +866,11 @@ describe('Agent supervisor-install-dry-run CLI', () => {
         EXPECTED_SUPERVISOR_INSTALL_APPROVAL_MANIFEST,
       );
       assertNoSensitiveApprovalManifestEvidence(body.installApprovalManifest);
+      assert.deepStrictEqual(
+        body.rollbackUninstallPlan,
+        EXPECTED_SUPERVISOR_ROLLBACK_UNINSTALL_PLAN,
+      );
+      assertNoSensitiveRollbackUninstallEvidence(body.rollbackUninstallPlan);
       assert.strictEqual(body.readinessSummary.state, 'blocked');
       assert.strictEqual(body.safety.launchctlCalled, false);
       assert.strictEqual(body.safety.processListRead, false);
@@ -732,6 +918,7 @@ describe('Agent supervisor-install-dry-run CLI', () => {
       assert.strictEqual(body.installCommandPreview, undefined);
       assert.strictEqual(body.installPreflight, undefined);
       assert.strictEqual(body.installApprovalManifest, undefined);
+      assert.strictEqual(body.rollbackUninstallPlan, undefined);
       assert.doesNotMatch(err.stdout, new RegExp(escapeRegExp(dataDir)));
       assert.doesNotMatch(err.stdout, /private-source|config\.json|127\.0\.0\.1|3000|Bearer/i);
     } finally {
