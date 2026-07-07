@@ -349,3 +349,65 @@ export async function executeSupervisorLifecycleApply(plan, executor, options = 
     events,
   };
 }
+
+const ALLOWED_AUDIT_RESULT_STATES = new Set(['blocked', 'failed', 'simulated']);
+const SAFE_REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
+
+function isoTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+}
+
+function safeRequestId(value) {
+  return typeof value === 'string' && SAFE_REQUEST_ID_PATTERN.test(value) ? value : '';
+}
+
+export function buildSupervisorLifecycleAuditPreview(plan, lifecycleResult, options = {}) {
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation) ? plan.operation : 'unknown';
+  const base = {
+    command: 'supervisor-lifecycle-apply',
+    operation,
+    safety: lifecycleSafety(),
+  };
+  const blockers = [];
+
+  if (!plan || plan.command !== 'supervisor-lifecycle-apply' || !Array.isArray(plan.actions)) {
+    blockers.push('invalid-lifecycle-plan');
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    blockers.push('lifecycle-plan-action-mismatch');
+  }
+  if (!lifecycleResult || lifecycleResult.command !== 'supervisor-lifecycle-apply') {
+    blockers.push('invalid-lifecycle-result');
+  }
+  if (blockers.length === 0 && lifecycleResult.operation !== plan.operation) {
+    blockers.push('lifecycle-audit-operation-mismatch');
+  }
+  if (blockers.length === 0 && !ALLOWED_AUDIT_RESULT_STATES.has(lifecycleResult.state)) {
+    blockers.push('lifecycle-audit-state-not-allowed');
+  }
+
+  if (blockers.length > 0) {
+    return {
+      ...base,
+      state: 'blocked',
+      blockers: [...new Set(blockers)],
+      auditEvent: null,
+    };
+  }
+
+  const resultState = lifecycleResult.state;
+  const auditEvent = {
+    type: `supervisor.lifecycle.${plan.operation}.${resultState}`,
+    createdAt: isoTimestamp(options.now || new Date()),
+    outcome: resultState,
+    message: `supervisor lifecycle ${plan.operation} ${resultState}; audit preview only; no host mutation`,
+  };
+  const requestId = safeRequestId(options.requestId);
+  if (requestId) auditEvent.requestId = requestId;
+
+  return {
+    ...base,
+    state: 'preview',
+    auditEvent,
+  };
+}

@@ -129,8 +129,10 @@ const GOLD_READINESS_ITEMS = [
       'supervisorLifecycleApply.state:blocked',
       'executeSupervisorLifecycleApply',
       'test/supervisor-lifecycle-executor.test.js',
+      'buildSupervisorLifecycleAuditPreview',
+      'test/supervisor-lifecycle-audit-preview.test.js',
     ],
-    nextStep: 'V0.88 adds a supervisor lifecycle fake executor contract, V0.87 adds a safety-gated supervisor lifecycle apply plan foundation on top of the V0.86 display-only Web Console rendering for the blocked rollbackUninstallPlan, V0.85 full JSON plan, V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
+    nextStep: 'V0.89 adds a supervisor lifecycle audit preview, V0.88 adds a supervisor lifecycle fake executor contract, V0.87 adds a safety-gated supervisor lifecycle apply plan foundation on top of the V0.86 display-only Web Console rendering for the blocked rollbackUninstallPlan, V0.85 full JSON plan, V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -254,8 +256,10 @@ const GOLD_READINESS_ITEMS = [
       'supervisorLifecycleApply.state:blocked',
       'executeSupervisorLifecycleApply',
       'test/supervisor-lifecycle-executor.test.js',
+      'buildSupervisorLifecycleAuditPreview',
+      'test/supervisor-lifecycle-audit-preview.test.js',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, the V0.85 blocked rollbackUninstallPlan, the V0.86 display-only rollbackUninstallPlan Web rendering, the V0.87 safety-gated supervisor lifecycle apply plan foundation, and the V0.88 supervisor lifecycle fake executor contract; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, the V0.85 blocked rollbackUninstallPlan, the V0.86 display-only rollbackUninstallPlan Web rendering, the V0.87 safety-gated supervisor lifecycle apply plan foundation, the V0.88 supervisor lifecycle fake executor contract, and the V0.89 supervisor lifecycle audit preview; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
   },
 ];
 
