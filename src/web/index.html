@@ -187,6 +187,57 @@
           <p>Supervisor install dry-run 仅手动 POST /api/supervisor-install-dry-run 生成只读预览，可展示 install、approval、rollback、uninstall 与 recovery supervisor 的 blocked dry-run 计划；无启动请求、不自动轮询、不调用 launchctl、不读取进程列表、不安装或启动 supervisor、不执行 rollback 或 uninstall、不删除 launchd 文件、不恢复 previous plist、不启动 recovery supervisor、不写入 metadata、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 allowlist 字段，不显示 token、Authorization header、serverUrl、sourcePath、NAS endpoint、credentialRef、approval identity、timestamp、hostname、username、process id、plist path、executable path、raw evidence 或 runnable command；Gold 仍 blocked，不能声明生产就绪。</p>
         </div>
       </section>
+      <section id="supervisor-lifecycle-approval-preview-panel" class="panel supervisor-lifecycle-approval-preview-panel" data-testid="supervisor-lifecycle-approval-preview-panel">
+        <h2>Supervisor approval persistence preview</h2>
+        <div class="supervisor-lifecycle-approval-preview-controls">
+          <label for="supervisor-lifecycle-approval-preview-operation">操作</label>
+          <select id="supervisor-lifecycle-approval-preview-operation" data-testid="supervisor-lifecycle-approval-preview-operation">
+            <option value="install">install</option>
+            <option value="uninstall">uninstall</option>
+            <option value="rollback">rollback</option>
+            <option value="recover">recover</option>
+          </select>
+          <label for="supervisor-lifecycle-approval-preview-config">配置 JSON</label>
+          <textarea
+            id="supervisor-lifecycle-approval-preview-config"
+            data-testid="supervisor-lifecycle-approval-preview-config"
+            rows="8"
+          >{
+  "serverUrl": "http://localhost:3000",
+  "deviceId": "web-lifecycle-approval-preview",
+  "backupJobs": [
+    { "name": "documents", "sourcePath": "/tmp/linke-documents" }
+  ]
+}</textarea>
+          <label for="supervisor-lifecycle-approval-preview-approval">批准 JSON（可选）</label>
+          <textarea
+            id="supervisor-lifecycle-approval-preview-approval"
+            data-testid="supervisor-lifecycle-approval-preview-approval"
+            rows="6"
+          ></textarea>
+          <button id="supervisor-lifecycle-approval-preview-run" data-testid="supervisor-lifecycle-approval-preview-run" type="button">Approval preview</button>
+        </div>
+        <div class="supervisor-lifecycle-approval-preview-stats">
+          <div class="supervisor-lifecycle-approval-preview-stat">
+            <span id="supervisor-lifecycle-approval-preview-status" data-testid="supervisor-lifecycle-approval-preview-status">未检查</span>
+            <span>状态</span>
+          </div>
+          <div class="supervisor-lifecycle-approval-preview-stat">
+            <span id="supervisor-lifecycle-approval-preview-valid" data-testid="supervisor-lifecycle-approval-preview-valid">—</span>
+            <span>批准有效</span>
+          </div>
+          <div class="supervisor-lifecycle-approval-preview-stat">
+            <span id="supervisor-lifecycle-approval-preview-persist" data-testid="supervisor-lifecycle-approval-preview-persist">—</span>
+            <span>持久化</span>
+          </div>
+        </div>
+        <div id="supervisor-lifecycle-approval-preview-result" data-testid="supervisor-lifecycle-approval-preview-result">
+          <p class="placeholder">请粘贴配置 JSON 和可选批准 JSON，手动获取 approval persistence preview</p>
+        </div>
+        <div class="supervisor-lifecycle-approval-preview-safety-note" data-testid="supervisor-lifecycle-approval-preview-safety-note">
+          <p>Supervisor approval persistence preview 仅手动 POST /api/supervisor-lifecycle-approval-persistence-preview 生成只读预览；不写 approval 文件、不持久化批准、approvalPersisted:false、不调用 launchctl、不执行生命周期 apply、不新增真实 apply 面、不读取本地 approval path、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 allowlist 字段，不返回 approvedBy 值、不显示 approval reason、acknowledgement 内容、hash 值、路径、URL、token、Authorization header、hostname、username 或 process id；Gold 仍 blocked，不能声明生产就绪。</p>
+        </div>
+      </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
         <header class="panel-title-row">
           <h2>审计日志</h2>

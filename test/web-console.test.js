@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
+import { validateConfig } from '../src/config.js';
 import { LINKE_RELEASE_VERSION } from '../src/version.js';
 import {
   applyDeviceListControls,
@@ -41,7 +42,9 @@ import {
   buildGoldReadinessViewModel,
   buildAuditLogViewModel,
   buildSupervisorInstallDryRunViewModel,
+  buildSupervisorLifecycleApprovalPersistencePreviewViewModel,
 } from '../src/web/app.js';
+import { buildSupervisorLifecycleApplyPlan } from '../src/supervisor-lifecycle.js';
 
 function postJSON(port, path, body) {
   return fetch(`http://localhost:${port}${path}`, {
@@ -949,6 +952,102 @@ describe('Web Console / API contract', () => {
     assert.match(body.error, /credential|not allowed|forbidden|password/i);
     assert.ok(!text.includes('do-not-echo-this-secret'), 'must not echo submitted secret value');
     assert.ok(!text.includes('192.168.1.100'), 'must not echo NAS endpoint on validation errors');
+  });
+
+  // ── V0.92 POST /api/supervisor-lifecycle-approval-persistence-preview ──
+
+  it('POST /api/supervisor-lifecycle-approval-persistence-preview returns sanitized blocked preview for valid approval', async () => {
+    const config = {
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-approval-preview',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+    };
+    const plan = buildSupervisorLifecycleApplyPlan(validateConfig(config), { operation: 'install' });
+    const now = Date.now();
+    const res = await postJSON(port, '/api/supervisor-lifecycle-approval-persistence-preview', {
+      operation: 'install',
+      config,
+      approval: {
+        operation: 'install',
+        configHash: plan.configHash,
+        planHash: plan.planHash,
+        approved: true,
+        schemaVersion: 1,
+        approvedBy: 'operator@example.invalid',
+        reason: 'V0.92 Web preview approval should not leak',
+        acknowledgements: ['operator accepts Web preview only'],
+        approvedAt: new Date(now - 5 * 60 * 1000).toISOString(),
+        expiresAt: new Date(now + 30 * 60 * 1000).toISOString(),
+      },
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.command, 'supervisor-lifecycle-approval-persistence-preview');
+    assert.strictEqual(body.operation, 'install');
+    assert.strictEqual(body.state, 'blocked');
+    assert.strictEqual(body.approvalValid, true);
+    assert.deepStrictEqual(body.blockers, ['approval-persistence-store-missing']);
+    assert.strictEqual(body.persistence.previewOnly, true);
+    assert.strictEqual(body.persistence.wouldPersist, false);
+    assert.strictEqual(body.persistence.validation.acknowledgementCount, 1);
+    assert.strictEqual(body.safety.approvalPersisted, false);
+    assert.ok(!text.includes('operator@example'), 'must not echo approval identity');
+    assert.ok(!text.includes('Web preview approval'), 'must not echo approval reason');
+    assert.ok(!text.includes('operator accepts'), 'must not echo acknowledgement content');
+    assert.ok(!text.includes('sha256:'), 'must not echo hashes');
+    assert.ok(!text.includes('/tmp/linke-documents'), 'must not echo sourcePath');
+    assert.ok(!text.includes('localhost:3000'), 'must not echo serverUrl');
+  });
+
+  it('POST /api/supervisor-lifecycle-approval-persistence-preview returns safe blockers when approval is missing', async () => {
+    const res = await postJSON(port, '/api/supervisor-lifecycle-approval-persistence-preview', {
+      operation: 'rollback',
+      config: {
+        serverUrl: 'http://localhost:3000',
+        deviceId: 'web-lifecycle-approval-preview',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+      },
+    });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.approvalValid, false);
+    assert.ok(body.blockers.includes('approval-missing-required-fields'));
+    assert.ok(body.blockers.includes('approval-persistence-store-missing'));
+    assert.strictEqual(body.persistence.validation.acknowledgementCount, 0);
+    assert.ok(!text.includes('/tmp/linke-documents'), 'must not echo sourcePath');
+    assert.ok(!text.includes('localhost:3000'), 'must not echo serverUrl');
+  });
+
+  it('POST /api/supervisor-lifecycle-approval-persistence-preview rejects invalid input without echoing submitted values', async () => {
+    const invalidOperation = await postJSON(port, '/api/supervisor-lifecycle-approval-persistence-preview', {
+      operation: 'restart',
+      config: {
+        serverUrl: 'http://localhost:3000',
+        deviceId: 'web-lifecycle-approval-preview',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+      },
+    });
+    const invalidOperationBody = await invalidOperation.json();
+    assert.strictEqual(invalidOperation.status, 400);
+    assert.match(invalidOperationBody.error, /operation must be one of/i);
+    assert.doesNotMatch(JSON.stringify(invalidOperationBody), /linke-documents|localhost/);
+
+    const invalidConfig = await postJSON(port, '/api/supervisor-lifecycle-approval-persistence-preview', {
+      operation: 'install',
+      config: {
+        serverUrl: 'not-a-url-secret-like-value',
+        deviceId: 'web-lifecycle-approval-preview',
+        backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+      },
+    });
+    const invalidConfigBody = await invalidConfig.json();
+    assert.strictEqual(invalidConfig.status, 400);
+    assert.match(invalidConfigBody.error, /serverUrl/i);
+    assert.doesNotMatch(JSON.stringify(invalidConfigBody), /not-a-url-secret-like-value|linke-documents/);
   });
 
   // ── V0.15 Device detail Web Console panel ───────────────────────
@@ -1873,6 +1972,55 @@ describe('Web Console / API contract', () => {
 
     assert.ok(css.includes('.supervisor-install-dry-run-panel'), 'styles.css must contain panel styles');
     assert.ok(css.includes('.supervisor-install-dry-run-error'), 'styles.css must contain error styles');
+  });
+
+  it('HTML contains supervisor lifecycle approval persistence preview panel with required data-testid hooks', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-panel"'), 'must have approval preview panel');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-config"'), 'must have config textarea');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-approval"'), 'must have approval textarea');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-operation"'), 'must have operation selector');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-run"'), 'must have run button');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-status"'), 'must have status stat');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-valid"'), 'must have approval valid stat');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-persist"'), 'must have persistence stat');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-result"'), 'must have result container');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-safety-note"'), 'must have safety note');
+  });
+
+  it('supervisor lifecycle approval preview panel safety note documents manual preview boundaries', async () => {
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+    const panelMatch = html.match(/data-testid="supervisor-lifecycle-approval-preview-panel"[\s\S]*?<\/section>/);
+
+    assert.ok(panelMatch, 'approval preview panel section must exist');
+    const content = panelMatch[0];
+    assert.ok(content.includes('POST /api/supervisor-lifecycle-approval-persistence-preview'), 'must mention POST endpoint');
+    assert.match(content, /只读|预览|manual/i);
+    assert.match(content, /不写 approval|不持久化批准|approvalPersisted:false/i);
+    assert.match(content, /不调用 launchctl/);
+    assert.match(content, /不新增.*apply|不执行.*apply|不执行生命周期/);
+    assert.match(content, /不显示.*token|不显示.*hash|不显示.*路径|不返回.*approvedBy/);
+    assert.match(content, /Gold.*blocked|Gold.*仍|Gold.*未完成/);
+  });
+
+  it('app.js wires supervisor lifecycle approval preview rendering contract', async () => {
+    const res = await fetch(`http://localhost:${port}/app.js`);
+    const js = await res.text();
+
+    assert.ok(js.includes('/api/supervisor-lifecycle-approval-persistence-preview'), 'app.js must reference approval preview endpoint');
+    assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistencePreviewViewModel'), 'app.js must export approval preview view model');
+    assert.ok(js.includes('supervisor-lifecycle-approval-preview-run') || js.includes('supervisorLifecycleApprovalPreviewRun'), 'app.js must reference the run button');
+  });
+
+  it('styles.css contains supervisor lifecycle approval preview panel styles', async () => {
+    const res = await fetch(`http://localhost:${port}/styles.css`);
+    const css = await res.text();
+
+    assert.ok(css.includes('.supervisor-lifecycle-approval-preview-panel'), 'styles.css must contain approval preview panel styles');
+    assert.ok(css.includes('.supervisor-lifecycle-approval-preview-error'), 'styles.css must contain approval preview error styles');
   });
 });
 // ── V0.3.1 Pure-function logic tests (TDD RED → GREEN) ─────────────
@@ -8543,6 +8691,99 @@ describe('buildSupervisorInstallDryRunViewModel', () => {
   });
 });
 
+describe('buildSupervisorLifecycleApprovalPersistencePreviewViewModel', () => {
+  it('returns unknown state for missing payload', () => {
+    const result = buildSupervisorLifecycleApprovalPersistencePreviewViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.approvalValidText, '—');
+    assert.strictEqual(result.persistenceText, '—');
+    assert.deepStrictEqual(result.blockers, []);
+    assert.deepStrictEqual(result.requiredFields, []);
+    assert.deepStrictEqual(result.validationLines, []);
+    assert.deepStrictEqual(result.safetyLines, []);
+    assert.match(result.messageText, /approval persistence preview/i);
+  });
+
+  it('returns sanitized blocked display fields for approval persistence preview', () => {
+    const result = buildSupervisorLifecycleApprovalPersistencePreviewViewModel({
+      command: 'supervisor-lifecycle-approval-persistence-preview',
+      operation: 'install',
+      state: 'blocked',
+      approvalValid: true,
+      blockers: ['approval-persistence-store-missing'],
+      persistence: {
+        previewOnly: true,
+        wouldPersist: false,
+        recordSchemaVersion: 1,
+        requiredRecordFields: [
+          'schemaVersion',
+          'operation',
+          'configHash',
+          'planHash',
+          'approvedAt',
+          'expiresAt',
+          'approvedBy',
+          'reason',
+          'acknowledgements',
+        ],
+        validation: {
+          approvalValid: true,
+          acknowledgementCount: 1,
+          windowWithinLimit: true,
+          operationMatchesPlan: true,
+          configHashMatchesPlan: true,
+          planHashMatchesPlan: true,
+          approvedBy: 'operator@example.invalid',
+          configHash: 'sha256:secret',
+        },
+      },
+      safety: {
+        dryRun: true,
+        hostMutation: false,
+        launchctlCalled: false,
+        filesystemWritten: false,
+        metadataWritten: false,
+        rollbackAnchorWritten: false,
+        auditEventWritten: false,
+        approvalPersisted: false,
+        sensitiveValuesReturned: false,
+      },
+      approvedBy: 'operator@example.invalid',
+      reason: 'secret reason',
+      configHash: 'sha256:secret',
+      sourcePath: '/Users/ah/Documents',
+    });
+    const text = JSON.stringify(result);
+
+    assert.strictEqual(result.statusKey, 'blocked');
+    assert.strictEqual(result.statusText, '阻塞');
+    assert.strictEqual(result.approvalValidText, 'true');
+    assert.strictEqual(result.persistenceText, 'previewOnly:true / wouldPersist:false');
+    assert.deepStrictEqual(result.blockers, ['approval-persistence-store-missing']);
+    assert.ok(result.requiredFields.includes('approvedBy'));
+    assert.ok(result.validationLines.includes('approvalValid:true'));
+    assert.ok(result.validationLines.includes('acknowledgementCount:1'));
+    assert.ok(result.validationLines.includes('windowWithinLimit:true'));
+    assert.ok(result.safetyLines.includes('approvalPersisted:false'));
+    assert.ok(result.safetyLines.includes('filesystemWritten:false'));
+    assert.ok(!text.includes('operator@example'), 'must not expose approval identity values');
+    assert.ok(!text.includes('secret reason'), 'must not expose approval reasons');
+    assert.ok(!text.includes('sha256:secret'), 'must not expose hashes');
+    assert.ok(!text.includes('/Users/ah/Documents'), 'must not expose paths');
+  });
+
+  it('returns sanitized error state', () => {
+    const result = buildSupervisorLifecycleApprovalPersistencePreviewViewModel(null, 'approval token secret-value invalid');
+
+    assert.strictEqual(result.statusKey, 'error');
+    assert.strictEqual(result.statusText, '检查失败');
+    assert.deepStrictEqual(result.blockers, []);
+    assert.ok(!result.messageText.includes('secret-value'), 'error message must be sanitized');
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -9385,6 +9626,212 @@ describe('DOM test: supervisor-install-dry-run panel interactions', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     const text = doc.getElementById('supervisor-install-dry-run-result').textContent;
+    assert.match(text, /检查失败|加载失败|失败/);
+    assert.ok(!text.includes('secret-value'), 'must redact secret-like error detail');
+  });
+});
+
+describe('DOM test: supervisor lifecycle approval persistence preview panel interactions', () => {
+  it('does not request /api/supervisor-lifecycle-approval-persistence-preview on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')) fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call approval persistence preview API on init');
+  });
+
+  it('validates empty and invalid config or approval JSON locally without calling the API', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        calls.push(url);
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '   ';
+    doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
+    assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 不能为空/);
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{ invalid json';
+    doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
+    assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 格式错误/);
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-approval-preview',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-approval').value = '{ invalid approval';
+    doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
+    assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /批准 JSON 格式错误/);
+  });
+
+  it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-approval-persistence-preview',
+              operation: 'install',
+              state: 'blocked',
+              approvalValid: true,
+              blockers: ['approval-persistence-store-missing'],
+              persistence: {
+                previewOnly: true,
+                wouldPersist: false,
+                recordSchemaVersion: 1,
+                requiredRecordFields: ['schemaVersion', 'approvedBy', 'configHash', 'planHash'],
+                validation: {
+                  approvalValid: true,
+                  acknowledgementCount: 1,
+                  windowWithinLimit: true,
+                  operationMatchesPlan: true,
+                  configHashMatchesPlan: true,
+                  planHashMatchesPlan: true,
+                  approvedBy: 'operator@example.invalid',
+                  configHash: 'sha256:secret',
+                },
+              },
+              safety: {
+                dryRun: true,
+                hostMutation: false,
+                filesystemWritten: false,
+                metadataWritten: false,
+                auditEventWritten: false,
+                approvalPersisted: false,
+                sensitiveValuesReturned: false,
+              },
+              approvedBy: 'operator@example.invalid',
+              reason: 'secret reason',
+              sourcePath: '/Users/ah/Documents',
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-operation').value = 'install';
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://secret.localhost:3000',
+      deviceId: 'web-lifecycle-approval-preview',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-approval').value = JSON.stringify({
+      approvedBy: 'operator@example.invalid',
+      reason: 'secret reason',
+      acknowledgements: ['do not leak'],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url).includes('/api/supervisor-lifecycle-approval-persistence-preview'));
+    assert.ok(apiCall, 'must call approval persistence preview API');
+    assert.strictEqual(apiCall.options.method, 'POST');
+    const requestBody = JSON.parse(apiCall.options.body);
+    assert.strictEqual(requestBody.operation, 'install');
+    assert.strictEqual(requestBody.config.deviceId, 'web-lifecycle-approval-preview');
+    assert.strictEqual(requestBody.approval.approvedBy, 'operator@example.invalid');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-status').textContent, '阻塞');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-valid').textContent, 'true');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-persist').textContent, 'previewOnly:true / wouldPersist:false');
+
+    const resultText = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
+    assert.match(resultText, /approval-persistence-store-missing/);
+    assert.match(resultText, /acknowledgementCount:1/);
+    assert.match(resultText, /approvalPersisted:false/);
+    assert.match(resultText, /filesystemWritten:false/);
+    assert.ok(!resultText.includes('operator@example'), 'must not render approval identity value');
+    assert.ok(!resultText.includes('secret reason'), 'must not render approval reason');
+    assert.ok(!resultText.includes('sha256:secret'), 'must not render hash values');
+    assert.ok(!resultText.includes('/Users/ah/Documents'), 'must not render paths');
+    assert.ok(!resultText.includes('secret.localhost'), 'must not render config serverUrl');
+    assert.ok(!resultText.includes('/tmp/linke-documents'), 'must not render config sourcePath');
+  });
+
+  it('does not start a second approval persistence preview request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')) {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              state: 'blocked',
+              approvalValid: false,
+              blockers: ['approval-missing-required-fields'],
+              persistence: { previewOnly: true, wouldPersist: false, requiredRecordFields: [], validation: {} },
+              safety: { approvalPersisted: false },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-approval-preview',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    const runBtn = doc.getElementById('supervisor-lifecycle-approval-preview-run');
+    runBtn._listeners.click();
+    runBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+
+  it('renders sanitized error on non-2xx approval persistence preview response', async () => {
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')) {
+          return { ok: false, status: 400, json: async () => ({ error: 'approval token secret-value invalid' }) };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-approval-preview',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const text = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
     assert.match(text, /检查失败|加载失败|失败/);
     assert.ok(!text.includes('secret-value'), 'must redact secret-like error detail');
   });

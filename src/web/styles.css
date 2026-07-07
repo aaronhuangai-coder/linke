@@ -1311,6 +1311,68 @@ ul {
   font-size: 0.9rem;
 }
 
+.supervisor-lifecycle-approval-preview-panel {
+  border-color: rgba(44, 123, 229, 0.28);
+}
+
+.supervisor-lifecycle-approval-preview-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.supervisor-lifecycle-approval-preview-controls textarea,
+.supervisor-lifecycle-approval-preview-controls select {
+  width: 100%;
+}
+
+.supervisor-lifecycle-approval-preview-controls textarea {
+  min-height: 140px;
+  resize: vertical;
+}
+
+.supervisor-lifecycle-approval-preview-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.supervisor-lifecycle-approval-preview-stat {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.supervisor-lifecycle-approval-preview-stat span:first-child {
+  display: block;
+  font-weight: 700;
+}
+
+.supervisor-lifecycle-approval-preview-group {
+  margin-top: 12px;
+}
+
+.supervisor-lifecycle-approval-preview-group h3 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.supervisor-lifecycle-approval-preview-group ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.supervisor-lifecycle-approval-preview-error {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.supervisor-lifecycle-approval-preview-safety-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .manifest-summary {
   display: grid;
   gap: 8px;

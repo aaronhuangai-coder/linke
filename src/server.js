@@ -21,6 +21,10 @@ import { runBackupPreflightDryRun } from './backup-preflight.js';
 import { buildNasDryRunPlan } from './nas.js';
 import { validateConfig } from './config.js';
 import { buildSupervisorInstallDryRunPlan } from './agent.js';
+import {
+  buildSupervisorLifecycleApplyPlan,
+  buildSupervisorLifecycleApprovalPersistencePreview,
+} from './supervisor-lifecycle.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
@@ -636,6 +640,41 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           const config = validateConfig(body);
           const plan = buildSupervisorInstallDryRunPlan(config);
           return sendJSON(res, 200, plan);
+        } catch (err) {
+          return sendError(res, 400, err.message);
+        }
+      }
+
+      // POST /api/supervisor-lifecycle-approval-persistence-preview
+      // Manual preview only. This route does not apply lifecycle changes and
+      // must not be registered as a write route.
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-approval-persistence-preview') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400) {
+            return sendError(res, 400, err.message);
+          }
+          throw err;
+        }
+
+        try {
+          const operation = body?.operation;
+          const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+          if (!validOperations.has(operation)) {
+            return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+          }
+          const config = validateConfig(body?.config);
+          const approval = body && Object.hasOwn(body, 'approval') ? body.approval : undefined;
+          const plan = buildSupervisorLifecycleApplyPlan(config, {
+            operation,
+            apply: true,
+            envGateEnabled: true,
+            approval,
+          });
+          const preview = buildSupervisorLifecycleApprovalPersistencePreview(plan, approval);
+          return sendJSON(res, 200, preview);
         } catch (err) {
           return sendError(res, 400, err.message);
         }

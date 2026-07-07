@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer } from '../src/server.js';
+import { API_WRITE_ROUTES, createServer, isApiWriteRoute } from '../src/server.js';
 
 describe('Server API Isolation Regression', () => {
   let server, dataDir, port;
@@ -36,5 +36,17 @@ describe('Server API Isolation Regression', () => {
     assert.strictEqual(res.status, 404);
     const body = await res.text();
     assert.doesNotMatch(body, /simulated|fake-test-only|\blaunchctl\b/i);
+  });
+
+  it('proves GET /api/supervisor-lifecycle-approval-persistence-preview does not exist and returns 404', async () => {
+    const res = await fetch(`http://localhost:${port}/api/supervisor-lifecycle-approval-persistence-preview`);
+    assert.strictEqual(res.status, 404);
+    const body = await res.text();
+    assert.doesNotMatch(body, /approvalPersisted:true|wouldPersist:true|\blaunchctl\b/i);
+  });
+
+  it('keeps approval persistence preview out of API_WRITE_ROUTES', () => {
+    assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-approval-persistence-preview'), false);
+    assert.ok(!API_WRITE_ROUTES.some((route) => route.path === '/api/supervisor-lifecycle-approval-persistence-preview'));
   });
 });
