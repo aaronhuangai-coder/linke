@@ -95,6 +95,66 @@ it('--apply with missing approval prints blocked report and exits 2', async () =
   }
 });
 
+it('--apply with valid approval still exits 2 with executor blocker only', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'linke-lifecycle-cli-'));
+  try {
+    const configPath = await writeTempConfig(dir);
+    const dryRun = await runAgent(['supervisor-lifecycle-apply', '--config', configPath, '--operation', 'install']);
+    const dryRunReport = JSON.parse(dryRun.stdout);
+    const approvalPath = join(dir, 'approval.json');
+    const now = Date.now();
+    await writeFile(approvalPath, JSON.stringify({
+      operation: 'install',
+      configHash: dryRunReport.configHash,
+      planHash: dryRunReport.planHash,
+      approved: true,
+      schemaVersion: 1,
+      approvedBy: 'operator@example.invalid',
+      reason: 'V0.87 valid approval still has no executor',
+      acknowledgements: ['no-real-host-mutation-in-v0.87'],
+      approvedAt: new Date(now - 5 * 60 * 1000).toISOString(),
+      expiresAt: new Date(now + 30 * 60 * 1000).toISOString(),
+    }));
+
+    const error = await runAgentExpectExit([
+      'supervisor-lifecycle-apply',
+      '--config', configPath,
+      '--operation', 'install',
+      '--approval', approvalPath,
+      '--apply',
+    ], 2, { env: { LINKE_SUPERVISOR_LIFECYCLE_APPLY: 'enabled' } });
+    const report = JSON.parse(error.stdout);
+
+    assert.deepStrictEqual(report.blockers, ['executor-implementation-missing']);
+    assert.strictEqual(report.safety.hostMutation, false);
+    assert.strictEqual(report.safety.launchctlCalled, false);
+    assert.strictEqual(report.safety.filesystemWritten, false);
+    assert.doesNotMatch(error.stdout, /operator@example|valid approval still has no executor|acknowledgements/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('prints blocked dry-run plans for uninstall and rollback operations', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'linke-lifecycle-cli-'));
+  try {
+    const configPath = await writeTempConfig(dir);
+    for (const operation of ['uninstall', 'rollback']) {
+      const { stdout } = await runAgent(['supervisor-lifecycle-apply', '--config', configPath, '--operation', operation]);
+      const report = JSON.parse(stdout);
+      assert.strictEqual(report.operation, operation);
+      assert.strictEqual(report.mode, 'dry-run-only');
+      assert.strictEqual(report.state, 'blocked');
+      assert.ok(report.blockers.includes('apply-flag-required'));
+      assert.ok(report.blockers.includes('executor-implementation-missing'));
+      assert.ok(report.actions.length > 0);
+      assert.ok(report.actions.every((action) => action.wouldRun === false && action.wouldWrite === false));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('invalid operation exits 1 with sanitized error', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'linke-lifecycle-cli-'));
   try {
