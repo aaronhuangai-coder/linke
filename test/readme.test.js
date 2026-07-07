@@ -1742,18 +1742,18 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.89 Supervisor lifecycle audit preview', () => {
-  it('title and badge claim V0.89 as current', () => {
-    assertReadmeContains(/# Linke V0\.89/, 'README title should mention V0.89');
-    assertReadmeContains(/\*\*当前版本：V0\.89\*\*/, 'README badge should mention V0.89');
-    assertReadmeDoesNotContain(/^# Linke V0\.88/m, 'README title must not still claim V0.88');
-    assertReadmeDoesNotContain(/\*\*当前版本：V0\.88\*\*/, 'README badge must not still claim V0.88');
+describe('README — V0.90 Supervisor lifecycle approval persistence preview', () => {
+  it('title and badge claim V0.90 as current', () => {
+    assertReadmeContains(/# Linke V0\.90/, 'README title should mention V0.90');
+    assertReadmeContains(/\*\*当前版本：V0\.90\*\*/, 'README badge should mention V0.90');
+    assertReadmeDoesNotContain(/^# Linke V0\.89/m, 'README title must not still claim V0.89');
+    assertReadmeDoesNotContain(/\*\*当前版本：V0\.89\*\*/, 'README badge must not still claim V0.89');
   });
 
-  it('version table marks V0.88 historical and V0.89 current', () => {
-    assertReadmeContains(/\| V0\.88 \| 历史版本 \|[^|]*(supervisor lifecycle fake executor contract|executeSupervisorLifecycleApply|fake-supervisor-lifecycle-executor)/i, 'V0.88 should become historical milestone');
-    assertReadmeContains(/\| V0\.89 \| 当前版本 \|[^|]*(supervisor lifecycle audit preview|buildSupervisorLifecycleAuditPreview)/i, 'V0.89 should be current supervisor lifecycle audit preview milestone');
-    assertReadmeDoesNotContain(/\| V0\.88 \| 当前版本 \|/i, 'V0.88 must not remain marked as current');
+  it('version table marks V0.89 historical and V0.90 current', () => {
+    assertReadmeContains(/\| V0\.89 \| 历史版本 \|[^|]*(supervisor lifecycle audit preview|buildSupervisorLifecycleAuditPreview)/i, 'V0.89 should become historical milestone');
+    assertReadmeContains(/\| V0\.90 \| 当前版本 \|[^|]*(supervisor lifecycle approval persistence preview|buildSupervisorLifecycleApprovalPersistencePreview)/i, 'V0.90 should be current supervisor lifecycle approval persistence preview milestone');
+    assertReadmeDoesNotContain(/\| V0\.89 \| 当前版本 \|/i, 'V0.89 must not remain marked as current');
   });
 
   it('documents supervisor-lifecycle-apply as dry-run/blocked without --apply', () => {
@@ -1764,16 +1764,16 @@ describe('README — V0.89 Supervisor lifecycle audit preview', () => {
     assertReadmeContains(/Web.*(lifecycle|生命周期).*button|Web.*(lifecycle|生命周期).*(按钮|接口)|no.*Web.*button/i, 'README should mention no Web lifecycle button or API endpoint');
   });
 
-  it('keeps Gold blocked and rejects lifecycle overclaims for V0.89', () => {
+  it('keeps Gold blocked and rejects lifecycle overclaims for V0.90', () => {
     assertReadmeContains(/Gold (依旧|仍然|remains) blocked/i, 'README should keep Gold blocked');
     assertReadmeContains(/真实 installer|real installer/i, 'README should still call out missing real installer');
     assertReadmeDoesNotContain(/Gold ready|Gold 发布 ready|生产可用 supervisor|production-ready supervisor|rollback ready|uninstall ready|recovery supervisor ready/i, 'README must not overclaim Gold or lifecycle readiness');
   });
 
-  it('keeps later Gold readiness sections synced to V0.89 evidence', () => {
-    assertReadmeContains(/Agent CLI[\s\S]*?V0\.89[\s\S]*?buildSupervisorLifecycleAuditPreview/i, 'README Agent CLI Gold section should mention V0.89');
-    assertReadmeContains(/Gold blockers[\s\S]*?V0\.89[\s\S]*?buildSupervisorLifecycleAuditPreview[\s\S]*?test\/supervisor-lifecycle-audit-preview\.test\.js/i, 'README Gold blockers section should mention V0.89 evidence');
-    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.89[\s\S]*?buildSupervisorLifecycleAuditPreview[\s\S]*?test\/supervisor-lifecycle-audit-preview\.test\.js/i, 'README partial hardening section should mention V0.89 evidence');
+  it('keeps later Gold readiness sections synced to V0.90 evidence', () => {
+    assertReadmeContains(/Agent CLI[\s\S]*?V0\.90[\s\S]*?buildSupervisorLifecycleApprovalPersistencePreview/i, 'README Agent CLI Gold section should mention V0.90');
+    assertReadmeContains(/Gold blockers[\s\S]*?V0\.90[\s\S]*?buildSupervisorLifecycleApprovalPersistencePreview[\s\S]*?test\/supervisor-lifecycle-approval-persistence-preview\.test\.js/i, 'README Gold blockers section should mention V0.90 evidence');
+    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.90[\s\S]*?buildSupervisorLifecycleApprovalPersistencePreview[\s\S]*?test\/supervisor-lifecycle-approval-persistence-preview\.test\.js/i, 'README partial hardening section should mention V0.90 evidence');
   });
 });
 
@@ -1845,13 +1845,13 @@ describe('README — long-lived safety boundaries', () => {
     assertReadmeContains(/Agent gold-readiness CLI|Agent gold-readiness fail-on-blocked/, 'README should document Agent gold-readiness test coverage');
   });
 
-  it('keeps historical supervisor install evidence documented while V0.89 is current', () => {
+  it('keeps historical supervisor install evidence documented while V0.90 is current', () => {
     assertReadmeContains(/Agent CLI[\s\S]*?V0\.83[\s\S]*?installApprovalManifest/i, 'README Agent CLI Gold section should mention V0.83 installApprovalManifest');
     assertReadmeContains(/V0\.84[\s\S]*?POST `?\/api\/supervisor-install-dry-run`?[\s\S]*?buildSupervisorInstallDryRunViewModel/i, 'README should keep V0.84 Web panel evidence as historical context');
     assertReadmeContains(/V0\.85[\s\S]*?rollbackUninstallPlan\.state:"blocked"[\s\S]*?rollbackUninstallPlan\.actions:wouldRun:false/i, 'README should keep V0.85 rollback uninstall dry-run evidence as historical context');
     assertReadmeContains(/V0\.86[\s\S]*?rollbackUninstallPlan Web Console rendering[\s\S]*?buildSupervisorInstallDryRunViewModel rollbackUninstallActions/i, 'README should keep V0.86 Web panel evidence as historical context');
-    assertReadmeDoesNotContain(/Gold blockers\*\*：V0\.88 基于/, 'README Gold blockers section should not keep V0.88 as current evidence');
-    assertReadmeDoesNotContain(/NAS、认证和生产硬化仍是 partial\*\*：V0\.88 基于/, 'README partial hardening section should not keep V0.88 as current evidence');
+    assertReadmeDoesNotContain(/Gold blockers\*\*：V0\.89 基于/, 'README Gold blockers section should not keep V0.89 as current evidence');
+    assertReadmeDoesNotContain(/NAS、认证和生产硬化仍是 partial\*\*：V0\.89 基于/, 'README partial hardening section should not keep V0.89 as current evidence');
   });
 
   it('documents Agent auth-status CLI safety boundaries', () => {

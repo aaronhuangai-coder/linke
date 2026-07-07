@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.89', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.89');
+  it('expects LINKE_RELEASE_VERSION to be V0.90', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.90');
   });
 
-  it('expects report.version to be V0.89', () => {
+  it('expects report.version to be V0.90', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.89');
+    assert.strictEqual(report.version, 'V0.90');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -191,6 +191,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-executor.test.js'));
     assert.ok(automationEvidence.includes('buildSupervisorLifecycleAuditPreview'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-audit-preview.test.js'));
+    assert.ok(automationEvidence.includes('buildSupervisorLifecycleApprovalPersistencePreview'));
+    assert.ok(automationEvidence.includes('test/supervisor-lifecycle-approval-persistence-preview.test.js'));
+    assert.ok(automationItem.nextStep.includes('V0.90'));
     assert.ok(automationItem.nextStep.includes('V0.89'));
     assert.ok(automationItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(automationItem.nextStep.includes('Web Console'));
@@ -301,9 +304,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-executor.test.js'));
     assert.ok(hardeningEvidence.includes('buildSupervisorLifecycleAuditPreview'));
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-audit-preview.test.js'));
+    assert.ok(hardeningEvidence.includes('buildSupervisorLifecycleApprovalPersistencePreview'));
+    assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-approval-persistence-preview.test.js'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V0.90'));
     assert.ok(hardeningItem.nextStep.includes('V0.89'));
     assert.ok(hardeningItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(hardeningItem.nextStep.includes('Web dry-run panel'));

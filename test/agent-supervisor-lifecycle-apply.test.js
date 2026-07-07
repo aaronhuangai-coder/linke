@@ -132,9 +132,11 @@ it('--apply with valid approval still exits 2 with executor blocker only', async
     assert.strictEqual(report.state, 'blocked');
     assert.strictEqual(report.events, undefined);
     assert.strictEqual(report.auditEvent, undefined);
+    assert.strictEqual(report.approvalPersistencePreview, undefined);
     assert.doesNotMatch(error.stdout, /operator@example|valid approval still has no executor|acknowledgements/);
     assert.doesNotMatch(error.stdout, /simulated|fake-test-only|events/i);
     assert.doesNotMatch(error.stdout, /\bauditEvent\b|supervisor\.lifecycle\b/i);
+    assert.doesNotMatch(error.stdout, /approvalPersistencePreview|approval-persistence/i);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

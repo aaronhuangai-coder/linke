@@ -108,6 +108,16 @@ describe('Supervisor lifecycle safety gate', () => {
     );
   });
 
+  it('validateSupervisorLifecycleApproval rejects inverted approval windows', () => {
+    assert.deepStrictEqual(
+      validateSupervisorLifecycleApproval(validApproval({
+        approvedAt: '2026-07-07T07:30:00.000Z',
+        expiresAt: '2026-07-07T07:00:00.000Z',
+      }), { ...EXPECTED, now: new Date('2026-07-07T06:30:00.000Z') }).blockers,
+      ['approval-window-invalid'],
+    );
+  });
+
   it('validateSupervisorLifecycleApproval rejects operation, configHash, and planHash mismatches', () => {
     const result = validateSupervisorLifecycleApproval(validApproval({
       operation: 'rollback',
@@ -201,6 +211,7 @@ describe('Supervisor lifecycle safety gate', () => {
       metadataWritten: false,
       rollbackAnchorWritten: false,
       auditEventWritten: false,
+      approvalPersisted: false,
       sensitiveValuesReturned: false,
     });
   });

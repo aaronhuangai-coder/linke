@@ -7,6 +7,17 @@ const EXECUTOR_MISSING_BLOCKER = 'executor-implementation-missing';
 const FAKE_EXECUTOR_KIND = 'fake-supervisor-lifecycle-executor';
 const FAKE_EXECUTOR_MODE = 'fake-test-only';
 const MAX_FAKE_ATTEMPTS = 2;
+const APPROVAL_PERSISTENCE_REQUIRED_FIELDS = Object.freeze([
+  'schemaVersion',
+  'operation',
+  'configHash',
+  'planHash',
+  'approvedAt',
+  'expiresAt',
+  'approvedBy',
+  'reason',
+  'acknowledgements',
+]);
 const SAFE_PLAN_BLOCKERS = new Set([
   EXECUTOR_MISSING_BLOCKER,
   'apply-flag-required',
@@ -15,6 +26,7 @@ const SAFE_PLAN_BLOCKERS = new Set([
   'approval-missing',
   'approval-missing-required-fields',
   'approval-not-granted',
+  'approval-window-invalid',
   'approval-window-too-wide',
   'approval-expired',
   'approval-operation-mismatch',
@@ -31,6 +43,7 @@ function lifecycleSafety() {
     metadataWritten: false,
     rollbackAnchorWritten: false,
     auditEventWritten: false,
+    approvalPersisted: false,
     sensitiveValuesReturned: false,
   };
 }
@@ -139,6 +152,22 @@ function safePlanBlockers(blockers) {
   return safeBlockers;
 }
 
+function buildApprovalPersistenceValidation(plan, approval) {
+  const approvedAt = parseTime(approval?.approvedAt);
+  const expiresAt = parseTime(approval?.expiresAt);
+  return {
+    approvalValid: false,
+    acknowledgementCount: Array.isArray(approval?.acknowledgements) ? approval.acknowledgements.length : 0,
+    windowWithinLimit: approvedAt !== null &&
+      expiresAt !== null &&
+      expiresAt > approvedAt &&
+      expiresAt - approvedAt <= APPROVAL_MAX_WINDOW_MS,
+    operationMatchesPlan: approval?.operation === plan?.operation,
+    configHashMatchesPlan: approval?.configHash === plan?.configHash,
+    planHashMatchesPlan: approval?.planHash === plan?.planHash,
+  };
+}
+
 function buildPlanHash(operation, configHash, actions) {
   return hashLifecycleObject({
     version: 'V0.88',
@@ -167,7 +196,9 @@ export function validateSupervisorLifecycleApproval(approval, expected = {}) {
   const approvedAt = parseTime(approval.approvedAt);
   const expiresAt = parseTime(approval.expiresAt);
   const now = parseTime(expected.now || new Date());
-  if (expiresAt - approvedAt > APPROVAL_MAX_WINDOW_MS) {
+  if (expiresAt <= approvedAt) {
+    blockers.push('approval-window-invalid');
+  } else if (expiresAt - approvedAt > APPROVAL_MAX_WINDOW_MS) {
     blockers.push('approval-window-too-wide');
   }
   if (now !== null && expiresAt <= now) {
@@ -409,5 +440,54 @@ export function buildSupervisorLifecycleAuditPreview(plan, lifecycleResult, opti
     ...base,
     state: 'preview',
     auditEvent,
+  };
+}
+
+export function buildSupervisorLifecycleApprovalPersistencePreview(plan, approval, options = {}) {
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation) ? plan.operation : 'unknown';
+  const validation = buildApprovalPersistenceValidation(plan, approval);
+  const base = {
+    command: 'supervisor-lifecycle-approval-persistence-preview',
+    operation,
+    state: 'blocked',
+    approvalValid: false,
+    persistence: {
+      previewOnly: true,
+      wouldPersist: false,
+      recordSchemaVersion: 1,
+      requiredRecordFields: [...APPROVAL_PERSISTENCE_REQUIRED_FIELDS],
+      validation,
+    },
+    safety: lifecycleSafety(),
+  };
+  const blockers = [];
+
+  if (!plan || plan.command !== 'supervisor-lifecycle-apply' || !ALLOWED_OPERATIONS.has(plan.operation) || !Array.isArray(plan.actions)) {
+    blockers.push('invalid-lifecycle-plan');
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    blockers.push('lifecycle-plan-action-mismatch');
+  }
+
+  if (blockers.length > 0) {
+    return {
+      ...base,
+      blockers: [...new Set(blockers)],
+    };
+  }
+
+  const approvalResult = validateSupervisorLifecycleApproval(approval, {
+    operation: plan.operation,
+    configHash: plan.configHash,
+    planHash: plan.planHash,
+    now: options.now || new Date(),
+  });
+  validation.approvalValid = approvalResult.valid;
+  blockers.push(...safePlanBlockers(approvalResult.blockers));
+  blockers.push('approval-persistence-store-missing');
+
+  return {
+    ...base,
+    approvalValid: approvalResult.valid,
+    blockers: [...new Set(blockers)],
   };
 }
