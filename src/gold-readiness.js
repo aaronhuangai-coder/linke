@@ -103,6 +103,9 @@ const GOLD_READINESS_ITEMS = [
       'installApprovalManifest.state:blocked',
       'installApprovalManifest.approval.approved:false',
       'installApprovalManifest.rollback.available:false',
+      'src/agent.js buildSupervisorRollbackUninstallPlan',
+      'rollbackUninstallPlan.state:blocked',
+      'rollbackUninstallPlan.actions:wouldRun:false',
       'GET /api/supervisor-status',
       'src/server.js buildSupervisorStatusResponse',
       'src/agent.js supervisor-status',
@@ -117,7 +120,7 @@ const GOLD_READINESS_ITEMS = [
       'Web Console supervisor-install-dry-run-panel',
       'src/web/app.js buildSupervisorInstallDryRunViewModel',
     ],
-    nextStep: 'V0.84 adds a Web Console supervisor install dry-run panel and POST /api/supervisor-install-dry-run preview on top of the V0.83 approval/rollback manifest and V0.82 preflight gate, while supervisor install remains blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
+    nextStep: 'V0.85 adds a blocked rollbackUninstallPlan on top of the V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -205,6 +208,9 @@ const GOLD_READINESS_ITEMS = [
       'installApprovalManifest.state:blocked',
       'installApprovalManifest.approval.approved:false',
       'installApprovalManifest.rollback.available:false',
+      'src/agent.js buildSupervisorRollbackUninstallPlan',
+      'rollbackUninstallPlan.state:blocked',
+      'rollbackUninstallPlan.actions:wouldRun:false',
       'supervisor.state:not_configured',
       'supervisorInstalled:false',
       'src/web/app.js buildSupervisorStatusViewModel',
@@ -229,7 +235,7 @@ const GOLD_READINESS_ITEMS = [
       'Web Console supervisor-install-dry-run-panel',
       'src/web/app.js buildSupervisorInstallDryRunViewModel',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, and the V0.84 supervisor install Web dry-run panel; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, and the V0.85 blocked rollbackUninstallPlan; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
   },
 ];
 
