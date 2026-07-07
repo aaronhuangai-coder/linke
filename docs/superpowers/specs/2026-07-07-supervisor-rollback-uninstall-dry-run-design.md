@@ -125,7 +125,7 @@ The full dry-run plan adds:
         wouldRun: false,
         wouldWrite: false,
         blockerCode: 'launchd-unload-blocked',
-        evidence: 'launchctl unload behavior is not implemented.'
+        evidence: 'Launch agent unload behavior is not implemented.'
       },
       {
         id: 'remove-launch-agent-plist',
