@@ -13,7 +13,7 @@
 - [x] Run full suite and `git diff --check`.
 - [x] Run Qwen adversarial review.
 - [x] Run DeepSeek closure.
-- [ ] Commit and push after verification.
+- [x] Commit and push after verification.
 
 ## Verification Commands
 
