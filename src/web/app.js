@@ -591,6 +591,34 @@ function normalizeStringList(values) {
     : [];
 }
 
+const SUPERVISOR_ROLLBACK_UNINSTALL_SAFETY_KEYS = [
+  'dryRun',
+  'planOnly',
+  'rollbackExecuted',
+  'uninstallExecuted',
+  'recoverySupervisorStarted',
+  'launchctlCalled',
+  'processListRead',
+  'filesystemWritten',
+  'metadataWritten',
+  'supervisorInstalled',
+  'supervisorStarted',
+  'launchdFileWritten',
+  'launchdFileRemoved',
+  'previousPlistRestored',
+  'nasConnected',
+  'backupTriggered',
+  'restoreTriggered',
+  'remoteCommandExecuted',
+  'sensitiveValuesReturned',
+];
+
+function buildSupervisorRollbackUninstallSafetyLines(safety) {
+  const source = safety && typeof safety === 'object' ? safety : null;
+  if (!source) return [];
+  return SUPERVISOR_ROLLBACK_UNINSTALL_SAFETY_KEYS.map((key) => `${key}:${source[key] === true ? 'true' : 'false'}`);
+}
+
 function buildSupervisorInstallSafetyLines(safety) {
   const source = safety && typeof safety === 'object' ? safety : {};
   return [
@@ -617,6 +645,8 @@ export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
       commandActions: [],
       preflightChecks: [],
       approvalControls: [],
+      rollbackUninstallActions: [],
+      rollbackUninstallSafetyLines: [],
       safetyLines: [],
       messageText: 'Supervisor install dry-run 检查失败: ' + sanitizeSupervisorInstallErrorMessage(errorMessage),
     };
@@ -633,6 +663,8 @@ export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
       commandActions: [],
       preflightChecks: [],
       approvalControls: [],
+      rollbackUninstallActions: [],
+      rollbackUninstallSafetyLines: [],
       safetyLines: [],
       messageText: '点击 Supervisor install dry-run 手动 POST /api/supervisor-install-dry-run',
     };
@@ -645,6 +677,11 @@ export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
   const manifest = plan.installApprovalManifest && typeof plan.installApprovalManifest === 'object' ? plan.installApprovalManifest : {};
   const approval = manifest.approval && typeof manifest.approval === 'object' ? manifest.approval : {};
   const rollback = manifest.rollback && typeof manifest.rollback === 'object' ? manifest.rollback : {};
+  const rollbackUninstallPlan = plan.rollbackUninstallPlan && typeof plan.rollbackUninstallPlan === 'object' ? plan.rollbackUninstallPlan : {};
+  const rollbackPlan = rollbackUninstallPlan.rollback && typeof rollbackUninstallPlan.rollback === 'object' ? rollbackUninstallPlan.rollback : null;
+  const uninstallPlan = rollbackUninstallPlan.uninstall && typeof rollbackUninstallPlan.uninstall === 'object' ? rollbackUninstallPlan.uninstall : null;
+  const recoveryPlan = rollbackUninstallPlan.recovery && typeof rollbackUninstallPlan.recovery === 'object' ? rollbackUninstallPlan.recovery : null;
+  const hasRollbackUninstallPlan = Boolean(rollbackPlan || uninstallPlan || recoveryPlan || Array.isArray(rollbackUninstallPlan.actions));
 
   const statusKey = ['ready', 'partial', 'blocked'].includes(plan.status) ? plan.status : 'partial';
 
@@ -653,7 +690,9 @@ export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
     statusText: formatHardeningStatusText(statusKey),
     installStateText: `${formatAuditDisplayString(supervisor.state) || 'unknown'} / wouldInstall:${supervisor.wouldInstall === true ? 'true' : 'false'} / wouldStart:${supervisor.wouldStart === true ? 'true' : 'false'}`,
     approvalStateText: `approved:${approval.approved === true ? 'true' : 'false'}`,
-    rollbackStateText: `available:${rollback.available === true ? 'true' : 'false'}`,
+    rollbackStateText: hasRollbackUninstallPlan
+      ? `rollback:${rollbackPlan?.available === true ? 'true' : 'false'} / uninstall:${uninstallPlan?.available === true ? 'true' : 'false'} / recovery:${recoveryPlan?.available === true ? 'true' : 'false'}`
+      : `available:${rollback.available === true ? 'true' : 'false'}`,
     readinessBlockers: normalizeStringList(readiness.blockers),
     commandActions: Array.isArray(commandPreview.actions)
       ? commandPreview.actions.map((action) => {
@@ -673,6 +712,13 @@ export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
         return `${formatAuditDisplayString(source.id) || 'unknown'} · ${formatAuditDisplayString(source.status) || 'unknown'} · ${formatAuditDisplayString(source.blockerCode) || 'none'}`;
       })
       : [],
+    rollbackUninstallActions: Array.isArray(rollbackUninstallPlan.actions)
+      ? rollbackUninstallPlan.actions.map((action) => {
+        const source = action && typeof action === 'object' ? action : {};
+        return `${formatAuditDisplayString(source.id) || 'unknown'} · ${formatAuditDisplayString(source.kind) || 'unknown'} · ${formatAuditDisplayString(source.status) || 'unknown'} · wouldRun:${source.wouldRun === true ? 'true' : 'false'} · wouldWrite:${source.wouldWrite === true ? 'true' : 'false'} · ${formatAuditDisplayString(source.blockerCode) || 'none'}`;
+      })
+      : [],
+    rollbackUninstallSafetyLines: buildSupervisorRollbackUninstallSafetyLines(rollbackUninstallPlan.safety),
     safetyLines: buildSupervisorInstallSafetyLines(plan.safety),
     messageText: 'POST /api/supervisor-install-dry-run 成功，仍为 blocked dry-run 预览',
   };
@@ -3091,6 +3137,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     appendSupervisorInstallGroup('Command preview', state.commandActions);
     appendSupervisorInstallGroup('Install preflight', state.preflightChecks);
     appendSupervisorInstallGroup('Approval manifest', state.approvalControls);
+    appendSupervisorInstallGroup('Rollback / uninstall plan', state.rollbackUninstallActions);
+    appendSupervisorInstallGroup('Rollback / uninstall safety flags', state.rollbackUninstallSafetyLines);
     appendSupervisorInstallGroup('Safety flags', state.safetyLines);
   }
 

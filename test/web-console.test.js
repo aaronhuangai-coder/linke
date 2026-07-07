@@ -8369,6 +8369,8 @@ describe('buildSupervisorInstallDryRunViewModel', () => {
     assert.strictEqual(result.installStateText, '—');
     assert.strictEqual(result.approvalStateText, '—');
     assert.strictEqual(result.rollbackStateText, '—');
+    assert.deepStrictEqual(result.rollbackUninstallActions, []);
+    assert.deepStrictEqual(result.rollbackUninstallSafetyLines, []);
     assert.match(result.messageText, /supervisor install dry-run/i);
   });
 
@@ -8411,6 +8413,64 @@ describe('buildSupervisorInstallDryRunViewModel', () => {
           { id: 'explicit-operator-approval', status: 'blocked', blockerCode: 'operator-approval-required' },
         ],
       },
+      rollbackUninstallPlan: {
+        state: 'blocked',
+        rollback: {
+          available: false,
+          evidence: 'restore previous plist from /Users/ah/Library/LaunchAgents/com.linke.agent.plist',
+        },
+        uninstall: {
+          available: false,
+          evidence: 'run launchctl unload and rm secret plist',
+        },
+        recovery: {
+          available: false,
+          evidence: 'start recovery supervisor on hostname secret-host pid 42',
+        },
+        actions: [
+          {
+            id: 'capture-current-state',
+            kind: 'rollback',
+            status: 'blocked',
+            command: 'launchctl print gui/501/com.linke.agent',
+            evidence: 'read /Users/ah/private-state.json',
+            wouldRun: false,
+            wouldWrite: false,
+            blockerCode: 'rollback-state-capture-missing',
+          },
+          {
+            id: 'unload-launch-agent',
+            kind: 'uninstall',
+            status: 'blocked',
+            command: 'launchctl bootout gui/501 /Users/ah/Library/LaunchAgents/com.linke.agent.plist',
+            evidence: 'operator Aaron timestamp 2026-07-07T00:00:00Z',
+            wouldRun: false,
+            wouldWrite: false,
+            blockerCode: 'launchd-unload-blocked',
+          },
+        ],
+        safety: {
+          dryRun: true,
+          planOnly: true,
+          rollbackExecuted: false,
+          uninstallExecuted: false,
+          recoverySupervisorStarted: false,
+          launchctlCalled: false,
+          processListRead: false,
+          filesystemWritten: false,
+          metadataWritten: false,
+          supervisorInstalled: false,
+          supervisorStarted: false,
+          launchdFileWritten: false,
+          launchdFileRemoved: false,
+          previousPlistRestored: false,
+          nasConnected: false,
+          backupTriggered: false,
+          restoreTriggered: false,
+          remoteCommandExecuted: false,
+          sensitiveValuesReturned: false,
+        },
+      },
       safety: {
         launchctlCalled: false,
         processListRead: false,
@@ -8431,15 +8491,39 @@ describe('buildSupervisorInstallDryRunViewModel', () => {
     assert.strictEqual(result.statusText, '部分就绪');
     assert.strictEqual(result.installStateText, 'not_configured / wouldInstall:false / wouldStart:false');
     assert.strictEqual(result.approvalStateText, 'approved:false');
-    assert.strictEqual(result.rollbackStateText, 'available:false');
+    assert.strictEqual(result.rollbackStateText, 'rollback:false / uninstall:false / recovery:false');
     assert.deepStrictEqual(result.readinessBlockers, ['real-install-not-implemented']);
     assert.deepStrictEqual(result.commandActions, ['write-launch-agent-plist · wouldRun:false · wouldWrite:false']);
     assert.deepStrictEqual(result.preflightChecks, ['launchd-install · blocked · launchd-install-blocked']);
     assert.deepStrictEqual(result.approvalControls, ['explicit-operator-approval · blocked · operator-approval-required']);
+    assert.deepStrictEqual(result.rollbackUninstallActions, [
+      'capture-current-state · rollback · blocked · wouldRun:false · wouldWrite:false · rollback-state-capture-missing',
+      'unload-launch-agent · uninstall · blocked · wouldRun:false · wouldWrite:false · launchd-unload-blocked',
+    ]);
+    assert.ok(result.rollbackUninstallSafetyLines.includes('dryRun:true'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('planOnly:true'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('rollbackExecuted:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('uninstallExecuted:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('recoverySupervisorStarted:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('launchctlCalled:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('processListRead:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('filesystemWritten:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('metadataWritten:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('supervisorInstalled:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('supervisorStarted:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('launchdFileWritten:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('launchdFileRemoved:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('previousPlistRestored:false'));
+    assert.ok(result.rollbackUninstallSafetyLines.includes('sensitiveValuesReturned:false'));
     assert.ok(result.safetyLines.includes('launchctlCalled:false'));
     assert.ok(!text.includes('/Users/ah/secret-config.json'), 'view model must not expose config path');
     assert.ok(!text.includes('launchctl bootstrap'), 'view model must not expose runnable command');
     assert.ok(!text.includes('secret-device'), 'view model must not expose arbitrary config summary strings');
+    assert.ok(!text.includes('restore previous plist'), 'view model must not expose lifecycle evidence');
+    assert.ok(!text.includes('launchctl bootout'), 'view model must not expose runnable rollback command');
+    assert.ok(!text.includes('secret-host'), 'view model must not expose hostnames');
+    assert.ok(!text.includes('pid 42'), 'view model must not expose process identifiers');
+    assert.ok(!text.includes('2026-07-07T00:00:00Z'), 'view model must not expose timestamps');
   });
 
   it('returns sanitized error state', () => {
@@ -8447,6 +8531,8 @@ describe('buildSupervisorInstallDryRunViewModel', () => {
 
     assert.strictEqual(result.statusKey, 'error');
     assert.strictEqual(result.statusText, '检查失败');
+    assert.deepStrictEqual(result.rollbackUninstallActions, []);
+    assert.deepStrictEqual(result.rollbackUninstallSafetyLines, []);
     assert.ok(!result.messageText.includes('secret-value'), 'error message must be sanitized');
   });
 });
@@ -9118,6 +9204,55 @@ describe('DOM test: supervisor-install-dry-run panel interactions', () => {
                 rollback: { available: false },
                 controls: [{ id: 'explicit-operator-approval', status: 'blocked', blockerCode: 'operator-approval-required' }],
               },
+              rollbackUninstallPlan: {
+                state: 'blocked',
+                rollback: { available: false, evidence: 'restore /Users/ah/Library/LaunchAgents/com.linke.agent.plist' },
+                uninstall: { available: false, evidence: 'launchctl bootout secret' },
+                recovery: { available: false, evidence: 'recovery hostname secret-host pid 42' },
+                actions: [
+                  {
+                    id: 'capture-current-state',
+                    kind: 'rollback',
+                    status: 'blocked',
+                    command: 'launchctl print secret',
+                    evidence: 'private /Users/ah/state.json',
+                    wouldRun: false,
+                    wouldWrite: false,
+                    blockerCode: 'rollback-state-capture-missing',
+                  },
+                  {
+                    id: 'unload-launch-agent',
+                    kind: 'uninstall',
+                    status: 'blocked',
+                    command: 'launchctl bootout secret',
+                    evidence: 'operator Aaron timestamp',
+                    wouldRun: false,
+                    wouldWrite: false,
+                    blockerCode: 'launchd-unload-blocked',
+                  },
+                ],
+                safety: {
+                  dryRun: true,
+                  planOnly: true,
+                  rollbackExecuted: false,
+                  uninstallExecuted: false,
+                  recoverySupervisorStarted: false,
+                  launchctlCalled: false,
+                  processListRead: false,
+                  filesystemWritten: false,
+                  metadataWritten: false,
+                  supervisorInstalled: false,
+                  supervisorStarted: false,
+                  launchdFileWritten: false,
+                  launchdFileRemoved: false,
+                  previousPlistRestored: false,
+                  nasConnected: false,
+                  backupTriggered: false,
+                  restoreTriggered: false,
+                  remoteCommandExecuted: false,
+                  sensitiveValuesReturned: false,
+                },
+              },
               safety: {
                 launchctlCalled: false,
                 processListRead: false,
@@ -9151,19 +9286,32 @@ describe('DOM test: supervisor-install-dry-run panel interactions', () => {
     assert.strictEqual(doc.getElementById('supervisor-install-dry-run-status').textContent, '部分就绪');
     assert.strictEqual(doc.getElementById('supervisor-install-dry-run-install-state').textContent, 'not_configured / wouldInstall:false / wouldStart:false');
     assert.strictEqual(doc.getElementById('supervisor-install-dry-run-approval-state').textContent, 'approved:false');
-    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-rollback-state').textContent, 'available:false');
+    assert.strictEqual(doc.getElementById('supervisor-install-dry-run-rollback-state').textContent, 'rollback:false / uninstall:false / recovery:false');
 
     const resultText = doc.getElementById('supervisor-install-dry-run-result').textContent;
     assert.match(resultText, /real-install-not-implemented/);
     assert.match(resultText, /write-launch-agent-plist/);
     assert.match(resultText, /wouldRun:false/);
     assert.match(resultText, /operator-approval-required/);
+    assert.match(resultText, /Rollback \/ uninstall plan/);
+    assert.match(resultText, /capture-current-state/);
+    assert.match(resultText, /unload-launch-agent/);
+    assert.match(resultText, /wouldWrite:false/);
+    assert.match(resultText, /rollback-state-capture-missing/);
+    assert.match(resultText, /rollbackExecuted:false/);
+    assert.match(resultText, /uninstallExecuted:false/);
+    assert.match(resultText, /recoverySupervisorStarted:false/);
+    assert.match(resultText, /previousPlistRestored:false/);
     assert.match(resultText, /launchctlCalled:false/);
     assert.ok(!resultText.includes('secret.localhost'), 'must not render serverUrl');
     assert.ok(!resultText.includes('/tmp/linke-documents'), 'must not render sourcePath');
     assert.ok(!resultText.includes('192.168.1.100'), 'must not render NAS endpoint');
     assert.ok(!resultText.includes('nas-ref'), 'must not render credentialRef');
     assert.ok(!resultText.includes('launchctl bootstrap secret'), 'must not render runnable command');
+    assert.ok(!resultText.includes('launchctl bootout secret'), 'must not render runnable rollback command');
+    assert.ok(!resultText.includes('private /Users/ah/state.json'), 'must not render lifecycle evidence paths');
+    assert.ok(!resultText.includes('secret-host'), 'must not render hostnames from lifecycle evidence');
+    assert.ok(!resultText.includes('operator Aaron timestamp'), 'must not render approval identity or timestamp evidence');
   });
 
   it('does not start a second supervisor install dry-run request while one is in flight', async () => {
