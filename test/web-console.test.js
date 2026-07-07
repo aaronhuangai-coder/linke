@@ -1841,14 +1841,20 @@ describe('Web Console / API contract', () => {
     const content = panelMatch[0];
     assert.ok(content.includes('POST /api/supervisor-install-dry-run'), 'must mention POST endpoint');
     assert.match(content, /dry-run|只读|预览/);
+    assert.match(content, /rollback|uninstall|recovery supervisor/i);
     assert.match(content, /无启动请求|不自动轮询/);
     assert.match(content, /不调用 launchctl/);
     assert.match(content, /不读取进程列表/);
     assert.match(content, /不安装|不启动/);
+    assert.ok(content.includes('不执行 rollback 或 uninstall'), 'must say rollback and uninstall are not executed');
+    assert.ok(content.includes('不删除 launchd 文件'), 'must say launchd files are not deleted');
+    assert.ok(content.includes('不恢复 previous plist'), 'must say previous plist is not restored');
+    assert.ok(content.includes('不启动 recovery supervisor'), 'must say recovery supervisor is not started');
     assert.match(content, /不写入 metadata|不写 metadata/);
     assert.match(content, /不连接 NAS/);
     assert.match(content, /不触发备份或恢复|不执行备份或恢复/);
     assert.match(content, /不执行远程命令/);
+    assert.match(content, /raw evidence|runnable command/);
     assert.match(content, /不声明.*Gold|Gold.*blocked|Gold.*未完成/);
   });
 

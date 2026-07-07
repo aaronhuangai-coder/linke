@@ -119,8 +119,11 @@ const GOLD_READINESS_ITEMS = [
       'POST /api/supervisor-install-dry-run',
       'Web Console supervisor-install-dry-run-panel',
       'src/web/app.js buildSupervisorInstallDryRunViewModel',
+      'rollbackUninstallPlan Web Console rendering',
+      'buildSupervisorInstallDryRunViewModel rollbackUninstallActions',
+      'buildSupervisorInstallDryRunViewModel rollbackUninstallSafetyLines',
     ],
-    nextStep: 'V0.85 adds a blocked rollbackUninstallPlan on top of the V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
+    nextStep: 'V0.86 adds display-only Web Console rendering for the blocked rollbackUninstallPlan on top of the V0.85 full JSON plan, V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add real installer, launchd install/start, watchdog, monitoring, approval persistence, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -234,8 +237,11 @@ const GOLD_READINESS_ITEMS = [
       'POST /api/supervisor-install-dry-run',
       'Web Console supervisor-install-dry-run-panel',
       'src/web/app.js buildSupervisorInstallDryRunViewModel',
+      'rollbackUninstallPlan Web Console rendering',
+      'buildSupervisorInstallDryRunViewModel rollbackUninstallActions',
+      'buildSupervisorInstallDryRunViewModel rollbackUninstallSafetyLines',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, and the V0.85 blocked rollbackUninstallPlan; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, the V0.85 blocked rollbackUninstallPlan, and the V0.86 display-only rollbackUninstallPlan Web rendering; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, approval persistence, rollback, uninstall, and recovery supervisor.',
   },
 ];
 
