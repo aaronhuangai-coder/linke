@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.86', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.86');
+  it('expects LINKE_RELEASE_VERSION to be V0.87', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.87');
   });
 
-  it('expects report.version to be V0.86', () => {
+  it('expects report.version to be V0.87', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.86');
+    assert.strictEqual(report.version, 'V0.87');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -182,7 +182,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('rollbackUninstallPlan Web Console rendering'));
     assert.ok(automationEvidence.includes('buildSupervisorInstallDryRunViewModel rollbackUninstallActions'));
     assert.ok(automationEvidence.includes('buildSupervisorInstallDryRunViewModel rollbackUninstallSafetyLines'));
-    assert.ok(automationItem.nextStep.includes('V0.86'));
+    assert.ok(automationEvidence.includes('src/supervisor-lifecycle.js'));
+    assert.ok(automationEvidence.includes('test/supervisor-lifecycle.test.js'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-apply'));
+    assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-apply.test.js'));
+    assert.ok(automationEvidence.includes('supervisorLifecycleApply.state:blocked'));
+    assert.ok(automationItem.nextStep.includes('V0.87'));
     assert.ok(automationItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(automationItem.nextStep.includes('Web Console'));
     assert.ok(automationItem.nextStep.includes('approval'));
@@ -283,10 +288,15 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('rollbackUninstallPlan Web Console rendering'));
     assert.ok(hardeningEvidence.includes('buildSupervisorInstallDryRunViewModel rollbackUninstallActions'));
     assert.ok(hardeningEvidence.includes('buildSupervisorInstallDryRunViewModel rollbackUninstallSafetyLines'));
+    assert.ok(hardeningEvidence.includes('src/supervisor-lifecycle.js'));
+    assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle.test.js'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-apply'));
+    assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-apply.test.js'));
+    assert.ok(hardeningEvidence.includes('supervisorLifecycleApply.state:blocked'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
-    assert.ok(hardeningItem.nextStep.includes('V0.86'));
+    assert.ok(hardeningItem.nextStep.includes('V0.87'));
     assert.ok(hardeningItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(hardeningItem.nextStep.includes('Web dry-run panel'));
     assert.ok(hardeningItem.nextStep.includes('uninstall'));
