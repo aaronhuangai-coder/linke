@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.92', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.92');
+  it('expects LINKE_RELEASE_VERSION to be V0.93', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.93');
   });
 
-  it('expects report.version to be V0.92', () => {
+  it('expects report.version to be V0.93', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.92');
+    assert.strictEqual(report.version, 'V0.93');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -199,6 +199,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('Web Console supervisor-lifecycle-approval-preview-panel'));
     assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleApprovalPersistencePreviewViewModel'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle approval persistence preview'));
+    assert.ok(automationEvidence.includes('src/approval-store.js'));
+    assert.ok(automationEvidence.includes('buildSupervisorLifecycleApprovalRecord'));
+    assert.ok(automationEvidence.includes('appendSupervisorLifecycleApprovalRecord'));
+    assert.ok(automationEvidence.includes('readSupervisorLifecycleApprovalRecords'));
+    assert.ok(automationEvidence.includes('test/approval-store.test.js'));
+    assert.ok(automationItem.nextStep.includes('V0.93'));
     assert.ok(automationItem.nextStep.includes('V0.92'));
     assert.ok(automationItem.nextStep.includes('V0.91'));
     assert.ok(automationItem.nextStep.includes('V0.90'));
@@ -320,9 +326,15 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('Web Console supervisor-lifecycle-approval-preview-panel'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorLifecycleApprovalPersistencePreviewViewModel'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle approval persistence preview'));
+    assert.ok(hardeningEvidence.includes('src/approval-store.js'));
+    assert.ok(hardeningEvidence.includes('buildSupervisorLifecycleApprovalRecord'));
+    assert.ok(hardeningEvidence.includes('appendSupervisorLifecycleApprovalRecord'));
+    assert.ok(hardeningEvidence.includes('readSupervisorLifecycleApprovalRecords'));
+    assert.ok(hardeningEvidence.includes('test/approval-store.test.js'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V0.93'));
     assert.ok(hardeningItem.nextStep.includes('V0.92'));
     assert.ok(hardeningItem.nextStep.includes('V0.91'));
     assert.ok(hardeningItem.nextStep.includes('V0.90'));

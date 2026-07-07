@@ -1742,19 +1742,20 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V0.92 Supervisor lifecycle approval persistence preview Web/API', () => {
-  it('title and badge claim V0.92 as current', () => {
-    assertReadmeContains(/# Linke V0\.92/, 'README title should mention V0.92');
-    assertReadmeContains(/\*\*当前版本：V0\.92\*\*/, 'README badge should mention V0.92');
-    assertReadmeDoesNotContain(/^# Linke V0\.91/m, 'README title must not still claim V0.91');
-    assertReadmeDoesNotContain(/\*\*当前版本：V0\.91\*\*/, 'README badge must not still claim V0.91');
+describe('README — V0.93 Supervisor lifecycle approval store foundation', () => {
+  it('title and badge claim V0.93 as current', () => {
+    assertReadmeContains(/# Linke V0\.93/, 'README title should mention V0.93');
+    assertReadmeContains(/\*\*当前版本：V0\.93\*\*/, 'README badge should mention V0.93');
+    assertReadmeDoesNotContain(/^# Linke V0\.92/m, 'README title must not still claim V0.92');
+    assertReadmeDoesNotContain(/\*\*当前版本：V0\.92\*\*/, 'README badge must not still claim V0.92');
   });
 
-  it('version table marks V0.91 historical and V0.92 current', () => {
-    assertReadmeContains(/\| V0\.92 \| 当前版本 \|[^|]*(supervisor lifecycle approval persistence preview Web\/API|supervisor-lifecycle-approval-preview-panel|POST \/api\/supervisor-lifecycle-approval-persistence-preview)/i, 'V0.92 should be current supervisor lifecycle approval persistence preview Web/API milestone');
+  it('version table marks V0.92 historical and V0.93 current', () => {
+    assertReadmeContains(/\| V0\.93 \| 当前版本 \|[^|]*(supervisor lifecycle approval store foundation|src\/approval-store\.js|appendSupervisorLifecycleApprovalRecord|readSupervisorLifecycleApprovalRecords)/i, 'V0.93 should be current supervisor lifecycle approval store milestone');
+    assertReadmeContains(/\| V0\.92 \| 历史版本 \|[^|]*(supervisor lifecycle approval persistence preview Web\/API|supervisor-lifecycle-approval-preview-panel|POST \/api\/supervisor-lifecycle-approval-persistence-preview)/i, 'V0.92 should become historical milestone');
     assertReadmeContains(/\| V0\.91 \| 历史版本 \|[^|]*(supervisor lifecycle approval persistence preview CLI|supervisor-lifecycle-approval-persistence-preview)/i, 'V0.91 should become historical milestone');
     assertReadmeContains(/\| V0\.90 \| 历史版本 \|[^|]*(supervisor lifecycle approval persistence preview|buildSupervisorLifecycleApprovalPersistencePreview)/i, 'V0.90 should become historical milestone');
-    assertReadmeDoesNotContain(/\| V0\.91 \| 当前版本 \|/i, 'V0.91 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V0\.92 \| 当前版本 \|/i, 'V0.92 must not remain marked as current');
   });
 
   it('documents supervisor-lifecycle-apply as dry-run/blocked without --apply', () => {
@@ -1776,16 +1777,26 @@ describe('README — V0.92 Supervisor lifecycle approval persistence preview Web
     assertReadmeContains(/不读取本地 approval path|no local approval path/i, 'README should say Web/API does not read local approval paths');
   });
 
-  it('keeps Gold blocked and rejects lifecycle overclaims for V0.92', () => {
-    assertReadmeContains(/Gold (依旧|仍然|remains) blocked/i, 'README should keep Gold blocked');
-    assertReadmeContains(/真实 installer|real installer/i, 'README should still call out missing real installer');
-    assertReadmeDoesNotContain(/Gold ready|Gold 发布 ready|生产可用 supervisor|production-ready supervisor|rollback ready|uninstall ready|recovery supervisor ready/i, 'README must not overclaim Gold or lifecycle readiness');
+  it('documents approval store persistence and redaction boundaries', () => {
+    assertReadmeContains(/src\/approval-store\.js/, 'README should document approval store module');
+    assertReadmeContains(/appendSupervisorLifecycleApprovalRecord/, 'README should document approval append helper');
+    assertReadmeContains(/readSupervisorLifecycleApprovalRecords/, 'README should document approval read helper');
+    assertReadmeContains(/supervisor-lifecycle-approvals\.jsonl/, 'README should document local JSONL store');
+    assertReadmeContains(/不新增 Web\/API approval persist endpoint|不新增 Web\/API persist 面/i, 'README should say no Web/API persist surface is added');
+    assertReadmeContains(/不接入 `?supervisor-lifecycle-apply`?|not wired to lifecycle apply/i, 'README should say store is not wired to lifecycle apply');
+    assertReadmeContains(/不保存 approvedBy 值|approval reason|acknowledgement 内容|approval timestamps|configHash|planHash|sha256:/i, 'README should document sensitive approval fields are not stored');
   });
 
-  it('keeps later Gold readiness sections synced to V0.92 evidence', () => {
-    assertReadmeContains(/Agent CLI[\s\S]*?V0\.92[\s\S]*?supervisor-lifecycle-approval-preview-panel[\s\S]*?POST \/api\/supervisor-lifecycle-approval-persistence-preview/i, 'README Agent CLI Gold section should mention V0.92');
-    assertReadmeContains(/Gold blockers[\s\S]*?V0\.92[\s\S]*?supervisor-lifecycle-approval-preview-panel[\s\S]*?test\/web-console\.test\.js/i, 'README Gold blockers section should mention V0.92 evidence');
-    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.92[\s\S]*?supervisor-lifecycle-approval-preview-panel[\s\S]*?test\/web-console\.test\.js/i, 'README partial hardening section should mention V0.92 evidence');
+  it('keeps Gold blocked and rejects lifecycle overclaims for V0.93', () => {
+    assertReadmeContains(/Gold (依旧|仍然|remains) blocked/i, 'README should keep Gold blocked');
+    assertReadmeContains(/真实 installer|real installer/i, 'README should still call out missing real installer');
+    assertReadmeDoesNotContain(/Gold ready|Gold 发布 ready|生产可用 supervisor|production-ready supervisor|production approval workflow|rollback ready|uninstall ready|recovery supervisor ready/i, 'README must not overclaim Gold or lifecycle readiness');
+  });
+
+  it('keeps later Gold readiness sections synced to V0.93 evidence', () => {
+    assertReadmeContains(/Agent CLI[\s\S]*?V0\.93[\s\S]*?src\/approval-store\.js/i, 'README Agent CLI Gold section should mention V0.93');
+    assertReadmeContains(/Gold blockers[\s\S]*?V0\.93[\s\S]*?src\/approval-store\.js[\s\S]*?test\/approval-store\.test\.js/i, 'README Gold blockers section should mention V0.93 evidence');
+    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V0\.93[\s\S]*?src\/approval-store\.js[\s\S]*?test\/approval-store\.test\.js/i, 'README partial hardening section should mention V0.93 evidence');
   });
 });
 
