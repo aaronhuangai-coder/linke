@@ -1,1 +1,1 @@
-export const LINKE_RELEASE_VERSION = 'V0.93';
+export const LINKE_RELEASE_VERSION = 'V0.94';

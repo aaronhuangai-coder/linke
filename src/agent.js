@@ -22,6 +22,7 @@
  *   supervisor-install-dry-run — show sanitized supervisor install plan
  *   supervisor-lifecycle-apply — show blocked lifecycle apply plan
  *   supervisor-lifecycle-approval-persistence-preview — preview approval persistence readiness
+ *   supervisor-lifecycle-approval-persist — persist sanitized supervisor lifecycle approval records
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -35,9 +36,10 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --output <path>      Output path (launchd-dry-run)
- *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview)
+ *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
+ *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
@@ -57,6 +59,7 @@ import {
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApprovalPersistencePreview,
 } from './supervisor-lifecycle.js';
+import { appendSupervisorLifecycleApprovalRecord } from './approval-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -83,6 +86,7 @@ const SUPERVISOR_SAFETY_FALSE_FIELDS = [
 const SUPERVISOR_INSTALL_DRY_RUN_CONFIG_ERROR = 'supervisor-install-dry-run failed; verify --config points to a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_APPLY_CONFIG_ERROR = 'supervisor-lifecycle-apply failed; verify --config points to a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_APPROVAL_PERSISTENCE_PREVIEW_CONFIG_ERROR = 'supervisor-lifecycle-approval-persistence-preview failed; verify --config points to a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_APPROVAL_PERSIST_CONFIG_ERROR = 'supervisor-lifecycle-approval-persist failed; verify --config points to a readable valid Linke config';
 const FORBIDDEN_APPROVAL_PATH_SEGMENTS = new Set([
   '.aws',
   '.config',
@@ -672,6 +676,7 @@ Commands:
   supervisor-install-dry-run Show sanitized supervisor install dry-run plan
   supervisor-lifecycle-apply Apply supervisor lifecycle operations under LINKE_SUPERVISOR_LIFECYCLE_APPLY=enabled gate
   supervisor-lifecycle-approval-persistence-preview Preview sanitized approval persistence readiness without writing approval data
+  supervisor-lifecycle-approval-persist Persist sanitized supervisor lifecycle approval records
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -685,7 +690,7 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
@@ -693,7 +698,8 @@ Options:
   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
   --fail-on-blocked   Exit 2 when nas-dry-run/supervisor-install-dry-run readinessSummary.state, approval persistence preview state, or gold-readiness status is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
-  --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview)
+  --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
+  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist)
 `);
 }
 
@@ -1027,6 +1033,91 @@ export async function main() {
 
         if (args['fail-on-blocked'] === true && preview.state === 'blocked') {
           process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'supervisor-lifecycle-approval-persist': {
+        if (!args.config) {
+          throw new Error('--config is required');
+        }
+        if (args.config === true) {
+          throw new Error('--config requires a path value');
+        }
+        if (!args.operation) {
+          throw new Error('--operation is required');
+        }
+        if (args.operation === true) {
+          throw new Error('--operation requires a value');
+        }
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(args.operation)) {
+          throw new Error('operation must be one of: install, uninstall, rollback, recover');
+        }
+        if (!args.approval) {
+          throw new Error('--approval is required');
+        }
+        if (args.approval === true) {
+          throw new Error('--approval requires a path value');
+        }
+        if (!args['data-dir']) {
+          throw new Error('--data-dir is required');
+        }
+        if (args['data-dir'] === true) {
+          throw new Error('--data-dir requires a path value');
+        }
+        if (args.apply !== undefined) {
+          throw new Error('--apply is not supported');
+        }
+
+        let config;
+        try {
+          const raw = await loadConfig(args.config);
+          config = validateConfig(raw);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_APPROVAL_PERSIST_CONFIG_ERROR);
+        }
+
+        if (isForbiddenApprovalPath(args.approval)) {
+          throw new Error('approval path is not allowed');
+        }
+        let approval;
+        try {
+          const rawApproval = await readFile(args.approval, 'utf-8');
+          approval = JSON.parse(rawApproval);
+        } catch (err) {
+          throw new Error('failed to read or parse approval file');
+        }
+
+        const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+          operation: args.operation,
+          apply: true,
+          envGateEnabled: true,
+          approval,
+        });
+        const preview = buildSupervisorLifecycleApprovalPersistencePreview(lifecyclePlan, approval);
+
+        const isPersistable = preview &&
+          preview.command === 'supervisor-lifecycle-approval-persistence-preview' &&
+          preview.approvalValid === true &&
+          preview.persistence &&
+          preview.persistence.previewOnly === true &&
+          preview.persistence.wouldPersist === false &&
+          Array.isArray(preview.blockers) &&
+          preview.blockers.length === 1 &&
+          preview.blockers[0] === 'approval-persistence-store-missing';
+
+        if (!isPersistable) {
+          console.log(JSON.stringify(preview, null, 2));
+          process.exitCode = 2;
+        } else {
+          let record;
+          try {
+            record = await appendSupervisorLifecycleApprovalRecord(args['data-dir'], preview, approval);
+          } catch (err) {
+            throw new Error('failed to persist approval record');
+          }
+          console.log(JSON.stringify(record, null, 2));
         }
         break;
       }
