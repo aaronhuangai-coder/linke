@@ -2,7 +2,7 @@ import { mkdir, appendFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-function isPersistablePreview(preview) {
+export function isPersistablePreview(preview) {
   if (!preview || typeof preview !== 'object') return false;
   if (preview.command !== 'supervisor-lifecycle-approval-persistence-preview') return false;
   if (preview.approvalValid !== true) return false;

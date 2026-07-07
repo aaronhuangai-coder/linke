@@ -59,7 +59,10 @@ import {
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApprovalPersistencePreview,
 } from './supervisor-lifecycle.js';
-import { appendSupervisorLifecycleApprovalRecord } from './approval-store.js';
+import {
+  appendSupervisorLifecycleApprovalRecord,
+  isPersistablePreview,
+} from './approval-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1097,17 +1100,9 @@ export async function main() {
         });
         const preview = buildSupervisorLifecycleApprovalPersistencePreview(lifecyclePlan, approval);
 
-        const isPersistable = preview &&
-          preview.command === 'supervisor-lifecycle-approval-persistence-preview' &&
-          preview.approvalValid === true &&
-          preview.persistence &&
-          preview.persistence.previewOnly === true &&
-          preview.persistence.wouldPersist === false &&
-          Array.isArray(preview.blockers) &&
-          preview.blockers.length === 1 &&
-          preview.blockers[0] === 'approval-persistence-store-missing';
+        const persistable = isPersistablePreview(preview);
 
-        if (!isPersistable) {
+        if (!persistable) {
           console.log(JSON.stringify(preview, null, 2));
           process.exitCode = 2;
         } else {

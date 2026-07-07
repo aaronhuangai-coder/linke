@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import {
   appendSupervisorLifecycleApprovalRecord,
   buildSupervisorLifecycleApprovalRecord,
+  isPersistablePreview,
   readSupervisorLifecycleApprovalRecords,
 } from '../src/approval-store.js';
 import {
@@ -115,6 +116,18 @@ describe('supervisor lifecycle approval store', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+  it('identifies persistable previews with the shared helper', () => {
+    const { preview } = validPreview('install');
+    const invalidPreview = {
+      ...preview,
+      approvalValid: false,
+      blockers: ['approval-plan-hash-mismatch', 'approval-persistence-store-missing'],
+    };
+
+    assert.strictEqual(isPersistablePreview(preview), true);
+    assert.strictEqual(isPersistablePreview(invalidPreview), false);
+    assert.strictEqual(isPersistablePreview(null), false);
   });
 
   it('rejects invalid previews and leaves storage empty', async () => {
