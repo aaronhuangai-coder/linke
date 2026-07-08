@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.99', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.99');
+  it('expects LINKE_RELEASE_VERSION to be V1.00', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.00');
   });
 
-  it('expects report.version to be V0.99', () => {
+  it('expects report.version to be V1.00', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.99');
+    assert.strictEqual(report.version, 'V1.00');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -227,6 +227,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-executor-readiness.test.js'));
     assert.ok(automationEvidence.includes('POST /api/supervisor-lifecycle-executor-readiness'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-executor-readiness-api.test.js'));
+    assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleExecutorReadinessViewModel'));
+    assert.ok(automationEvidence.includes('supervisor-lifecycle-executor-readiness-button'));
+    assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle executor readiness'));
+    assert.ok(automationItem.nextStep.includes('V1.00'));
     assert.ok(automationItem.nextStep.includes('V0.99'));
     assert.ok(automationItem.nextStep.includes('V0.98'));
     assert.ok(automationItem.nextStep.includes('V0.97'));
