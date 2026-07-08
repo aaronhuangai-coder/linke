@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.94', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.94');
+  it('expects LINKE_RELEASE_VERSION to be V0.95', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.95');
   });
 
-  it('expects report.version to be V0.94', () => {
+  it('expects report.version to be V0.95', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.94');
+    assert.strictEqual(report.version, 'V0.95');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -206,6 +206,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/approval-store.test.js'));
     assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-approval-persist'));
     assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-approval-persist.test.js'));
+    assert.ok(automationEvidence.includes('POST /api/supervisor-lifecycle-approval-persist'));
+    assert.ok(automationEvidence.includes('test/supervisor-lifecycle-approval-persist-api.test.js'));
+    assert.ok(automationEvidence.includes('supervisor-lifecycle-approval-persist-button'));
+    assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
+    assert.ok(automationItem.nextStep.includes('V0.95'));
     assert.ok(automationItem.nextStep.includes('V0.94'));
     assert.ok(automationItem.nextStep.includes('V0.93'));
     assert.ok(automationItem.nextStep.includes('V0.92'));
@@ -215,7 +220,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(automationItem.nextStep.includes('Web Console'));
     assert.ok(automationItem.nextStep.includes('approval'));
-    assert.ok(automationItem.nextStep.includes('Web/API approval persist'));
+    assert.ok(automationItem.nextStep.includes('Gold remains blocked') || automationItem.nextStep.includes('real NAS'));
     assert.ok(automationItem.nextStep.includes('rollback'));
     assert.ok(automationItem.nextStep.includes('preflight'));
     assert.ok(automationItem.nextStep.includes('real installer'));
@@ -337,9 +342,14 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/approval-store.test.js'));
     assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-approval-persist'));
     assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-approval-persist.test.js'));
+    assert.ok(hardeningEvidence.includes('POST /api/supervisor-lifecycle-approval-persist'));
+    assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-approval-persist-api.test.js'));
+    assert.ok(hardeningEvidence.includes('supervisor-lifecycle-approval-persist-button'));
+    assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V0.95'));
     assert.ok(hardeningItem.nextStep.includes('V0.94'));
     assert.ok(hardeningItem.nextStep.includes('V0.93'));
     assert.ok(hardeningItem.nextStep.includes('V0.92'));
@@ -349,7 +359,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('rollbackUninstallPlan'));
     assert.ok(hardeningItem.nextStep.includes('Web dry-run panel'));
     assert.ok(hardeningItem.nextStep.includes('uninstall'));
-    assert.ok(hardeningItem.nextStep.includes('Web/API approval persist'));
+    assert.ok(hardeningItem.nextStep.includes('Gold remains blocked') || hardeningItem.nextStep.includes('real NAS'));
     assert.ok(hardeningItem.nextStep.includes('secret management'));
     assert.ok(hardeningItem.nextStep.includes('monitoring'));
     assert.ok(hardeningItem.nextStep.includes('recovery supervisor'));

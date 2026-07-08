@@ -146,8 +146,12 @@ const GOLD_READINESS_ITEMS = [
       'test/approval-store.test.js',
       'src/agent.js supervisor-lifecycle-approval-persist',
       'test/agent-supervisor-lifecycle-approval-persist.test.js',
+      'POST /api/supervisor-lifecycle-approval-persist',
+      'test/supervisor-lifecycle-approval-persist-api.test.js',
+      'supervisor-lifecycle-approval-persist-button',
+      'test/web-console.test.js supervisor lifecycle approval persist',
     ],
-    nextStep: 'V0.94 adds an explicit Agent CLI for local sanitized approval record persistence, V0.93 adds the local approval store foundation, V0.92 adds a manual read-only Web/API approval persistence preview panel and endpoint, V0.91 adds a read-only Agent CLI for supervisor lifecycle approval persistence preview, V0.90 adds a supervisor lifecycle approval persistence preview, V0.89 adds a supervisor lifecycle audit preview, V0.88 adds a supervisor lifecycle fake executor contract, V0.87 adds a safety-gated supervisor lifecycle apply plan foundation on top of the V0.86 display-only Web Console rendering for the blocked rollbackUninstallPlan, V0.85 full JSON plan, V0.84 supervisor install Web Console dry-run panel, V0.83 approval manifest, and V0.82 preflight gate, while supervisor install, rollback, uninstall, and recovery supervisor remain blocked and not_configured; add Web/API approval persist, real installer, launchd install/start, watchdog, monitoring, guarded approval-store apply wiring, rollback, uninstall, recovery supervisor, secret management, and managed daemon lifecycle only after production boundaries are designed.',
+    nextStep: 'V0.95 adds guarded Web/API approval record persistence with POST /api/supervisor-lifecycle-approval-persist, API_WRITE_ROUTES auth coverage, sanitized audit events, and the manual supervisor-lifecycle-approval-persist-button in Web Console; V0.94 adds the explicit Agent CLI for local sanitized approval record persistence, V0.93 adds the local approval store foundation, V0.92 adds a manual read-only Web/API approval persistence preview panel and endpoint, V0.91 adds a read-only Agent CLI for supervisor lifecycle approval persistence preview, V0.90 adds a supervisor lifecycle approval persistence preview, and V0.89 adds a supervisor lifecycle audit preview. Keep install preflight, installPreflight, and rollbackUninstallPlan evidence visible while Gold remains blocked: add real installer, launchd install/start, watchdog, monitoring, guarded approval-store apply wiring, rollback, uninstall, recovery supervisor, real NAS remote backup, production auth, secret management, and managed daemon lifecycle only after production boundaries are designed.',
   },
   {
     id: 'security-auth',
@@ -288,8 +292,12 @@ const GOLD_READINESS_ITEMS = [
       'test/approval-store.test.js',
       'src/agent.js supervisor-lifecycle-approval-persist',
       'test/agent-supervisor-lifecycle-approval-persist.test.js',
+      'POST /api/supervisor-lifecycle-approval-persist',
+      'test/supervisor-lifecycle-approval-persist-api.test.js',
+      'supervisor-lifecycle-approval-persist-button',
+      'test/web-console.test.js supervisor lifecycle approval persist',
     ],
-    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, the V0.84 supervisor install Web dry-run panel, the V0.85 blocked rollbackUninstallPlan, the V0.86 display-only rollbackUninstallPlan Web rendering, the V0.87 safety-gated supervisor lifecycle apply plan foundation, the V0.88 supervisor lifecycle fake executor contract, the V0.89 supervisor lifecycle audit preview, the V0.90 supervisor lifecycle approval persistence preview, the V0.91 read-only Agent CLI for approval persistence preview, the V0.92 manual Web/API approval persistence preview, the V0.93 local sanitized approval record store foundation, and the V0.94 explicit Agent CLI for approval record persistence; still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, monitoring, Web/API approval persist, guarded approval-store apply wiring, rollback, uninstall, and recovery supervisor.',
+    nextStep: 'Recent releases add read-only Agent/Web visibility, supervisor-status not_configured reporting, supervisor install dry-run planning, supervisor install readiness gating, non-runnable install command preview, blocked install preflight checks, a dry-run approval/rollback manifest, rollbackUninstallPlan Web Console rendering in the Web dry-run panel, the V0.89 supervisor lifecycle audit preview, the V0.90 supervisor lifecycle approval persistence preview, the V0.91 read-only Agent CLI preview, the V0.92 manual Web/API approval persistence preview, the V0.93 local sanitized approval record store foundation, the V0.94 explicit Agent CLI for approval record persistence, and the V0.95 guarded Web/API approval persist route plus manual Web button. Gold remains blocked: still add deployment hardening, audit rotation, tamper-proof audit storage, distributed rate limiting, secret management, production auth, monitoring, guarded approval-store apply wiring, rollback, uninstall, recovery supervisor, real NAS remote backup, and managed daemon lifecycle.',
   },
 ];
 
