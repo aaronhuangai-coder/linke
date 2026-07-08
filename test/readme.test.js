@@ -1807,6 +1807,15 @@ describe('README — V0.95 Supervisor lifecycle approval persist Web/API', () =>
     assertReadmeContains(/无启动请求|不自动轮询|manual/i, 'README should document manual-only Web action');
   });
 
+  it('documents approval records read API and Web button boundaries', () => {
+    assertReadmeContains(/GET \/api\/supervisor-lifecycle-approval-records/, 'README should document approval records GET endpoint');
+    assertReadmeContains(/supervisor-lifecycle-approval-records-button/, 'README should document approval records Web button hook');
+    assertReadmeContains(/readOnly:true|只读查看|read-only/i, 'README should document read-only records behavior');
+    assertReadmeContains(/sensitiveValuesReturned:false|approvedBy|approval identity/i, 'README should document records redaction boundary');
+    assertReadmeContains(/不执行 lifecycle apply|不执行生命周期 apply|lifecycleApplied:false/i, 'README should document records view does not apply lifecycle changes');
+    assertReadmeContains(/不调用 launchctl|launchctlCalled:false/i, 'README should document records view does not call launchctl');
+  });
+
   it('keeps Gold blocked and rejects lifecycle overclaims for V0.95', () => {
     assertReadmeContains(/Gold (依旧|仍然|remains) blocked/i, 'README should keep Gold blocked');
     assertReadmeContains(/真实 installer|real installer/i, 'README should still call out missing real installer');

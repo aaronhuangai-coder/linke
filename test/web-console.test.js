@@ -1985,6 +1985,7 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-operation"'), 'must have operation selector');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-run"'), 'must have run button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-persist-button"'), 'must have persist button');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-records-button"'), 'must have approval records button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-status"'), 'must have status stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-valid"'), 'must have approval valid stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-persist"'), 'must have persistence stat');
@@ -2026,10 +2027,16 @@ describe('Web Console / API contract', () => {
       js.includes("apiFetch('/api/supervisor-lifecycle-approval-persist'"),
       'app.js must call approval persist endpoint directly',
     );
+    assert.ok(
+      js.includes("apiFetch('/api/supervisor-lifecycle-approval-records'"),
+      'app.js must call approval records endpoint directly',
+    );
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistencePreviewViewModel'), 'app.js must export approval preview view model');
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistViewModel'), 'app.js must export approval persist view model');
+    assert.ok(js.includes('buildSupervisorLifecycleApprovalRecordsViewModel'), 'app.js must export approval records view model');
     assert.ok(js.includes('supervisor-lifecycle-approval-preview-run') || js.includes('supervisorLifecycleApprovalPreviewRun'), 'app.js must reference the run button');
     assert.ok(js.includes('supervisor-lifecycle-approval-persist-button') || js.includes('supervisorLifecycleApprovalPersistButton'), 'app.js must reference the persist button');
+    assert.ok(js.includes('supervisor-lifecycle-approval-records-button') || js.includes('supervisorLifecycleApprovalRecordsButton'), 'app.js must reference the records button');
   });
 
   it('styles.css contains supervisor lifecycle approval preview panel styles', async () => {
@@ -9752,6 +9759,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.strictEqual(fetchCount, 0, 'should not call approval persist API on init');
   });
 
+  it('does not request /api/supervisor-lifecycle-approval-records on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url) === '/api/supervisor-lifecycle-approval-records') fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call approval records API on init');
+  });
+
   it('validates empty and invalid config or approval JSON locally without calling the API', async () => {
     const calls = [];
     const doc = buildMockDoc();
@@ -10049,6 +10069,122 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!resultText.includes('/Users/ah/Documents'), 'must not render paths');
     assert.ok(!resultText.includes('secret.localhost'), 'must not render config serverUrl');
     assert.ok(!resultText.includes('/tmp/linke-documents'), 'must not render config sourcePath');
+  });
+
+  it('manually loads approval records and renders sanitized read-only records', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url) === '/api/supervisor-lifecycle-approval-records') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-approval-records',
+              state: 'ready',
+              count: 1,
+              records: [{
+                command: 'supervisor-lifecycle-approval-record',
+                id: 'record-1',
+                operation: 'install',
+                state: 'persisted',
+                approvalValid: true,
+                approvedBy: 'operator@example.invalid',
+                reason: 'secret reason',
+                sourcePath: '/Users/ah/Documents',
+                validation: {
+                  approvalValid: true,
+                  acknowledgementCount: 1,
+                  windowWithinLimit: true,
+                  operationMatchesPlan: true,
+                  configHashMatchesPlan: true,
+                  planHashMatchesPlan: true,
+                  configHash: 'sha256:secret',
+                },
+                safety: {
+                  approvalPersisted: true,
+                  filesystemWritten: true,
+                  hostMutation: false,
+                  launchctlCalled: false,
+                  lifecycleApplied: false,
+                  sensitiveValuesReturned: false,
+                },
+              }],
+              safety: {
+                readOnly: true,
+                filesystemWritten: false,
+                lifecycleApplied: false,
+                launchctlCalled: false,
+                sensitiveValuesReturned: false,
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-records-button')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url) === '/api/supervisor-lifecycle-approval-records');
+    assert.ok(apiCall, 'must call approval records API');
+    assert.strictEqual(apiCall.options, undefined);
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-status').textContent, '已保存记录');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-valid').textContent, 'records:1');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-persist').textContent, 'readOnly:true / lifecycleApply:false');
+
+    const resultText = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
+    assert.match(resultText, /record-1/);
+    assert.match(resultText, /operation:install/);
+    assert.match(resultText, /state:persisted/);
+    assert.match(resultText, /approvalValid:true/);
+    assert.match(resultText, /readOnly:true/);
+    assert.match(resultText, /lifecycleApplied:false/);
+    assert.ok(!resultText.includes('operator@example'), 'must not render approval identity value');
+    assert.ok(!resultText.includes('secret reason'), 'must not render approval reason');
+    assert.ok(!resultText.includes('sha256:secret'), 'must not render hash values');
+    assert.ok(!resultText.includes('/Users/ah/Documents'), 'must not render paths');
+  });
+
+  it('does not start a second approval records request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url) === '/api/supervisor-lifecycle-approval-records') {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-approval-records',
+              state: 'ready',
+              count: 0,
+              records: [],
+              safety: { readOnly: true, lifecycleApplied: false },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    const recordsBtn = doc.getElementById('supervisor-lifecycle-approval-records-button');
+    recordsBtn._listeners.click();
+    recordsBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate records requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
   });
 
   it('does not start a second approval persist request while one is in flight', async () => {

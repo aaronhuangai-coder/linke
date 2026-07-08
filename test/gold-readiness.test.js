@@ -207,8 +207,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-approval-persist'));
     assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-approval-persist.test.js'));
     assert.ok(automationEvidence.includes('POST /api/supervisor-lifecycle-approval-persist'));
+    assert.ok(automationEvidence.includes('GET /api/supervisor-lifecycle-approval-records'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-approval-persist-api.test.js'));
     assert.ok(automationEvidence.includes('supervisor-lifecycle-approval-persist-button'));
+    assert.ok(automationEvidence.includes('supervisor-lifecycle-approval-records-button'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
     assert.ok(automationItem.nextStep.includes('V0.95'));
     assert.ok(automationItem.nextStep.includes('V0.94'));
@@ -343,8 +345,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-approval-persist'));
     assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-approval-persist.test.js'));
     assert.ok(hardeningEvidence.includes('POST /api/supervisor-lifecycle-approval-persist'));
+    assert.ok(hardeningEvidence.includes('GET /api/supervisor-lifecycle-approval-records'));
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-approval-persist-api.test.js'));
     assert.ok(hardeningEvidence.includes('supervisor-lifecycle-approval-persist-button'));
+    assert.ok(hardeningEvidence.includes('supervisor-lifecycle-approval-records-button'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));

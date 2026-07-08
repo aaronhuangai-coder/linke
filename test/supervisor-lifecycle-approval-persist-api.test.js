@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -63,6 +63,21 @@ async function postJSON(port, path, body, headers = {}) {
   return { res, text, body: parsed };
 }
 
+async function getJSON(port, path, headers = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: 'GET',
+    headers,
+  });
+  const text = await res.text();
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = {};
+  }
+  return { res, text, body: parsed };
+}
+
 function assertNoSensitiveText(text, dataDir = '') {
   assert.doesNotMatch(text, /operator@example|do not leak|sha256:|localhost|linke-documents|token|secret|Authorization|Bearer/i);
   assert.doesNotMatch(text, /EEXIST|ENOTDIR|EACCES|ENOENT|\/tmp\/linke-documents/i);
@@ -78,6 +93,7 @@ describe('Supervisor lifecycle approval persist API', () => {
       route.method === 'POST' && route.path === '/api/supervisor-lifecycle-approval-persist'
     )));
     assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-approval-persistence-preview'), false);
+    assert.strictEqual(isApiWriteRoute('GET', '/api/supervisor-lifecycle-approval-records'), false);
   });
 
   it('persists valid approval through API with sanitized record and audit event', async () => {
@@ -106,6 +122,90 @@ describe('Supervisor lifecycle approval persist API', () => {
           event.statusCode === 201 &&
           event.operation === 'install'
         )));
+        assertNoSensitiveText(text, dataDir);
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns approval records through a read-only API without leaking approval material', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-approval-records-api-'));
+    try {
+      await withServer({ dataDir }, async (port) => {
+        const persisted = await postJSON(port, '/api/supervisor-lifecycle-approval-persist', {
+          operation: 'install',
+          config: BASE_CONFIG,
+          approval: validApprovalFor('install'),
+        });
+        assert.strictEqual(persisted.res.status, 201);
+
+        const { res, text, body } = await getJSON(port, '/api/supervisor-lifecycle-approval-records');
+
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(body.command, 'supervisor-lifecycle-approval-records');
+        assert.strictEqual(body.state, 'ready');
+        assert.strictEqual(body.count, 1);
+        assert.deepStrictEqual(body.records, [persisted.body]);
+        assert.strictEqual(body.safety.readOnly, true);
+        assert.strictEqual(body.safety.filesystemWritten, false);
+        assert.strictEqual(body.safety.lifecycleApplied, false);
+        assert.strictEqual(body.safety.launchctlCalled, false);
+        assertNoSensitiveText(text, dataDir);
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('sanitizes locally tampered approval records before returning them through the read API', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-approval-records-api-tampered-'));
+    try {
+      const approvalsDir = join(dataDir, 'approvals');
+      await mkdir(approvalsDir, { recursive: true });
+      await writeFile(join(approvalsDir, 'supervisor-lifecycle-approvals.jsonl'), `${JSON.stringify({
+        command: 'supervisor-lifecycle-approval-record',
+        schemaVersion: 1,
+        id: 'tampered-record',
+        createdAt: '2026-07-07T00:00:00.000Z',
+        operation: 'install',
+        state: 'persisted',
+        approvalValid: true,
+        approvedBy: 'operator@example.invalid',
+        reason: 'do not leak this reason',
+        acknowledgement: 'do not leak this acknowledgement',
+        extraField: 'do not leak this extra field',
+        validation: {
+          approvalValid: true,
+          acknowledgementCount: 1,
+          windowWithinLimit: true,
+          operationMatchesPlan: true,
+          configHashMatchesPlan: true,
+          planHashMatchesPlan: true,
+        },
+        safety: {
+          approvalPersisted: true,
+          filesystemWritten: true,
+          hostMutation: true,
+          launchctlCalled: true,
+          lifecycleApplied: true,
+          sensitiveValuesReturned: true,
+        },
+      })}\n`, 'utf-8');
+
+      await withServer({ dataDir }, async (port) => {
+        const { res, text, body } = await getJSON(port, '/api/supervisor-lifecycle-approval-records');
+
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(body.count, 1);
+        assert.strictEqual(body.records[0].id, 'tampered-record');
+        assert.strictEqual(body.records[0].operation, 'install');
+        assert.strictEqual(body.records[0].safety.approvalPersisted, true);
+        assert.strictEqual(body.records[0].safety.filesystemWritten, true);
+        assert.strictEqual(body.records[0].safety.hostMutation, false);
+        assert.strictEqual(body.records[0].safety.launchctlCalled, false);
+        assert.strictEqual(body.records[0].safety.lifecycleApplied, false);
+        assert.strictEqual(body.records[0].safety.sensitiveValuesReturned, false);
         assertNoSensitiveText(text, dataDir);
       });
     } finally {

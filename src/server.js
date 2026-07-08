@@ -28,6 +28,7 @@ import {
 import {
   appendSupervisorLifecycleApprovalRecord,
   isPersistablePreview,
+  readSupervisorLifecycleApprovalRecords,
 } from './approval-store.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
@@ -363,6 +364,67 @@ export function buildHardeningStatusResponse({
   };
 }
 
+function sanitizeApprovalRecordValidation(validation = {}) {
+  const source = validation && typeof validation === 'object' ? validation : {};
+  return {
+    approvalValid: source.approvalValid === true,
+    acknowledgementCount: Number.isInteger(source.acknowledgementCount) && source.acknowledgementCount >= 0
+      ? source.acknowledgementCount
+      : 0,
+    windowWithinLimit: source.windowWithinLimit === true,
+    operationMatchesPlan: source.operationMatchesPlan === true,
+    configHashMatchesPlan: source.configHashMatchesPlan === true,
+    planHashMatchesPlan: source.planHashMatchesPlan === true,
+  };
+}
+
+function sanitizeApprovalRecord(record = {}) {
+  const source = record && typeof record === 'object' ? record : {};
+  const safety = source.safety && typeof source.safety === 'object' ? source.safety : {};
+  return {
+    command: 'supervisor-lifecycle-approval-record',
+    schemaVersion: Number.isInteger(source.schemaVersion) ? source.schemaVersion : 1,
+    id: typeof source.id === 'string' ? source.id : '',
+    createdAt: typeof source.createdAt === 'string' ? source.createdAt : '',
+    operation: typeof source.operation === 'string' ? source.operation : 'unknown',
+    state: typeof source.state === 'string' ? source.state : 'unknown',
+    approvalValid: source.approvalValid === true,
+    blockersResolved: Array.isArray(source.blockersResolved)
+      ? source.blockersResolved.filter((blocker) => typeof blocker === 'string')
+      : [],
+    validation: sanitizeApprovalRecordValidation(source.validation),
+    safety: {
+      approvalPersisted: safety.approvalPersisted === true,
+      filesystemWritten: safety.filesystemWritten === true,
+      hostMutation: false,
+      launchctlCalled: false,
+      lifecycleApplied: false,
+      sensitiveValuesReturned: false,
+    },
+  };
+}
+
+export function buildSupervisorLifecycleApprovalRecordsResponse(records = []) {
+  const sanitizedRecords = Array.isArray(records)
+    ? records.map((record) => sanitizeApprovalRecord(record))
+    : [];
+  return {
+    command: 'supervisor-lifecycle-approval-records',
+    state: 'ready',
+    count: sanitizedRecords.length,
+    records: sanitizedRecords,
+    safety: {
+      readOnly: true,
+      approvalPersisted: false,
+      filesystemWritten: false,
+      hostMutation: false,
+      launchctlCalled: false,
+      lifecycleApplied: false,
+      sensitiveValuesReturned: false,
+    },
+  };
+}
+
 async function isDataDirReadable(dataDir) {
   try {
     await access(dataDir, constants.R_OK);
@@ -502,6 +564,12 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
       if (method === 'GET' && pathname === '/api/audit-log') {
         const events = await readAuditEvents(dataDir, { limit: url.searchParams.get('limit') });
         return sendJSON(res, 200, { events });
+      }
+
+      // GET /api/supervisor-lifecycle-approval-records
+      if (method === 'GET' && pathname === '/api/supervisor-lifecycle-approval-records') {
+        const records = await readSupervisorLifecycleApprovalRecords(dataDir);
+        return sendJSON(res, 200, buildSupervisorLifecycleApprovalRecordsResponse(records));
       }
 
       // POST /api/heartbeat
