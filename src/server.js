@@ -23,6 +23,7 @@ import { validateConfig } from './config.js';
 import { buildSupervisorInstallDryRunPlan } from './agent.js';
 import {
   buildSupervisorLifecycleApplyPlan,
+  buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleApprovalPersistencePreview,
 } from './supervisor-lifecycle.js';
 import {
@@ -570,6 +571,41 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
       if (method === 'GET' && pathname === '/api/supervisor-lifecycle-approval-records') {
         const records = await readSupervisorLifecycleApprovalRecords(dataDir);
         return sendJSON(res, 200, buildSupervisorLifecycleApprovalRecordsResponse(records));
+      }
+
+      // POST /api/supervisor-lifecycle-apply-readiness
+      // Read-only fail-closed preflight. It checks server-owned approval
+      // records but never applies lifecycle changes and is not a write route.
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-apply-readiness') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400 || err.statusCode === 413) {
+            return sendError(res, err.statusCode, err.message);
+          }
+          throw err;
+        }
+
+        const operation = body?.operation;
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(operation)) {
+          return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+        }
+
+        try {
+          const config = validateConfig(body?.config);
+          const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+            operation,
+            apply: true,
+            envGateEnabled: true,
+          });
+          const approvalRecords = await readSupervisorLifecycleApprovalRecords(dataDir);
+          const readiness = buildSupervisorLifecycleApplyReadiness(lifecyclePlan, approvalRecords);
+          return sendJSON(res, 200, readiness);
+        } catch (err) {
+          return sendError(res, 400, err.message);
+        }
       }
 
       // POST /api/heartbeat

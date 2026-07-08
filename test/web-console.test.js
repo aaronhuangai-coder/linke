@@ -44,6 +44,7 @@ import {
   buildSupervisorInstallDryRunViewModel,
   buildSupervisorLifecycleApprovalPersistencePreviewViewModel,
   buildSupervisorLifecycleApprovalPersistViewModel,
+  buildSupervisorLifecycleApplyReadinessViewModel,
 } from '../src/web/app.js';
 import { buildSupervisorLifecycleApplyPlan } from '../src/supervisor-lifecycle.js';
 
@@ -1986,16 +1987,22 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-run"'), 'must have run button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-persist-button"'), 'must have persist button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-records-button"'), 'must have approval records button');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-apply-readiness-button"'), 'must have apply readiness button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-status"'), 'must have status stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-valid"'), 'must have approval valid stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-persist"'), 'must have persistence stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-result"'), 'must have result container');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-safety-note"'), 'must have safety note');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-persist-safety-note"'), 'must have persist safety note');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-apply-readiness-safety-note"'), 'must have readiness safety note');
     const buttonMatch = html.match(/<button[^>]*data-testid="supervisor-lifecycle-approval-persist-button"[^>]*>([\s\S]*?)<\/button>/);
     assert.ok(buttonMatch, 'persist button must exist');
     assert.match(buttonMatch[1], /Persist Approval Record/);
     assert.doesNotMatch(buttonMatch[1], /Apply|Install|Execute|Run install|Rollback|Uninstall/i);
+    const readinessButtonMatch = html.match(/<button[^>]*data-testid="supervisor-lifecycle-apply-readiness-button"[^>]*>([\s\S]*?)<\/button>/);
+    assert.ok(readinessButtonMatch, 'readiness button must exist');
+    assert.match(readinessButtonMatch[1], /Readiness/i);
+    assert.doesNotMatch(readinessButtonMatch[1], /Execute|Run install|Start|Launch/i);
   });
 
   it('supervisor lifecycle approval preview panel safety note documents manual preview boundaries', async () => {
@@ -2014,6 +2021,8 @@ describe('Web Console / API contract', () => {
     assert.match(content, /does not execute lifecycle apply|不执行生命周期 apply/i);
     assert.match(content, /does not call launchctl|不调用 launchctl/i);
     assert.doesNotMatch(content, /does not execute lifecycle apply|does not call launchctl/i);
+    assert.match(content, /POST \/api\/supervisor-lifecycle-apply-readiness/i);
+    assert.match(content, /readOnly:true|只读/i);
     assert.match(content, /不显示.*token|不显示.*hash|不显示.*路径|不返回.*approvedBy/);
     assert.match(content, /Gold.*blocked|Gold.*仍|Gold.*未完成/);
   });
@@ -2031,12 +2040,18 @@ describe('Web Console / API contract', () => {
       js.includes("apiFetch('/api/supervisor-lifecycle-approval-records'"),
       'app.js must call approval records endpoint directly',
     );
+    assert.ok(
+      js.includes("apiFetch('/api/supervisor-lifecycle-apply-readiness'"),
+      'app.js must call apply readiness endpoint directly',
+    );
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistencePreviewViewModel'), 'app.js must export approval preview view model');
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistViewModel'), 'app.js must export approval persist view model');
     assert.ok(js.includes('buildSupervisorLifecycleApprovalRecordsViewModel'), 'app.js must export approval records view model');
+    assert.ok(js.includes('buildSupervisorLifecycleApplyReadinessViewModel'), 'app.js must export apply readiness view model');
     assert.ok(js.includes('supervisor-lifecycle-approval-preview-run') || js.includes('supervisorLifecycleApprovalPreviewRun'), 'app.js must reference the run button');
     assert.ok(js.includes('supervisor-lifecycle-approval-persist-button') || js.includes('supervisorLifecycleApprovalPersistButton'), 'app.js must reference the persist button');
     assert.ok(js.includes('supervisor-lifecycle-approval-records-button') || js.includes('supervisorLifecycleApprovalRecordsButton'), 'app.js must reference the records button');
+    assert.ok(js.includes('supervisor-lifecycle-apply-readiness-button') || js.includes('supervisorLifecycleApplyReadinessButton'), 'app.js must reference the readiness button');
   });
 
   it('styles.css contains supervisor lifecycle approval preview panel styles', async () => {
@@ -8885,6 +8900,104 @@ describe('buildSupervisorLifecycleApprovalPersistViewModel', () => {
   });
 });
 
+describe('buildSupervisorLifecycleApplyReadinessViewModel', () => {
+  it('returns unknown state for missing payload', () => {
+    const result = buildSupervisorLifecycleApplyReadinessViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.approvalValidText, 'records:0');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / lifecycleApply:false');
+    assert.deepStrictEqual(result.blockers, []);
+    assert.deepStrictEqual(result.recordLines, []);
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.match(result.messageText, /apply readiness/i);
+  });
+
+  it('returns sanitized ready display fields without implying lifecycle apply execution', () => {
+    const result = buildSupervisorLifecycleApplyReadinessViewModel({
+      command: 'supervisor-lifecycle-apply-readiness',
+      operation: 'install',
+      state: 'blocked',
+      approvalRecordState: 'ready',
+      approvalRecordReady: true,
+      blockers: [],
+      nextBlockers: ['executor-implementation-missing'],
+      approvalRecords: {
+        readOnly: true,
+        count: 1,
+        operationMatchCount: 1,
+        persistedMatchCount: 1,
+      },
+      gates: {
+        lifecyclePlanValid: true,
+        applyFlag: true,
+        envGate: true,
+        approvalRecordPersisted: true,
+        approvalRecordValid: true,
+        approvalRecordOperationMatched: true,
+        executorImplemented: false,
+        configHash: 'sha256:secret',
+      },
+      safety: {
+        dryRun: true,
+        readOnly: true,
+        hostMutation: false,
+        launchctlCalled: false,
+        filesystemWritten: false,
+        lifecycleApplied: false,
+        sensitiveValuesReturned: false,
+      },
+      approvedBy: 'operator@example.invalid',
+      reason: 'secret reason',
+      sourcePath: '/Users/ah/Documents',
+    });
+    const text = JSON.stringify(result);
+
+    assert.strictEqual(result.statusKey, 'ready');
+    assert.strictEqual(result.statusText, '批准记录就绪');
+    assert.strictEqual(result.approvalValidText, 'approvalRecordReady:true');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / lifecycleApply:false');
+    assert.ok(result.blockers.includes('next:executor-implementation-missing'));
+    assert.ok(result.recordLines.includes('records:1'));
+    assert.ok(result.recordLines.includes('operationMatches:1'));
+    assert.ok(result.recordLines.includes('persistedMatches:1'));
+    assert.ok(result.validationLines.includes('approvalRecordValid:true'));
+    assert.ok(result.validationLines.includes('executorImplemented:false'));
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.match(result.messageText, /approval record gate ready/i);
+    assert.match(result.messageText, /not lifecycle apply/i);
+    assert.ok(!text.includes('operator@example'), 'must not expose approval identity values');
+    assert.ok(!text.includes('secret reason'), 'must not expose approval reasons');
+    assert.ok(!text.includes('sha256:secret'), 'must not expose hashes');
+    assert.ok(!text.includes('/Users/ah/Documents'), 'must not expose paths');
+  });
+
+  it('returns sanitized blocked and error states', () => {
+    const blocked = buildSupervisorLifecycleApplyReadinessViewModel({
+      command: 'supervisor-lifecycle-apply-readiness',
+      operation: 'rollback',
+      state: 'blocked',
+      approvalRecordReady: false,
+      blockers: ['approval-record-missing'],
+      nextBlockers: ['executor-implementation-missing'],
+      approvalRecords: { readOnly: true, count: 0, operationMatchCount: 0, persistedMatchCount: 0 },
+      gates: { applyFlag: true, envGate: true, approvalRecordValid: false },
+      safety: { readOnly: true, lifecycleApplied: false },
+    });
+    const failed = buildSupervisorLifecycleApplyReadinessViewModel(null, 'Bearer token secret-value failed at /Users/ah/private');
+
+    assert.strictEqual(blocked.statusKey, 'blocked');
+    assert.strictEqual(blocked.statusText, '阻塞');
+    assert.deepStrictEqual(blocked.blockers, ['approval-record-missing', 'next:executor-implementation-missing']);
+    assert.strictEqual(failed.statusKey, 'error');
+    assert.ok(!failed.messageText.includes('secret-value'), 'error message must be sanitized');
+    assert.ok(!failed.messageText.includes('/Users/ah/private'), 'error path must be sanitized');
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -9772,6 +9885,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.strictEqual(fetchCount, 0, 'should not call approval records API on init');
   });
 
+  it('does not request /api/supervisor-lifecycle-apply-readiness on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url) === '/api/supervisor-lifecycle-apply-readiness') fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call apply readiness API on init');
+  });
+
   it('validates empty and invalid config or approval JSON locally without calling the API', async () => {
     const calls = [];
     const doc = buildMockDoc();
@@ -9803,6 +9929,30 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     doc.getElementById('supervisor-lifecycle-approval-preview-run')._listeners.click();
     assert.ok(!calls.some((url) => String(url).includes('/api/supervisor-lifecycle-approval-persistence-preview')));
     assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /批准 JSON 格式错误/);
+  });
+
+  it('validates apply readiness config locally without parsing approval JSON or calling the API', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        calls.push(url);
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '   ';
+    doc.getElementById('supervisor-lifecycle-apply-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-apply-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 不能为空/);
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{ invalid json';
+    doc.getElementById('supervisor-lifecycle-approval-preview-approval').value = '{ invalid approval ignored';
+    doc.getElementById('supervisor-lifecycle-apply-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-apply-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 格式错误/);
   });
 
   it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {
@@ -10149,6 +10299,140 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!resultText.includes('secret reason'), 'must not render approval reason');
     assert.ok(!resultText.includes('sha256:secret'), 'must not render hash values');
     assert.ok(!resultText.includes('/Users/ah/Documents'), 'must not render paths');
+  });
+
+  it('manually checks apply readiness and renders sanitized read-only gate status', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url) === '/api/supervisor-lifecycle-apply-readiness') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-apply-readiness',
+              operation: 'install',
+              state: 'blocked',
+              approvalRecordState: 'ready',
+              approvalRecordReady: true,
+              blockers: [],
+              nextBlockers: ['executor-implementation-missing'],
+              approvalRecords: {
+                readOnly: true,
+                count: 1,
+                operationMatchCount: 1,
+                persistedMatchCount: 1,
+              },
+              gates: {
+                lifecyclePlanValid: true,
+                applyFlag: true,
+                envGate: true,
+                approvalRecordPersisted: true,
+                approvalRecordValid: true,
+                approvalRecordOperationMatched: true,
+                executorImplemented: false,
+                configHash: 'sha256:secret',
+              },
+              safety: {
+                dryRun: true,
+                readOnly: true,
+                hostMutation: false,
+                launchctlCalled: false,
+                filesystemWritten: false,
+                lifecycleApplied: false,
+                sensitiveValuesReturned: false,
+              },
+              approvedBy: 'operator@example.invalid',
+              reason: 'secret reason',
+              sourcePath: '/Users/ah/Documents',
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-operation').value = 'install';
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://secret.localhost:3000',
+      deviceId: 'web-lifecycle-apply-readiness',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/linke-documents' }],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-approval').value = '{ invalid approval ignored';
+    doc.getElementById('supervisor-lifecycle-apply-readiness-button')._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url) === '/api/supervisor-lifecycle-apply-readiness');
+    assert.ok(apiCall, 'must call apply readiness API');
+    assert.strictEqual(apiCall.options.method, 'POST');
+    const requestBody = JSON.parse(apiCall.options.body);
+    assert.strictEqual(requestBody.operation, 'install');
+    assert.strictEqual(requestBody.config.deviceId, 'web-lifecycle-apply-readiness');
+    assert.ok(!Object.hasOwn(requestBody, 'approval'), 'readiness must not submit approval JSON');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-status').textContent, '批准记录就绪');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-valid').textContent, 'approvalRecordReady:true');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-persist').textContent, 'readOnly:true / lifecycleApply:false');
+
+    const resultText = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
+    assert.match(resultText, /approval record gate ready/i);
+    assert.match(resultText, /next:executor-implementation-missing/);
+    assert.match(resultText, /records:1/);
+    assert.match(resultText, /approvalRecordValid:true/);
+    assert.match(resultText, /lifecycleApplied:false/);
+    assert.ok(!resultText.includes('operator@example'), 'must not render approval identity value');
+    assert.ok(!resultText.includes('secret reason'), 'must not render approval reason');
+    assert.ok(!resultText.includes('sha256:secret'), 'must not render hash values');
+    assert.ok(!resultText.includes('/Users/ah/Documents'), 'must not render paths');
+    assert.ok(!resultText.includes('secret.localhost'), 'must not render config serverUrl');
+    assert.ok(!resultText.includes('/tmp/linke-documents'), 'must not render config sourcePath');
+  });
+
+  it('does not start a second apply readiness request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url) === '/api/supervisor-lifecycle-apply-readiness') {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-apply-readiness',
+              state: 'blocked',
+              approvalRecordReady: false,
+              blockers: ['approval-record-missing'],
+              nextBlockers: ['executor-implementation-missing'],
+              approvalRecords: { readOnly: true, count: 0, operationMatchCount: 0, persistedMatchCount: 0 },
+              gates: { approvalRecordValid: false },
+              safety: { readOnly: true, lifecycleApplied: false },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-apply-readiness',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    const readinessBtn = doc.getElementById('supervisor-lifecycle-apply-readiness-button');
+    readinessBtn._listeners.click();
+    readinessBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate readiness requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
   });
 
   it('does not start a second approval records request while one is in flight', async () => {

@@ -18,6 +18,17 @@ const APPROVAL_PERSISTENCE_REQUIRED_FIELDS = Object.freeze([
   'reason',
   'acknowledgements',
 ]);
+const APPROVAL_RECORD_READINESS_ALLOWED_PLAN_BLOCKERS = new Set([
+  EXECUTOR_MISSING_BLOCKER,
+  'approval-missing',
+]);
+const APPROVAL_RECORD_READINESS_VALIDATION_FLAGS = Object.freeze([
+  'approvalValid',
+  'windowWithinLimit',
+  'operationMatchesPlan',
+  'configHashMatchesPlan',
+  'planHashMatchesPlan',
+]);
 const SAFE_PLAN_BLOCKERS = new Set([
   EXECUTOR_MISSING_BLOCKER,
   'apply-flag-required',
@@ -168,6 +179,57 @@ function buildApprovalPersistenceValidation(plan, approval) {
   };
 }
 
+function normalizeApprovalRecordValidation(validation) {
+  const source = validation && typeof validation === 'object' ? validation : {};
+  return {
+    approvalValid: source.approvalValid === true,
+    acknowledgementCount: Number.isInteger(source.acknowledgementCount) && source.acknowledgementCount >= 0
+      ? source.acknowledgementCount
+      : 0,
+    windowWithinLimit: source.windowWithinLimit === true,
+    operationMatchesPlan: source.operationMatchesPlan === true,
+    configHashMatchesPlan: source.configHashMatchesPlan === true,
+    planHashMatchesPlan: source.planHashMatchesPlan === true,
+  };
+}
+
+function normalizeApprovalRecordSafety(safety) {
+  const source = safety && typeof safety === 'object' ? safety : {};
+  return {
+    approvalPersisted: source.approvalPersisted === true,
+    filesystemWritten: source.filesystemWritten === true,
+    hostMutation: source.hostMutation === true,
+    launchctlCalled: source.launchctlCalled === true,
+    lifecycleApplied: source.lifecycleApplied === true,
+    sensitiveValuesReturned: source.sensitiveValuesReturned === true,
+  };
+}
+
+function isObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isSupervisorLifecycleApprovalRecord(record) {
+  return isObject(record) && record.command === 'supervisor-lifecycle-approval-record';
+}
+
+function isApprovalRecordValidationComplete(record) {
+  const validation = normalizeApprovalRecordValidation(record?.validation);
+  return record?.approvalValid === true &&
+    validation.acknowledgementCount > 0 &&
+    APPROVAL_RECORD_READINESS_VALIDATION_FLAGS.every((flag) => validation[flag] === true);
+}
+
+function isApprovalRecordSafetyClean(record) {
+  const safety = normalizeApprovalRecordSafety(record?.safety);
+  return safety.approvalPersisted === true &&
+    safety.filesystemWritten === true &&
+    safety.hostMutation === false &&
+    safety.launchctlCalled === false &&
+    safety.lifecycleApplied === false &&
+    safety.sensitiveValuesReturned === false;
+}
+
 function buildPlanHash(operation, configHash, actions) {
   return hashLifecycleObject({
     version: 'V0.88',
@@ -182,6 +244,74 @@ export function hashLifecycleObject(value) {
   const stableJson = JSON.stringify(normalizeForHash(value));
   const hex = createHash('sha256').update(stableJson).digest('hex');
   return `sha256:${hex}`;
+}
+
+export function buildSupervisorLifecycleApplyReadiness(plan, approvalRecords = []) {
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation) ? plan.operation : 'unknown';
+  const safeRecords = Array.isArray(approvalRecords)
+    ? approvalRecords.filter(isSupervisorLifecycleApprovalRecord)
+    : [];
+  const operationRecords = safeRecords.filter((record) => record.operation === operation);
+  const persistedOperationRecords = operationRecords.filter((record) => record.state === 'persisted');
+  const validationReadyRecords = persistedOperationRecords.filter(isApprovalRecordValidationComplete);
+  const safeReadyRecords = validationReadyRecords.filter(isApprovalRecordSafetyClean);
+  const blockers = [];
+
+  if (!plan || plan.command !== 'supervisor-lifecycle-apply' || !Array.isArray(plan.actions) || !Array.isArray(plan.blockers)) {
+    blockers.push('invalid-lifecycle-plan');
+  } else {
+    if (!hasExpectedLifecycleActions(plan)) blockers.push('lifecycle-plan-action-mismatch');
+    const unsafePlanBlockers = plan.blockers
+      .filter((blocker) => !APPROVAL_RECORD_READINESS_ALLOWED_PLAN_BLOCKERS.has(blocker));
+    blockers.push(...safePlanBlockers(unsafePlanBlockers));
+  }
+
+  if (blockers.length === 0) {
+    if (safeRecords.length === 0) {
+      blockers.push('approval-record-missing');
+    } else if (operationRecords.length === 0) {
+      blockers.push('approval-record-operation-mismatch');
+    } else if (persistedOperationRecords.length === 0) {
+      blockers.push('approval-record-not-persisted');
+    } else if (validationReadyRecords.length === 0) {
+      blockers.push('approval-record-validation-incomplete');
+    } else if (safeReadyRecords.length === 0) {
+      blockers.push('approval-record-safety-invalid');
+    }
+  }
+
+  const approvalRecordReady = blockers.length === 0 && safeReadyRecords.length > 0;
+  const planGates = isObject(plan?.gates) ? plan.gates : {};
+  return {
+    command: 'supervisor-lifecycle-apply-readiness',
+    operation,
+    state: 'blocked',
+    approvalRecordState: approvalRecordReady ? 'ready' : 'blocked',
+    approvalRecordReady,
+    blockers: [...new Set(blockers)],
+    nextBlockers: [EXECUTOR_MISSING_BLOCKER],
+    approvalRecords: {
+      readOnly: true,
+      count: safeRecords.length,
+      operationMatchCount: operationRecords.length,
+      persistedMatchCount: persistedOperationRecords.length,
+    },
+    gates: {
+      lifecyclePlanValid: blockers.includes('invalid-lifecycle-plan') === false &&
+        blockers.includes('lifecycle-plan-action-mismatch') === false,
+      applyFlag: planGates.applyFlag === true,
+      envGate: planGates.envGate === true,
+      approvalRecordPersisted: persistedOperationRecords.length > 0,
+      approvalRecordValid: safeReadyRecords.length > 0,
+      approvalRecordOperationMatched: operationRecords.length > 0,
+      executorImplemented: false,
+    },
+    safety: {
+      ...lifecycleSafety(),
+      readOnly: true,
+      lifecycleApplied: false,
+    },
+  };
 }
 
 export function validateSupervisorLifecycleApproval(approval, expected = {}) {

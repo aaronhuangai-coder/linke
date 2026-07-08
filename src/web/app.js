@@ -816,6 +816,91 @@ export function buildSupervisorLifecycleApprovalRecordsViewModel(payload, errorM
   };
 }
 
+function buildSupervisorLifecycleApplyReadinessSafetyLines(safety) {
+  const source = safety && typeof safety === 'object' ? safety : {};
+  return [
+    'readOnly',
+    ...SUPERVISOR_LIFECYCLE_APPROVAL_PREVIEW_SAFETY_KEYS,
+  ].map((key) => `${key}:${source[key] === true ? 'true' : 'false'}`);
+}
+
+function buildSupervisorLifecycleApplyReadinessGateLines(gates) {
+  const source = gates && typeof gates === 'object' ? gates : {};
+  return [
+    'lifecyclePlanValid',
+    'applyFlag',
+    'envGate',
+    'approvalRecordPersisted',
+    'approvalRecordValid',
+    'approvalRecordOperationMatched',
+    'executorImplemented',
+  ].map((key) => `${key}:${source[key] === true ? 'true' : 'false'}`);
+}
+
+function buildSupervisorLifecycleApplyReadinessRecordLines(approvalRecords) {
+  const source = approvalRecords && typeof approvalRecords === 'object' ? approvalRecords : {};
+  const count = Number.isFinite(Number(source.count)) ? Number(source.count) : 0;
+  const operationMatchCount = Number.isFinite(Number(source.operationMatchCount)) ? Number(source.operationMatchCount) : 0;
+  const persistedMatchCount = Number.isFinite(Number(source.persistedMatchCount)) ? Number(source.persistedMatchCount) : 0;
+  return [
+    `records:${count}`,
+    `operationMatches:${operationMatchCount}`,
+    `persistedMatches:${persistedMatchCount}`,
+  ];
+}
+
+export function buildSupervisorLifecycleApplyReadinessViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      approvalValidText: '—',
+      persistenceText: '—',
+      blockers: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: [],
+      messageText: 'Supervisor lifecycle apply readiness 检查失败: ' + sanitizeSupervisorInstallErrorMessage(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      approvalValidText: 'records:0',
+      persistenceText: 'readOnly:true / lifecycleApply:false',
+      blockers: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: ['readOnly:true', 'lifecycleApplied:false'],
+      messageText: '点击手动 POST /api/supervisor-lifecycle-apply-readiness 获取 apply readiness preflight',
+    };
+  }
+
+  const statusKey = payload.approvalRecordReady === true ? 'ready' : 'blocked';
+  const blockers = [
+    ...normalizeStringList(payload.blockers),
+    ...normalizeStringList(payload.nextBlockers).map((blocker) => `next:${blocker}`),
+  ];
+  return {
+    statusKey,
+    statusText: statusKey === 'ready' ? '批准记录就绪' : '阻塞',
+    approvalValidText: `approvalRecordReady:${payload.approvalRecordReady === true ? 'true' : 'false'}`,
+    persistenceText: 'readOnly:true / lifecycleApply:false',
+    blockers,
+    requiredFields: [],
+    recordLines: buildSupervisorLifecycleApplyReadinessRecordLines(payload.approvalRecords),
+    validationLines: buildSupervisorLifecycleApplyReadinessGateLines(payload.gates),
+    safetyLines: buildSupervisorLifecycleApplyReadinessSafetyLines(payload.safety),
+    messageText: statusKey === 'ready'
+      ? 'Supervisor approval record gate ready; this is not lifecycle apply.'
+      : 'POST /api/supervisor-lifecycle-apply-readiness completed; readiness remains fail-closed.',
+  };
+}
+
 export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
   if (errorMessage) {
     return {
@@ -1802,6 +1887,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const supervisorLifecycleApprovalPreviewRunButton = doc.getElementById('supervisor-lifecycle-approval-preview-run');
   const supervisorLifecycleApprovalPersistButton = doc.getElementById('supervisor-lifecycle-approval-persist-button');
   const supervisorLifecycleApprovalRecordsButton = doc.getElementById('supervisor-lifecycle-approval-records-button');
+  const supervisorLifecycleApplyReadinessButton = doc.getElementById('supervisor-lifecycle-apply-readiness-button');
   const supervisorLifecycleApprovalPreviewStatusEl = doc.getElementById('supervisor-lifecycle-approval-preview-status');
   const supervisorLifecycleApprovalPreviewValidEl = doc.getElementById('supervisor-lifecycle-approval-preview-valid');
   const supervisorLifecycleApprovalPreviewPersistEl = doc.getElementById('supervisor-lifecycle-approval-preview-persist');
@@ -3278,6 +3364,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     renderSupervisorLifecycleApprovalPreview(viewModel);
   }
 
+  function setSupervisorLifecycleApplyReadinessError(message) {
+    const viewModel = buildSupervisorLifecycleApplyReadinessViewModel(null, message);
+    renderSupervisorLifecycleApprovalPreview(viewModel);
+  }
+
   function appendSupervisorInstallGroup(titleText, lines) {
     if (!supervisorInstallDryRunResultEl || lines.length === 0) return;
     const group = doc.createElement('div');
@@ -3476,6 +3567,28 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     };
   }
 
+  function parseSupervisorLifecycleApplyReadinessPayload() {
+    const configRaw = supervisorLifecycleApprovalPreviewConfigInput ? supervisorLifecycleApprovalPreviewConfigInput.value : '';
+    if (!String(configRaw || '').trim()) {
+      return { ok: false, error: '配置 JSON 不能为空' };
+    }
+
+    let config;
+    try {
+      config = JSON.parse(configRaw);
+    } catch (err) {
+      return { ok: false, error: '配置 JSON 格式错误' };
+    }
+
+    return {
+      ok: true,
+      payload: {
+        operation: supervisorLifecycleApprovalPreviewOperationInput?.value || 'install',
+        config,
+      },
+    };
+  }
+
   async function fetchSupervisorLifecycleApprovalPreview() {
     if (!supervisorLifecycleApprovalPreviewResultEl || supervisorLifecycleApprovalPreviewInFlight) return;
 
@@ -3600,6 +3713,49 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     } finally {
       supervisorLifecycleApprovalRecordsInFlight = false;
       if (supervisorLifecycleApprovalRecordsButton) supervisorLifecycleApprovalRecordsButton.disabled = false;
+    }
+  }
+
+  async function fetchSupervisorLifecycleApplyReadiness() {
+    if (!supervisorLifecycleApprovalPreviewResultEl || supervisorLifecycleApplyReadinessInFlight) return;
+
+    const parsed = parseSupervisorLifecycleApplyReadinessPayload();
+    if (!parsed.ok) {
+      setSupervisorLifecycleApplyReadinessError(parsed.error);
+      return;
+    }
+
+    supervisorLifecycleApplyReadinessInFlight = true;
+    if (supervisorLifecycleApplyReadinessButton) supervisorLifecycleApplyReadinessButton.disabled = true;
+    clearElement(supervisorLifecycleApprovalPreviewResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '检查 apply readiness 中...';
+    supervisorLifecycleApprovalPreviewResultEl.appendChild(loading);
+
+    try {
+      const res = await apiFetch('/api/supervisor-lifecycle-apply-readiness', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.payload),
+      });
+      let body;
+      try {
+        body = await res.json();
+      } catch (_) {
+        body = {};
+      }
+      if (!res.ok) {
+        throw new Error(body.error || 'HTTP ' + res.status);
+      }
+      renderSupervisorLifecycleApprovalPreview(buildSupervisorLifecycleApplyReadinessViewModel(body));
+      logEvent('Supervisor lifecycle apply readiness preflight completed', body.state === 'ready' ? 'info' : 'warning');
+    } catch (err) {
+      setSupervisorLifecycleApplyReadinessError(err.message);
+      logEvent('Supervisor lifecycle apply readiness failed: ' + sanitizeSupervisorInstallErrorMessage(err.message), 'error');
+    } finally {
+      supervisorLifecycleApplyReadinessInFlight = false;
+      if (supervisorLifecycleApplyReadinessButton) supervisorLifecycleApplyReadinessButton.disabled = false;
     }
   }
 
@@ -3875,6 +4031,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   if (supervisorLifecycleApprovalRecordsButton?.addEventListener) {
     supervisorLifecycleApprovalRecordsButton.addEventListener('click', fetchSupervisorLifecycleApprovalRecords);
   }
+  if (supervisorLifecycleApplyReadinessButton?.addEventListener) {
+    supervisorLifecycleApplyReadinessButton.addEventListener('click', fetchSupervisorLifecycleApplyReadiness);
+  }
 
   for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
@@ -3933,6 +4092,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let supervisorLifecycleApprovalPreviewInFlight = false;
   let supervisorLifecycleApprovalPersistInFlight = false;
   let supervisorLifecycleApprovalRecordsInFlight = false;
+  let supervisorLifecycleApplyReadinessInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
