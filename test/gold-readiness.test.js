@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.01', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.01');
+  it('expects LINKE_RELEASE_VERSION to be V1.02', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.02');
   });
 
-  it('expects report.version to be V1.01', () => {
+  it('expects report.version to be V1.02', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.01');
+    assert.strictEqual(report.version, 'V1.02');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -232,9 +232,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle executor readiness'));
     assert.ok(automationEvidence.includes('validateSupervisorLifecycleExecutorManifest'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-executor-manifest.test.js'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-executor-manifest-readiness'));
+    assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-executor-manifest-readiness.test.js'));
     assert.ok(automationEvidence.includes('executorManifestReadiness.state:blocked'));
     assert.ok(automationEvidence.includes('executorManifestReadiness.executorReady:false'));
     assert.ok(automationEvidence.includes('guarded-executor-runner-missing'));
+    assert.ok(automationItem.nextStep.includes('V1.02'));
     assert.ok(automationItem.nextStep.includes('V1.01'));
     assert.ok(automationItem.nextStep.includes('V1.00'));
     assert.ok(automationItem.nextStep.includes('V0.99'));
@@ -390,12 +393,15 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle apply readiness'));
     assert.ok(hardeningEvidence.includes('validateSupervisorLifecycleExecutorManifest'));
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-executor-manifest.test.js'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-executor-manifest-readiness'));
+    assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-executor-manifest-readiness.test.js'));
     assert.ok(hardeningEvidence.includes('executorManifestReadiness.state:blocked'));
     assert.ok(hardeningEvidence.includes('executorManifestReadiness.executorReady:false'));
     assert.ok(hardeningEvidence.includes('guarded-executor-runner-missing'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.02'));
     assert.ok(hardeningItem.nextStep.includes('V1.01'));
     assert.ok(hardeningItem.nextStep.includes('V0.97'));
     assert.ok(hardeningItem.nextStep.includes('V0.96'));
