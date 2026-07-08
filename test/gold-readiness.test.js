@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V0.96', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.96');
+  it('expects LINKE_RELEASE_VERSION to be V0.97', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V0.97');
   });
 
-  it('expects report.version to be V0.96', () => {
+  it('expects report.version to be V0.97', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V0.96');
+    assert.strictEqual(report.version, 'V0.97');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -214,11 +214,14 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
     assert.ok(automationEvidence.includes('buildSupervisorLifecycleApplyReadiness'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-apply-readiness.test.js'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-apply-readiness'));
+    assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-apply-readiness.test.js'));
     assert.ok(automationEvidence.includes('POST /api/supervisor-lifecycle-apply-readiness'));
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-apply-readiness-api.test.js'));
     assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleApplyReadinessViewModel'));
     assert.ok(automationEvidence.includes('supervisor-lifecycle-apply-readiness-button'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle apply readiness'));
+    assert.ok(automationItem.nextStep.includes('V0.97'));
     assert.ok(automationItem.nextStep.includes('V0.96'));
     assert.ok(automationItem.nextStep.includes('V0.95'));
     assert.ok(automationItem.nextStep.includes('V0.94'));
@@ -360,6 +363,8 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle approval persist'));
     assert.ok(hardeningEvidence.includes('buildSupervisorLifecycleApplyReadiness'));
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-apply-readiness.test.js'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-apply-readiness'));
+    assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-apply-readiness.test.js'));
     assert.ok(hardeningEvidence.includes('POST /api/supervisor-lifecycle-apply-readiness'));
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-apply-readiness-api.test.js'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorLifecycleApplyReadinessViewModel'));
@@ -368,6 +373,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V0.97'));
     assert.ok(hardeningItem.nextStep.includes('V0.96'));
     assert.ok(hardeningItem.nextStep.includes('V0.95'));
     assert.ok(hardeningItem.nextStep.includes('V0.94'));
