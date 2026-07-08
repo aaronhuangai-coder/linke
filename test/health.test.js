@@ -84,12 +84,13 @@ describe('Auth status response', () => {
 describe('Shared write-route registry pure tests', () => {
   it('defines API_WRITE_ROUTES correctly', () => {
     assert.strictEqual(Array.isArray(API_WRITE_ROUTES), true);
-    assert.strictEqual(API_WRITE_ROUTES.length, 3);
+    assert.strictEqual(API_WRITE_ROUTES.length, 4);
 
     const expected = [
       { method: 'POST', path: '/api/heartbeat' },
       { method: 'POST', path: '/api/backups' },
       { method: 'POST', path: '/api/restore' },
+      { method: 'POST', path: '/api/supervisor-lifecycle-approval-persist' },
     ];
     assert.deepStrictEqual(API_WRITE_ROUTES, expected);
   });
@@ -98,15 +99,21 @@ describe('Shared write-route registry pure tests', () => {
     assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/heartbeat' }), 'POST /api/heartbeat');
     assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/backups' }), 'POST /api/backups');
     assert.strictEqual(formatApiRoute({ method: 'POST', path: '/api/restore' }), 'POST /api/restore');
+    assert.strictEqual(
+      formatApiRoute({ method: 'POST', path: '/api/supervisor-lifecycle-approval-persist' }),
+      'POST /api/supervisor-lifecycle-approval-persist',
+    );
   });
 
   it('isApiWriteRoute returns true for the write routes and false for others', () => {
     assert.strictEqual(isApiWriteRoute('POST', '/api/heartbeat'), true);
     assert.strictEqual(isApiWriteRoute('POST', '/api/backups'), true);
     assert.strictEqual(isApiWriteRoute('POST', '/api/restore'), true);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-approval-persist'), true);
 
     assert.strictEqual(isApiWriteRoute('GET', '/api/heartbeat'), false);
     assert.strictEqual(isApiWriteRoute('POST', '/api/nas-dry-run'), false);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-approval-persistence-preview'), false);
   });
 });
 describe('GET /api/health', () => {

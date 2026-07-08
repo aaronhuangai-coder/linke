@@ -25,6 +25,10 @@ import {
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApprovalPersistencePreview,
 } from './supervisor-lifecycle.js';
+import {
+  appendSupervisorLifecycleApprovalRecord,
+  isPersistablePreview,
+} from './approval-store.js';
 import { LINKE_RELEASE_VERSION } from './version.js';
 import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
@@ -48,6 +52,7 @@ export const API_WRITE_ROUTES = [
   { method: 'POST', path: '/api/heartbeat' },
   { method: 'POST', path: '/api/backups' },
   { method: 'POST', path: '/api/restore' },
+  { method: 'POST', path: '/api/supervisor-lifecycle-approval-persist' },
 ];
 
 export function formatApiRoute(route) {
@@ -678,6 +683,128 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
         } catch (err) {
           return sendError(res, 400, err.message);
         }
+      }
+
+      // POST /api/supervisor-lifecycle-approval-persist
+      // Manual approval record persistence only. This route writes sanitized
+      // local JSONL records and never applies lifecycle changes.
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-approval-persist') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400) {
+            await recordAudit(dataDir, {
+              type: 'api.supervisor_lifecycle_approval_persist.failure',
+              method,
+              path: pathname,
+              statusCode: 400,
+              outcome: 'failure',
+              requestId,
+              message: 'invalid request body',
+            }, auditRetention);
+            return sendError(res, 400, err.message);
+          }
+          throw err;
+        }
+
+        const operation = body?.operation;
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(operation)) {
+          await recordAudit(dataDir, {
+            type: 'api.supervisor_lifecycle_approval_persist.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            message: 'invalid operation',
+          }, auditRetention);
+          return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+        }
+
+        if (!body?.approval || typeof body.approval !== 'object' || Array.isArray(body.approval)) {
+          await recordAudit(dataDir, {
+            type: 'api.supervisor_lifecycle_approval_persist.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            operation,
+            message: 'approval object is required',
+          }, auditRetention);
+          return sendError(res, 400, 'approval object is required');
+        }
+
+        let config;
+        try {
+          config = validateConfig(body?.config);
+        } catch (err) {
+          await recordAudit(dataDir, {
+            type: 'api.supervisor_lifecycle_approval_persist.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            operation,
+            message: 'invalid config',
+          }, auditRetention);
+          return sendError(res, 400, err.message);
+        }
+
+        const approval = body.approval;
+        const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+          operation,
+          apply: true,
+          envGateEnabled: true,
+          approval,
+        });
+        const preview = buildSupervisorLifecycleApprovalPersistencePreview(lifecyclePlan, approval);
+
+        if (!isPersistablePreview(preview)) {
+          await recordAudit(dataDir, {
+            type: 'api.supervisor_lifecycle_approval_persist.blocked',
+            method,
+            path: pathname,
+            statusCode: 409,
+            outcome: 'blocked',
+            requestId,
+            operation,
+            message: 'approval persistence blocked',
+          }, auditRetention);
+          return sendJSON(res, 409, preview);
+        }
+
+        let record;
+        try {
+          record = await appendSupervisorLifecycleApprovalRecord(dataDir, preview, approval);
+        } catch (err) {
+          await recordAudit(dataDir, {
+            type: 'api.supervisor_lifecycle_approval_persist.failure',
+            method,
+            path: pathname,
+            statusCode: 500,
+            outcome: 'failure',
+            requestId,
+            operation,
+            message: 'failed to persist approval record',
+          }, auditRetention);
+          return sendError(res, 500, 'failed to persist approval record');
+        }
+
+        await recordAudit(dataDir, {
+          type: 'api.supervisor_lifecycle_approval_persist.persisted',
+          method,
+          path: pathname,
+          statusCode: 201,
+          outcome: 'success',
+          requestId,
+          operation,
+          message: 'approval record persisted',
+        }, auditRetention);
+        return sendJSON(res, 201, record);
       }
 
       // POST /api/restore

@@ -15,6 +15,7 @@ const STRING_FIELDS = [
   'requestId',
   'deviceId',
   'snapshotId',
+  'operation',
   'message',
 ];
 
