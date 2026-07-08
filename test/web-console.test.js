@@ -46,6 +46,7 @@ import {
   buildSupervisorLifecycleApprovalPersistViewModel,
   buildSupervisorLifecycleApplyReadinessViewModel,
   buildSupervisorLifecycleExecutorReadinessViewModel,
+  buildSupervisorLifecycleExecutorManifestReadinessViewModel,
 } from '../src/web/app.js';
 import { buildSupervisorLifecycleApplyPlan } from '../src/supervisor-lifecycle.js';
 
@@ -9123,6 +9124,90 @@ describe('buildSupervisorLifecycleExecutorReadinessViewModel', () => {
   });
 });
 
+describe('buildSupervisorLifecycleExecutorManifestReadinessViewModel', () => {
+  it('returns unknown state for missing payload without implying execution readiness', () => {
+    const result = buildSupervisorLifecycleExecutorManifestReadinessViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.approvalValidText, 'manifestReady:false / executorReady:false');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / executorReady:false');
+    assert.deepStrictEqual(result.blockers, []);
+    assert.deepStrictEqual(result.recordLines, []);
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.match(result.messageText, /manifest readiness/i);
+  });
+
+  it('returns sanitized blocked executor manifest readiness fields without exposing sensitive payload details', () => {
+    const result = buildSupervisorLifecycleExecutorManifestReadinessViewModel({
+      command: 'supervisor-lifecycle-executor-manifest-readiness',
+      operation: 'install',
+      state: 'blocked',
+      manifestState: 'blocked',
+      manifestReady: false,
+      executorReady: false,
+      blockers: ['guarded-executor-runner-missing', 'executor-manifest-missing-for-action:/Users/ah/secret-path/render-launch-agent-plist'],
+      manifestBlockers: ['executor-manifest-missing-for-action:/Users/ah/secret-path/render-launch-agent-plist'],
+      nextBlockers: ['guarded-executor-runner-missing'],
+      actionManifests: [
+        {
+          wouldRun: false,
+          wouldWrite: false,
+          actionId: 'capture-current-state',
+          implementationId: 'my-implementation',
+          mode: 'guarded-host-action',
+          requiresApprovalRecord: true,
+          maxAttempts: 3,
+        },
+      ],
+      gates: {
+        lifecyclePlanValid: true,
+        manifestReady: false,
+        executorImplemented: false,
+      },
+      safety: {
+        dryRun: true,
+        readOnly: true,
+        hostMutation: false,
+        launchctlCalled: false,
+        filesystemWritten: false,
+        lifecycleApplied: false,
+        sensitiveValuesReturned: false,
+      },
+    });
+    const text = JSON.stringify(result);
+
+    assert.strictEqual(result.statusKey, 'blocked');
+    assert.strictEqual(result.statusText, '执行器未就绪');
+    assert.strictEqual(result.approvalValidText, 'manifestReady:false / executorReady:false');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / executorReady:false');
+    assert.ok(result.blockers.includes('guarded-executor-runner-missing'));
+    assert.ok(result.blockers.includes('executor-manifest-missing-for-action:[redacted-path]'));
+    assert.ok(result.blockers.includes('manifest:executor-manifest-missing-for-action:[redacted-path]'));
+    assert.ok(result.blockers.includes('next:guarded-executor-runner-missing'));
+    assert.ok(result.requiredFields.includes('action:capture-current-state:impl:my-implementation:mode:guarded-host-action:wouldRun:false:wouldWrite:false'));
+    assert.ok(result.validationLines.includes('lifecyclePlanValid:true'));
+    assert.ok(result.validationLines.includes('manifestReady:false'));
+    assert.ok(result.validationLines.includes('executorImplemented:false'));
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.ok(result.safetyLines.includes('launchctlCalled:false'));
+    assert.match(result.messageText, /executor manifest readiness/i);
+    assert.match(result.messageText, /fail-closed/i);
+    assert.ok(!text.includes('/Users/ah/secret-path'), 'must not expose paths');
+  });
+
+  it('returns sanitized error state', () => {
+    const failed = buildSupervisorLifecycleExecutorManifestReadinessViewModel(null, 'Bearer token secret-value failed at /Users/ah/private');
+
+    assert.strictEqual(failed.statusKey, 'error');
+    assert.strictEqual(failed.statusText, '检查失败');
+    assert.ok(!failed.messageText.includes('secret-value'), 'error message must be sanitized');
+    assert.ok(!failed.messageText.includes('/Users/ah/private'), 'error path must be sanitized');
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -10117,6 +10202,60 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 格式错误/);
   });
 
+  it('does not request /api/supervisor-lifecycle-executor-manifest-readiness on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness') fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call executor manifest readiness API on init');
+  });
+
+  it('validates executor manifest readiness config and manifest locally without calling the API', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        calls.push(url);
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    // config is empty
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '   ';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{}';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 不能为空/);
+
+    // config is invalid
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{ invalid json';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{}';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 格式错误/);
+
+    // manifest is empty
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{}';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '  ';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /执行器 Manifest JSON 不能为空/);
+
+    // manifest is invalid
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{}';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{ invalid manifest';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button')._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /执行器 Manifest JSON 格式错误/);
+  });
+
   it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {
     const calls = [];
     const doc = buildMockDoc();
@@ -10733,6 +10872,150 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     readinessBtn._listeners.click();
     readinessBtn._listeners.click();
     assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate executor readiness requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+
+  it('manually checks executor manifest readiness and renders sanitized read-only gate status', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-executor-manifest-readiness',
+              operation: 'install',
+              state: 'blocked',
+              manifestState: 'blocked',
+              manifestReady: false,
+              executorReady: false,
+              blockers: ['guarded-executor-runner-missing', 'executor-manifest-missing-for-action:/Users/ah/secret-path/render-launch-agent-plist'],
+              nextBlockers: ['guarded-executor-runner-missing'],
+              actionManifests: [
+                {
+                  wouldRun: false,
+                  wouldWrite: false,
+                  actionId: 'capture-current-state',
+                  implementationId: 'my-implementation',
+                  mode: 'guarded-host-action',
+                  requiresApprovalRecord: true,
+                  maxAttempts: 3
+                }
+              ],
+              gates: {
+                lifecyclePlanValid: true,
+                manifestReady: false,
+                executorImplemented: false,
+              },
+              safety: {
+                dryRun: true,
+                readOnly: true,
+                hostMutation: false,
+                launchctlCalled: false,
+                filesystemWritten: false,
+                lifecycleApplied: false,
+                sensitiveValuesReturned: false,
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-operation').value = 'install';
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-executor-manifest-readiness',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-executor-manifest',
+      schemaVersion: 1,
+      actions: [],
+    });
+
+    const manifestBtn = doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button');
+    manifestBtn._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url) === '/api/supervisor-lifecycle-executor-manifest-readiness');
+    assert.ok(apiCall, 'must call executor manifest readiness API');
+    assert.strictEqual(apiCall.options.method, 'POST');
+
+    const requestBody = JSON.parse(apiCall.options.body);
+    assert.strictEqual(requestBody.operation, 'install');
+    assert.strictEqual(requestBody.config.deviceId, 'web-lifecycle-executor-manifest-readiness');
+    assert.strictEqual(requestBody.manifest.kind, 'supervisor-lifecycle-executor-manifest');
+    assert.ok(requestBody.approval === undefined, 'must not submit approval JSON');
+
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-status').textContent, '执行器未就绪');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-valid').textContent, 'manifestReady:false / executorReady:false');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-persist').textContent, 'readOnly:true / executorReady:false');
+
+    const resultText = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
+    assert.match(resultText, /guarded-executor-runner-missing/);
+    assert.match(resultText, /executor-manifest-missing-for-action:\[redacted-path\]/);
+    assert.match(resultText, /action:capture-current-state:impl:my-implementation:mode:guarded-host-action:wouldRun:false:wouldWrite:false/);
+    assert.match(resultText, /lifecyclePlanValid:true/);
+    assert.match(resultText, /manifestReady:false/);
+    assert.match(resultText, /executorImplemented:false/);
+    assert.match(resultText, /readOnly:true/);
+    assert.match(resultText, /lifecycleApplied:false/);
+    assert.ok(!resultText.includes('/Users/ah/secret-path'), 'must not expose paths');
+  });
+
+  it('does not start a second executor manifest readiness request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness') {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-executor-manifest-readiness',
+              manifestReady: false,
+              executorReady: false,
+              blockers: [],
+              actionManifests: [],
+              gates: {},
+              safety: {},
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-executor-manifest-readiness-inflight',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-executor-manifest',
+      schemaVersion: 1,
+      actions: [],
+    });
+
+    const manifestBtn = doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button');
+    manifestBtn._listeners.click();
+    manifestBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate executor manifest readiness requests');
 
     resolveRequest();
     await new Promise((resolve) => setTimeout(resolve, 30));

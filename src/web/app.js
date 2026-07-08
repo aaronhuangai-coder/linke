@@ -988,6 +988,99 @@ export function buildSupervisorLifecycleExecutorReadinessViewModel(payload, erro
   };
 }
 
+function sanitizeManifestReadinessValue(value) {
+  let line = String(value || '').trim();
+  if (!line) return '';
+
+  // URL、路径、凭证、hash 与可执行命令都只作为状态码展示，不回显原值。
+  line = line.replace(/https?:\/\/[^\s"']+/gi, '[redacted-url]');
+  line = line.replace(/(?:\/[a-zA-Z0-9._-]+)+/g, '[redacted-path]');
+  line = line.replace(/[a-zA-Z]:\\[a-zA-Z0-9._\\-]+/g, '[redacted-path]');
+  line = line.replace(/(?:token|secret|bearer|authorization|auth|apiKey|credential)[-_\w]*/gi, '[redacted-token]');
+  line = line.replace(/\b(?:sha256|md5|sha1):[a-fA-F0-9]+\b/g, '[redacted-hash]');
+  line = line.replace(/\b[a-fA-F0-9]{32,64}\b/g, '[redacted-hash]');
+  line = line.replace(/\b(?:launchctl|sudo|bash|sh|node|npm|git|curl|wget)\b.*/gi, '[redacted-command]');
+
+  return line;
+}
+
+export function buildSupervisorLifecycleExecutorManifestReadinessViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      approvalValidText: '—',
+      persistenceText: '—',
+      blockers: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: [],
+      messageText: 'Supervisor lifecycle executor manifest readiness 检查失败: ' + sanitizeSupervisorInstallErrorMessage(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      approvalValidText: 'manifestReady:false / executorReady:false',
+      persistenceText: 'readOnly:true / executorReady:false',
+      blockers: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: ['readOnly:true', 'lifecycleApplied:false'],
+      messageText: '点击手动 POST /api/supervisor-lifecycle-executor-manifest-readiness 获取 executor manifest readiness preflight',
+    };
+  }
+
+  const statusKey = 'blocked';
+  const statusText = '执行器未就绪';
+  const approvalValidText = `manifestReady:${payload.manifestReady === true ? 'true' : 'false'} / executorReady:false`;
+  const persistenceText = 'readOnly:true / executorReady:false';
+
+  const blockers = [
+    ...normalizeStringList(payload.blockers).map(sanitizeManifestReadinessValue),
+    ...normalizeStringList(payload.manifestBlockers).map((blocker) => `manifest:${sanitizeManifestReadinessValue(blocker)}`),
+    ...normalizeStringList(payload.nextBlockers).map((blocker) => `next:${sanitizeManifestReadinessValue(blocker)}`),
+  ].filter(Boolean);
+
+  const actionManifests = Array.isArray(payload.actionManifests) ? payload.actionManifests : [];
+  const requiredFields = actionManifests.map((m) => {
+    const actionId = sanitizeManifestReadinessValue(m.actionId);
+    const implId = sanitizeManifestReadinessValue(m.implementationId);
+    const mode = sanitizeManifestReadinessValue(m.mode);
+    return `action:${actionId}:impl:${implId}:mode:${mode}:wouldRun:${m.wouldRun === true ? 'true' : 'false'}:wouldWrite:${m.wouldWrite === true ? 'true' : 'false'}`;
+  });
+
+  const gates = payload.gates && typeof payload.gates === 'object' ? payload.gates : {};
+  const validationLines = [
+    `lifecyclePlanValid:${gates.lifecyclePlanValid === true ? 'true' : 'false'}`,
+    `manifestReady:${gates.manifestReady === true ? 'true' : 'false'}`,
+    `executorImplemented:${gates.executorImplemented === true ? 'true' : 'false'}`,
+  ];
+
+  const safety = payload.safety && typeof payload.safety === 'object' ? payload.safety : {};
+  const safetyLines = [
+    'readOnly',
+    ...SUPERVISOR_LIFECYCLE_APPROVAL_PREVIEW_SAFETY_KEYS,
+  ].map((key) => `${key}:${safety[key] === true ? 'true' : 'false'}`);
+
+  return {
+    statusKey,
+    statusText,
+    approvalValidText,
+    persistenceText,
+    blockers,
+    requiredFields,
+    recordLines: [],
+    validationLines,
+    safetyLines,
+    messageText: 'POST /api/supervisor-lifecycle-executor-manifest-readiness completed; executor manifest readiness remains fail-closed.',
+  };
+}
+
 export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
   if (errorMessage) {
     return {
@@ -1976,6 +2069,8 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const supervisorLifecycleApprovalRecordsButton = doc.getElementById('supervisor-lifecycle-approval-records-button');
   const supervisorLifecycleApplyReadinessButton = doc.getElementById('supervisor-lifecycle-apply-readiness-button');
   const supervisorLifecycleExecutorReadinessButton = doc.getElementById('supervisor-lifecycle-executor-readiness-button');
+  const supervisorLifecycleExecutorManifestReadinessManifestInput = doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest');
+  const supervisorLifecycleExecutorManifestReadinessButton = doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button');
   const supervisorLifecycleApprovalPreviewStatusEl = doc.getElementById('supervisor-lifecycle-approval-preview-status');
   const supervisorLifecycleApprovalPreviewValidEl = doc.getElementById('supervisor-lifecycle-approval-preview-valid');
   const supervisorLifecycleApprovalPreviewPersistEl = doc.getElementById('supervisor-lifecycle-approval-preview-persist');
@@ -3895,6 +3990,89 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  function parseSupervisorLifecycleExecutorManifestReadinessPayload() {
+    const configRaw = supervisorLifecycleApprovalPreviewConfigInput ? supervisorLifecycleApprovalPreviewConfigInput.value : '';
+    if (!String(configRaw || '').trim()) {
+      return { ok: false, error: '配置 JSON 不能为空' };
+    }
+
+    let config;
+    try {
+      config = JSON.parse(configRaw);
+    } catch (err) {
+      return { ok: false, error: '配置 JSON 格式错误' };
+    }
+
+    const manifestRaw = supervisorLifecycleExecutorManifestReadinessManifestInput ? supervisorLifecycleExecutorManifestReadinessManifestInput.value : '';
+    if (!String(manifestRaw || '').trim()) {
+      return { ok: false, error: '执行器 Manifest JSON 不能为空' };
+    }
+
+    let manifest;
+    try {
+      manifest = JSON.parse(manifestRaw);
+    } catch (err) {
+      return { ok: false, error: '执行器 Manifest JSON 格式错误' };
+    }
+
+    return {
+      ok: true,
+      payload: {
+        operation: supervisorLifecycleApprovalPreviewOperationInput?.value || 'install',
+        config,
+        manifest,
+      },
+    };
+  }
+
+  async function fetchSupervisorLifecycleExecutorManifestReadiness() {
+    if (!supervisorLifecycleApprovalPreviewResultEl || supervisorLifecycleExecutorManifestReadinessInFlight) return;
+
+    const parsed = parseSupervisorLifecycleExecutorManifestReadinessPayload();
+    if (!parsed.ok) {
+      setSupervisorLifecycleExecutorManifestReadinessError(parsed.error);
+      return;
+    }
+
+    supervisorLifecycleExecutorManifestReadinessInFlight = true;
+    if (supervisorLifecycleExecutorManifestReadinessButton) supervisorLifecycleExecutorManifestReadinessButton.disabled = true;
+    clearElement(supervisorLifecycleApprovalPreviewResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '检查 executor manifest readiness 中...';
+    supervisorLifecycleApprovalPreviewResultEl.appendChild(loading);
+
+    try {
+      const res = await apiFetch('/api/supervisor-lifecycle-executor-manifest-readiness', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.payload),
+      });
+      let body;
+      try {
+        body = await res.json();
+      } catch (_) {
+        body = {};
+      }
+      if (!res.ok) {
+        throw new Error(body.error || 'HTTP ' + res.status);
+      }
+      renderSupervisorLifecycleApprovalPreview(buildSupervisorLifecycleExecutorManifestReadinessViewModel(body));
+      logEvent('Supervisor lifecycle executor manifest readiness preflight completed', 'warning');
+    } catch (err) {
+      setSupervisorLifecycleExecutorManifestReadinessError(err.message);
+      logEvent('Supervisor lifecycle executor manifest readiness failed: ' + sanitizeSupervisorInstallErrorMessage(err.message), 'error');
+    } finally {
+      supervisorLifecycleExecutorManifestReadinessInFlight = false;
+      if (supervisorLifecycleExecutorManifestReadinessButton) supervisorLifecycleExecutorManifestReadinessButton.disabled = false;
+    }
+  }
+
+  function setSupervisorLifecycleExecutorManifestReadinessError(message) {
+    const viewModel = buildSupervisorLifecycleExecutorManifestReadinessViewModel(null, message);
+    renderSupervisorLifecycleApprovalPreview(viewModel);
+  }
+
   function setSnapshotDiffCounts(addedCount, removedCount, unchangedCount) {
     if (snapshotDiffAddedCountEl) snapshotDiffAddedCountEl.textContent = String(addedCount);
     if (snapshotDiffRemovedCountEl) snapshotDiffRemovedCountEl.textContent = String(removedCount);
@@ -4173,6 +4351,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   if (supervisorLifecycleExecutorReadinessButton?.addEventListener) {
     supervisorLifecycleExecutorReadinessButton.addEventListener('click', fetchSupervisorLifecycleExecutorReadiness);
   }
+  if (supervisorLifecycleExecutorManifestReadinessButton?.addEventListener) {
+    supervisorLifecycleExecutorManifestReadinessButton.addEventListener('click', fetchSupervisorLifecycleExecutorManifestReadiness);
+  }
 
   for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
@@ -4233,6 +4414,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let supervisorLifecycleApprovalRecordsInFlight = false;
   let supervisorLifecycleApplyReadinessInFlight = false;
   let supervisorLifecycleExecutorReadinessInFlight = false;
+  let supervisorLifecycleExecutorManifestReadinessInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);

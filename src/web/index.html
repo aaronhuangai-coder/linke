@@ -215,11 +215,22 @@
             data-testid="supervisor-lifecycle-approval-preview-approval"
             rows="6"
           ></textarea>
+          <label for="supervisor-lifecycle-executor-manifest-readiness-manifest">执行器 Manifest JSON</label>
+          <textarea
+            id="supervisor-lifecycle-executor-manifest-readiness-manifest"
+            data-testid="supervisor-lifecycle-executor-manifest-readiness-manifest"
+            rows="8"
+          >{
+  "kind": "supervisor-lifecycle-executor-manifest",
+  "schemaVersion": 1,
+  "actions": []
+}</textarea>
           <button id="supervisor-lifecycle-approval-preview-run" data-testid="supervisor-lifecycle-approval-preview-run" type="button">Approval preview</button>
           <button id="supervisor-lifecycle-approval-persist-button" data-testid="supervisor-lifecycle-approval-persist-button" type="button">Persist Approval Record</button>
           <button id="supervisor-lifecycle-approval-records-button" data-testid="supervisor-lifecycle-approval-records-button" type="button">View Approval Records</button>
           <button id="supervisor-lifecycle-apply-readiness-button" data-testid="supervisor-lifecycle-apply-readiness-button" type="button">Apply Readiness Check</button>
           <button id="supervisor-lifecycle-executor-readiness-button" data-testid="supervisor-lifecycle-executor-readiness-button" type="button">Executor Readiness Check</button>
+          <button id="supervisor-lifecycle-executor-manifest-readiness-button" data-testid="supervisor-lifecycle-executor-manifest-readiness-button" type="button">Executor Manifest Readiness Check</button>
         </div>
         <div class="supervisor-lifecycle-approval-preview-stats">
           <div class="supervisor-lifecycle-approval-preview-stat">
@@ -249,6 +260,9 @@
         </div>
         <div class="supervisor-lifecycle-approval-preview-safety-note" id="supervisor-lifecycle-executor-readiness-safety-note" data-testid="supervisor-lifecycle-executor-readiness-safety-note">
           <p>Executor Readiness Check 仅手动 POST /api/supervisor-lifecycle-executor-readiness 并生成 readOnly:true 的 fail-closed 预检；不读取 approval textarea、不使用 approval textarea、不提交 approval JSON、不写 approval 文件、不执行生命周期 apply、lifecycleApplied:false、不调用 launchctl、不安装、不卸载、不回滚、不启动 recovery supervisor、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 gate 状态，不返回 approvedBy 值、不显示 approval reason、acknowledgement 内容、hash 值、路径、URL、token、Authorization header、hostname、username 或 process id；executorReady:false，Gold 仍 blocked。</p>
+        </div>
+        <div class="supervisor-lifecycle-approval-preview-safety-note" id="supervisor-lifecycle-executor-manifest-readiness-safety-note" data-testid="supervisor-lifecycle-executor-manifest-readiness-safety-note">
+          <p>Executor Manifest Readiness Check 仅手动 POST /api/supervisor-lifecycle-executor-manifest-readiness 并生成 readOnly:true 的 fail-closed 预检；不读取本地 path，不提交 approval JSON，不读取 approval store，不执行 lifecycle apply；仅展示 manifestReady 与 safety flags，不返回 approvedBy 值、不显示 approval reason、acknowledgement 内容、hash 值、路径、URL、token、Authorization header、hostname、username、command 或 process id；executorReady:false，wouldRun:false，wouldWrite:false，Gold 仍 blocked。</p>
         </div>
       </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
