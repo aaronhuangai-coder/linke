@@ -2012,6 +2012,7 @@ describe('Web Console / API contract', () => {
     assert.match(content, /local JSONL approval record|本地 JSONL approval record/i);
     assert.match(content, /does not execute lifecycle apply|不执行生命周期 apply/i);
     assert.match(content, /does not call launchctl|不调用 launchctl/i);
+    assert.doesNotMatch(content, /does not execute lifecycle apply|does not call launchctl/i);
     assert.match(content, /不显示.*token|不显示.*hash|不显示.*路径|不返回.*approvedBy/);
     assert.match(content, /Gold.*blocked|Gold.*仍|Gold.*未完成/);
   });

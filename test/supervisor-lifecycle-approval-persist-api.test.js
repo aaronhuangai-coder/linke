@@ -3,7 +3,12 @@ import assert from 'node:assert';
 import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer, API_WRITE_ROUTES, isApiWriteRoute } from '../src/server.js';
+import {
+  createServer,
+  API_WRITE_ROUTES,
+  isApiWriteRoute,
+  MAX_JSON_BODY_BYTES,
+} from '../src/server.js';
 import { readAuditEvents } from '../src/audit-log.js';
 import { readSupervisorLifecycleApprovalRecords } from '../src/approval-store.js';
 import { buildSupervisorLifecycleApplyPlan } from '../src/supervisor-lifecycle.js';
@@ -230,6 +235,36 @@ describe('Supervisor lifecycle approval persist API', () => {
           event.type === 'api.supervisor_lifecycle_approval_persist.failure' &&
           event.statusCode === 400 &&
           event.message === 'invalid request body'
+        )));
+        assertNoSensitiveText(text, dataDir);
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 413 and sanitized failure audit when approval persist request body is too large', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-approval-persist-api-large-body-'));
+    try {
+      await withServer({ dataDir }, async (port) => {
+        const tooLargeBody = JSON.stringify({
+          operation: 'install',
+          approval: 'operator@example.invalid secret token',
+          padding: 'x'.repeat(MAX_JSON_BODY_BYTES),
+        });
+        const { res, text, body } = await postJSON(
+          port,
+          '/api/supervisor-lifecycle-approval-persist',
+          tooLargeBody,
+        );
+
+        assert.strictEqual(res.status, 413);
+        assert.deepStrictEqual(body, { error: 'Request body too large' });
+        const auditEvents = await readAuditEvents(dataDir, { limit: 10 });
+        assert.ok(auditEvents.some((event) => (
+          event.type === 'api.supervisor_lifecycle_approval_persist.failure' &&
+          event.statusCode === 413 &&
+          event.message === 'request body too large'
         )));
         assertNoSensitiveText(text, dataDir);
       });

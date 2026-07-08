@@ -693,17 +693,18 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
         try {
           body = await readBody(req);
         } catch (err) {
-          if (err.statusCode === 400) {
+          if (err.statusCode === 400 || err.statusCode === 413) {
+            const statusCode = err.statusCode;
             await recordAudit(dataDir, {
               type: 'api.supervisor_lifecycle_approval_persist.failure',
               method,
               path: pathname,
-              statusCode: 400,
+              statusCode,
               outcome: 'failure',
               requestId,
-              message: 'invalid request body',
+              message: statusCode === 413 ? 'request body too large' : 'invalid request body',
             }, auditRetention);
-            return sendError(res, 400, err.message);
+            return sendError(res, statusCode, err.message);
           }
           throw err;
         }
