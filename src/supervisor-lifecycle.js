@@ -621,3 +621,115 @@ export function buildSupervisorLifecycleApprovalPersistencePreview(plan, approva
     blockers: [...new Set(blockers)],
   };
 }
+
+const ALLOWED_EXECUTOR_READINESS_BLOCKERS = new Set([
+  'apply-flag-required',
+  'env-gate-disabled',
+  'recovery-supervisor-design-missing',
+  'approval-missing',
+  'approval-missing-required-fields',
+  'approval-not-granted',
+  'approval-window-invalid',
+  'approval-window-too-wide',
+  'approval-expired',
+  'approval-operation-mismatch',
+  'approval-config-hash-mismatch',
+  'approval-plan-hash-mismatch',
+  'invalid-lifecycle-plan',
+  'lifecycle-plan-action-mismatch',
+  'approval-record-missing',
+  'approval-record-operation-mismatch',
+  'approval-record-not-persisted',
+  'approval-record-validation-incomplete',
+  'approval-record-safety-invalid',
+  'approval-record-gate-not-ready',
+  'lifecycle-plan-blocker-not-allowed',
+]);
+
+export function buildSupervisorLifecycleExecutorReadiness(plan, applyReadiness) {
+  const blockers = [];
+  let lifecyclePlanValid = true;
+  let applyReadinessValid = true;
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation) ? plan.operation : 'unknown';
+  const safety = {
+    ...lifecycleSafety(),
+    readOnly: true,
+    lifecycleApplied: false,
+  };
+
+  if (!plan || typeof plan !== 'object' || plan.command !== 'supervisor-lifecycle-apply' || !Array.isArray(plan.actions) || !Array.isArray(plan.blockers)) {
+    lifecyclePlanValid = false;
+    blockers.push('invalid-lifecycle-plan');
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    lifecyclePlanValid = false;
+    blockers.push('lifecycle-plan-action-mismatch');
+  }
+
+  if (!applyReadiness || typeof applyReadiness !== 'object' || applyReadiness.command !== 'supervisor-lifecycle-apply-readiness' || !Array.isArray(applyReadiness.blockers)) {
+    applyReadinessValid = false;
+    blockers.push('apply-readiness-invalid');
+  }
+
+  if (!lifecyclePlanValid || !applyReadinessValid) {
+    return {
+      command: 'supervisor-lifecycle-executor-readiness',
+      operation,
+      state: 'blocked',
+      executorState: 'blocked',
+      executorReady: false,
+      approvalRecordReady: false,
+      blockers: [...new Set(blockers)],
+      nextBlockers: [],
+      executorBlockers: [],
+      gates: {
+        lifecyclePlanValid,
+        applyReadinessValid,
+        approvalRecordReady: false,
+        executorImplemented: false,
+      },
+      safety,
+    };
+  }
+
+  const approvalRecordReady = applyReadiness.approvalRecordReady === true;
+
+  const actionBlockers = plan.actions.map((action) => `executor-not-implemented-for-action:${action.id}`);
+  const executorBlockers = plan.actions.map((action) => ({
+    actionId: action.id,
+    blocker: `executor-not-implemented-for-action:${action.id}`,
+    implemented: false,
+    wouldRun: false,
+    wouldWrite: false,
+  }));
+
+  const copiedBlockers = applyReadiness.blockers.filter((b) => {
+    if (b === 'executor-implementation-missing') return false;
+    return ALLOWED_EXECUTOR_READINESS_BLOCKERS.has(b);
+  });
+
+  const finalBlockers = [];
+  if (!approvalRecordReady) {
+    finalBlockers.push('approval-record-gate-not-ready');
+  }
+  finalBlockers.push(...copiedBlockers);
+  finalBlockers.push(...actionBlockers);
+
+  return {
+    command: 'supervisor-lifecycle-executor-readiness',
+    operation,
+    state: 'blocked',
+    executorState: 'blocked',
+    executorReady: false,
+    approvalRecordReady,
+    blockers: [...new Set(finalBlockers)],
+    nextBlockers: actionBlockers,
+    executorBlockers,
+    gates: {
+      lifecyclePlanValid: true,
+      applyReadinessValid: true,
+      approvalRecordReady,
+      executorImplemented: false,
+    },
+    safety,
+  };
+}

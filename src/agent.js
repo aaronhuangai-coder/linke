@@ -24,6 +24,7 @@
  *   supervisor-lifecycle-approval-persistence-preview — preview approval persistence readiness
  *   supervisor-lifecycle-approval-persist — persist sanitized supervisor lifecycle approval records
  *   supervisor-lifecycle-apply-readiness — show sanitized supervisor lifecycle apply readiness preflight
+ *   supervisor-lifecycle-executor-readiness — show sanitized supervisor lifecycle executor readiness
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -37,10 +38,10 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness)
  *   --output <path>      Output path (launchd-dry-run)
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
- *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence and apply readiness
+ *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence, apply readiness, and executor readiness
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
@@ -60,6 +61,7 @@ import {
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApprovalPersistencePreview,
   buildSupervisorLifecycleApplyReadiness,
+  buildSupervisorLifecycleExecutorReadiness,
 } from './supervisor-lifecycle.js';
 import {
   appendSupervisorLifecycleApprovalRecord,
@@ -94,6 +96,7 @@ const SUPERVISOR_LIFECYCLE_APPLY_CONFIG_ERROR = 'supervisor-lifecycle-apply fail
 const SUPERVISOR_LIFECYCLE_APPROVAL_PERSISTENCE_PREVIEW_CONFIG_ERROR = 'supervisor-lifecycle-approval-persistence-preview failed; verify --config points to a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_APPROVAL_PERSIST_CONFIG_ERROR = 'supervisor-lifecycle-approval-persist failed; verify --config points to a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_APPLY_READINESS_CONFIG_ERROR = 'supervisor-lifecycle-apply-readiness failed; verify --config points to a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_EXECUTOR_READINESS_CONFIG_ERROR = 'supervisor-lifecycle-executor-readiness failed; verify --config points to a readable valid Linke config';
 const FORBIDDEN_APPROVAL_PATH_SEGMENTS = new Set([
   '.aws',
   '.config',
@@ -685,6 +688,7 @@ Commands:
   supervisor-lifecycle-approval-persistence-preview Preview sanitized approval persistence readiness without writing approval data
   supervisor-lifecycle-approval-persist Persist sanitized supervisor lifecycle approval records
   supervisor-lifecycle-apply-readiness Show sanitized supervisor lifecycle apply readiness preflight
+  supervisor-lifecycle-executor-readiness Show sanitized supervisor lifecycle executor readiness
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -698,7 +702,7 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
@@ -707,7 +711,7 @@ Options:
   --fail-on-blocked   Exit 2 when supported readiness/status output is blocked
   --token <token>      Bearer token for authenticated Linke Server requests
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
-  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness)
+  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness)
 `);
 }
 
@@ -1247,6 +1251,71 @@ export async function main() {
         console.log(JSON.stringify(readiness, null, 2));
 
         if (args['fail-on-blocked'] === true && readiness.state === 'blocked') {
+          process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'supervisor-lifecycle-executor-readiness': {
+        if (!args.config) {
+          throw new Error('--config is required');
+        }
+        if (args.config === true) {
+          throw new Error('--config requires a path value');
+        }
+        if (!args.operation) {
+          throw new Error('--operation is required');
+        }
+        if (args.operation === true) {
+          throw new Error('--operation requires a value');
+        }
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(args.operation)) {
+          throw new Error('operation must be one of: install, uninstall, rollback, recover');
+        }
+        if (!args['data-dir']) {
+          throw new Error('--data-dir is required');
+        }
+        if (args['data-dir'] === true) {
+          throw new Error('--data-dir requires a path value');
+        }
+        if (args.apply !== undefined) {
+          throw new Error('--apply is not supported');
+        }
+        if (args.approval !== undefined) {
+          throw new Error('--approval is not supported');
+        }
+        if (args['fail-on-blocked'] !== undefined && args['fail-on-blocked'] !== true) {
+          throw new Error('--fail-on-blocked does not accept a value');
+        }
+
+        let config;
+        try {
+          const raw = await loadConfig(args.config);
+          config = validateConfig(raw);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_EXECUTOR_READINESS_CONFIG_ERROR);
+        }
+
+        let approvalRecords;
+        try {
+          approvalRecords = await readSupervisorLifecycleApprovalRecords(args['data-dir']);
+        } catch (err) {
+          throw new Error('failed to read supervisor lifecycle approval records');
+        }
+
+        const plan = buildSupervisorLifecycleApplyPlan(config, {
+          operation: args.operation,
+          apply: true,
+          envGateEnabled: true,
+        });
+
+        const applyReadiness = buildSupervisorLifecycleApplyReadiness(plan, approvalRecords);
+        const executorReadiness = buildSupervisorLifecycleExecutorReadiness(plan, applyReadiness);
+
+        console.log(JSON.stringify(executorReadiness, null, 2));
+
+        if (args['fail-on-blocked'] === true && executorReadiness.state === 'blocked') {
           process.exitCode = 2;
         }
         break;
