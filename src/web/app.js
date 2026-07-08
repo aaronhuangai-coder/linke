@@ -642,6 +642,7 @@ const SUPERVISOR_LIFECYCLE_APPROVAL_PREVIEW_SAFETY_KEYS = [
   'rollbackAnchorWritten',
   'auditEventWritten',
   'approvalPersisted',
+  'lifecycleApplied',
   'sensitiveValuesReturned',
 ];
 
@@ -712,6 +713,30 @@ export function buildSupervisorLifecycleApprovalPersistencePreviewViewModel(prev
     safetyLines: buildSupervisorLifecycleApprovalPreviewSafetyLines(preview.safety),
     messageText: 'POST /api/supervisor-lifecycle-approval-persistence-preview 成功，仍为 blocked preview',
   };
+}
+
+export function buildSupervisorLifecycleApprovalPersistViewModel(payload, httpStatus = 0, errorMessage = '') {
+  if (errorMessage) {
+    return buildSupervisorLifecycleApprovalPersistencePreviewViewModel(null, errorMessage);
+  }
+
+  if (httpStatus === 201 && payload?.command === 'supervisor-lifecycle-approval-record') {
+    const safeOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+    const operation = safeOperations.has(payload.operation) ? payload.operation : 'unknown';
+    return {
+      statusKey: 'ready',
+      statusText: '已记录',
+      approvalValidText: payload.approvalValid === true ? 'true' : 'false',
+      persistenceText: 'approvalRecord:persisted / lifecycleApply:false',
+      blockers: normalizeStringList(payload.blockersResolved),
+      requiredFields: [],
+      validationLines: buildSupervisorLifecycleApprovalPreviewValidationLines(payload.validation),
+      safetyLines: buildSupervisorLifecycleApprovalPreviewSafetyLines(payload.safety),
+      messageText: `Persisted approval record for ${operation}; this is not lifecycle apply.`,
+    };
+  }
+
+  return buildSupervisorLifecycleApprovalPersistencePreviewViewModel(payload);
 }
 
 export function buildSupervisorInstallDryRunViewModel(plan, errorMessage = '') {
@@ -1698,6 +1723,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const supervisorLifecycleApprovalPreviewApprovalInput = doc.getElementById('supervisor-lifecycle-approval-preview-approval');
   const supervisorLifecycleApprovalPreviewOperationInput = doc.getElementById('supervisor-lifecycle-approval-preview-operation');
   const supervisorLifecycleApprovalPreviewRunButton = doc.getElementById('supervisor-lifecycle-approval-preview-run');
+  const supervisorLifecycleApprovalPersistButton = doc.getElementById('supervisor-lifecycle-approval-persist-button');
   const supervisorLifecycleApprovalPreviewStatusEl = doc.getElementById('supervisor-lifecycle-approval-preview-status');
   const supervisorLifecycleApprovalPreviewValidEl = doc.getElementById('supervisor-lifecycle-approval-preview-valid');
   const supervisorLifecycleApprovalPreviewPersistEl = doc.getElementById('supervisor-lifecycle-approval-preview-persist');
@@ -3415,6 +3441,56 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     }
   }
 
+  async function persistSupervisorLifecycleApprovalRecord() {
+    if (!supervisorLifecycleApprovalPreviewResultEl || supervisorLifecycleApprovalPersistInFlight) return;
+
+    const parsed = parseSupervisorLifecycleApprovalPreviewPayload();
+    if (!parsed.ok) {
+      setSupervisorLifecycleApprovalPreviewError(parsed.error);
+      return;
+    }
+    if (!parsed.payload.approval || typeof parsed.payload.approval !== 'object' || Array.isArray(parsed.payload.approval)) {
+      setSupervisorLifecycleApprovalPreviewError('批准 JSON 不能为空');
+      return;
+    }
+
+    supervisorLifecycleApprovalPersistInFlight = true;
+    if (supervisorLifecycleApprovalPersistButton) supervisorLifecycleApprovalPersistButton.disabled = true;
+    clearElement(supervisorLifecycleApprovalPreviewResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '写入批准记录中...';
+    supervisorLifecycleApprovalPreviewResultEl.appendChild(loading);
+
+    try {
+      const res = await apiFetch('/api/supervisor-lifecycle-approval-persist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.payload),
+      });
+      let body;
+      try {
+        body = await res.json();
+      } catch (_) {
+        body = {};
+      }
+      if (!res.ok && res.status !== 409) {
+        throw new Error(body.error || 'HTTP ' + res.status);
+      }
+      renderSupervisorLifecycleApprovalPreview(buildSupervisorLifecycleApprovalPersistViewModel(body, res.status));
+      logEvent(
+        'Supervisor approval record persist request completed',
+        res.status === 201 ? 'info' : 'warning',
+      );
+    } catch (err) {
+      setSupervisorLifecycleApprovalPreviewError(err.message);
+      logEvent('Supervisor approval record persist failed: ' + sanitizeSupervisorInstallErrorMessage(err.message), 'error');
+    } finally {
+      supervisorLifecycleApprovalPersistInFlight = false;
+      if (supervisorLifecycleApprovalPersistButton) supervisorLifecycleApprovalPersistButton.disabled = false;
+    }
+  }
+
   function setSnapshotDiffCounts(addedCount, removedCount, unchangedCount) {
     if (snapshotDiffAddedCountEl) snapshotDiffAddedCountEl.textContent = String(addedCount);
     if (snapshotDiffRemovedCountEl) snapshotDiffRemovedCountEl.textContent = String(removedCount);
@@ -3681,6 +3757,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     supervisorLifecycleApprovalPreviewRunButton.addEventListener('click', fetchSupervisorLifecycleApprovalPreview);
   }
 
+  if (supervisorLifecycleApprovalPersistButton?.addEventListener) {
+    supervisorLifecycleApprovalPersistButton.addEventListener('click', persistSupervisorLifecycleApprovalRecord);
+  }
+
   for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
       control.addEventListener('input', renderFilteredDevices);
@@ -3736,6 +3816,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let auditLogInFlight = false;
   let supervisorInstallDryRunInFlight = false;
   let supervisorLifecycleApprovalPreviewInFlight = false;
+  let supervisorLifecycleApprovalPersistInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);

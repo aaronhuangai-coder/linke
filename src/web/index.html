@@ -216,6 +216,7 @@
             rows="6"
           ></textarea>
           <button id="supervisor-lifecycle-approval-preview-run" data-testid="supervisor-lifecycle-approval-preview-run" type="button">Approval preview</button>
+          <button id="supervisor-lifecycle-approval-persist-button" data-testid="supervisor-lifecycle-approval-persist-button" type="button">Persist Approval Record</button>
         </div>
         <div class="supervisor-lifecycle-approval-preview-stats">
           <div class="supervisor-lifecycle-approval-preview-stat">
@@ -236,6 +237,9 @@
         </div>
         <div class="supervisor-lifecycle-approval-preview-safety-note" data-testid="supervisor-lifecycle-approval-preview-safety-note">
           <p>Supervisor approval persistence preview 仅手动 POST /api/supervisor-lifecycle-approval-persistence-preview 生成只读预览；不写 approval 文件、不持久化批准、approvalPersisted:false、不调用 launchctl、不执行生命周期 apply、不新增真实 apply 面、不读取本地 approval path、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 allowlist 字段，不返回 approvedBy 值、不显示 approval reason、acknowledgement 内容、hash 值、路径、URL、token、Authorization header、hostname、username 或 process id；Gold 仍 blocked，不能声明生产就绪。</p>
+        </div>
+        <div class="supervisor-lifecycle-approval-preview-safety-note" data-testid="supervisor-lifecycle-approval-persist-safety-note">
+          <p>Persist Approval Record 仅将批准记录写入本地 JSONL approval record；does not execute lifecycle apply、does not call launchctl、不安装、不卸载、不回滚、不启动 recovery supervisor、不连接 NAS、不触发备份或恢复、不执行远程命令；不显示 dataDir、config path、approval path、approval identity、reason、acknowledgement 内容、hash 值、token、hostname、username 或 process id；Gold 仍 blocked。</p>
         </div>
       </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">
