@@ -25,6 +25,7 @@ import {
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleApprovalPersistencePreview,
+  buildSupervisorLifecycleExecutorReadiness,
 } from './supervisor-lifecycle.js';
 import {
   appendSupervisorLifecycleApprovalRecord,
@@ -49,6 +50,7 @@ const MIME = {
 
 export const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const RESTORE_ROOT_ERROR = 'targetPath is outside the allowed restore root';
+const SUPERVISOR_LIFECYCLE_APPROVAL_RECORDS_READ_ERROR = 'failed to read supervisor lifecycle approval records';
 // 新增写入接口必须注册在这里，测试会捕获 auth gate 与 auth-status 的漂移。
 export const API_WRITE_ROUTES = [
   { method: 'POST', path: '/api/heartbeat' },
@@ -603,6 +605,48 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           const approvalRecords = await readSupervisorLifecycleApprovalRecords(dataDir);
           const readiness = buildSupervisorLifecycleApplyReadiness(lifecyclePlan, approvalRecords);
           return sendJSON(res, 200, readiness);
+        } catch (err) {
+          return sendError(res, 400, err.message);
+        }
+      }
+
+      // POST /api/supervisor-lifecycle-executor-readiness
+      // Read-only fail-closed executor readiness preflight. It composes the
+      // existing apply readiness with server-owned approval records, but never
+      // executes lifecycle changes and is not a write route.
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-executor-readiness') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400 || err.statusCode === 413) {
+            return sendError(res, err.statusCode, err.message);
+          }
+          throw err;
+        }
+
+        const operation = body?.operation;
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(operation)) {
+          return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+        }
+
+        try {
+          const config = validateConfig(body?.config);
+          const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+            operation,
+            apply: true,
+            envGateEnabled: true,
+          });
+          let approvalRecords;
+          try {
+            approvalRecords = await readSupervisorLifecycleApprovalRecords(dataDir);
+          } catch (err) {
+            return sendError(res, 400, SUPERVISOR_LIFECYCLE_APPROVAL_RECORDS_READ_ERROR);
+          }
+          const applyReadiness = buildSupervisorLifecycleApplyReadiness(lifecyclePlan, approvalRecords);
+          const executorReadiness = buildSupervisorLifecycleExecutorReadiness(lifecyclePlan, applyReadiness);
+          return sendJSON(res, 200, executorReadiness);
         } catch (err) {
           return sendError(res, 400, err.message);
         }
