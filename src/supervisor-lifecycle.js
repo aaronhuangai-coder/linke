@@ -733,3 +733,267 @@ export function buildSupervisorLifecycleExecutorReadiness(plan, applyReadiness) 
     safety,
   };
 }
+
+function hasPlaceholder(str) {
+  if (typeof str !== 'string') return false;
+  return str.includes('{{') || str.includes('}}') || str.includes('${') || str.includes('<%') || str.includes('%>');
+}
+
+function hasSecretOrUnsafeText(val) {
+  if (typeof val !== 'string') return false;
+
+  const lower = val.toLowerCase();
+  const secretKeywords = [
+    'password',
+    'secret',
+    'token',
+    'authorization',
+    'credential',
+    'private',
+    'key',
+    'auth',
+    'passwd',
+    'pwd',
+    'apikey',
+    'api-key',
+    'passphrase',
+  ];
+  if (secretKeywords.some((keyword) => lower.includes(keyword))) {
+    return true;
+  }
+
+  if (lower.includes('://') || lower.includes('http') || lower.includes('ssh') || lower.includes('git@') || lower.includes('@')) {
+    return true;
+  }
+
+  if (val.includes('/') || val.includes('\\') || val.startsWith('~')) {
+    return true;
+  }
+
+  const shellChars = [';', '|', '&', '$', '>', '<', '`', '\n', '\r'];
+  if (shellChars.some((char) => val.includes(char))) {
+    return true;
+  }
+  const cmdKeywordsRegex = /\b(sudo|launchctl|exec|eval|run|sh|bash|zsh|systemctl)\b/i;
+  if (cmdKeywordsRegex.test(val)) {
+    return true;
+  }
+
+  if (/[a-f0-9]{64}/i.test(val)) {
+    return true;
+  }
+
+  return false;
+}
+
+function isSafeString(val) {
+  if (typeof val !== 'string') return false;
+  return !hasPlaceholder(val) && !hasSecretOrUnsafeText(val);
+}
+
+function sanitizeString(val) {
+  if (typeof val !== 'string') return val;
+  if (hasPlaceholder(val) || hasSecretOrUnsafeText(val)) {
+    return '[redacted]';
+  }
+  return val;
+}
+
+function sanitizeEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const sanitized = {
+    wouldRun: false,
+    wouldWrite: false,
+  };
+  if (entry.actionId !== undefined) {
+    sanitized.actionId = sanitizeString(entry.actionId);
+  }
+  if (entry.implementationId !== undefined) {
+    sanitized.implementationId = sanitizeString(entry.implementationId);
+  }
+  if (entry.mode !== undefined) {
+    sanitized.mode = sanitizeString(entry.mode);
+  }
+  if (entry.requiresApprovalRecord !== undefined) {
+    sanitized.requiresApprovalRecord = entry.requiresApprovalRecord;
+  }
+  if (entry.maxAttempts !== undefined) {
+    sanitized.maxAttempts = entry.maxAttempts;
+  }
+  return sanitized;
+}
+
+function checkManifestForUnsafeValues(val, results = { hasPlaceholder: false, hasSecret: false }) {
+  if (val === null || val === undefined) return results;
+
+  if (typeof val === 'string') {
+    if (hasPlaceholder(val)) {
+      results.hasPlaceholder = true;
+    }
+    if (hasSecretOrUnsafeText(val)) {
+      results.hasSecret = true;
+    }
+  } else if (Array.isArray(val)) {
+    for (const item of val) {
+      checkManifestForUnsafeValues(item, results);
+    }
+  } else if (typeof val === 'object') {
+    for (const key of Object.keys(val)) {
+      checkManifestForUnsafeValues(key, results);
+      checkManifestForUnsafeValues(val[key], results);
+    }
+  }
+  return results;
+}
+
+export function validateSupervisorLifecycleExecutorManifest(plan, manifest) {
+  const planBlockers = [];
+  let planValid = true;
+  if (!plan || typeof plan !== 'object' || plan.command !== 'supervisor-lifecycle-apply' || !Array.isArray(plan.actions) || !Array.isArray(plan.blockers)) {
+    planBlockers.push('invalid-lifecycle-plan');
+    planValid = false;
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    planBlockers.push('lifecycle-plan-action-mismatch');
+    planValid = false;
+  }
+
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation) ? plan.operation : 'unknown';
+  const manifestBlockers = [...planBlockers];
+  const actionManifests = [];
+
+  if (manifest !== undefined && manifest !== null) {
+    const checkResults = checkManifestForUnsafeValues(manifest);
+    if (checkResults.hasPlaceholder) {
+      manifestBlockers.push('unresolved-placeholder');
+    }
+    if (checkResults.hasSecret) {
+      manifestBlockers.push('secret-reference');
+    }
+  }
+
+  if (manifest === undefined || manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    if (planValid) {
+      for (const action of plan.actions) {
+        const safeActionId = isSafeString(action.id) ? action.id : 'redacted-action-id';
+        manifestBlockers.push(`executor-manifest-missing-for-action:${safeActionId}`);
+      }
+    }
+  } else {
+    if (manifest.kind !== 'supervisor-lifecycle-executor-manifest') {
+      manifestBlockers.push('executor-manifest-invalid-kind');
+    }
+    if (manifest.schemaVersion !== 1) {
+      manifestBlockers.push('executor-manifest-invalid-schema');
+    }
+    if (!Array.isArray(manifest.actions)) {
+      manifestBlockers.push('executor-manifest-invalid-actions');
+    }
+
+    if (planValid && Array.isArray(manifest.actions)) {
+      const planActionIds = new Set(plan.actions.map((action) => action.id));
+
+      for (const action of plan.actions) {
+        const safeActionId = isSafeString(action.id) ? action.id : 'redacted-action-id';
+        const entries = manifest.actions.filter((entry) => entry && entry.actionId === action.id);
+
+        if (entries.length === 0) {
+          manifestBlockers.push(`executor-manifest-missing-for-action:${safeActionId}`);
+        } else {
+          for (const entry of entries) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+              manifestBlockers.push(`executor-manifest-unsafe-for-action:${safeActionId}:invalid-field`);
+              continue;
+            }
+
+            const allowedKeys = new Set(['actionId', 'implementationId', 'mode', 'requiresApprovalRecord', 'maxAttempts']);
+            let hasForbidden = false;
+            for (const key of Object.keys(entry)) {
+              if (!allowedKeys.has(key)) {
+                hasForbidden = true;
+                break;
+              }
+            }
+            if (hasForbidden) {
+              manifestBlockers.push(`executor-manifest-unsafe-for-action:${safeActionId}:forbidden-field`);
+            }
+
+            const requiredFields = ['actionId', 'implementationId', 'mode', 'requiresApprovalRecord', 'maxAttempts'];
+            let hasMissing = false;
+            for (const field of requiredFields) {
+              if (entry[field] === undefined) {
+                hasMissing = true;
+              }
+            }
+            if (hasMissing) {
+              manifestBlockers.push(`executor-manifest-unsafe-for-action:${safeActionId}:missing-field`);
+            }
+
+            let hasInvalid = false;
+            if (entry.actionId !== undefined && (typeof entry.actionId !== 'string' || entry.actionId !== action.id)) {
+              hasInvalid = true;
+            }
+            if (entry.implementationId !== undefined && (typeof entry.implementationId !== 'string' || !/^(?!.*--)[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(entry.implementationId))) {
+              hasInvalid = true;
+            }
+            if (entry.mode !== undefined && entry.mode !== 'guarded-host-action') {
+              hasInvalid = true;
+            }
+            if (entry.requiresApprovalRecord !== undefined && entry.requiresApprovalRecord !== true) {
+              hasInvalid = true;
+            }
+            if (entry.maxAttempts !== undefined && (typeof entry.maxAttempts !== 'number' || !Number.isInteger(entry.maxAttempts) || entry.maxAttempts < 1 || entry.maxAttempts > 3)) {
+              hasInvalid = true;
+            }
+
+            if (hasInvalid) {
+              manifestBlockers.push(`executor-manifest-unsafe-for-action:${safeActionId}:invalid-field`);
+            }
+
+            const sanitized = sanitizeEntry(entry);
+            if (sanitized) {
+              actionManifests.push(sanitized);
+            }
+          }
+        }
+      }
+
+      for (const entry of manifest.actions) {
+        if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          const entryActionId = entry.actionId;
+          if (typeof entryActionId !== 'string' || !planActionIds.has(entryActionId)) {
+            const safeEntryActionId = isSafeString(entryActionId) ? entryActionId : 'redacted-action-id';
+            manifestBlockers.push(`executor-manifest-unsafe-for-action:${safeEntryActionId}:invalid-field`);
+          }
+        }
+      }
+    }
+  }
+
+  const uniqueManifestBlockers = [...new Set(manifestBlockers)];
+  const manifestReady = uniqueManifestBlockers.length === 0;
+  const manifestState = manifestReady ? 'ready' : 'blocked';
+  const topBlockers = [...new Set([...uniqueManifestBlockers, 'guarded-executor-runner-missing'])];
+
+  return {
+    command: 'supervisor-lifecycle-executor-manifest-readiness',
+    operation,
+    state: 'blocked',
+    manifestState,
+    manifestReady,
+    executorReady: false,
+    manifestBlockers: uniqueManifestBlockers,
+    blockers: topBlockers,
+    nextBlockers: ['guarded-executor-runner-missing'],
+    actionManifests,
+    gates: {
+      lifecyclePlanValid: !planBlockers.includes('invalid-lifecycle-plan') && !planBlockers.includes('lifecycle-plan-action-mismatch'),
+      manifestReady,
+      executorImplemented: false,
+    },
+    safety: {
+      ...lifecycleSafety(),
+      readOnly: true,
+      lifecycleApplied: false,
+    },
+  };
+}
