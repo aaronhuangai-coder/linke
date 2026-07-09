@@ -15,13 +15,13 @@ function evidenceText(item) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.05', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.05');
+  it('expects LINKE_RELEASE_VERSION to be V1.06', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.06');
   });
 
-  it('expects report.version to be V1.05', () => {
+  it('expects report.version to be V1.06', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.05');
+    assert.strictEqual(report.version, 'V1.06');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -246,6 +246,10 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/supervisor-lifecycle-guarded-runner-readiness.test.js'));
     assert.ok(automationEvidence.includes('supervisor-lifecycle-guarded-runner-readiness'));
     assert.ok(automationEvidence.includes('guarded-runner-execution-disabled'));
+    assert.ok(automationEvidence.includes('src/agent.js supervisor-lifecycle-guarded-runner-readiness'));
+    assert.ok(automationEvidence.includes('test/agent-supervisor-lifecycle-guarded-runner-readiness.test.js'));
+    assert.ok(automationEvidence.includes('--runner-binding <path>'));
+    assert.ok(automationItem.nextStep.includes('V1.06'));
     assert.ok(automationItem.nextStep.includes('V1.05'));
     assert.ok(automationItem.nextStep.includes('V1.04'));
     assert.ok(automationItem.nextStep.includes('V1.03'));
@@ -419,9 +423,13 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/supervisor-lifecycle-guarded-runner-readiness.test.js'));
     assert.ok(hardeningEvidence.includes('supervisor-lifecycle-guarded-runner-readiness'));
     assert.ok(hardeningEvidence.includes('guarded-runner-execution-disabled'));
+    assert.ok(hardeningEvidence.includes('src/agent.js supervisor-lifecycle-guarded-runner-readiness'));
+    assert.ok(hardeningEvidence.includes('test/agent-supervisor-lifecycle-guarded-runner-readiness.test.js'));
+    assert.ok(hardeningEvidence.includes('--runner-binding <path>'));
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.06'));
     assert.ok(hardeningItem.nextStep.includes('V1.05'));
     assert.ok(hardeningItem.nextStep.includes('V1.04'));
     assert.ok(hardeningItem.nextStep.includes('V1.03'));
