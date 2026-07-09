@@ -71,16 +71,20 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('rollbackAnchorReadiness.state:blocked'));
   assert.ok(evidence.includes('rollbackAnchorReady:false'));
   assert.ok(evidence.includes('rollback-anchor-real-implementation-missing'));
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness'));
+  assert.ok(evidence.includes('attemptAuditReadiness.state:blocked'));
+  assert.ok(evidence.includes('attemptAuditReady:false'));
+  assert.ok(evidence.includes('attempt-audit-real-implementation-missing'));
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.20', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.20');
+  it('expects LINKE_RELEASE_VERSION to be V1.21', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.21');
   });
 
-  it('expects report.version to be V1.20', () => {
+  it('expects report.version to be V1.21', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.20');
+    assert.strictEqual(report.version, 'V1.21');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -315,6 +319,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.21'));
     assert.ok(automationItem.nextStep.includes('V1.20'));
     assert.ok(automationItem.nextStep.includes('V1.19'));
     assert.ok(automationItem.nextStep.includes('V1.18'));
@@ -516,6 +521,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.21'));
     assert.ok(hardeningItem.nextStep.includes('V1.20'));
     assert.ok(hardeningItem.nextStep.includes('V1.19'));
     assert.ok(hardeningItem.nextStep.includes('V1.18'));

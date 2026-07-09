@@ -656,6 +656,22 @@ const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter
 const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
 const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub';
 const DISABLED_ROLLBACK_ANCHOR_KIND = 'disabled-rollback-anchor-stub';
+const ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING = 'attempt-audit-real-implementation-missing';
+const DISABLED_ATTEMPT_AUDIT_KIND = 'disabled-attempt-audit-stub';
+const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
+  auditKind: DISABLED_ATTEMPT_AUDIT_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  wouldWriteAudit: false,
+  wouldRun: false,
+  wouldWrite: false,
+  auditWriteAllowed: false,
+  metadataWriteAllowed: false,
+  filesystemWriteAllowed: false,
+  immutableAuditReady: false,
+  sensitiveValuesReturned: false,
+  blockerCode: ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING,
+});
 const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   adapterKind: DISABLED_HOST_MUTATION_ADAPTER_KIND,
   state: 'blocked',
@@ -1488,6 +1504,25 @@ export function buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness() {
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-attempt-audit-readiness',
+    state: 'blocked',
+    attemptAuditDefined: true,
+    attemptAuditReady: false,
+    realAttemptAuditReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    auditEntries: [{ ...GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY }],
+    blockers: [
+      ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -1500,6 +1535,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
     hostMutationAdapterReadiness: buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
     rollbackAnchorReadiness: buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
+    attemptAuditReadiness: buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -1653,6 +1689,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerWiringContractReady: false,
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
+      attemptAuditReady: false,
     },
     safety: executionPreviewSafety(),
   };
