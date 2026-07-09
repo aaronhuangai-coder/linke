@@ -1742,18 +1742,21 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.10 Supervisor lifecycle guarded runner execution preview CLI', () => {
-  it('title and badge claim V1.10 as current', () => {
-    assertReadmeContains(/# Linke V1\.10/, 'README title should mention V1.10');
-    assertReadmeContains(/\*\*当前版本：V1\.10\*\*/, 'README badge should mention V1.10');
+describe('README — V1.11 Supervisor lifecycle guarded runner execution preview API', () => {
+  it('title and badge claim V1.11 as current', () => {
+    assertReadmeContains(/# Linke V1\.11/, 'README title should mention V1.11');
+    assertReadmeContains(/\*\*当前版本：V1\.11\*\*/, 'README badge should mention V1.11');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.10\*\*.*当前版本/m, 'README badge must not still claim V1.10 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.10$/m, 'README title must not still claim V1.10 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.09\*\*.*当前版本/m, 'README badge must not still claim V1.09 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.09$/m, 'README title must not still claim V1.09 as current title');
     assertReadmeDoesNotContain(/^# Linke V1\.08/m, 'README title must not still claim V1.08');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('version table marks V1.09 historical and V1.10 current', () => {
-    assertReadmeContains(/\| V1\.10 \| 当前版本 \|[^|]*supervisor lifecycle guarded runner execution preview CLI[^|]*agent\.js supervisor-lifecycle-guarded-runner-execution-preview[^|]*buildSupervisorLifecycleGuardedRunnerExecutionPreview[^|]*--fail-on-blocked[^|]*executionReady:false[^|]*executorReady:false[^|]*wouldExecute:false[^|]*wouldRun:false[^|]*wouldWrite:false[^|]*guarded-runner-execution-preview-only[^|]*real-guarded-runner-execution-wiring-missing[^|]*test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js[^|]*test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'V1.10 should be current supervisor lifecycle guarded runner execution preview CLI milestone');
+  it('version table marks V1.11 current and keeps V1.10/V1.09 historical', () => {
+    assertReadmeContains(/\| V1\.11 \| 当前版本 \|[^|]*POST \/api\/supervisor-lifecycle-guarded-runner-execution-preview[^|]*API_WRITE_ROUTES[^|]*read token[^|]*executionReady:false[^|]*wouldExecute:false[^|]*test\/supervisor-lifecycle-guarded-runner-execution-preview-api\.test\.js/i, 'V1.11 should be current guarded runner execution preview API milestone');
+    assertReadmeContains(/\| V1\.10 \| 历史版本 \|[^|]*agent\.js supervisor-lifecycle-guarded-runner-execution-preview[^|]*test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'V1.10 should become historical CLI milestone');
     assertReadmeContains(/\| V1\.09 \| 历史版本 \|[^|]*supervisor lifecycle guarded runner execution preview[^|]*buildSupervisorLifecycleGuardedRunnerExecutionPreview[^|]*executionReady:false[^|]*executorReady:false[^|]*wouldExecute:false[^|]*wouldRun:false[^|]*wouldWrite:false[^|]*guarded-runner-execution-preview-only[^|]*real-guarded-runner-execution-wiring-missing[^|]*test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'V1.09 should become historical pure guarded runner execution preview milestone');
     assertReadmeContains(/\| V1\.08 \| 历史版本 \|[^|]*supervisor-lifecycle-guarded-runner-readiness-button[^|]*buildSupervisorLifecycleGuardedRunnerReadinessViewModel[^|]*POST \/api\/supervisor-lifecycle-guarded-runner-readiness[^|]*inline[^|]*runnerBinding[^|]*executorReady:false[^|]*guarded-runner-execution-disabled[^|]*wouldRun:false[^|]*wouldWrite:false[^|]*test\/web-console\.test\.js supervisor lifecycle guarded runner readiness/i, 'V1.08 should become historical supervisor lifecycle guarded runner readiness Web milestone');
     assertReadmeContains(/\| V1\.07 \| 历史版本 \|[^|]*POST \/api\/supervisor-lifecycle-guarded-runner-readiness[^|]*inline[^|]*runnerBinding[^|]*API_WRITE_ROUTES[^|]*read token[^|]*executorReady:false[^|]*guarded-runner-execution-disabled[^|]*wouldRun:false[^|]*wouldWrite:false[^|]*test\/supervisor-lifecycle-guarded-runner-readiness-api\.test\.js/i, 'V1.07 should become historical supervisor lifecycle guarded runner readiness API milestone');
@@ -1785,6 +1788,7 @@ describe('README — V1.10 Supervisor lifecycle guarded runner execution preview
     assertReadmeDoesNotContain(/\| V1\.07 \| 当前版本 \|/i, 'V1.07 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.08 \| 当前版本 \|/i, 'V1.08 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.09 \| 当前版本 \|/i, 'V1.09 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.10 \| 当前版本 \|/i, 'V1.10 must not remain marked as current');
   });
 
   it('documents supervisor-lifecycle-apply as dry-run/blocked without --apply', () => {
@@ -1949,8 +1953,11 @@ describe('README — V1.10 Supervisor lifecycle guarded runner execution preview
     assertReadmeContains(/guarded-runner-execution-preview-only/, 'README should document execution preview-only blocker');
     assertReadmeContains(/real-guarded-runner-execution-wiring-missing/, 'README should document real wiring missing next blocker');
     assertReadmeContains(/agent\.js supervisor-lifecycle-guarded-runner-execution-preview/, 'README should document V1.10 CLI surface');
-    assertReadmeContains(/不新增 API|no API/i, 'README should document V1.10 adds no API surface');
-    assertReadmeContains(/不新增 Web|no Web/i, 'README should document V1.10 adds no Web surface');
+    assertReadmeContains(/POST \/api\/supervisor-lifecycle-guarded-runner-execution-preview/, 'README should document V1.11 API surface');
+    assertReadmeContains(/不注册到 `?API_WRITE_ROUTES`?|read token 可调用|read token.*call/i, 'README should document execution preview API read-only auth boundary');
+    assertReadmeContains(/missing\/invalid\/not-ready manifest[\s\S]*固定 sanitized 错误|missing\/invalid\/not-ready manifest[\s\S]*fixed sanitized/i, 'README should document missing or not-ready manifest sanitized validation boundary');
+    assertReadmeContains(/不新增 Web|no Web/i, 'README should document V1.11 adds no Web surface');
+    assertReadmeContains(/V1\.10[\s\S]*?(不新增 API|no API)/i, 'README should keep V1.10 no-API wording only as historical CLI boundary');
     assertReadmeContains(/不调用 `?executeSupervisorLifecycleApply`?|does not call `?executeSupervisorLifecycleApply`?/i, 'README should document execution preview does not call lifecycle executor');
     assertReadmeContains(/不调用 launchctl|launchctlCalled:false/i, 'README should document no launchctl call');
     assertReadmeContains(/不写文件|filesystemWritten:false/i, 'README should document no filesystem write');
@@ -1961,19 +1968,19 @@ describe('README — V1.10 Supervisor lifecycle guarded runner execution preview
     assertReadmeContains(/不执行远程命令|remoteCommandExecuted:false/i, 'README should document no remote command');
   });
 
-  it('keeps Gold blocked and rejects lifecycle overclaims for V1.10', () => {
+  it('keeps Gold blocked and rejects lifecycle overclaims for V1.11', () => {
     assertReadmeContains(/Gold (依旧|仍然|remains) blocked/i, 'README should keep Gold blocked');
     assertReadmeContains(/真实 installer|real installer/i, 'README should still call out missing real installer');
     assertReadmeDoesNotContain(/Gold ready|Gold 发布 ready|生产可用 supervisor|production-ready supervisor|production approval workflow|rollback ready|uninstall ready|recovery supervisor ready|real guarded lifecycle apply execution wiring ready|real NAS remote backup ready|managed daemon lifecycle ready/i, 'README must not overclaim Gold or lifecycle readiness');
   });
 
-  it('keeps later Gold readiness sections synced to V1.10 evidence', () => {
-    assertReadmeContains(/Agent CLI[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'README Agent CLI Gold section should mention V1.10 guarded runner execution preview CLI evidence and V1.09 pure evidence');
+  it('keeps later Gold readiness sections synced to V1.11 evidence', () => {
+    assertReadmeContains(/Agent CLI[\s\S]*?V1\.11[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview-api\.test\.js[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'README Agent CLI Gold section should mention V1.11 API evidence, V1.10 guarded runner execution preview CLI evidence and V1.09 pure evidence');
     assertReadmeContains(/Agent CLI[\s\S]*?V1\.08[\s\S]*?supervisor-lifecycle-guarded-runner-readiness-button[\s\S]*?buildSupervisorLifecycleGuardedRunnerReadinessViewModel[\s\S]*?test\/web-console\.test\.js supervisor lifecycle guarded runner readiness/i, 'README Agent CLI Gold section should mention V1.08 guarded runner readiness Web evidence');
     assertReadmeContains(/Agent CLI[\s\S]*?V1\.07[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-readiness[\s\S]*?test\/supervisor-lifecycle-guarded-runner-readiness-api\.test\.js/i, 'README Agent CLI Gold section should mention V1.07 guarded runner readiness API evidence');
     assertReadmeContains(/Agent CLI[\s\S]*?V1\.06[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-readiness --runner-binding <path>[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-readiness\.test\.js/i, 'README Agent CLI Gold section should mention V1.06 guarded runner readiness CLI evidence');
     assertReadmeContains(/Agent CLI[\s\S]*?V1\.05[\s\S]*?buildSupervisorLifecycleGuardedRunnerReadiness[\s\S]*?test\/supervisor-lifecycle-guarded-runner-readiness\.test\.js/i, 'README Agent CLI Gold section should retain V1.05 guarded runner readiness evidence');
-    assertReadmeContains(/Gold blockers[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?guarded-runner-execution-preview-only[\s\S]*?real-guarded-runner-execution-wiring-missing[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'README Gold blockers section should mention V1.10 CLI evidence and V1.09 pure evidence');
+    assertReadmeContains(/Gold blockers[\s\S]*?V1\.11[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview-api\.test\.js[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-execution-preview\.test\.js[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?guarded-runner-execution-preview-only[\s\S]*?real-guarded-runner-execution-wiring-missing[\s\S]*?test\/supervisor-lifecycle-guarded-runner-execution-preview\.test\.js/i, 'README Gold blockers section should mention V1.11 API evidence, V1.10 CLI evidence and V1.09 pure evidence');
     assertReadmeContains(/Gold blockers[\s\S]*?V1\.08[\s\S]*?supervisor-lifecycle-guarded-runner-readiness-button[\s\S]*?buildSupervisorLifecycleGuardedRunnerReadinessViewModel[\s\S]*?test\/web-console\.test\.js supervisor lifecycle guarded runner readiness/i, 'README Gold blockers section should mention V1.08 guarded runner readiness Web evidence');
     assertReadmeContains(/Gold blockers[\s\S]*?V1\.07[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-readiness[\s\S]*?test\/supervisor-lifecycle-guarded-runner-readiness-api\.test\.js/i, 'README Gold blockers section should mention V1.07 guarded runner readiness API evidence');
     assertReadmeContains(/Gold blockers[\s\S]*?V1\.06[\s\S]*?src\/agent\.js supervisor-lifecycle-guarded-runner-readiness[\s\S]*?--runner-binding <path>[\s\S]*?test\/agent-supervisor-lifecycle-guarded-runner-readiness\.test\.js/i, 'README Gold blockers section should mention V1.06 guarded runner readiness CLI evidence');
@@ -1987,7 +1994,7 @@ describe('README — V1.10 Supervisor lifecycle guarded runner execution preview
     assertReadmeContains(/Gold blockers[\s\S]*?V0\.99[\s\S]*?POST \/api\/supervisor-lifecycle-executor-readiness[\s\S]*?test\/supervisor-lifecycle-executor-readiness-api\.test\.js/i, 'README Gold blockers section should mention V0.99 API evidence');
     assertReadmeContains(/Gold blockers[\s\S]*?V0\.98[\s\S]*?agent\.js supervisor-lifecycle-executor-readiness[\s\S]*?test\/agent-supervisor-lifecycle-executor-readiness\.test\.js/i, 'README Gold blockers section should retain V0.98 CLI evidence');
     assertReadmeContains(/Gold blockers[\s\S]*?buildSupervisorLifecycleExecutorReadiness[\s\S]*?test\/supervisor-lifecycle-executor-readiness\.test\.js/i, 'README Gold blockers section should mention V0.98 pure function evidence');
-    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?V1\.08[\s\S]*?supervisor-lifecycle-guarded-runner-readiness-button[\s\S]*?V1\.07[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-readiness[\s\S]*?V1\.06[\s\S]*?src\/agent\.js supervisor-lifecycle-guarded-runner-readiness[\s\S]*?V1\.05[\s\S]*?buildSupervisorLifecycleGuardedRunnerReadiness[\s\S]*?V1\.04[\s\S]*?supervisor-lifecycle-executor-manifest-readiness-button[\s\S]*?V1\.03[\s\S]*?POST \/api\/supervisor-lifecycle-executor-manifest-readiness/i, 'README partial hardening section should mention V1.10 CLI evidence, V1.09 pure preview evidence, V1.08 Web evidence, V1.07 API evidence, V1.06 CLI evidence, retain V1.05 runner evidence, V1.04 manifest Web evidence and V1.03 API evidence');
+    assertReadmeContains(/NAS、认证和生产硬化仍是 partial[\s\S]*?V1\.11[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?V1\.10[\s\S]*?agent\.js supervisor-lifecycle-guarded-runner-execution-preview[\s\S]*?V1\.09[\s\S]*?buildSupervisorLifecycleGuardedRunnerExecutionPreview[\s\S]*?V1\.08[\s\S]*?supervisor-lifecycle-guarded-runner-readiness-button[\s\S]*?V1\.07[\s\S]*?POST \/api\/supervisor-lifecycle-guarded-runner-readiness[\s\S]*?V1\.06[\s\S]*?src\/agent\.js supervisor-lifecycle-guarded-runner-readiness[\s\S]*?V1\.05[\s\S]*?buildSupervisorLifecycleGuardedRunnerReadiness[\s\S]*?V1\.04[\s\S]*?supervisor-lifecycle-executor-manifest-readiness-button[\s\S]*?V1\.03[\s\S]*?POST \/api\/supervisor-lifecycle-executor-manifest-readiness/i, 'README partial hardening section should mention V1.11 API evidence, V1.10 CLI evidence, V1.09 pure preview evidence, V1.08 Web evidence, V1.07 API evidence, V1.06 CLI evidence, retain V1.05 runner evidence, V1.04 manifest Web evidence and V1.03 API evidence');
   });
 });
 
