@@ -26,6 +26,7 @@ import {
   buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleApprovalPersistencePreview,
   buildSupervisorLifecycleExecutorReadiness,
+  buildSupervisorLifecycleGuardedRunnerExecutionGate,
   buildSupervisorLifecycleGuardedRunnerExecutionPreview,
   buildSupervisorLifecycleGuardedRunnerReadiness,
   validateSupervisorLifecycleExecutorManifest,
@@ -60,6 +61,9 @@ const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_CONFIG_ERROR = 'supervisor-l
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-readiness failed; guarded runner readiness validation did not complete';
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_CONFIG_ERROR = 'supervisor-lifecycle-guarded-runner-execution-preview failed; verify config is a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-execution-preview failed; execution preview validation did not complete';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_CONFIG_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; verify config is a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; execution gate validation did not complete';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_EXECUTE_REQUESTED_ERROR = 'executeRequested must be a boolean when provided';
 // 新增写入接口必须注册在这里，测试会捕获 auth gate 与 auth-status 的漂移。
 export const API_WRITE_ROUTES = [
   { method: 'POST', path: '/api/heartbeat' },
@@ -796,6 +800,78 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           return sendJSON(res, 200, executionPreview);
         } catch (err) {
           return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_VALIDATION_ERROR);
+        }
+      }
+
+      // POST /api/supervisor-lifecycle-guarded-runner-execution-gate
+      // 只读 fail-closed guarded runner execution gate。仅消费 inline JSON，
+      // approval records 只从 server-owned dataDir 读取，且刻意不注册为写路由。
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-guarded-runner-execution-gate') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400 || err.statusCode === 413) {
+            return sendError(res, err.statusCode, err.message);
+          }
+          throw err;
+        }
+
+        const operation = body?.operation;
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(operation)) {
+          return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+        }
+
+        if (body?.executeRequested !== undefined && typeof body.executeRequested !== 'boolean') {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_EXECUTE_REQUESTED_ERROR);
+        }
+
+        let config;
+        try {
+          config = validateConfig(body?.config);
+        } catch (err) {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_CONFIG_ERROR);
+        }
+
+        const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+          operation,
+          apply: true,
+          envGateEnabled: true,
+        });
+
+        let approvalRecords;
+        try {
+          approvalRecords = await readSupervisorLifecycleApprovalRecords(dataDir);
+        } catch (err) {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_APPROVAL_RECORDS_READ_ERROR);
+        }
+
+        try {
+          const applyReadiness = buildSupervisorLifecycleApplyReadiness(lifecyclePlan, approvalRecords);
+          const manifestReadiness = validateSupervisorLifecycleExecutorManifest(lifecyclePlan, body?.manifest);
+          if (manifestReadiness.manifestReady !== true) {
+            return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_VALIDATION_ERROR);
+          }
+          const guardedRunnerReadiness = buildSupervisorLifecycleGuardedRunnerReadiness(
+            manifestReadiness,
+            body?.runnerBinding,
+          );
+          const executionPreview = buildSupervisorLifecycleGuardedRunnerExecutionPreview(
+            lifecyclePlan,
+            guardedRunnerReadiness,
+          );
+          const executionGate = buildSupervisorLifecycleGuardedRunnerExecutionGate(
+            lifecyclePlan,
+            applyReadiness,
+            manifestReadiness,
+            guardedRunnerReadiness,
+            executionPreview,
+            { executeRequested: body?.executeRequested === true },
+          );
+          return sendJSON(res, 200, executionGate);
+        } catch (err) {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_VALIDATION_ERROR);
         }
       }
 
