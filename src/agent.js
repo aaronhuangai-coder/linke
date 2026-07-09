@@ -28,6 +28,7 @@
  *   supervisor-lifecycle-executor-manifest-readiness — show sanitized executor manifest readiness
  *   supervisor-lifecycle-guarded-runner-readiness — show sanitized guarded runner binding readiness
  *   supervisor-lifecycle-guarded-runner-execution-preview — show sanitized guarded runner execution preview
+ *   supervisor-lifecycle-guarded-runner-execution-gate — show sanitized guarded runner execution gate
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
@@ -41,13 +42,14 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
- *   --operation <operation> Supervisor lifecycle operation (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+ *   --operation <operation> Supervisor lifecycle operation (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --output <path>      Output path (launchd-dry-run)
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
- *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
- *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
- *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence, apply readiness, and executor readiness
+ *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+ *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+ *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence, apply readiness, executor readiness, and guarded runner execution gate
+ *   --execute-requested Record explicit execution intent for the guarded runner execution gate without executing
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
  *   --expected-version <version> Expected release version (release-readiness)
@@ -68,6 +70,7 @@ import {
   buildSupervisorLifecycleApprovalPersistencePreview,
   buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleExecutorReadiness,
+  buildSupervisorLifecycleGuardedRunnerExecutionGate,
   buildSupervisorLifecycleGuardedRunnerExecutionPreview,
   buildSupervisorLifecycleGuardedRunnerReadiness,
   validateSupervisorLifecycleExecutorManifest,
@@ -117,6 +120,10 @@ const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_CONFIG_ERROR = 'supe
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_MANIFEST_ERROR = 'supervisor-lifecycle-guarded-runner-execution-preview failed; verify --manifest points to a readable valid executor manifest JSON';
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_BINDING_ERROR = 'supervisor-lifecycle-guarded-runner-execution-preview failed; verify --runner-binding points to a readable valid guarded runner binding JSON';
 const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_PREVIEW_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-execution-preview failed; execution preview validation did not complete';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_CONFIG_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; verify --config points to a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_MANIFEST_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; verify --manifest points to a readable valid executor manifest JSON';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_BINDING_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; verify --runner-binding points to a readable valid guarded runner binding JSON';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-execution-gate failed; execution gate validation did not complete';
 const FORBIDDEN_APPROVAL_PATH_SEGMENTS = new Set([
   '.aws',
   '.config',
@@ -712,6 +719,7 @@ Commands:
   supervisor-lifecycle-executor-manifest-readiness Show sanitized supervisor lifecycle executor manifest readiness
   supervisor-lifecycle-guarded-runner-readiness Show sanitized supervisor lifecycle guarded runner binding readiness
   supervisor-lifecycle-guarded-runner-execution-preview Show sanitized supervisor lifecycle guarded runner execution preview
+  supervisor-lifecycle-guarded-runner-execution-gate Show sanitized supervisor lifecycle guarded runner execution gate
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
@@ -725,19 +733,20 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
-  --operation <operation> Supervisor lifecycle operation (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+  --operation <operation> Supervisor lifecycle operation (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
   --limit <n>          Limit read-only audit-log events
   --expected-version <version> Expected release version (for release-readiness)
   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
   --fail-on-blocked   Exit 2 when supported readiness/status output is blocked
+  --execute-requested Record explicit execution intent for the guarded runner execution gate without executing
   --token <token>      Bearer token for authenticated Linke Server requests
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
-  --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
-  --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview)
-  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness)
+  --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+  --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate)
 `);
 }
 
@@ -1610,6 +1619,125 @@ export async function main() {
         console.log(JSON.stringify(executionPreview, null, 2));
 
         if (args['fail-on-blocked'] === true && executionPreview.state === 'blocked') {
+          process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'supervisor-lifecycle-guarded-runner-execution-gate': {
+        if (!args.config) {
+          throw new Error('--config is required');
+        }
+        if (args.config === true) {
+          throw new Error('--config requires a path value');
+        }
+        if (!args.operation) {
+          throw new Error('--operation is required');
+        }
+        if (args.operation === true) {
+          throw new Error('--operation requires a value');
+        }
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(args.operation)) {
+          throw new Error('operation must be one of: install, uninstall, rollback, recover');
+        }
+        if (!args['data-dir']) {
+          throw new Error('--data-dir is required');
+        }
+        if (args['data-dir'] === true) {
+          throw new Error('--data-dir requires a path value');
+        }
+        if (!args.manifest) {
+          throw new Error('--manifest is required');
+        }
+        if (args.manifest === true) {
+          throw new Error('--manifest requires a path value');
+        }
+        if (!args['runner-binding']) {
+          throw new Error('--runner-binding is required');
+        }
+        if (args['runner-binding'] === true) {
+          throw new Error('--runner-binding requires a path value');
+        }
+        if (args.apply !== undefined) {
+          throw new Error('--apply is not supported');
+        }
+        if (args.approval !== undefined) {
+          throw new Error('--approval is not supported');
+        }
+        if (args.output !== undefined) {
+          throw new Error('--output is not supported');
+        }
+        if (args['execute-requested'] !== undefined && args['execute-requested'] !== true) {
+          throw new Error('--execute-requested does not accept a value');
+        }
+        if (args['fail-on-blocked'] !== undefined && args['fail-on-blocked'] !== true) {
+          throw new Error('--fail-on-blocked does not accept a value');
+        }
+
+        let config;
+        try {
+          const raw = await loadConfig(args.config);
+          config = validateConfig(raw);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_CONFIG_ERROR);
+        }
+
+        let approvalRecords;
+        try {
+          approvalRecords = await readSupervisorLifecycleApprovalRecords(args['data-dir']);
+        } catch (err) {
+          throw new Error('failed to read supervisor lifecycle approval records');
+        }
+
+        let manifest;
+        try {
+          const rawManifest = await readFile(args.manifest, 'utf-8');
+          manifest = JSON.parse(rawManifest);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_MANIFEST_ERROR);
+        }
+
+        let runnerBinding;
+        try {
+          const rawBinding = await readFile(args['runner-binding'], 'utf-8');
+          runnerBinding = JSON.parse(rawBinding);
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_BINDING_ERROR);
+        }
+
+        let gate;
+        try {
+          const plan = buildSupervisorLifecycleApplyPlan(config, {
+            operation: args.operation,
+            apply: true,
+            envGateEnabled: true,
+          });
+          const applyReadiness = buildSupervisorLifecycleApplyReadiness(plan, approvalRecords);
+          const manifestReadiness = validateSupervisorLifecycleExecutorManifest(plan, manifest);
+          const guardedRunnerReadiness = buildSupervisorLifecycleGuardedRunnerReadiness(
+            manifestReadiness,
+            runnerBinding,
+          );
+          const executionPreview = buildSupervisorLifecycleGuardedRunnerExecutionPreview(
+            plan,
+            guardedRunnerReadiness,
+          );
+          gate = buildSupervisorLifecycleGuardedRunnerExecutionGate(
+            plan,
+            applyReadiness,
+            manifestReadiness,
+            guardedRunnerReadiness,
+            executionPreview,
+            { executeRequested: args['execute-requested'] === true },
+          );
+        } catch (err) {
+          throw new Error(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_EXECUTION_GATE_VALIDATION_ERROR);
+        }
+
+        console.log(JSON.stringify(gate, null, 2));
+
+        if (args['fail-on-blocked'] === true && gate.state === 'blocked') {
           process.exitCode = 2;
         }
         break;
