@@ -26,6 +26,7 @@ import {
   buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleApprovalPersistencePreview,
   buildSupervisorLifecycleExecutorReadiness,
+  buildSupervisorLifecycleGuardedRunnerReadiness,
   validateSupervisorLifecycleExecutorManifest,
 } from './supervisor-lifecycle.js';
 import {
@@ -54,6 +55,8 @@ const RESTORE_ROOT_ERROR = 'targetPath is outside the allowed restore root';
 const SUPERVISOR_LIFECYCLE_APPROVAL_RECORDS_READ_ERROR = 'failed to read supervisor lifecycle approval records';
 const SUPERVISOR_LIFECYCLE_EXECUTOR_MANIFEST_READINESS_CONFIG_ERROR = 'supervisor-lifecycle-executor-manifest-readiness failed; verify config is a readable valid Linke config';
 const SUPERVISOR_LIFECYCLE_EXECUTOR_MANIFEST_READINESS_VALIDATION_ERROR = 'supervisor-lifecycle-executor-manifest-readiness failed; manifest validation did not complete';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_CONFIG_ERROR = 'supervisor-lifecycle-guarded-runner-readiness failed; verify config is a readable valid Linke config';
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_VALIDATION_ERROR = 'supervisor-lifecycle-guarded-runner-readiness failed; guarded runner readiness validation did not complete';
 // 新增写入接口必须注册在这里，测试会捕获 auth gate 与 auth-status 的漂移。
 export const API_WRITE_ROUTES = [
   { method: 'POST', path: '/api/heartbeat' },
@@ -693,6 +696,51 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
           return sendJSON(res, 200, manifestReadiness);
         } catch (err) {
           return sendError(res, 400, SUPERVISOR_LIFECYCLE_EXECUTOR_MANIFEST_READINESS_VALIDATION_ERROR);
+        }
+      }
+
+      // POST /api/supervisor-lifecycle-guarded-runner-readiness
+      // 只读 fail-closed guarded runner binding readiness 校验。仅消费
+      // inline JSON，不读取本地 path 或 approval storage，且刻意不注册为写路由。
+      if (method === 'POST' && pathname === '/api/supervisor-lifecycle-guarded-runner-readiness') {
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          if (err.statusCode === 400 || err.statusCode === 413) {
+            return sendError(res, err.statusCode, err.message);
+          }
+          throw err;
+        }
+
+        const operation = body?.operation;
+        const validOperations = new Set(['install', 'uninstall', 'rollback', 'recover']);
+        if (!validOperations.has(operation)) {
+          return sendError(res, 400, 'operation must be one of: install, uninstall, rollback, recover');
+        }
+
+        let config;
+        try {
+          config = validateConfig(body?.config);
+        } catch (err) {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_CONFIG_ERROR);
+        }
+
+        const lifecyclePlan = buildSupervisorLifecycleApplyPlan(config, {
+          operation,
+          apply: true,
+          envGateEnabled: true,
+        });
+
+        try {
+          const manifestReadiness = validateSupervisorLifecycleExecutorManifest(lifecyclePlan, body?.manifest);
+          const guardedRunnerReadiness = buildSupervisorLifecycleGuardedRunnerReadiness(
+            manifestReadiness,
+            body?.runnerBinding,
+          );
+          return sendJSON(res, 200, guardedRunnerReadiness);
+        } catch (err) {
+          return sendError(res, 400, SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_VALIDATION_ERROR);
         }
       }
 
