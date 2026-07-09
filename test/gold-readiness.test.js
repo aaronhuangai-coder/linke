@@ -41,6 +41,9 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('test/agent-supervisor-lifecycle-guarded-runner-execution-gate.test.js'));
   assert.ok(evidence.includes('POST /api/supervisor-lifecycle-guarded-runner-execution-gate'));
   assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-gate-api.test.js'));
+  assert.ok(evidence.includes('supervisor-lifecycle-guarded-runner-execution-gate-button'));
+  assert.ok(evidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel'));
+  assert.ok(evidence.includes('test/web-console.test.js supervisor lifecycle guarded runner execution gate'));
   assert.ok(evidence.includes('read token'));
   assert.ok(evidence.includes('API_WRITE_ROUTES exclusion'));
   assert.ok(evidence.includes('supervisor-lifecycle-guarded-runner-execution-gate'));
@@ -49,18 +52,19 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('executeRequested:true'));
   assert.ok(evidence.includes('--fail-on-blocked'));
   assert.ok(evidence.includes('executionEligible:false'));
+  assert.ok(evidence.includes('wouldExecute:false'));
   assert.ok(evidence.includes('execute-request-missing'));
   assert.ok(evidence.includes('realRunnerWiringReady:false'));
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.15', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.15');
+  it('expects LINKE_RELEASE_VERSION to be V1.16', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.16');
   });
 
-  it('expects report.version to be V1.15', () => {
+  it('expects report.version to be V1.16', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.15');
+    assert.strictEqual(report.version, 'V1.16');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -295,6 +299,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.16'));
     assert.ok(automationItem.nextStep.includes('V1.15'));
     assert.ok(automationItem.nextStep.includes('V1.14'));
     assert.ok(automationItem.nextStep.includes('V1.13'));
@@ -491,6 +496,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.16'));
     assert.ok(hardeningItem.nextStep.includes('V1.13'));
     assert.ok(hardeningItem.nextStep.includes('V1.15'));
     assert.ok(hardeningItem.nextStep.includes('V1.14'));
