@@ -17,6 +17,9 @@ function evidenceText(item) {
 function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerExecutionPreview'));
   assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-preview.test.js'));
+  assert.ok(evidence.includes('src/agent.js supervisor-lifecycle-guarded-runner-execution-preview'));
+  assert.ok(evidence.includes('test/agent-supervisor-lifecycle-guarded-runner-execution-preview.test.js'));
+  assert.ok(evidence.includes('--fail-on-blocked'));
   assert.ok(evidence.includes('executionReady:false'));
   assert.ok(evidence.includes('executorReady:false'));
   assert.ok(evidence.includes('wouldExecute:false'));
@@ -27,13 +30,13 @@ function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.09', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.09');
+  it('expects LINKE_RELEASE_VERSION to be V1.10', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.10');
   });
 
-  it('expects report.version to be V1.09', () => {
+  it('expects report.version to be V1.10', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.09');
+    assert.strictEqual(report.version, 'V1.10');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -267,6 +270,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerReadinessViewModel'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.10'));
     assert.ok(automationItem.nextStep.includes('V1.09'));
     assert.ok(automationItem.nextStep.includes('V1.08'));
     assert.ok(automationItem.nextStep.includes('V1.07'));
@@ -456,6 +460,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.10'));
     assert.ok(hardeningItem.nextStep.includes('V1.09'));
     assert.ok(hardeningItem.nextStep.includes('V1.08'));
     assert.ok(hardeningItem.nextStep.includes('V1.07'));
