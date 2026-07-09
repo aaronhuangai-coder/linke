@@ -242,6 +242,7 @@
           <button id="supervisor-lifecycle-executor-readiness-button" data-testid="supervisor-lifecycle-executor-readiness-button" type="button">Executor Readiness Check</button>
           <button id="supervisor-lifecycle-executor-manifest-readiness-button" data-testid="supervisor-lifecycle-executor-manifest-readiness-button" type="button">Executor Manifest Readiness Check</button>
           <button id="supervisor-lifecycle-guarded-runner-readiness-button" data-testid="supervisor-lifecycle-guarded-runner-readiness-button" type="button">Guarded Runner Readiness Check</button>
+          <button id="supervisor-lifecycle-guarded-runner-execution-preview-button" data-testid="supervisor-lifecycle-guarded-runner-execution-preview-button" type="button">Guarded Runner Execution Preview</button>
         </div>
         <div class="supervisor-lifecycle-approval-preview-stats">
           <div class="supervisor-lifecycle-approval-preview-stat">
@@ -277,6 +278,9 @@
         </div>
         <div class="supervisor-lifecycle-approval-preview-safety-note" id="supervisor-lifecycle-guarded-runner-readiness-safety-note" data-testid="supervisor-lifecycle-guarded-runner-readiness-safety-note">
           <p>Guarded Runner Readiness Check 仅由用户点击后手动 POST /api/supervisor-lifecycle-guarded-runner-readiness，并且请求体只包含 inline operation、config、manifest 与 runnerBinding；不读取 approval textarea、不提交 approval JSON、不读取 approval store、不读取本地 path、不写文件、不执行 lifecycle apply、不调用 launchctl、不安装、不卸载、不回滚、不启动 recovery supervisor、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 runnerBindingsReady、executorReady:false、runnerBlockers、blockers、nextBlockers、runnerBindings wouldRun:false/wouldWrite:false 与 safety flags，不显示路径、URL、token、Authorization header、secret、hash、hostname、username、process id 或 command；Gold 仍 blocked。</p>
+        </div>
+        <div class="supervisor-lifecycle-approval-preview-safety-note" id="supervisor-lifecycle-guarded-runner-execution-preview-safety-note" data-testid="supervisor-lifecycle-guarded-runner-execution-preview-safety-note">
+          <p>Guarded Runner Execution Preview 仅由用户点击后手动 POST /api/supervisor-lifecycle-guarded-runner-execution-preview，并且请求体只包含 inline operation、config、manifest 与 runnerBinding；不读取 approval textarea、不提交 approval JSON、不读取 approval store、不读取本地 path、不写文件、不执行 lifecycle apply、不调用 launchctl、不安装、不卸载、不回滚、不启动 recovery supervisor、不读取进程列表、不连接 NAS、不触发备份或恢复、不执行远程命令；仅展示 executionReady:false、executorReady:false、wouldExecute:false、actionPreviews wouldRun:false/wouldWrite:false、blockers、nextBlockers 与 safety flags，不显示路径、URL、token、Authorization header、secret、hash、hostname、username、process id 或 command；Gold 仍 blocked。</p>
         </div>
       </section>
       <section id="audit-log-panel" class="panel audit-log-panel" data-testid="audit-log-panel" data-status="unknown">

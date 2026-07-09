@@ -1100,6 +1100,12 @@ const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_SAFETY_KEYS = [
   'sensitiveValuesReturned',
 ];
 
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_COMMAND_PATTERN =
+  /\b(?:launchctl|sudo|bash|sh|zsh|node|npm|pnpm|git|curl|wget|osascript|python3?|ruby|perl|php|powershell|pwsh)\b[^\n]*/gi;
+
+const SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_SECRET_PREFIX_PATTERN =
+  /\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+)\b/gi;
+
 function sanitizeSupervisorLifecycleGuardedRunnerReadinessValue(value, key = '') {
   const keyText = String(key || '').trim().toLowerCase();
   if (/(authorization|token|secret|password|credential|hash|hostname|username|process|pid|command|cmd|path|url)/i.test(keyText)) {
@@ -1117,11 +1123,12 @@ function sanitizeSupervisorLifecycleGuardedRunnerReadinessValue(value, key = '')
   line = line.replace(/\\\\[^\s"']+/g, '[redacted-path]');
   line = line.replace(/(?:~|\.{1,2})?\/[^\s"']+/g, '[redacted-path]');
   line = line.replace(/\b(?:authorization|bearer|token|secret|password|api[-_ ]?key|credential|private[-_ ]?key)[^\s"']*/gi, '[redacted-secret]');
+  line = line.replace(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_SECRET_PREFIX_PATTERN, '[redacted-secret]');
   line = line.replace(/\b(?:sha256|sha1|md5):[a-f0-9]+\b/gi, '[redacted-hash]');
   line = line.replace(/\b[a-f0-9]{32,128}\b/gi, '[redacted-hash]');
   line = line.replace(/\b(?:host(?:name)?|user(?:name)?|process\s*id|processId|pid)\s*[:=]\s*[^\s,;]+/gi, '[redacted]');
   line = line.replace(/\b(?:command|cmd|argv)\s*[:=]\s*[^\n]+/gi, '[redacted-command]');
-  line = line.replace(/\b(?:launchctl|sudo|bash|sh|zsh|node|npm|pnpm|git|curl|wget|osascript)\b[^\n]*/gi, '[redacted-command]');
+  line = line.replace(SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_COMMAND_PATTERN, '[redacted-command]');
   line = line.replace(/\bcommand\b/gi, '[redacted-command]');
 
   if (keyText === 'runnerkind' && line !== raw) {
@@ -1150,6 +1157,20 @@ function buildSupervisorLifecycleGuardedRunnerReadinessSafetyLines(safety) {
   ];
 }
 
+function buildSupervisorLifecycleGuardedRunnerExecutionSafetyLines(safety) {
+  const source = safety && typeof safety === 'object' ? safety : {};
+  return [
+    ...SUPERVISOR_LIFECYCLE_GUARDED_RUNNER_READINESS_SAFETY_KEYS.map((key) => (
+      `${key}:${key === 'readOnly' || source[key] === true ? 'true' : 'false'}`
+    )),
+    'executionReady:false',
+    'executorReady:false',
+    'wouldExecute:false',
+    'wouldRun:false',
+    'wouldWrite:false',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerReadinessGateLines(gates, runnerBindingsReady) {
   const source = gates && typeof gates === 'object' ? gates : {};
   return [
@@ -1167,6 +1188,12 @@ function normalizeGuardedRunnerBindingBoolean(value) {
 function sanitizeSupervisorLifecycleGuardedRunnerBindingField(value, key) {
   const sanitized = sanitizeSupervisorLifecycleGuardedRunnerReadinessValue(value, key);
   return sanitized.includes('[redacted') ? '[redacted]' : sanitized;
+}
+
+function sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(value, key = '') {
+  const sanitized = sanitizeSupervisorLifecycleGuardedRunnerReadinessValue(value, key);
+  const redactedHighEntropy = sanitized.replace(/\b[A-Za-z0-9+/]{24,}={0,2}\b/g, '[redacted-secret]');
+  return redactedHighEntropy.includes('[redacted') ? '[redacted]' : redactedHighEntropy;
 }
 
 function buildSupervisorLifecycleGuardedRunnerBindingItems(runnerBindings) {
@@ -1259,6 +1286,78 @@ export function buildSupervisorLifecycleGuardedRunnerReadinessViewModel(payload,
     validationLines: buildSupervisorLifecycleGuardedRunnerReadinessGateLines(payload.gates, runnerBindingsReady),
     safetyLines: buildSupervisorLifecycleGuardedRunnerReadinessSafetyLines(payload.safety),
     messageText: 'Guarded runner readiness completed; readiness remains fail-closed.',
+  };
+}
+
+export function buildSupervisorLifecycleGuardedRunnerExecutionPreviewViewModel(payload, errorMessage = '') {
+  if (errorMessage) {
+    return {
+      statusKey: 'error',
+      statusText: '检查失败',
+      approvalValidText: '—',
+      persistenceText: '—',
+      runnerBlockers: [],
+      blockers: [],
+      nextBlockers: [],
+      runnerBindingLines: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: [],
+      messageText: 'Guarded runner execution preview 检查失败: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(errorMessage),
+    };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return {
+      statusKey: 'unknown',
+      statusText: '未检查',
+      approvalValidText: 'executionReady:false / executorReady:false',
+      persistenceText: 'readOnly:true / wouldExecute:false',
+      runnerBlockers: [],
+      blockers: [],
+      nextBlockers: [],
+      runnerBindingLines: [],
+      requiredFields: [],
+      recordLines: [],
+      validationLines: [],
+      safetyLines: ['readOnly:true', 'executionReady:false', 'executorReady:false', 'wouldExecute:false', 'wouldRun:false', 'wouldWrite:false'],
+      messageText: '点击手动 POST /api/supervisor-lifecycle-guarded-runner-execution-preview 获取 guarded runner execution preview',
+    };
+  }
+
+  const actionPreviews = Array.isArray(payload.actionPreviews) ? payload.actionPreviews : [];
+  const actionLines = actionPreviews.map((action) => {
+    const source = action && typeof action === 'object' ? action : {};
+    const actionId = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.actionId, 'actionId') || 'unknown';
+    const implementationId = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.implementationId, 'implementationId') || 'unknown';
+    const mode = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.mode, 'mode') || 'unknown';
+    const runnerKind = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.runnerKind, 'runnerKind') || 'unknown';
+    return `action:${actionId}:impl:${implementationId}:mode:${mode}:runner:${runnerKind}:wouldExecute:false:wouldRun:false:wouldWrite:false`;
+  });
+  const gates = payload.gates && typeof payload.gates === 'object' ? payload.gates : {};
+  const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
+  const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
+
+  return {
+    statusKey: 'blocked',
+    statusText: '执行预览阻塞',
+    approvalValidText: 'executionReady:false / executorReady:false',
+    persistenceText: 'readOnly:true / wouldExecute:false',
+    runnerBlockers: [],
+    blockers: [...blockers, ...nextBlockers],
+    nextBlockers,
+    runnerBindingLines: [],
+    requiredFields: actionLines,
+    recordLines: [],
+    validationLines: [
+      `lifecyclePlanValid:${gates.lifecyclePlanValid === true ? 'true' : 'false'}`,
+      `runnerBindingsReady:${gates.runnerBindingsReady === true ? 'true' : 'false'}`,
+      `executionPreviewOnly:${gates.executionPreviewOnly === true ? 'true' : 'false'}`,
+      'executorReady:false',
+    ],
+    safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionSafetyLines(payload.safety),
+    messageText: 'Guarded runner execution preview completed; execution remains fail-closed.',
   };
 }
 
@@ -2254,6 +2353,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   const supervisorLifecycleExecutorManifestReadinessButton = doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button');
   const supervisorLifecycleGuardedRunnerReadinessRunnerBindingInput = doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding');
   const supervisorLifecycleGuardedRunnerReadinessButton = doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-button');
+  const supervisorLifecycleGuardedRunnerExecutionPreviewButton = doc.getElementById('supervisor-lifecycle-guarded-runner-execution-preview-button');
   const supervisorLifecycleApprovalPreviewStatusEl = doc.getElementById('supervisor-lifecycle-approval-preview-status');
   const supervisorLifecycleApprovalPreviewValidEl = doc.getElementById('supervisor-lifecycle-approval-preview-valid');
   const supervisorLifecycleApprovalPreviewPersistEl = doc.getElementById('supervisor-lifecycle-approval-preview-persist');
@@ -3745,6 +3845,11 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     renderSupervisorLifecycleApprovalPreview(viewModel);
   }
 
+  function setSupervisorLifecycleGuardedRunnerExecutionPreviewError(message) {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionPreviewViewModel(null, message);
+    renderSupervisorLifecycleApprovalPreview(viewModel);
+  }
+
   function appendSupervisorInstallGroup(titleText, lines) {
     if (!supervisorInstallDryRunResultEl || lines.length === 0) return;
     const group = doc.createElement('div');
@@ -4293,6 +4398,34 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     };
   }
 
+  function hasSupervisorLifecycleSharedResultRequestInFlight() {
+    return (
+      supervisorLifecycleApprovalPreviewInFlight ||
+      supervisorLifecycleApprovalPersistInFlight ||
+      supervisorLifecycleApprovalRecordsInFlight ||
+      supervisorLifecycleApplyReadinessInFlight ||
+      supervisorLifecycleExecutorReadinessInFlight ||
+      supervisorLifecycleExecutorManifestReadinessInFlight ||
+      supervisorLifecycleGuardedRunnerReadinessInFlight ||
+      supervisorLifecycleGuardedRunnerExecutionPreviewInFlight
+    );
+  }
+
+  function setSupervisorLifecycleSharedResultButtonsDisabled(disabled) {
+    [
+      supervisorLifecycleApprovalPreviewRunButton,
+      supervisorLifecycleApprovalPersistButton,
+      supervisorLifecycleApprovalRecordsButton,
+      supervisorLifecycleApplyReadinessButton,
+      supervisorLifecycleExecutorReadinessButton,
+      supervisorLifecycleExecutorManifestReadinessButton,
+      supervisorLifecycleGuardedRunnerReadinessButton,
+      supervisorLifecycleGuardedRunnerExecutionPreviewButton,
+    ].forEach((button) => {
+      if (button) button.disabled = Boolean(disabled);
+    });
+  }
+
   async function fetchSupervisorLifecycleGuardedRunnerReadiness() {
     if (!supervisorLifecycleApprovalPreviewResultEl || supervisorLifecycleGuardedRunnerReadinessInFlight) return;
 
@@ -4333,6 +4466,49 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     } finally {
       supervisorLifecycleGuardedRunnerReadinessInFlight = false;
       if (supervisorLifecycleGuardedRunnerReadinessButton) supervisorLifecycleGuardedRunnerReadinessButton.disabled = false;
+    }
+  }
+
+  async function fetchSupervisorLifecycleGuardedRunnerExecutionPreview() {
+    if (!supervisorLifecycleApprovalPreviewResultEl || hasSupervisorLifecycleSharedResultRequestInFlight()) return;
+
+    const parsed = parseSupervisorLifecycleGuardedRunnerReadinessPayload();
+    if (!parsed.ok) {
+      setSupervisorLifecycleGuardedRunnerExecutionPreviewError(parsed.error);
+      return;
+    }
+
+    supervisorLifecycleGuardedRunnerExecutionPreviewInFlight = true;
+    setSupervisorLifecycleSharedResultButtonsDisabled(true);
+    clearElement(supervisorLifecycleApprovalPreviewResultEl);
+    const loading = doc.createElement('p');
+    loading.className = 'placeholder';
+    loading.textContent = '生成 guarded runner execution preview 中...';
+    supervisorLifecycleApprovalPreviewResultEl.appendChild(loading);
+
+    try {
+      const res = await apiFetch('/api/supervisor-lifecycle-guarded-runner-execution-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed.payload),
+      });
+      let body;
+      try {
+        body = await res.json();
+      } catch (_) {
+        body = {};
+      }
+      if (!res.ok) {
+        throw new Error(body.error || 'HTTP ' + res.status);
+      }
+      renderSupervisorLifecycleApprovalPreview(buildSupervisorLifecycleGuardedRunnerExecutionPreviewViewModel(body));
+      logEvent('Supervisor lifecycle guarded runner execution preview completed', 'warning');
+    } catch (err) {
+      setSupervisorLifecycleGuardedRunnerExecutionPreviewError(err.message);
+      logEvent('Supervisor lifecycle guarded runner execution preview failed: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(err.message), 'error');
+    } finally {
+      supervisorLifecycleGuardedRunnerExecutionPreviewInFlight = false;
+      setSupervisorLifecycleSharedResultButtonsDisabled(false);
     }
   }
 
@@ -4620,6 +4796,9 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   if (supervisorLifecycleGuardedRunnerReadinessButton?.addEventListener) {
     supervisorLifecycleGuardedRunnerReadinessButton.addEventListener('click', fetchSupervisorLifecycleGuardedRunnerReadiness);
   }
+  if (supervisorLifecycleGuardedRunnerExecutionPreviewButton?.addEventListener) {
+    supervisorLifecycleGuardedRunnerExecutionPreviewButton.addEventListener('click', fetchSupervisorLifecycleGuardedRunnerExecutionPreview);
+  }
 
   for (const control of [deviceSearchInput, deviceStatusFilter, deviceManagementFilter, deviceSortSelect]) {
     if (control?.addEventListener) {
@@ -4682,6 +4861,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
   let supervisorLifecycleExecutorReadinessInFlight = false;
   let supervisorLifecycleExecutorManifestReadinessInFlight = false;
   let supervisorLifecycleGuardedRunnerReadinessInFlight = false;
+  let supervisorLifecycleGuardedRunnerExecutionPreviewInFlight = false;
 
   function renderReleaseHealth(viewModel) {
     const state = viewModel || buildReleaseHealthViewModel(null);
