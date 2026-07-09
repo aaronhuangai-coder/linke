@@ -34,14 +34,23 @@ function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
   assert.ok(evidence.includes('real-guarded-runner-execution-wiring-missing'));
 }
 
+function assertGuardedRunnerExecutionGateEvidence(evidence) {
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerExecutionGate'));
+  assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-gate.test.js'));
+  assert.ok(evidence.includes('supervisor-lifecycle-guarded-runner-execution-gate'));
+  assert.ok(evidence.includes('executionEligible:false'));
+  assert.ok(evidence.includes('execute-request-missing'));
+  assert.ok(evidence.includes('realRunnerWiringReady:false'));
+}
+
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.12', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.12');
+  it('expects LINKE_RELEASE_VERSION to be V1.13', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.13');
   });
 
-  it('expects report.version to be V1.12', () => {
+  it('expects report.version to be V1.13', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.12');
+    assert.strictEqual(report.version, 'V1.13');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -275,6 +284,8 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerReadinessViewModel'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
+    assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.13'));
     assert.ok(automationItem.nextStep.includes('V1.12'));
     assert.ok(automationItem.nextStep.includes('V1.11'));
     assert.ok(automationItem.nextStep.includes('V1.10'));
@@ -464,9 +475,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerReadinessViewModel'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
+    assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.13'));
     assert.ok(hardeningItem.nextStep.includes('V1.12'));
     assert.ok(hardeningItem.nextStep.includes('V1.11'));
     assert.ok(hardeningItem.nextStep.includes('V1.10'));

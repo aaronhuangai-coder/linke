@@ -1241,6 +1241,35 @@ function isGuardedRunnerReadinessShape(readiness) {
     Array.isArray(readiness.runnerBindings);
 }
 
+function isApplyReadinessShape(readiness) {
+  return isObject(readiness) &&
+    readiness.command === 'supervisor-lifecycle-apply-readiness' &&
+    typeof readiness.approvalRecordReady === 'boolean' &&
+    Array.isArray(readiness.blockers) &&
+    Array.isArray(readiness.nextBlockers);
+}
+
+function isExecutorManifestReadinessShape(readiness) {
+  return isObject(readiness) &&
+    readiness.command === 'supervisor-lifecycle-executor-manifest-readiness' &&
+    typeof readiness.manifestReady === 'boolean' &&
+    Array.isArray(readiness.blockers) &&
+    Array.isArray(readiness.nextBlockers) &&
+    Array.isArray(readiness.manifestBlockers) &&
+    Array.isArray(readiness.actionManifests);
+}
+
+function isGuardedRunnerExecutionPreviewShape(preview) {
+  return isObject(preview) &&
+    preview.command === 'supervisor-lifecycle-guarded-runner-execution-preview' &&
+    typeof preview.executionReady === 'boolean' &&
+    typeof preview.executorReady === 'boolean' &&
+    typeof preview.wouldExecute === 'boolean' &&
+    Array.isArray(preview.blockers) &&
+    Array.isArray(preview.nextBlockers) &&
+    Array.isArray(preview.actionPreviews);
+}
+
 function buildGuardedRunnerActionPreviews(plan, guardedRunnerReadiness) {
   if (!Array.isArray(plan?.actions) || !Array.isArray(guardedRunnerReadiness?.runnerBindings)) {
     return [];
@@ -1316,6 +1345,151 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guar
       runnerBindingsReady,
       executionPreviewOnly: true,
       executorReady: false,
+    },
+    safety: executionPreviewSafety(),
+  };
+}
+
+function isGuardedRunnerExecutionPreviewVerified(preview) {
+  if (!isGuardedRunnerExecutionPreviewShape(preview)) return false;
+  return preview.state === 'blocked' &&
+    preview.executionReady === false &&
+    preview.executorReady === false &&
+    preview.wouldExecute === false &&
+    preview.blockers.includes(GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY) &&
+    preview.nextBlockers.includes(REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING) &&
+    preview.actionPreviews.every((entry) =>
+      isObject(entry) &&
+        entry.status === 'blocked' &&
+        entry.wouldExecute === false &&
+        entry.wouldRun === false &&
+        entry.wouldWrite === false);
+}
+
+function buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview) {
+  if (!isLifecycleApplyPlanShape(plan) ||
+      !hasExpectedLifecycleActions(plan) ||
+      !isGuardedRunnerExecutionPreviewShape(executionPreview) ||
+      !isGuardedRunnerExecutionPreviewVerified(executionPreview) ||
+      executionPreview.operation !== plan.operation) {
+    return [];
+  }
+
+  return plan.actions
+    .map((action) => {
+      const preview = executionPreview.actionPreviews.find((entry) =>
+        isObject(entry) && entry.actionId === action?.id);
+      if (!preview) return null;
+      return {
+        actionId: sanitizeExecutionPreviewMetadata(preview.actionId),
+        implementationId: sanitizeExecutionPreviewMetadata(preview.implementationId),
+        runnerKind: sanitizeExecutionPreviewMetadata(preview.runnerKind),
+        mode: sanitizeExecutionPreviewMetadata(preview.mode),
+        status: 'blocked',
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        maxAttempts: sanitizeExecutionPreviewMaxAttempts(preview.maxAttempts),
+      };
+    })
+    .filter(Boolean);
+}
+
+export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
+  plan,
+  applyReadiness,
+  manifestReadiness,
+  guardedRunnerReadiness,
+  executionPreview,
+  options = {},
+) {
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation)
+    ? plan.operation
+    : (ALLOWED_OPERATIONS.has(executionPreview?.operation) ? executionPreview.operation : 'unknown');
+  const blockers = [];
+  let lifecyclePlanValid = false;
+  let approvalRecordReady = false;
+  let manifestReady = false;
+  let runnerBindingsReady = false;
+  let executionPreviewVerified = false;
+  const executeRequested = options?.executeRequested === true;
+
+  if (!isLifecycleApplyPlanShape(plan)) {
+    blockers.push('invalid-lifecycle-plan');
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    blockers.push('lifecycle-plan-action-mismatch');
+  } else {
+    lifecyclePlanValid = true;
+  }
+
+  if (!isApplyReadinessShape(applyReadiness)) {
+    blockers.push('apply-readiness-invalid');
+  } else if (lifecyclePlanValid && applyReadiness.operation !== plan.operation) {
+    blockers.push('apply-readiness-invalid');
+  } else {
+    approvalRecordReady = applyReadiness.approvalRecordReady === true;
+    if (!approvalRecordReady) {
+      blockers.push('approval-record-gate-not-ready');
+    }
+  }
+
+  if (!isExecutorManifestReadinessShape(manifestReadiness)) {
+    blockers.push('executor-manifest-readiness-invalid');
+  } else if (lifecyclePlanValid && manifestReadiness.operation !== plan.operation) {
+    blockers.push('executor-manifest-readiness-invalid');
+  } else {
+    manifestReady = manifestReadiness.manifestReady === true;
+    if (!manifestReady) {
+      blockers.push('executor-manifest-not-ready');
+    }
+  }
+
+  if (!isGuardedRunnerReadinessShape(guardedRunnerReadiness)) {
+    blockers.push('guarded-runner-readiness-invalid');
+  } else if (lifecyclePlanValid && guardedRunnerReadiness.operation !== plan.operation) {
+    blockers.push('guarded-runner-readiness-invalid');
+  } else {
+    runnerBindingsReady = guardedRunnerReadiness.runnerBindingsReady === true;
+    if (!runnerBindingsReady) {
+      blockers.push('guarded-runner-readiness-not-ready');
+    }
+  }
+
+  if (!isGuardedRunnerExecutionPreviewShape(executionPreview)) {
+    blockers.push('execution-preview-invalid');
+  } else if (lifecyclePlanValid && executionPreview.operation !== plan.operation) {
+    blockers.push('execution-preview-operation-mismatch');
+  } else {
+    executionPreviewVerified = isGuardedRunnerExecutionPreviewVerified(executionPreview);
+    if (!executionPreviewVerified) {
+      blockers.push('execution-preview-not-verified');
+    }
+  }
+
+  if (!executeRequested) {
+    blockers.push('execute-request-missing');
+  }
+  blockers.push(REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING);
+
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+    operation,
+    state: 'blocked',
+    executionGateState: 'blocked',
+    executionEligible: false,
+    executorReady: false,
+    wouldExecute: false,
+    blockers: [...new Set(blockers)],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    actionCandidates: buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview),
+    gates: {
+      lifecyclePlanValid,
+      approvalRecordReady,
+      manifestReady,
+      runnerBindingsReady,
+      executionPreviewVerified,
+      executeRequested,
+      realRunnerWiringReady: false,
     },
     safety: executionPreviewSafety(),
   };
