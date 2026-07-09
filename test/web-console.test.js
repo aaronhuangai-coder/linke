@@ -47,6 +47,7 @@ import {
   buildSupervisorLifecycleApplyReadinessViewModel,
   buildSupervisorLifecycleExecutorReadinessViewModel,
   buildSupervisorLifecycleExecutorManifestReadinessViewModel,
+  buildSupervisorLifecycleGuardedRunnerReadinessViewModel,
 } from '../src/web/app.js';
 import { buildSupervisorLifecycleApplyPlan } from '../src/supervisor-lifecycle.js';
 
@@ -1991,6 +1992,10 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-records-button"'), 'must have approval records button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-apply-readiness-button"'), 'must have apply readiness button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-executor-readiness-button"'), 'must have executor readiness button');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-executor-manifest-readiness-manifest"'), 'must have executor manifest textarea');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-executor-manifest-readiness-button"'), 'must have executor manifest readiness button');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-guarded-runner-readiness-runner-binding"'), 'must have guarded runner binding textarea');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-guarded-runner-readiness-button"'), 'must have guarded runner readiness button');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-status"'), 'must have status stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-valid"'), 'must have approval valid stat');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-preview-persist"'), 'must have persistence stat');
@@ -1999,6 +2004,8 @@ describe('Web Console / API contract', () => {
     assert.ok(html.includes('data-testid="supervisor-lifecycle-approval-persist-safety-note"'), 'must have persist safety note');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-apply-readiness-safety-note"'), 'must have readiness safety note');
     assert.ok(html.includes('data-testid="supervisor-lifecycle-executor-readiness-safety-note"'), 'must have executor readiness safety note');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-executor-manifest-readiness-safety-note"'), 'must have executor manifest readiness safety note');
+    assert.ok(html.includes('data-testid="supervisor-lifecycle-guarded-runner-readiness-safety-note"'), 'must have guarded runner readiness safety note');
     const buttonMatch = html.match(/<button[^>]*data-testid="supervisor-lifecycle-approval-persist-button"[^>]*>([\s\S]*?)<\/button>/);
     assert.ok(buttonMatch, 'persist button must exist');
     assert.match(buttonMatch[1], /Persist Approval Record/);
@@ -2011,6 +2018,10 @@ describe('Web Console / API contract', () => {
     assert.ok(executorReadinessButtonMatch, 'executor readiness button must exist');
     assert.match(executorReadinessButtonMatch[1], /Executor Readiness/i);
     assert.doesNotMatch(executorReadinessButtonMatch[1], /Execute|Run install|Start|Launch/i);
+    const guardedRunnerReadinessButtonMatch = html.match(/<button[^>]*data-testid="supervisor-lifecycle-guarded-runner-readiness-button"[^>]*>([\s\S]*?)<\/button>/);
+    assert.ok(guardedRunnerReadinessButtonMatch, 'guarded runner readiness button must exist');
+    assert.match(guardedRunnerReadinessButtonMatch[1], /Guarded Runner Readiness/i);
+    assert.doesNotMatch(guardedRunnerReadinessButtonMatch[1], /Execute|Run install|Start|Launch/i);
   });
 
   it('supervisor lifecycle approval preview panel safety note documents manual preview boundaries', async () => {
@@ -2031,7 +2042,10 @@ describe('Web Console / API contract', () => {
     assert.doesNotMatch(content, /does not execute lifecycle apply|does not call launchctl/i);
     assert.match(content, /POST \/api\/supervisor-lifecycle-apply-readiness/i);
     assert.match(content, /POST \/api\/supervisor-lifecycle-executor-readiness/i);
+    assert.match(content, /POST \/api\/supervisor-lifecycle-executor-manifest-readiness/i);
+    assert.match(content, /POST \/api\/supervisor-lifecycle-guarded-runner-readiness/i);
     assert.match(content, /executorReady:false|执行器未就绪/i);
+    assert.match(content, /runnerBindingsReady|guarded-runner-execution-disabled|wouldRun:false/i);
     assert.match(content, /readOnly:true|只读/i);
     assert.match(content, /不读取 approval textarea|不使用 approval textarea|不提交 approval JSON/i);
     assert.match(content, /不执行远程命令|remote command/i);
@@ -2060,16 +2074,28 @@ describe('Web Console / API contract', () => {
       js.includes("apiFetch('/api/supervisor-lifecycle-executor-readiness'"),
       'app.js must call executor readiness endpoint directly',
     );
+    assert.ok(
+      js.includes("apiFetch('/api/supervisor-lifecycle-executor-manifest-readiness'"),
+      'app.js must call executor manifest readiness endpoint directly',
+    );
+    assert.ok(
+      js.includes("apiFetch('/api/supervisor-lifecycle-guarded-runner-readiness'"),
+      'app.js must call guarded runner readiness endpoint directly',
+    );
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistencePreviewViewModel'), 'app.js must export approval preview view model');
     assert.ok(js.includes('buildSupervisorLifecycleApprovalPersistViewModel'), 'app.js must export approval persist view model');
     assert.ok(js.includes('buildSupervisorLifecycleApprovalRecordsViewModel'), 'app.js must export approval records view model');
     assert.ok(js.includes('buildSupervisorLifecycleApplyReadinessViewModel'), 'app.js must export apply readiness view model');
     assert.ok(js.includes('buildSupervisorLifecycleExecutorReadinessViewModel'), 'app.js must export executor readiness view model');
+    assert.ok(js.includes('buildSupervisorLifecycleExecutorManifestReadinessViewModel'), 'app.js must export executor manifest readiness view model');
+    assert.ok(js.includes('buildSupervisorLifecycleGuardedRunnerReadinessViewModel'), 'app.js must export guarded runner readiness view model');
     assert.ok(js.includes('supervisor-lifecycle-approval-preview-run') || js.includes('supervisorLifecycleApprovalPreviewRun'), 'app.js must reference the run button');
     assert.ok(js.includes('supervisor-lifecycle-approval-persist-button') || js.includes('supervisorLifecycleApprovalPersistButton'), 'app.js must reference the persist button');
     assert.ok(js.includes('supervisor-lifecycle-approval-records-button') || js.includes('supervisorLifecycleApprovalRecordsButton'), 'app.js must reference the records button');
     assert.ok(js.includes('supervisor-lifecycle-apply-readiness-button') || js.includes('supervisorLifecycleApplyReadinessButton'), 'app.js must reference the readiness button');
     assert.ok(js.includes('supervisor-lifecycle-executor-readiness-button') || js.includes('supervisorLifecycleExecutorReadinessButton'), 'app.js must reference the executor readiness button');
+    assert.ok(js.includes('supervisor-lifecycle-executor-manifest-readiness-button') || js.includes('supervisorLifecycleExecutorManifestReadinessButton'), 'app.js must reference the executor manifest readiness button');
+    assert.ok(js.includes('supervisor-lifecycle-guarded-runner-readiness-button') || js.includes('supervisorLifecycleGuardedRunnerReadinessButton'), 'app.js must reference the guarded runner readiness button');
   });
 
   it('styles.css contains supervisor lifecycle approval preview panel styles', async () => {
@@ -9208,6 +9234,94 @@ describe('buildSupervisorLifecycleExecutorManifestReadinessViewModel', () => {
   });
 });
 
+describe('buildSupervisorLifecycleGuardedRunnerReadinessViewModel', () => {
+  it('returns unknown state for missing payload without implying runner execution readiness', () => {
+    const result = buildSupervisorLifecycleGuardedRunnerReadinessViewModel(null);
+
+    assert.strictEqual(result.statusKey, 'unknown');
+    assert.strictEqual(result.statusText, '未检查');
+    assert.strictEqual(result.approvalValidText, 'runnerBindingsReady:false / executorReady:false');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / executorReady:false');
+    assert.deepStrictEqual(result.blockers, []);
+    assert.deepStrictEqual(result.recordLines, []);
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.match(result.messageText, /guarded runner readiness/i);
+  });
+
+  it('returns sanitized blocked guarded runner readiness fields without exposing sensitive payload details', () => {
+    const result = buildSupervisorLifecycleGuardedRunnerReadinessViewModel({
+      command: 'supervisor-lifecycle-guarded-runner-readiness',
+      operation: 'install',
+      state: 'blocked',
+      runnerBindingState: 'blocked',
+      runnerBindingsReady: false,
+      executorReady: false,
+      blockers: ['guarded-runner-execution-disabled'],
+      runnerBlockers: ['invalid-runner-kind:/usr/bin/eval token=SECRET_XYZ'],
+      nextBlockers: ['guarded-runner-execution-disabled'],
+      runnerBindings: [
+        {
+          actionId: 'render-launch-agent-plist',
+          implementationId: 'render-plist-impl',
+          mode: 'guarded-host-action',
+          runnerKind: '/usr/bin/eval token=SECRET_XYZ',
+          requiresApprovalRecord: true,
+          maxAttempts: 2,
+          wouldRun: false,
+          wouldWrite: false,
+        },
+      ],
+      gates: {
+        lifecyclePlanValid: true,
+        manifestReady: true,
+        runnerBindingsReady: false,
+        executorReady: false,
+      },
+      safety: {
+        dryRun: true,
+        readOnly: true,
+        hostMutation: false,
+        launchctlCalled: false,
+        filesystemWritten: false,
+        lifecycleApplied: false,
+        sensitiveValuesReturned: false,
+      },
+    });
+    const text = JSON.stringify(result);
+
+    assert.strictEqual(result.statusKey, 'blocked');
+    assert.strictEqual(result.statusText, 'Guarded runner 未启用');
+    assert.strictEqual(result.approvalValidText, 'runnerBindingsReady:false / executorReady:false');
+    assert.strictEqual(result.persistenceText, 'readOnly:true / executorReady:false');
+    assert.ok(result.blockers.includes('guarded-runner-execution-disabled'));
+    assert.ok(result.runnerBlockers.includes('runner:invalid-runner-kind:[redacted-path]'));
+    assert.ok(result.nextBlockers.includes('guarded-runner-execution-disabled'));
+    assert.ok(result.requiredFields.includes('binding:render-launch-agent-plist:impl:render-plist-impl:mode:guarded-host-action:runner:[redacted]:wouldRun:false:wouldWrite:false'));
+    assert.ok(result.validationLines.includes('lifecyclePlanValid:true'));
+    assert.ok(result.validationLines.includes('manifestReady:true'));
+    assert.ok(result.validationLines.includes('runnerBindingsReady:false'));
+    assert.ok(result.validationLines.includes('executorReady:false'));
+    assert.ok(result.safetyLines.includes('readOnly:true'));
+    assert.ok(result.safetyLines.includes('lifecycleApplied:false'));
+    assert.ok(result.safetyLines.includes('launchctlCalled:false'));
+    assert.match(result.messageText, /guarded runner readiness/i);
+    assert.match(result.messageText, /fail-closed/i);
+    assert.ok(!text.includes('/usr/bin'), 'must not expose executable paths');
+    assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token values');
+    assert.doesNotMatch(text, /\beval\b/i, 'must not expose command-like runner kind');
+  });
+
+  it('returns sanitized error state', () => {
+    const failed = buildSupervisorLifecycleGuardedRunnerReadinessViewModel(null, 'Bearer token secret-value failed at /Users/ah/private');
+
+    assert.strictEqual(failed.statusKey, 'error');
+    assert.strictEqual(failed.statusText, '检查失败');
+    assert.ok(!failed.messageText.includes('secret-value'), 'error message must be sanitized');
+    assert.ok(!failed.messageText.includes('/Users/ah/private'), 'error path must be sanitized');
+  });
+});
+
 describe('DOM test: hardening status panel interactions', () => {
   it('does not request /api/hardening-status on initialization', async () => {
     const doc = buildMockDoc();
@@ -10215,6 +10329,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.strictEqual(fetchCount, 0, 'should not call executor manifest readiness API on init');
   });
 
+  it('does not request /api/supervisor-lifecycle-guarded-runner-readiness on initialization', async () => {
+    let fetchCount = 0;
+    const doc = buildMockDoc();
+    const fetchImpl = async (url) => {
+      if (String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness') fetchCount++;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+
+    initConsole(doc, fetchImpl, () => {});
+
+    assert.strictEqual(fetchCount, 0, 'should not call guarded runner readiness API on init');
+  });
+
   it('validates executor manifest readiness config and manifest locally without calling the API', async () => {
     const calls = [];
     const doc = buildMockDoc();
@@ -10254,6 +10381,55 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-button')._listeners.click();
     assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-executor-manifest-readiness'));
     assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /执行器 Manifest JSON 格式错误/);
+  });
+
+  it('validates guarded runner readiness config, manifest, and runner binding locally without calling the API', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        calls.push(url);
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    const guardedButton = doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-button');
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '   ';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{}';
+    doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding').value = '{}';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 不能为空/);
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{ invalid json';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /配置 JSON 格式错误/);
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = '{}';
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '  ';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /执行器 Manifest JSON 不能为空/);
+
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{ invalid manifest';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /执行器 Manifest JSON 格式错误/);
+
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = '{}';
+    doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding').value = '  ';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /Runner Binding JSON 不能为空/);
+
+    doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding').value = '{ invalid runner binding';
+    guardedButton._listeners.click();
+    assert.ok(!calls.some((url) => String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness'));
+    assert.match(doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent, /Runner Binding JSON 格式错误/);
   });
 
   it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {
@@ -11016,6 +11192,173 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     manifestBtn._listeners.click();
     manifestBtn._listeners.click();
     assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate executor manifest readiness requests');
+
+    resolveRequest();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  });
+
+  it('requests guarded runner readiness with inline config, manifest, and runner binding and renders sanitized blocked fields', async () => {
+    const calls = [];
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url, options) => {
+        calls.push({ url, options });
+        if (String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-guarded-runner-readiness',
+              operation: 'install',
+              state: 'blocked',
+              runnerBindingState: 'ready',
+              runnerBindingsReady: true,
+              executorReady: false,
+              blockers: ['guarded-runner-execution-disabled'],
+              runnerBlockers: ['unsafe-runner-binding:/Users/ah/secret-path token=SECRET_XYZ'],
+              nextBlockers: ['guarded-runner-execution-disabled'],
+              runnerBindings: [
+                {
+                  actionId: 'render-launch-agent-plist',
+                  implementationId: 'render-plist-impl',
+                  mode: 'guarded-host-action',
+                  runnerKind: '/usr/bin/eval token=SECRET_XYZ',
+                  wouldRun: false,
+                  wouldWrite: false,
+                },
+              ],
+              gates: {
+                lifecyclePlanValid: true,
+                manifestReady: true,
+                runnerBindingsReady: true,
+                executorReady: false,
+              },
+              safety: {
+                dryRun: true,
+                readOnly: true,
+                hostMutation: false,
+                launchctlCalled: false,
+                filesystemWritten: false,
+                lifecycleApplied: false,
+                sensitiveValuesReturned: false,
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-operation').value = 'install';
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-guarded-runner-readiness',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-approval-preview-approval').value = JSON.stringify({
+      approvedBy: 'operator@example.invalid',
+      reason: 'do not send this approval',
+    });
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-executor-manifest',
+      schemaVersion: 1,
+      actions: [],
+    });
+    doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-guarded-runner-binding',
+      schemaVersion: 1,
+      bindings: [],
+    });
+
+    const guardedRunnerBtn = doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-button');
+    guardedRunnerBtn._listeners.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const apiCall = calls.find((call) => String(call.url) === '/api/supervisor-lifecycle-guarded-runner-readiness');
+    assert.ok(apiCall, 'must call guarded runner readiness API');
+    assert.strictEqual(apiCall.options.method, 'POST');
+
+    const requestBody = JSON.parse(apiCall.options.body);
+    assert.strictEqual(requestBody.operation, 'install');
+    assert.strictEqual(requestBody.config.deviceId, 'web-lifecycle-guarded-runner-readiness');
+    assert.strictEqual(requestBody.manifest.kind, 'supervisor-lifecycle-executor-manifest');
+    assert.strictEqual(requestBody.runnerBinding.kind, 'supervisor-lifecycle-guarded-runner-binding');
+    assert.ok(requestBody.approval === undefined, 'must not submit approval JSON');
+    assert.ok(requestBody.dataDir === undefined, 'must not submit dataDir');
+    assert.ok(requestBody.apply === undefined, 'must not submit apply flag');
+
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-status').textContent, 'Guarded runner 未启用');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-valid').textContent, 'runnerBindingsReady:true / executorReady:false');
+    assert.strictEqual(doc.getElementById('supervisor-lifecycle-approval-preview-persist').textContent, 'readOnly:true / executorReady:false');
+
+    const resultText = doc.getElementById('supervisor-lifecycle-approval-preview-result').textContent;
+    assert.match(resultText, /guarded-runner-execution-disabled/);
+    assert.match(resultText, /runner:unsafe-runner-binding:\[redacted-path\]/);
+    assert.match(resultText, /binding:render-launch-agent-plist:impl:render-plist-impl:mode:guarded-host-action:runner:\[redacted\]:wouldRun:false:wouldWrite:false/);
+    assert.match(resultText, /lifecyclePlanValid:true/);
+    assert.match(resultText, /manifestReady:true/);
+    assert.match(resultText, /runnerBindingsReady:true/);
+    assert.match(resultText, /executorReady:false/);
+    assert.match(resultText, /readOnly:true/);
+    assert.match(resultText, /lifecycleApplied:false/);
+    assert.ok(!resultText.includes('/Users/ah/secret-path'), 'must not expose paths');
+    assert.ok(!resultText.includes('/usr/bin'), 'must not expose executable paths');
+    assert.ok(!resultText.includes('SECRET_XYZ'), 'must not expose token values');
+    assert.ok(!resultText.includes('operator@example.invalid'), 'must not render approval identity');
+    assert.doesNotMatch(resultText, /\beval\b/i, 'must not expose command-like runner kind');
+  });
+
+  it('does not start a second guarded runner readiness request while one is in flight', async () => {
+    let fetchCount = 0;
+    let resolveRequest;
+    const doc = buildMockDoc();
+    initConsole(
+      doc,
+      async (url) => {
+        if (String(url) === '/api/supervisor-lifecycle-guarded-runner-readiness') {
+          fetchCount++;
+          await new Promise((resolve) => { resolveRequest = resolve; });
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              command: 'supervisor-lifecycle-guarded-runner-readiness',
+              runnerBindingsReady: true,
+              executorReady: false,
+              blockers: ['guarded-runner-execution-disabled'],
+              runnerBindings: [],
+              gates: {},
+              safety: {},
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => [] };
+      },
+      () => {},
+    );
+
+    doc.getElementById('supervisor-lifecycle-approval-preview-config').value = JSON.stringify({
+      serverUrl: 'http://localhost:3000',
+      deviceId: 'web-lifecycle-guarded-runner-readiness-inflight',
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/source' }],
+    });
+    doc.getElementById('supervisor-lifecycle-executor-manifest-readiness-manifest').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-executor-manifest',
+      schemaVersion: 1,
+      actions: [],
+    });
+    doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-runner-binding').value = JSON.stringify({
+      kind: 'supervisor-lifecycle-guarded-runner-binding',
+      schemaVersion: 1,
+      bindings: [],
+    });
+
+    const guardedRunnerBtn = doc.getElementById('supervisor-lifecycle-guarded-runner-readiness-button');
+    guardedRunnerBtn._listeners.click();
+    guardedRunnerBtn._listeners.click();
+    assert.strictEqual(fetchCount, 1, 'in-flight guard must block duplicate guarded runner readiness requests');
 
     resolveRequest();
     await new Promise((resolve) => setTimeout(resolve, 30));
