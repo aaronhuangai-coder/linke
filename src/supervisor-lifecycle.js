@@ -645,6 +645,27 @@ const ALLOWED_EXECUTOR_READINESS_BLOCKERS = new Set([
   'approval-record-gate-not-ready',
   'lifecycle-plan-blocker-not-allowed',
 ]);
+const GUARDED_RUNNER_BINDING_KIND = 'supervisor-lifecycle-guarded-runner-binding';
+const GUARDED_RUNNER_BINDING_MODE = 'guarded-host-action';
+const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
+const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
+const RUNNER_BINDING_ALLOWED_KEYS = new Set([
+  'actionId',
+  'implementationId',
+  'mode',
+  'runnerKind',
+  'requiresApprovalRecord',
+  'maxAttempts',
+]);
+const RUNNER_BINDING_REQUIRED_FIELDS = [
+  'actionId',
+  'implementationId',
+  'mode',
+  'runnerKind',
+  'requiresApprovalRecord',
+  'maxAttempts',
+];
+const SAFE_IMPLEMENTATION_ID_PATTERN = /^(?!.*--)[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/;
 
 export function buildSupervisorLifecycleExecutorReadiness(plan, applyReadiness) {
   const blockers = [];
@@ -823,6 +844,15 @@ function sanitizeEntry(entry) {
   return sanitized;
 }
 
+function sanitizeRunnerBindingEntry(entry) {
+  const sanitized = sanitizeEntry(entry);
+  if (!sanitized) return null;
+  if (entry.runnerKind !== undefined) {
+    sanitized.runnerKind = sanitizeString(entry.runnerKind);
+  }
+  return sanitized;
+}
+
 function checkManifestForUnsafeValues(val, results = { hasPlaceholder: false, hasSecret: false }) {
   if (val === null || val === undefined) return results;
 
@@ -844,6 +874,10 @@ function checkManifestForUnsafeValues(val, results = { hasPlaceholder: false, ha
     }
   }
   return results;
+}
+
+function safeActionBlockerId(actionId) {
+  return isSafeString(actionId) ? actionId : 'redacted-action-id';
 }
 
 export function validateSupervisorLifecycleExecutorManifest(plan, manifest) {
@@ -932,7 +966,7 @@ export function validateSupervisorLifecycleExecutorManifest(plan, manifest) {
             if (entry.actionId !== undefined && (typeof entry.actionId !== 'string' || entry.actionId !== action.id)) {
               hasInvalid = true;
             }
-            if (entry.implementationId !== undefined && (typeof entry.implementationId !== 'string' || !/^(?!.*--)[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(entry.implementationId))) {
+            if (entry.implementationId !== undefined && (typeof entry.implementationId !== 'string' || !SAFE_IMPLEMENTATION_ID_PATTERN.test(entry.implementationId))) {
               hasInvalid = true;
             }
             if (entry.mode !== undefined && entry.mode !== 'guarded-host-action') {
@@ -988,6 +1022,149 @@ export function validateSupervisorLifecycleExecutorManifest(plan, manifest) {
     gates: {
       lifecyclePlanValid: !planBlockers.includes('invalid-lifecycle-plan') && !planBlockers.includes('lifecycle-plan-action-mismatch'),
       manifestReady,
+      executorImplemented: false,
+    },
+    safety: {
+      ...lifecycleSafety(),
+      readOnly: true,
+      lifecycleApplied: false,
+    },
+  };
+}
+
+export function buildSupervisorLifecycleGuardedRunnerReadiness(manifestReadiness, runnerBinding) {
+  const runnerBlockers = [];
+  const operation = ALLOWED_OPERATIONS.has(manifestReadiness?.operation) ? manifestReadiness.operation : 'unknown';
+  const manifestReady = manifestReadiness?.manifestReady === true;
+  const actionManifests = Array.isArray(manifestReadiness?.actionManifests)
+    ? manifestReadiness.actionManifests
+    : [];
+  const runnerBindings = isObject(runnerBinding) && Array.isArray(runnerBinding.bindings)
+    ? runnerBinding.bindings.map(sanitizeRunnerBindingEntry).filter(Boolean)
+    : [];
+
+  if (!isObject(manifestReadiness) ||
+      manifestReadiness.command !== 'supervisor-lifecycle-executor-manifest-readiness' ||
+      !Array.isArray(manifestReadiness.blockers) ||
+      !Array.isArray(manifestReadiness.actionManifests)) {
+    runnerBlockers.push('invalid-executor-manifest-readiness');
+  } else if (!manifestReady) {
+    runnerBlockers.push('executor-manifest-not-ready');
+  }
+
+  if (runnerBinding !== undefined && runnerBinding !== null) {
+    const checkResults = checkManifestForUnsafeValues(runnerBinding);
+    if (checkResults.hasPlaceholder) {
+      runnerBlockers.push('unresolved-placeholder');
+    }
+    if (checkResults.hasSecret) {
+      runnerBlockers.push('secret-reference');
+    }
+  }
+
+  if (!isObject(runnerBinding)) {
+    runnerBlockers.push('guarded-runner-binding-invalid-bindings');
+  } else {
+    const topAllowedKeys = new Set(['kind', 'schemaVersion', 'bindings']);
+    if (Object.keys(runnerBinding).some((key) => !topAllowedKeys.has(key))) {
+      runnerBlockers.push('guarded-runner-binding-invalid-schema');
+    }
+    if (runnerBinding.kind !== GUARDED_RUNNER_BINDING_KIND) {
+      runnerBlockers.push('guarded-runner-binding-invalid-kind');
+    }
+    if (runnerBinding.schemaVersion !== 1) {
+      runnerBlockers.push('guarded-runner-binding-invalid-schema');
+    }
+    if (!Array.isArray(runnerBinding.bindings)) {
+      runnerBlockers.push('guarded-runner-binding-invalid-bindings');
+    }
+  }
+
+  if (Array.isArray(runnerBinding?.bindings)) {
+    for (const manifestEntry of actionManifests) {
+      const safeActionId = safeActionBlockerId(manifestEntry?.actionId);
+      const matches = runnerBinding.bindings.filter((entry) =>
+        isObject(entry) &&
+        entry.actionId === manifestEntry.actionId &&
+        entry.implementationId === manifestEntry.implementationId &&
+        entry.mode === manifestEntry.mode);
+
+      if (matches.length === 0) {
+        runnerBlockers.push(`guarded-runner-binding-missing-for-action:${safeActionId}`);
+      } else if (matches.length > 1) {
+        runnerBlockers.push(`guarded-runner-binding-unsafe-for-action:${safeActionId}:invalid-field`);
+      }
+    }
+
+    for (const entry of runnerBinding.bindings) {
+      if (!isObject(entry)) {
+        runnerBlockers.push('guarded-runner-binding-invalid-bindings');
+        continue;
+      }
+
+      const safeActionId = safeActionBlockerId(entry.actionId);
+      if (Object.keys(entry).some((key) => !RUNNER_BINDING_ALLOWED_KEYS.has(key))) {
+        runnerBlockers.push(`guarded-runner-binding-unsafe-for-action:${safeActionId}:forbidden-field`);
+      }
+      if (RUNNER_BINDING_REQUIRED_FIELDS.some((field) => entry[field] === undefined)) {
+        runnerBlockers.push(`guarded-runner-binding-unsafe-for-action:${safeActionId}:missing-field`);
+      }
+
+      let hasInvalid = false;
+      const matchingManifest = actionManifests.find((manifestEntry) =>
+        manifestEntry.actionId === entry.actionId &&
+        manifestEntry.implementationId === entry.implementationId &&
+        manifestEntry.mode === entry.mode);
+      if (!matchingManifest) {
+        hasInvalid = true;
+      }
+      if (entry.actionId !== undefined && (typeof entry.actionId !== 'string' || !isSafeString(entry.actionId))) {
+        hasInvalid = true;
+      }
+      if (entry.implementationId !== undefined &&
+          (typeof entry.implementationId !== 'string' || !SAFE_IMPLEMENTATION_ID_PATTERN.test(entry.implementationId))) {
+        hasInvalid = true;
+      }
+      if (entry.mode !== undefined && entry.mode !== GUARDED_RUNNER_BINDING_MODE) {
+        hasInvalid = true;
+      }
+      if (entry.runnerKind !== undefined && entry.runnerKind !== GUARDED_RUNNER_KIND) {
+        hasInvalid = true;
+      }
+      if (entry.requiresApprovalRecord !== undefined && entry.requiresApprovalRecord !== true) {
+        hasInvalid = true;
+      }
+      if (entry.maxAttempts !== undefined &&
+          (typeof entry.maxAttempts !== 'number' ||
+            !Number.isInteger(entry.maxAttempts) ||
+            entry.maxAttempts < 1 ||
+            entry.maxAttempts > 3)) {
+        hasInvalid = true;
+      }
+
+      if (hasInvalid) {
+        runnerBlockers.push(`guarded-runner-binding-unsafe-for-action:${safeActionId}:invalid-field`);
+      }
+    }
+  }
+
+  const uniqueRunnerBlockers = [...new Set(runnerBlockers)];
+  const runnerBindingsReady = uniqueRunnerBlockers.length === 0;
+
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-readiness',
+    operation,
+    state: 'blocked',
+    runnerBindingState: runnerBindingsReady ? 'ready' : 'blocked',
+    runnerBindingsReady,
+    executorReady: false,
+    runnerBlockers: uniqueRunnerBlockers,
+    blockers: [...new Set([...uniqueRunnerBlockers, GUARDED_RUNNER_EXECUTION_DISABLED])],
+    nextBlockers: [GUARDED_RUNNER_EXECUTION_DISABLED],
+    runnerBindings,
+    gates: {
+      manifestReady,
+      runnerBindingsReady,
       executorImplemented: false,
     },
     safety: {
