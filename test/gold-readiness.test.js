@@ -14,14 +14,26 @@ function evidenceText(item) {
   return item.evidence.join(' ');
 }
 
+function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerExecutionPreview'));
+  assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-preview.test.js'));
+  assert.ok(evidence.includes('executionReady:false'));
+  assert.ok(evidence.includes('executorReady:false'));
+  assert.ok(evidence.includes('wouldExecute:false'));
+  assert.ok(evidence.includes('wouldRun:false'));
+  assert.ok(evidence.includes('wouldWrite:false'));
+  assert.ok(evidence.includes('guarded-runner-execution-preview-only'));
+  assert.ok(evidence.includes('real-guarded-runner-execution-wiring-missing'));
+}
+
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.08', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.08');
+  it('expects LINKE_RELEASE_VERSION to be V1.09', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.09');
   });
 
-  it('expects report.version to be V1.08', () => {
+  it('expects report.version to be V1.09', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.08');
+    assert.strictEqual(report.version, 'V1.09');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -254,6 +266,8 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('supervisor-lifecycle-guarded-runner-readiness-button'));
     assert.ok(automationEvidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerReadinessViewModel'));
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
+    assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.09'));
     assert.ok(automationItem.nextStep.includes('V1.08'));
     assert.ok(automationItem.nextStep.includes('V1.07'));
     assert.ok(automationItem.nextStep.includes('V1.06'));
@@ -438,9 +452,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('supervisor-lifecycle-guarded-runner-readiness-button'));
     assert.ok(hardeningEvidence.includes('src/web/app.js buildSupervisorLifecycleGuardedRunnerReadinessViewModel'));
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
+    assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.09'));
     assert.ok(hardeningItem.nextStep.includes('V1.08'));
     assert.ok(hardeningItem.nextStep.includes('V1.07'));
     assert.ok(hardeningItem.nextStep.includes('V1.06'));

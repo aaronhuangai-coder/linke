@@ -649,6 +649,8 @@ const GUARDED_RUNNER_BINDING_KIND = 'supervisor-lifecycle-guarded-runner-binding
 const GUARDED_RUNNER_BINDING_MODE = 'guarded-host-action';
 const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
 const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
+const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
+const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
 const RUNNER_BINDING_ALLOWED_KEYS = new Set([
   'actionId',
   'implementationId',
@@ -818,6 +820,52 @@ function sanitizeString(val) {
     return '[redacted]';
   }
   return val;
+}
+
+function hasUnsafeExecutionPreviewMetadata(val) {
+  if (typeof val !== 'string') return false;
+  if (hasPlaceholder(val) || hasSecretOrUnsafeText(val)) return true;
+
+  if (/\b(launchctl|sudo|shell|node|npm|pnpm|git|curl|wget|osascript|sh|bash|zsh)\b/i.test(val)) {
+    return true;
+  }
+  if (/\b(?:\d{1,3}\.){3}\d{1,3}\b/.test(val)) {
+    return true;
+  }
+  if (/\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b/i.test(val)) {
+    return true;
+  }
+  if (/\b(?:pid|ppid|process|process-id|processid)\s*[:=#-]?\s*\d+\b/i.test(val)) {
+    return true;
+  }
+  if (/\b[a-f0-9]{32,}\b/i.test(val)) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeExecutionPreviewMetadata(val) {
+  if (typeof val !== 'string') return val;
+  return hasUnsafeExecutionPreviewMetadata(val) ? '[redacted]' : val;
+}
+
+function sanitizeExecutionPreviewMaxAttempts(val) {
+  if (Number.isInteger(val) && val >= 1 && val <= 3) return val;
+  return '[redacted]';
+}
+
+function executionPreviewSafety() {
+  return {
+    ...lifecycleSafety(),
+    readOnly: true,
+    dryRun: true,
+    processListRead: false,
+    lifecycleApplied: false,
+    nasConnected: false,
+    backupTriggered: false,
+    restoreTriggered: false,
+    remoteCommandExecuted: false,
+  };
 }
 
 function sanitizeEntry(entry) {
@@ -1172,5 +1220,103 @@ export function buildSupervisorLifecycleGuardedRunnerReadiness(manifestReadiness
       readOnly: true,
       lifecycleApplied: false,
     },
+  };
+}
+
+function isLifecycleApplyPlanShape(plan) {
+  return isObject(plan) &&
+    plan.command === 'supervisor-lifecycle-apply' &&
+    ALLOWED_OPERATIONS.has(plan.operation) &&
+    Array.isArray(plan.actions) &&
+    Array.isArray(plan.blockers);
+}
+
+function isGuardedRunnerReadinessShape(readiness) {
+  return isObject(readiness) &&
+    readiness.command === 'supervisor-lifecycle-guarded-runner-readiness' &&
+    typeof readiness.runnerBindingsReady === 'boolean' &&
+    Array.isArray(readiness.blockers) &&
+    Array.isArray(readiness.nextBlockers) &&
+    Array.isArray(readiness.runnerBlockers) &&
+    Array.isArray(readiness.runnerBindings);
+}
+
+function buildGuardedRunnerActionPreviews(plan, guardedRunnerReadiness) {
+  if (!Array.isArray(plan?.actions) || !Array.isArray(guardedRunnerReadiness?.runnerBindings)) {
+    return [];
+  }
+
+  return plan.actions
+    .map((action) => {
+      const binding = guardedRunnerReadiness.runnerBindings.find((entry) =>
+        isObject(entry) && entry.actionId === action?.id);
+      if (!binding) return null;
+      return {
+        actionId: sanitizeExecutionPreviewMetadata(action?.id),
+        implementationId: sanitizeExecutionPreviewMetadata(binding.implementationId),
+        runnerKind: sanitizeExecutionPreviewMetadata(binding.runnerKind),
+        mode: sanitizeExecutionPreviewMetadata(binding.mode),
+        status: 'blocked',
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        maxAttempts: sanitizeExecutionPreviewMaxAttempts(binding.maxAttempts),
+      };
+    })
+    .filter(Boolean);
+}
+
+export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guardedRunnerReadiness) {
+  const operation = ALLOWED_OPERATIONS.has(plan?.operation)
+    ? plan.operation
+    : (ALLOWED_OPERATIONS.has(guardedRunnerReadiness?.operation) ? guardedRunnerReadiness.operation : 'unknown');
+  const blockers = [];
+  let lifecyclePlanValid = false;
+  let runnerBindingsReady = false;
+
+  if (!isLifecycleApplyPlanShape(plan)) {
+    blockers.push('invalid-lifecycle-plan');
+  } else if (!hasExpectedLifecycleActions(plan)) {
+    blockers.push('lifecycle-plan-action-mismatch');
+  } else {
+    lifecyclePlanValid = true;
+  }
+
+  if (!isGuardedRunnerReadinessShape(guardedRunnerReadiness)) {
+    blockers.push('invalid-guarded-runner-readiness');
+  } else {
+    runnerBindingsReady = guardedRunnerReadiness.runnerBindingsReady === true;
+    if (!runnerBindingsReady) {
+      blockers.push('guarded-runner-readiness-not-ready');
+    }
+  }
+
+  if (lifecyclePlanValid && isGuardedRunnerReadinessShape(guardedRunnerReadiness)) {
+    if (guardedRunnerReadiness.operation !== plan.operation) {
+      blockers.push('guarded-runner-operation-mismatch');
+      runnerBindingsReady = false;
+    }
+  }
+
+  blockers.push(GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY);
+
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-execution-preview',
+    operation,
+    state: 'blocked',
+    executionReady: false,
+    executorReady: false,
+    wouldExecute: false,
+    runnerBindingsReady,
+    blockers: [...new Set(blockers)],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    actionPreviews: buildGuardedRunnerActionPreviews(plan, guardedRunnerReadiness),
+    gates: {
+      lifecyclePlanValid,
+      runnerBindingsReady,
+      executionPreviewOnly: true,
+      executorReady: false,
+    },
+    safety: executionPreviewSafety(),
   };
 }
