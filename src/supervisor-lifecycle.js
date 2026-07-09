@@ -651,6 +651,17 @@ const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
 const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
 const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
+const RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING = 'runner-registry-real-implementation-missing';
+const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
+  runnerKind: GUARDED_RUNNER_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  supportsHostMutation: false,
+  wouldExecute: false,
+  wouldRun: false,
+  wouldWrite: false,
+  blockerCode: RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING,
+});
 const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   Object.freeze({
     id: 'runner-registry',
@@ -1387,6 +1398,25 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guar
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerRegistryReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-registry-readiness',
+    state: 'blocked',
+    runnerRegistryDefined: true,
+    runnerRegistryReady: false,
+    realRunnerImplementationsReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    registryEntries: [{ ...GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY }],
+    blockers: [
+      RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -1396,6 +1426,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     readyCount: 0,
     blockedCount: requiredContracts.length,
     requiredContracts,
+    runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -1544,6 +1575,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerBindingsReady,
       executionPreviewVerified,
       executeRequested,
+      runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
     },

@@ -10671,6 +10671,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         manifestReady: true,
         runnerBindingsReady: true,
         executeRequested: true,
+        runnerRegistryReady: true,
         realRunnerWiringReady: true,
         runnerWiringContractReady: true,
       },
@@ -10691,6 +10692,20 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
         state: 'ready',
         realRunnerWiringReady: true,
+        runnerRegistryReadiness: {
+          runnerRegistryReady: true,
+          registryEntries: [
+            {
+              runnerKind: 'node /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+              state: 'ready',
+              realImplementationReady: true,
+              wouldExecute: true,
+              wouldRun: true,
+              wouldWrite: true,
+              blockerCode: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+            },
+          ],
+        },
         requiredContracts: [
           {
             id: 'runner-registry',
@@ -10736,11 +10751,13 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /status:blocked/);
     assert.match(text, /candidate:render-launch-agent-plist:impl:\[redacted\]:mode:\[redacted\]:runner:\[redacted\]:status:blocked:wouldExecute:false:wouldRun:false:wouldWrite:false/);
     assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
+    assert.match(text, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
     assert.match(text, /lifecyclePlanValid:true/);
     assert.match(text, /approvalRecordReady:true/);
     assert.match(text, /manifestReady:true/);
     assert.match(text, /runnerBindingsReady:true/);
     assert.match(text, /executeRequested:true/);
+    assert.match(text, /runnerRegistryReady:false/);
     assert.match(text, /realRunnerWiringReady:false/);
     assert.match(text, /runnerWiringContractReady:false/);
     assert.match(text, /executionEligible:false/);
@@ -11825,9 +11842,35 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
                 manifestReady: true,
                 runnerBindingsReady: true,
                 executeRequested: true,
+                runnerRegistryReady: true,
                 realRunnerWiringReady: true,
                 executionEligible: true,
                 executorReady: true,
+              },
+              runnerWiringContract: {
+                state: 'ready',
+                runnerRegistryReadiness: {
+                  runnerRegistryReady: true,
+                  registryEntries: [
+                    {
+                      runnerKind: 'node /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+                      state: 'ready',
+                      realImplementationReady: true,
+                      wouldExecute: true,
+                      wouldRun: true,
+                      wouldWrite: true,
+                      blockerCode: 'command=/bin/sh',
+                    },
+                  ],
+                },
+                requiredContracts: [
+                  {
+                    id: 'runner-registry',
+                    status: 'ready',
+                    requiredForExecution: false,
+                    blockerCode: 'runner-registry-missing',
+                  },
+                ],
               },
               safety: {
                 readOnly: true,
@@ -11907,6 +11950,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(resultText, /wouldExecute:false/);
     assert.match(resultText, /wouldRun:false/);
     assert.match(resultText, /wouldWrite:false/);
+    assert.match(resultText, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
+    assert.match(resultText, /runnerRegistryReady:false/);
     assert.match(resultText, /realRunnerWiringReady:false/);
     assert.match(resultText, /executionEligible:false/);
     assert.match(resultText, /executorReady:false/);

@@ -168,6 +168,7 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.wouldExecute, false);
   assert.strictEqual(body.gates.realRunnerWiringReady, false);
   assert.strictEqual(body.gates.runnerWiringContractReady, false);
+  assert.strictEqual(body.gates.runnerRegistryReady, false);
   assert.strictEqual(body.realRunnerWiringReady, false);
   assert.deepStrictEqual(body.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(body.blockers.includes('real-guarded-runner-execution-wiring-missing'));
@@ -177,6 +178,24 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.runnerWiringContract.readyCount, 0);
   assert.strictEqual(body.runnerWiringContract.blockedCount, 5);
   assert.deepStrictEqual(body.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
+  assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.state, 'blocked');
+  assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.runnerRegistryDefined, true);
+  assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.runnerRegistryReady, false);
+  assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.realRunnerImplementationsReady, false);
+  assert.deepStrictEqual(body.runnerWiringContract.runnerRegistryReadiness.nextBlockers, ['runner-registry-real-implementation-missing']);
+  assert.deepStrictEqual(body.runnerWiringContract.runnerRegistryReadiness.registryEntries, [
+    {
+      runnerKind: 'guarded-runner-stub',
+      state: 'blocked',
+      realImplementationReady: false,
+      supportsHostMutation: false,
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'runner-registry-real-implementation-missing',
+    },
+  ]);
   assert.deepStrictEqual(
     body.runnerWiringContract.requiredContracts.map((entry) => entry.id),
     ['runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],

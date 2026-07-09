@@ -188,6 +188,7 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.wouldExecute, false);
   assert.strictEqual(report.gates.realRunnerWiringReady, false);
   assert.strictEqual(report.gates.runnerWiringContractReady, false);
+  assert.strictEqual(report.gates.runnerRegistryReady, false);
   assert.strictEqual(report.realRunnerWiringReady, false);
   assert.deepStrictEqual(report.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(report.blockers.includes('real-guarded-runner-execution-wiring-missing'));
@@ -197,6 +198,22 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.runnerWiringContract.readyCount, 0);
   assert.strictEqual(report.runnerWiringContract.blockedCount, 5);
   assert.deepStrictEqual(report.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
+  assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.state, 'blocked');
+  assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.runnerRegistryReady, false);
+  assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.realRunnerImplementationsReady, false);
+  assert.deepStrictEqual(report.runnerWiringContract.runnerRegistryReadiness.registryEntries, [
+    {
+      runnerKind: 'guarded-runner-stub',
+      state: 'blocked',
+      realImplementationReady: false,
+      supportsHostMutation: false,
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      blockerCode: 'runner-registry-real-implementation-missing',
+    },
+  ]);
   assert.deepStrictEqual(
     report.runnerWiringContract.requiredContracts.map((entry) => entry.id),
     ['runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],

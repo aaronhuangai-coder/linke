@@ -6,6 +6,7 @@ import {
   buildSupervisorLifecycleApprovalPersistencePreview,
   buildSupervisorLifecycleGuardedRunnerExecutionGate,
   buildSupervisorLifecycleGuardedRunnerExecutionPreview,
+  buildSupervisorLifecycleGuardedRunnerRegistryReadiness,
   buildSupervisorLifecycleGuardedRunnerReadiness,
   buildSupervisorLifecycleGuardedRunnerWiringContract,
   validateSupervisorLifecycleExecutorManifest,
@@ -42,6 +43,18 @@ const EXPECTED_WIRING_CONTRACTS = Object.freeze([
   ['rollback-anchor', 'rollback-anchor-missing'],
   ['attempt-audit', 'attempt-audit-missing'],
   ['operator-recovery', 'operator-recovery-missing'],
+]);
+const EXPECTED_RUNNER_REGISTRY_ENTRIES = Object.freeze([
+  {
+    runnerKind: 'guarded-runner-stub',
+    state: 'blocked',
+    realImplementationReady: false,
+    supportsHostMutation: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    blockerCode: 'runner-registry-real-implementation-missing',
+  },
 ]);
 
 function validApprovalFor(plan) {
@@ -196,6 +209,7 @@ function assertAlwaysBlockedGate(result) {
   assert.deepStrictEqual(result.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.strictEqual(result.gates.realRunnerWiringReady, false);
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
+  assert.strictEqual(result.gates.runnerRegistryReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.safety.readOnly, true);
   assert.strictEqual(result.safety.dryRun, true);
@@ -229,12 +243,60 @@ function assertBlockedWiringContract(contract) {
     contract.requiredContracts.map((entry) => [entry.id, entry.blockerCode]),
     EXPECTED_WIRING_CONTRACTS,
   );
+  assert.deepStrictEqual(contract.runnerRegistryReadiness, buildSupervisorLifecycleGuardedRunnerRegistryReadiness());
   assert.ok(contract.requiredContracts.every((entry) =>
     entry.status === 'blocked' &&
       entry.requiredForExecution === true &&
       typeof entry.evidence === 'string' &&
       entry.evidence.length > 0));
 }
+
+describe('buildSupervisorLifecycleGuardedRunnerRegistryReadiness', () => {
+  it('returns fixed blocked disabled runner registry readiness evidence', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerRegistryReadiness();
+
+    assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
+    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.runnerRegistryDefined, true);
+    assert.strictEqual(readiness.runnerRegistryReady, false);
+    assert.strictEqual(readiness.realRunnerImplementationsReady, false);
+    assert.strictEqual(readiness.readyCount, 0);
+    assert.strictEqual(readiness.blockedCount, 1);
+    assert.ok(readiness.blockers.includes('runner-registry-real-implementation-missing'));
+    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+    assert.deepStrictEqual(readiness.nextBlockers, ['runner-registry-real-implementation-missing']);
+    assert.deepStrictEqual(readiness.registryEntries, EXPECTED_RUNNER_REGISTRY_ENTRIES);
+    assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+
+  it('ignores all runtime-looking inputs and never leaks malicious registry material', () => {
+    const baseline = buildSupervisorLifecycleGuardedRunnerRegistryReadiness();
+    const maliciousInput = {
+      runnerRegistryReady: true,
+      registryEntries: [
+        {
+          runnerKind: 'node /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+          wouldExecute: true,
+          wouldRun: true,
+          wouldWrite: true,
+        },
+      ],
+      config: { token: 'SECRET_XYZ' },
+      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
+      hash: 'sha256:abc',
+      path: '/Users/ah/private',
+    };
+
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(maliciousInput), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(null), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(), baseline);
+    assert.doesNotMatch(
+      JSON.stringify(baseline),
+      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node /i,
+    );
+  });
+});
 
 describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
   it('returns the fixed blocked real runner wiring contract with complete safety evidence', () => {
@@ -287,6 +349,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       runnerBindingsReady: true,
       executionPreviewVerified: true,
       executeRequested: false,
+      runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
     });
@@ -335,6 +398,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
     assert.strictEqual(result.gates.executeRequested, true);
+    assert.strictEqual(result.gates.runnerRegistryReady, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
     assertBlockedWiringContract(result.runnerWiringContract);
