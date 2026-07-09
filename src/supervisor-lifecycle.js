@@ -653,7 +653,9 @@ const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
 const RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING = 'runner-registry-real-implementation-missing';
 const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter-real-implementation-missing';
+const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
 const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub';
+const DISABLED_ROLLBACK_ANCHOR_KIND = 'disabled-rollback-anchor-stub';
 const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   adapterKind: DISABLED_HOST_MUTATION_ADAPTER_KIND,
   state: 'blocked',
@@ -668,6 +670,20 @@ const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   auditWriteAllowed: false,
   rollbackAnchorWriteAllowed: false,
   blockerCode: HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING,
+});
+const GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY = Object.freeze({
+  anchorKind: DISABLED_ROLLBACK_ANCHOR_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  wouldWriteAnchor: false,
+  wouldRun: false,
+  wouldWrite: false,
+  filesystemWriteAllowed: false,
+  metadataWriteAllowed: false,
+  rollbackAnchorWriteAllowed: false,
+  rollbackRestoreAllowed: false,
+  sensitiveValuesReturned: false,
+  blockerCode: ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING,
 });
 const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
   runnerKind: GUARDED_RUNNER_KIND,
@@ -1453,6 +1469,25 @@ export function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadines
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-rollback-anchor-readiness',
+    state: 'blocked',
+    rollbackAnchorDefined: true,
+    rollbackAnchorReady: false,
+    realRollbackAnchorReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    anchorEntries: [{ ...GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY }],
+    blockers: [
+      ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -1464,6 +1499,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     requiredContracts,
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
     hostMutationAdapterReadiness: buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
+    rollbackAnchorReadiness: buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -1616,6 +1652,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     },
     safety: executionPreviewSafety(),
   };

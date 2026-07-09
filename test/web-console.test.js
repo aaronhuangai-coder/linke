@@ -10719,6 +10719,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
             },
           ],
         },
+        rollbackAnchorReadiness: {
+          state: 'blocked',
+          rollbackAnchorReady: false,
+          anchorEntries: [
+            {
+              anchorKind: 'disabled-rollback-anchor-stub',
+              state: 'blocked',
+              realImplementationReady: false,
+              wouldWriteAnchor: false,
+              blockerCode: 'rollback-anchor-real-implementation-missing',
+            },
+          ],
+        },
         requiredContracts: [
           {
             id: 'runner-registry',
@@ -10766,7 +10779,9 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
     assert.match(text, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
     assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
+    assert.match(text, /rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing/);
     assert.match(text, /hostMutationAdapterReady:false/);
+    assert.match(text, /rollbackAnchorReady:false/);
     assert.match(text, /lifecyclePlanValid:true/);
     assert.match(text, /approvalRecordReady:true/);
     assert.match(text, /manifestReady:true/);
@@ -10858,6 +10873,74 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         'wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing'
     ));
     assert.match(text, /hostMutationAdapterReady:false/);
+    assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
+    assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
+    assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
+  });
+
+  it('handles malicious rollback anchor payload without leaking or execution permissions', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'ready',
+      executionGateState: 'completed',
+      executionEligible: true,
+      executorReady: true,
+      wouldExecute: true,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        runnerRegistryReady: true,
+        realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
+      },
+      actionCandidates: [],
+      runnerWiringContract: {
+        command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+        state: 'ready',
+        realRunnerWiringReady: true,
+        rollbackAnchorReadiness: {
+          rollbackAnchorReady: true,
+          anchorEntries: [{
+            anchorKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+            wouldWriteAnchor: true,
+            wouldRun: true,
+            wouldWrite: true,
+          }],
+        },
+        requiredContracts: [],
+        safety: {
+          readOnly: false,
+          filesystemWritten: true,
+        },
+      },
+      safety: {
+        readOnly: true,
+        lifecycleApplied: true,
+        filesystemWritten: true,
+        auditEventWritten: true,
+        metadataWritten: true,
+      },
+    });
+
+    const text = [
+      ...viewModel.blockers,
+      ...viewModel.nextBlockers,
+      ...viewModel.requiredFields,
+      ...viewModel.validationLines,
+      ...viewModel.safetyLines,
+      viewModel.messageText,
+    ].join(' ');
+
+    assert.ok(text.includes(
+      'rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:' +
+        'wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing'
+    ));
+    assert.match(text, /rollbackAnchorReady:false/);
     assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
     assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
     assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');

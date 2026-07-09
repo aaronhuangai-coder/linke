@@ -1245,6 +1245,17 @@ function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(runnerWir
   ];
 }
 
+function buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(runnerWiringContract) {
+  const anchorEntries = Array.isArray(runnerWiringContract?.rollbackAnchorReadiness?.anchorEntries)
+    ? runnerWiringContract.rollbackAnchorReadiness.anchorEntries
+    : [];
+  if (anchorEntries.length < 1) return [];
+  return [
+    'rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:' +
+      'wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerBindingItems(runnerBindings) {
   if (!Array.isArray(runnerBindings)) return [];
   return runnerBindings.map((binding) => {
@@ -1430,6 +1441,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'executionEligible:false',
         'executorReady:false',
         'hostMutationAdapterReady:false',
+        'rollbackAnchorReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: 'Guarded runner execution gate 检查失败: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(errorMessage),
@@ -1460,6 +1472,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'executionEligible:false',
         'executorReady:false',
         'hostMutationAdapterReady:false',
+        'rollbackAnchorReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: '点击手动 POST /api/supervisor-lifecycle-guarded-runner-execution-gate 获取 guarded runner execution gate',
@@ -1482,6 +1495,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(payload.runnerWiringContract);
   const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(payload.runnerWiringContract);
   const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(payload.runnerWiringContract);
+  const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
 
   return {
     statusKey: 'blocked',
@@ -1492,7 +1506,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
     blockers: [...blockers, ...nextBlockers],
     nextBlockers,
     runnerBindingLines: [],
-    requiredFields: [...actionLines, ...wiringContractLines, ...runnerRegistryLines, ...hostMutationAdapterLines],
+    requiredFields: [...actionLines, ...wiringContractLines, ...runnerRegistryLines, ...hostMutationAdapterLines, ...rollbackAnchorLines],
     recordLines: [],
     validationLines: [
       `lifecyclePlanValid:${gates.lifecyclePlanValid === true ? 'true' : 'false'}`,
@@ -1506,6 +1520,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       'executionEligible:false',
       'executorReady:false',
       'hostMutationAdapterReady:false',
+      'rollbackAnchorReady:false',
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
     messageText: 'Guarded runner execution gate completed; execution remains blocked and fail-closed.',

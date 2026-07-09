@@ -10,6 +10,7 @@ import {
   buildSupervisorLifecycleGuardedRunnerReadiness,
   buildSupervisorLifecycleGuardedRunnerWiringContract,
   buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness,
+  buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -72,6 +73,22 @@ const EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES = Object.freeze([
     auditWriteAllowed: false,
     rollbackAnchorWriteAllowed: false,
     blockerCode: 'host-mutation-adapter-real-implementation-missing',
+  },
+]);
+const EXPECTED_ROLLBACK_ANCHOR_ENTRIES = Object.freeze([
+  {
+    anchorKind: 'disabled-rollback-anchor-stub',
+    state: 'blocked',
+    realImplementationReady: false,
+    wouldWriteAnchor: false,
+    wouldRun: false,
+    wouldWrite: false,
+    filesystemWriteAllowed: false,
+    metadataWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    rollbackRestoreAllowed: false,
+    sensitiveValuesReturned: false,
+    blockerCode: 'rollback-anchor-real-implementation-missing',
   },
 ]);
 
@@ -228,6 +245,7 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
   assert.strictEqual(result.gates.runnerRegistryReady, false);
   assert.strictEqual(result.gates.hostMutationAdapterReady, false);
+  assert.strictEqual(result.gates.rollbackAnchorReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
   assert.strictEqual(result.safety.readOnly, true);
@@ -266,6 +284,10 @@ function assertBlockedWiringContract(contract) {
   assert.deepStrictEqual(
     contract.hostMutationAdapterReadiness,
     buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
+  );
+  assert.deepStrictEqual(
+    contract.rollbackAnchorReadiness,
+    buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
   );
   assert.ok(contract.requiredContracts.every((entry) =>
     entry.status === 'blocked' &&
@@ -367,6 +389,52 @@ describe('buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness', ()
   });
 });
 
+describe('buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness', () => {
+  it('returns fixed blocked disabled rollback anchor readiness evidence', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness();
+
+    assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-rollback-anchor-readiness');
+    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.rollbackAnchorDefined, true);
+    assert.strictEqual(readiness.rollbackAnchorReady, false);
+    assert.strictEqual(readiness.realRollbackAnchorReady, false);
+    assert.strictEqual(readiness.readyCount, 0);
+    assert.strictEqual(readiness.blockedCount, 1);
+    assert.ok(readiness.blockers.includes('rollback-anchor-real-implementation-missing'));
+    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+    assert.deepStrictEqual(readiness.nextBlockers, ['rollback-anchor-real-implementation-missing']);
+    assert.deepStrictEqual(readiness.anchorEntries, EXPECTED_ROLLBACK_ANCHOR_ENTRIES);
+    assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+
+  it('ignores all runtime-looking inputs and never leaks malicious material', () => {
+    const baseline = buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness();
+    const maliciousInput = {
+      rollbackAnchorReady: true,
+      anchorEntries: [
+        {
+          anchorKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          wouldWriteAnchor: true,
+          wouldRun: true,
+          wouldWrite: true,
+        },
+      ],
+      config: { token: 'SECRET_XYZ' },
+      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
+      hash: 'sha256:abc',
+      path: '/Users/ah/private',
+    };
+
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(maliciousInput), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(null), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(), baseline);
+    assert.doesNotMatch(
+      JSON.stringify(baseline),
+      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node |curl/i,
+    );
+  });
+});
+
 describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
   it('returns the fixed blocked real runner wiring contract with complete safety evidence', () => {
     const contract = buildSupervisorLifecycleGuardedRunnerWiringContract(getReadyInputs().executionPreview);
@@ -422,6 +490,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assertBlockedWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
