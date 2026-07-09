@@ -652,6 +652,23 @@ const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
 const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
 const RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING = 'runner-registry-real-implementation-missing';
+const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter-real-implementation-missing';
+const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub';
+const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
+  adapterKind: DISABLED_HOST_MUTATION_ADAPTER_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  wouldMutateHost: false,
+  wouldRun: false,
+  wouldWrite: false,
+  launchctlAllowed: false,
+  filesystemWriteAllowed: false,
+  processListReadAllowed: false,
+  metadataWriteAllowed: false,
+  auditWriteAllowed: false,
+  rollbackAnchorWriteAllowed: false,
+  blockerCode: HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING,
+});
 const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
   runnerKind: GUARDED_RUNNER_KIND,
   state: 'blocked',
@@ -1417,6 +1434,25 @@ export function buildSupervisorLifecycleGuardedRunnerRegistryReadiness() {
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-host-mutation-adapter-readiness',
+    state: 'blocked',
+    hostMutationAdapterDefined: true,
+    hostMutationAdapterReady: false,
+    realHostMutationAdapterReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    adapterEntries: [{ ...GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY }],
+    blockers: [
+      HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -1427,6 +1463,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     blockedCount: requiredContracts.length,
     requiredContracts,
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
+    hostMutationAdapterReadiness: buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -1578,6 +1615,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
+      hostMutationAdapterReady: false,
     },
     safety: executionPreviewSafety(),
   };

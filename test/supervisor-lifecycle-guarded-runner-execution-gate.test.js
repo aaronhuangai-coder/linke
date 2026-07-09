@@ -9,6 +9,7 @@ import {
   buildSupervisorLifecycleGuardedRunnerRegistryReadiness,
   buildSupervisorLifecycleGuardedRunnerReadiness,
   buildSupervisorLifecycleGuardedRunnerWiringContract,
+  buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -54,6 +55,23 @@ const EXPECTED_RUNNER_REGISTRY_ENTRIES = Object.freeze([
     wouldRun: false,
     wouldWrite: false,
     blockerCode: 'runner-registry-real-implementation-missing',
+  },
+]);
+const EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES = Object.freeze([
+  {
+    adapterKind: 'disabled-host-mutation-adapter-stub',
+    state: 'blocked',
+    realImplementationReady: false,
+    wouldMutateHost: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    blockerCode: 'host-mutation-adapter-real-implementation-missing',
   },
 ]);
 
@@ -203,14 +221,15 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.state, 'blocked');
   assert.strictEqual(result.executionGateState, 'blocked');
   assert.strictEqual(result.executionEligible, false);
-  assert.strictEqual(result.executorReady, false);
   assert.strictEqual(result.wouldExecute, false);
   assert.ok(result.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(result.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.strictEqual(result.gates.realRunnerWiringReady, false);
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
   assert.strictEqual(result.gates.runnerRegistryReady, false);
+  assert.strictEqual(result.gates.hostMutationAdapterReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
+  assert.strictEqual(result.executorReady, false);
   assert.strictEqual(result.safety.readOnly, true);
   assert.strictEqual(result.safety.dryRun, true);
   assert.strictEqual(result.safety.hostMutation, false);
@@ -244,6 +263,10 @@ function assertBlockedWiringContract(contract) {
     EXPECTED_WIRING_CONTRACTS,
   );
   assert.deepStrictEqual(contract.runnerRegistryReadiness, buildSupervisorLifecycleGuardedRunnerRegistryReadiness());
+  assert.deepStrictEqual(
+    contract.hostMutationAdapterReadiness,
+    buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
+  );
   assert.ok(contract.requiredContracts.every((entry) =>
     entry.status === 'blocked' &&
       entry.requiredForExecution === true &&
@@ -291,6 +314,52 @@ describe('buildSupervisorLifecycleGuardedRunnerRegistryReadiness', () => {
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(maliciousInput), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(null), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(), baseline);
+    assert.doesNotMatch(
+      JSON.stringify(baseline),
+      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node /i,
+    );
+  });
+});
+
+describe('buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness', () => {
+  it('returns fixed blocked disabled host mutation adapter readiness evidence', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness();
+
+    assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-host-mutation-adapter-readiness');
+    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.hostMutationAdapterDefined, true);
+    assert.strictEqual(readiness.hostMutationAdapterReady, false);
+    assert.strictEqual(readiness.realHostMutationAdapterReady, false);
+    assert.strictEqual(readiness.readyCount, 0);
+    assert.strictEqual(readiness.blockedCount, 1);
+    assert.ok(readiness.blockers.includes('host-mutation-adapter-real-implementation-missing'));
+    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+    assert.deepStrictEqual(readiness.nextBlockers, ['host-mutation-adapter-real-implementation-missing']);
+    assert.deepStrictEqual(readiness.adapterEntries, EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES);
+    assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+
+  it('ignores all runtime-looking inputs and never leaks malicious material', () => {
+    const baseline = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness();
+    const maliciousInput = {
+      hostMutationAdapterReady: true,
+      adapterEntries: [
+        {
+          adapterKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          wouldMutateHost: true,
+          wouldRun: true,
+          wouldWrite: true,
+        },
+      ],
+      config: { token: 'SECRET_XYZ' },
+      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
+      hash: 'sha256:abc',
+      path: '/Users/ah/private',
+    };
+
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(maliciousInput), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(null), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(), baseline);
     assert.doesNotMatch(
       JSON.stringify(baseline),
       /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node /i,
@@ -352,6 +421,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
+      hostMutationAdapterReady: false,
     });
     assertBlockedWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [

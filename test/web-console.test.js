@@ -10706,6 +10706,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
             },
           ],
         },
+        hostMutationAdapterReadiness: {
+          state: 'blocked',
+          hostMutationAdapterReady: false,
+          adapterEntries: [
+            {
+              adapterKind: 'disabled-host-mutation-adapter-stub',
+              state: 'blocked',
+              realImplementationReady: false,
+              wouldMutateHost: false,
+              blockerCode: 'host-mutation-adapter-real-implementation-missing',
+            },
+          ],
+        },
         requiredContracts: [
           {
             id: 'runner-registry',
@@ -10752,6 +10765,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /candidate:render-launch-agent-plist:impl:\[redacted\]:mode:\[redacted\]:runner:\[redacted\]:status:blocked:wouldExecute:false:wouldRun:false:wouldWrite:false/);
     assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
     assert.match(text, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
+    assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
+    assert.match(text, /hostMutationAdapterReady:false/);
     assert.match(text, /lifecyclePlanValid:true/);
     assert.match(text, /approvalRecordReady:true/);
     assert.match(text, /manifestReady:true/);
@@ -10778,6 +10793,74 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.doesNotMatch(text, /\bnode\b/i, 'must not expose command-like runner kind');
     assert.doesNotMatch(text, /\bcurl\b/i, 'must not expose command-like mode');
     assert.doesNotMatch(text, /\bpassword\b/i, 'must not expose secret key names');
+  });
+
+  it('handles malicious host mutation adapter payload without leaking or execution permissions', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'ready',
+      executionGateState: 'completed',
+      executionEligible: true,
+      executorReady: true,
+      wouldExecute: true,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        runnerRegistryReady: true,
+        realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
+      },
+      actionCandidates: [],
+      runnerWiringContract: {
+        command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+        state: 'ready',
+        realRunnerWiringReady: true,
+        hostMutationAdapterReadiness: {
+          hostMutationAdapterReady: true,
+          adapterEntries: [{
+            adapterKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+            wouldMutateHost: true,
+            wouldRun: true,
+            wouldWrite: true,
+          }],
+        },
+        requiredContracts: [],
+        safety: {
+          readOnly: false,
+          filesystemWritten: true,
+        },
+      },
+      safety: {
+        readOnly: true,
+        lifecycleApplied: true,
+        filesystemWritten: true,
+        auditEventWritten: true,
+        metadataWritten: true,
+      },
+    });
+
+    const text = [
+      ...viewModel.blockers,
+      ...viewModel.nextBlockers,
+      ...viewModel.requiredFields,
+      ...viewModel.validationLines,
+      ...viewModel.safetyLines,
+      viewModel.messageText,
+    ].join(' ');
+
+    assert.ok(text.includes(
+      'hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:' +
+        'wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing'
+    ));
+    assert.match(text, /hostMutationAdapterReady:false/);
+    assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
+    assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
+    assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
   });
 
   it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {

@@ -189,6 +189,7 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.gates.realRunnerWiringReady, false);
   assert.strictEqual(report.gates.runnerWiringContractReady, false);
   assert.strictEqual(report.gates.runnerRegistryReady, false);
+  assert.strictEqual(report.gates.hostMutationAdapterReady, false);
   assert.strictEqual(report.realRunnerWiringReady, false);
   assert.deepStrictEqual(report.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(report.blockers.includes('real-guarded-runner-execution-wiring-missing'));
@@ -198,6 +199,11 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.runnerWiringContract.readyCount, 0);
   assert.strictEqual(report.runnerWiringContract.blockedCount, 5);
   assert.deepStrictEqual(report.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.state, 'blocked');
+  assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.hostMutationAdapterReady, false);
+  assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldMutateHost, false);
+  assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldRun, false);
+  assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldWrite, false);
   assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
   assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.state, 'blocked');
   assert.strictEqual(report.runnerWiringContract.runnerRegistryReadiness.runnerRegistryReady, false);
