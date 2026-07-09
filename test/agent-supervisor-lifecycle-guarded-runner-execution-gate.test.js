@@ -167,6 +167,7 @@ function assertNoSensitiveOutput(output, ...paths) {
     'SECRET_XYZ',
     '/usr/bin',
     '/Users/ah',
+    'launchctl load',
   ]) {
     assert.ok(!output.includes(disallowed), `output leaked ${disallowed}`);
   }
@@ -186,8 +187,22 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.executorReady, false);
   assert.strictEqual(report.wouldExecute, false);
   assert.strictEqual(report.gates.realRunnerWiringReady, false);
+  assert.strictEqual(report.gates.runnerWiringContractReady, false);
+  assert.strictEqual(report.realRunnerWiringReady, false);
   assert.deepStrictEqual(report.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(report.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+  assert.strictEqual(report.runnerWiringContract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
+  assert.strictEqual(report.runnerWiringContract.state, 'blocked');
+  assert.strictEqual(report.runnerWiringContract.realRunnerWiringReady, false);
+  assert.strictEqual(report.runnerWiringContract.readyCount, 0);
+  assert.strictEqual(report.runnerWiringContract.blockedCount, 5);
+  assert.deepStrictEqual(report.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.deepStrictEqual(
+    report.runnerWiringContract.requiredContracts.map((entry) => entry.id),
+    ['runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
+  );
+  assert.ok(report.runnerWiringContract.requiredContracts.every((entry) =>
+    entry.status === 'blocked' && entry.requiredForExecution === true));
   assert.strictEqual(report.actionCandidates.length, 3);
   assert.ok(report.actionCandidates.every((entry) =>
     entry.status === 'blocked' &&

@@ -148,6 +148,7 @@ function assertNoSensitiveText(text, dataDir = '') {
     'SECRET_XYZ',
     'raw-manifest-secret',
     'raw-runner-binding-secret',
+    'launchctl load',
   ]) {
     assert.ok(!text.includes(disallowed), `response leaked ${disallowed}`);
   }
@@ -166,8 +167,22 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.executorReady, false);
   assert.strictEqual(body.wouldExecute, false);
   assert.strictEqual(body.gates.realRunnerWiringReady, false);
+  assert.strictEqual(body.gates.runnerWiringContractReady, false);
+  assert.strictEqual(body.realRunnerWiringReady, false);
   assert.deepStrictEqual(body.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(body.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+  assert.strictEqual(body.runnerWiringContract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
+  assert.strictEqual(body.runnerWiringContract.state, 'blocked');
+  assert.strictEqual(body.runnerWiringContract.realRunnerWiringReady, false);
+  assert.strictEqual(body.runnerWiringContract.readyCount, 0);
+  assert.strictEqual(body.runnerWiringContract.blockedCount, 5);
+  assert.deepStrictEqual(body.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.deepStrictEqual(
+    body.runnerWiringContract.requiredContracts.map((entry) => entry.id),
+    ['runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
+  );
+  assert.ok(body.runnerWiringContract.requiredContracts.every((entry) =>
+    entry.status === 'blocked' && entry.requiredForExecution === true));
   assert.strictEqual(body.safety.readOnly, true);
   assert.strictEqual(body.safety.lifecycleApplied, false);
   assert.strictEqual(body.safety.filesystemWritten, false);
@@ -413,6 +428,13 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
           configPath: '/tmp/SECRET_XYZ',
           manifestPath: '/tmp/SECRET_XYZ',
           runnerBindingPath: '/tmp/SECRET_XYZ',
+          executionPreview: {
+            command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+            token: 'SECRET_XYZ',
+            secret: 'raw-runner-binding-secret',
+            hostname: 'unsafe.example',
+            hash: 'sha256:abc',
+          },
           approval: {
             approvedBy: 'operator@example.invalid',
             reason: 'do not leak submitted approval reason',

@@ -10672,6 +10672,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         runnerBindingsReady: true,
         executeRequested: true,
         realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
       },
       actionCandidates: [
         {
@@ -10686,6 +10687,25 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           command: '/bin/sh',
         },
       ],
+      runnerWiringContract: {
+        command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+        state: 'ready',
+        realRunnerWiringReady: true,
+        requiredContracts: [
+          {
+            id: 'runner-registry',
+            status: 'ready',
+            requiredForExecution: false,
+            evidence: '/Users/ah/secret-path token=SECRET_XYZ approval reason',
+            blockerCode: 'runner-registry-missing',
+            command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+          },
+        ],
+        safety: {
+          readOnly: false,
+          filesystemWritten: true,
+        },
+      },
       safety: {
         readOnly: true,
         lifecycleApplied: true,
@@ -10714,12 +10734,15 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /wouldRun:false/);
     assert.match(text, /wouldWrite:false/);
     assert.match(text, /status:blocked/);
+    assert.match(text, /candidate:render-launch-agent-plist:impl:\[redacted\]:mode:\[redacted\]:runner:\[redacted\]:status:blocked:wouldExecute:false:wouldRun:false:wouldWrite:false/);
+    assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
     assert.match(text, /lifecyclePlanValid:true/);
     assert.match(text, /approvalRecordReady:true/);
     assert.match(text, /manifestReady:true/);
     assert.match(text, /runnerBindingsReady:true/);
     assert.match(text, /executeRequested:true/);
     assert.match(text, /realRunnerWiringReady:false/);
+    assert.match(text, /runnerWiringContractReady:false/);
     assert.match(text, /executionEligible:false/);
     assert.match(text, /executorReady:false/);
     assert.match(text, /readOnly:true/);
@@ -10733,6 +10756,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!text.includes('unsafe.example'), 'must not expose hostnames');
     assert.ok(!text.includes('super-secret'), 'must not expose secrets');
     assert.ok(!text.includes('/bin/sh'), 'must not expose command fields');
+    assert.ok(!text.includes('launchctl load'), 'must not expose command-like contract fields');
+    assert.ok(!text.includes('approval reason'), 'must not expose approval fields');
     assert.doesNotMatch(text, /\bnode\b/i, 'must not expose command-like runner kind');
     assert.doesNotMatch(text, /\bcurl\b/i, 'must not expose command-like mode');
     assert.doesNotMatch(text, /\bpassword\b/i, 'must not expose secret key names');

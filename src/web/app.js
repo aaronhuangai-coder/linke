@@ -1211,6 +1211,18 @@ function sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(value, ke
   return redactedHighEntropy.includes('[redacted') ? '[redacted]' : redactedHighEntropy;
 }
 
+function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringContract) {
+  const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
+    ? runnerWiringContract.requiredContracts
+    : [];
+  return requiredContracts.map((contract) => {
+    const source = contract && typeof contract === 'object' ? contract : {};
+    const id = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.id, 'id') || 'unknown';
+    const blockerCode = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.blockerCode, 'blockerCode') || 'unknown';
+    return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:${blockerCode}`;
+  });
+}
+
 function buildSupervisorLifecycleGuardedRunnerBindingItems(runnerBindings) {
   if (!Array.isArray(runnerBindings)) return [];
   return runnerBindings.map((binding) => {
@@ -1391,6 +1403,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       recordLines: [],
       validationLines: [
         'realRunnerWiringReady:false',
+        'runnerWiringContractReady:false',
         'executionEligible:false',
         'executorReady:false',
       ],
@@ -1418,6 +1431,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'runnerBindingsReady:false',
         'executeRequested:false',
         'realRunnerWiringReady:false',
+        'runnerWiringContractReady:false',
         'executionEligible:false',
         'executorReady:false',
       ],
@@ -1439,6 +1453,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
+  const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(payload.runnerWiringContract);
 
   return {
     statusKey: 'blocked',
@@ -1449,7 +1464,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
     blockers: [...blockers, ...nextBlockers],
     nextBlockers,
     runnerBindingLines: [],
-    requiredFields: actionLines,
+    requiredFields: [...actionLines, ...wiringContractLines],
     recordLines: [],
     validationLines: [
       `lifecyclePlanValid:${gates.lifecyclePlanValid === true ? 'true' : 'false'}`,
@@ -1458,6 +1473,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `runnerBindingsReady:${gates.runnerBindingsReady === true ? 'true' : 'false'}`,
       `executeRequested:${gates.executeRequested === true ? 'true' : 'false'}`,
       'realRunnerWiringReady:false',
+      'runnerWiringContractReady:false',
       'executionEligible:false',
       'executorReady:false',
     ],

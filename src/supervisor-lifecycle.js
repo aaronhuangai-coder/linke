@@ -651,6 +651,43 @@ const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
 const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
 const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
+const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
+  Object.freeze({
+    id: 'runner-registry',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'No code-owned guarded runner registry is wired.',
+    blockerCode: 'runner-registry-missing',
+  }),
+  Object.freeze({
+    id: 'host-mutation-adapter',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'No restricted host mutation adapter is wired.',
+    blockerCode: 'host-mutation-adapter-missing',
+  }),
+  Object.freeze({
+    id: 'rollback-anchor',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'No rollback anchor write and verification strategy is wired.',
+    blockerCode: 'rollback-anchor-missing',
+  }),
+  Object.freeze({
+    id: 'attempt-audit',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'No immutable real execution attempt audit strategy is wired.',
+    blockerCode: 'attempt-audit-missing',
+  }),
+  Object.freeze({
+    id: 'operator-recovery',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'No failure recovery, retry limit, and operator runbook is wired.',
+    blockerCode: 'operator-recovery-missing',
+  }),
+]);
 const RUNNER_BINDING_ALLOWED_KEYS = new Set([
   'actionId',
   'implementationId',
@@ -1350,6 +1387,21 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guar
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
+  const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+    state: 'blocked',
+    realRunnerWiringReady: false,
+    readyCount: 0,
+    blockedCount: requiredContracts.length,
+    requiredContracts,
+    blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 function isGuardedRunnerExecutionPreviewVerified(preview) {
   if (!isGuardedRunnerExecutionPreviewShape(preview)) return false;
   return preview.state === 'blocked' &&
@@ -1470,6 +1522,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     blockers.push('execute-request-missing');
   }
   blockers.push(REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING);
+  const runnerWiringContract = buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview);
 
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
@@ -1479,8 +1532,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executionEligible: false,
     executorReady: false,
     wouldExecute: false,
+    realRunnerWiringReady: false,
     blockers: [...new Set(blockers)],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    runnerWiringContract,
     actionCandidates: buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview),
     gates: {
       lifecyclePlanValid,
@@ -1490,6 +1545,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       executionPreviewVerified,
       executeRequested,
       realRunnerWiringReady: false,
+      runnerWiringContractReady: false,
     },
     safety: executionPreviewSafety(),
   };

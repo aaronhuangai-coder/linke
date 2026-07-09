@@ -55,16 +55,20 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('wouldExecute:false'));
   assert.ok(evidence.includes('execute-request-missing'));
   assert.ok(evidence.includes('realRunnerWiringReady:false'));
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerWiringContract'));
+  assert.ok(evidence.includes('runnerWiringContract.state:blocked'));
+  assert.ok(evidence.includes('runnerWiringContract.requiredContracts'));
+  assert.ok(evidence.includes('runnerWiringContractReady:false'));
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.16', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.16');
+  it('expects LINKE_RELEASE_VERSION to be V1.17', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.17');
   });
 
-  it('expects report.version to be V1.16', () => {
+  it('expects report.version to be V1.17', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.16');
+    assert.strictEqual(report.version, 'V1.17');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -299,6 +303,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.17'));
     assert.ok(automationItem.nextStep.includes('V1.16'));
     assert.ok(automationItem.nextStep.includes('V1.15'));
     assert.ok(automationItem.nextStep.includes('V1.14'));
@@ -496,6 +501,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.17'));
     assert.ok(hardeningItem.nextStep.includes('V1.16'));
     assert.ok(hardeningItem.nextStep.includes('V1.13'));
     assert.ok(hardeningItem.nextStep.includes('V1.15'));
