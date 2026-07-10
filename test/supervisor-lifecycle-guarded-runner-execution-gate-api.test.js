@@ -172,6 +172,7 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.gates.hostMutationAdapterReady, false);
   assert.strictEqual(body.gates.rollbackAnchorReady, false);
   assert.strictEqual(body.gates.attemptAuditReady, false);
+  assert.strictEqual(body.gates.operatorRecoveryReady, false);
   assert.strictEqual(body.realRunnerWiringReady, false);
   assert.deepStrictEqual(body.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(body.blockers.includes('real-guarded-runner-execution-wiring-missing'));
@@ -196,6 +197,12 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldWriteAudit, false);
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldRun, false);
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldWrite, false);
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.state, 'blocked');
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.operatorRecoveryReady, false);
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.recoveryEntries[0].wouldRecover, false);
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.recoveryEntries[0].wouldRetry, false);
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.recoveryEntries[0].wouldRun, false);
+  assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.recoveryEntries[0].wouldWrite, false);
   assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
   assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.runnerRegistryReadiness.runnerRegistryDefined, true);

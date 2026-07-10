@@ -658,6 +658,8 @@ const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub
 const DISABLED_ROLLBACK_ANCHOR_KIND = 'disabled-rollback-anchor-stub';
 const ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING = 'attempt-audit-real-implementation-missing';
 const DISABLED_ATTEMPT_AUDIT_KIND = 'disabled-attempt-audit-stub';
+const OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING = 'operator-recovery-real-implementation-missing';
+const DISABLED_OPERATOR_RECOVERY_KIND = 'disabled-operator-recovery-stub';
 const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
   auditKind: DISABLED_ATTEMPT_AUDIT_KIND,
   state: 'blocked',
@@ -671,6 +673,25 @@ const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
   immutableAuditReady: false,
   sensitiveValuesReturned: false,
   blockerCode: ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING,
+});
+const GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY = Object.freeze({
+  recoveryKind: DISABLED_OPERATOR_RECOVERY_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  failureRecoveryReady: false,
+  retryLimitReady: false,
+  operatorRunbookReady: false,
+  wouldRecover: false,
+  wouldRetry: false,
+  wouldNotifyOperator: false,
+  wouldRun: false,
+  wouldWrite: false,
+  metadataWriteAllowed: false,
+  filesystemWriteAllowed: false,
+  remoteCommandAllowed: false,
+  operatorNotificationAllowed: false,
+  sensitiveValuesReturned: false,
+  blockerCode: OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING,
 });
 const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   adapterKind: DISABLED_HOST_MUTATION_ADAPTER_KIND,
@@ -1523,6 +1544,25 @@ export function buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness() {
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-operator-recovery-readiness',
+    state: 'blocked',
+    operatorRecoveryDefined: true,
+    operatorRecoveryReady: false,
+    realOperatorRecoveryReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    recoveryEntries: [{ ...GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY }],
+    blockers: [
+      OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -1536,6 +1576,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     hostMutationAdapterReadiness: buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
     rollbackAnchorReadiness: buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
     attemptAuditReadiness: buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness(),
+    operatorRecoveryReadiness: buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -1690,6 +1731,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+      operatorRecoveryReady: false,
     },
     safety: executionPreviewSafety(),
   };

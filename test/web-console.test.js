@@ -10674,6 +10674,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         runnerRegistryReady: true,
         realRunnerWiringReady: true,
         runnerWiringContractReady: true,
+        operatorRecoveryReady: true,
       },
       actionCandidates: [
         {
@@ -10745,6 +10746,22 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
             },
           ],
         },
+        operatorRecoveryReadiness: {
+          state: 'blocked',
+          operatorRecoveryReady: true,
+          recoveryEntries: [
+            {
+              recoveryKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+              state: 'ready',
+              realImplementationReady: true,
+              wouldRecover: true,
+              wouldRetry: true,
+              wouldRun: true,
+              wouldWrite: true,
+              blockerCode: 'Authorization sha256:abc operator@example.invalid',
+            },
+          ],
+        },
         requiredContracts: [
           {
             id: 'runner-registry',
@@ -10794,9 +10811,11 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
     assert.match(text, /rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing/);
     assert.match(text, /attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing/);
+    assert.match(text, /operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:wouldRecover:false:blocker:operator-recovery-real-implementation-missing/);
     assert.match(text, /hostMutationAdapterReady:false/);
     assert.match(text, /rollbackAnchorReady:false/);
     assert.match(text, /attemptAuditReady:false/);
+    assert.match(text, /operatorRecoveryReady:false/);
     assert.match(text, /lifecyclePlanValid:true/);
     assert.match(text, /approvalRecordReady:true/);
     assert.match(text, /manifestReady:true/);
@@ -10819,10 +10838,22 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!text.includes('super-secret'), 'must not expose secrets');
     assert.ok(!text.includes('/bin/sh'), 'must not expose command fields');
     assert.ok(!text.includes('launchctl load'), 'must not expose command-like contract fields');
+    assert.ok(!text.includes('operator@example'), 'must not expose operator identity');
     assert.ok(!text.includes('approval reason'), 'must not expose approval fields');
     assert.doesNotMatch(text, /\bnode\b/i, 'must not expose command-like runner kind');
     assert.doesNotMatch(text, /\bcurl\b/i, 'must not expose command-like mode');
     assert.doesNotMatch(text, /\bpassword\b/i, 'must not expose secret key names');
+  });
+
+  it('keeps guarded runner execution gate unknown and error validation fail-closed for operator recovery', () => {
+    const unknown = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel();
+    const error = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(null, 'launchctl /Users/ah token=SECRET_XYZ');
+
+    assert.ok(unknown.validationLines.includes('operatorRecoveryReady:false'));
+    assert.ok(error.validationLines.includes('operatorRecoveryReady:false'));
+    assert.ok(!error.messageText.includes('/Users/ah'), 'must not expose error path');
+    assert.ok(!error.messageText.includes('SECRET_XYZ'), 'must not expose error token');
+    assert.ok(!error.messageText.includes('launchctl'), 'must not expose error command');
   });
 
   it('handles malicious host mutation adapter payload without leaking or execution permissions', () => {
@@ -11027,6 +11058,81 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
     assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
     assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
+  });
+
+  it('handles malicious operator recovery payload without leaking or execution permissions', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'ready',
+      executionGateState: 'completed',
+      executionEligible: true,
+      executorReady: true,
+      wouldExecute: true,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        runnerRegistryReady: true,
+        realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
+        operatorRecoveryReady: true,
+      },
+      actionCandidates: [],
+      runnerWiringContract: {
+        command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+        state: 'ready',
+        realRunnerWiringReady: true,
+        operatorRecoveryReadiness: {
+          operatorRecoveryReady: true,
+          recoveryEntries: [{
+            recoveryKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+            wouldRecover: true,
+            wouldRetry: true,
+            wouldRun: true,
+            wouldWrite: true,
+            blockerCode: 'Authorization sha256:abc operator@example.invalid',
+          }],
+        },
+        requiredContracts: [],
+        safety: {
+          readOnly: false,
+          filesystemWritten: true,
+        },
+      },
+      safety: {
+        readOnly: true,
+        lifecycleApplied: true,
+        filesystemWritten: true,
+        auditEventWritten: true,
+        metadataWritten: true,
+      },
+    });
+
+    const text = [
+      ...viewModel.blockers,
+      ...viewModel.nextBlockers,
+      ...viewModel.requiredFields,
+      ...viewModel.validationLines,
+      ...viewModel.safetyLines,
+      viewModel.messageText,
+    ].join(' ');
+
+    assert.ok(text.includes(
+      'operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:' +
+        'wouldRecover:false:blocker:operator-recovery-real-implementation-missing'
+    ));
+    assert.match(text, /operatorRecoveryReady:false/);
+    assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
+    assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
+    assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
+    assert.ok(!text.includes('token='), 'must not expose token assignment in malicious payload');
+    assert.ok(!text.includes('Authorization'), 'must not expose Authorization in malicious payload');
+    assert.ok(!text.includes('sha256:'), 'must not expose hash material in malicious payload');
+    assert.ok(!text.includes('operator@example'), 'must not expose operator identity in malicious payload');
   });
 
   it('requests approval persistence preview once and renders sanitized blocked preview fields', async () => {

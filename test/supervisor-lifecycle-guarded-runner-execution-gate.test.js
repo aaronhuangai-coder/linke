@@ -12,6 +12,7 @@ import {
   buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness,
   buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness,
   buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness,
+  buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -106,6 +107,27 @@ const EXPECTED_ATTEMPT_AUDIT_ENTRIES = Object.freeze([
     immutableAuditReady: false,
     sensitiveValuesReturned: false,
     blockerCode: 'attempt-audit-real-implementation-missing',
+  },
+]);
+const EXPECTED_OPERATOR_RECOVERY_ENTRIES = Object.freeze([
+  {
+    recoveryKind: 'disabled-operator-recovery-stub',
+    state: 'blocked',
+    realImplementationReady: false,
+    failureRecoveryReady: false,
+    retryLimitReady: false,
+    operatorRunbookReady: false,
+    wouldRecover: false,
+    wouldRetry: false,
+    wouldNotifyOperator: false,
+    wouldRun: false,
+    wouldWrite: false,
+    metadataWriteAllowed: false,
+    filesystemWriteAllowed: false,
+    remoteCommandAllowed: false,
+    operatorNotificationAllowed: false,
+    sensitiveValuesReturned: false,
+    blockerCode: 'operator-recovery-real-implementation-missing',
   },
 ]);
 
@@ -264,6 +286,7 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.gates.hostMutationAdapterReady, false);
   assert.strictEqual(result.gates.rollbackAnchorReady, false);
   assert.strictEqual(result.gates.attemptAuditReady, false);
+  assert.strictEqual(result.gates.operatorRecoveryReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
   assert.strictEqual(result.safety.readOnly, true);
@@ -293,6 +316,7 @@ function assertBlockedWiringContract(contract) {
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  assert.strictEqual(contract.requiredContracts.length, 5);
   assert.strictEqual(contract.requiredContracts.length, EXPECTED_WIRING_CONTRACTS.length);
   assert.deepStrictEqual(
     contract.requiredContracts.map((entry) => [entry.id, entry.blockerCode]),
@@ -310,6 +334,10 @@ function assertBlockedWiringContract(contract) {
   assert.deepStrictEqual(
     contract.attemptAuditReadiness,
     buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness(),
+  );
+  assert.deepStrictEqual(
+    contract.operatorRecoveryReadiness,
+    buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
   );
   assert.ok(contract.requiredContracts.every((entry) =>
     entry.status === 'blocked' &&
@@ -503,6 +531,54 @@ describe('buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness', () => {
   });
 });
 
+describe('buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness', () => {
+  it('returns fixed blocked disabled operator recovery readiness evidence', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
+
+    assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-operator-recovery-readiness');
+    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.operatorRecoveryDefined, true);
+    assert.strictEqual(readiness.operatorRecoveryReady, false);
+    assert.strictEqual(readiness.realOperatorRecoveryReady, false);
+    assert.strictEqual(readiness.readyCount, 0);
+    assert.strictEqual(readiness.blockedCount, 1);
+    assert.ok(readiness.blockers.includes('operator-recovery-real-implementation-missing'));
+    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
+    assert.deepStrictEqual(readiness.nextBlockers, ['operator-recovery-real-implementation-missing']);
+    assert.deepStrictEqual(readiness.recoveryEntries, EXPECTED_OPERATOR_RECOVERY_ENTRIES);
+    assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+
+  it('ignores all runtime-looking inputs and never leaks malicious recovery material', () => {
+    const baseline = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
+    const maliciousInput = {
+      operatorRecoveryReady: true,
+      recoveryEntries: [
+        {
+          recoveryKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          wouldRecover: true,
+          wouldRetry: true,
+          wouldRun: true,
+          wouldWrite: true,
+        },
+      ],
+      config: { token: 'SECRET_XYZ' },
+      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
+      hash: 'sha256:abc',
+      path: '/Users/ah/private',
+    };
+
+    assert.strictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness.length, 0);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(maliciousInput), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(null), baseline);
+    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(), baseline);
+    assert.doesNotMatch(
+      JSON.stringify(baseline),
+      /\/Users\/ah|localhost|SECRET_XYZ|\btoken\b|\bsecret\b|Authorization|operator@example|do not leak|sha256:|launchctl \/|launchctl load|node |curl/i,
+    );
+  });
+});
+
 describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
   it('returns the fixed blocked real runner wiring contract with complete safety evidence', () => {
     const contract = buildSupervisorLifecycleGuardedRunnerWiringContract(getReadyInputs().executionPreview);
@@ -560,6 +636,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+      operatorRecoveryReady: false,
     });
     assertBlockedWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
