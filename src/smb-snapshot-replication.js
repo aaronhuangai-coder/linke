@@ -37,6 +37,7 @@ const PROGRESS_TIMEOUT_MS = 120_000;
 const MOUNT_RECHECK_FILE_INTERVAL = 50;
 const MOUNT_RECHECK_BYTE_INTERVAL = 100 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const STALE_LOCK_MS = 30 * 60 * 1000;
 const RETRYABLE_IO_CODES = new Set([
   'EIO',
   'EHOSTDOWN',
@@ -44,6 +45,16 @@ const RETRYABLE_IO_CODES = new Set([
   'ENETUNREACH',
   'ECONNRESET',
   'ETIMEDOUT',
+]);
+const LOCK_SCHEMA_KEYS = Object.freeze([
+  'schemaVersion',
+  'attemptId',
+  'ownerToken',
+  'deviceId',
+  'snapshotId',
+  'manifestDigest',
+  'createdAt',
+  'heartbeatAt',
 ]);
 const COMPLETED_MARKER_KEYS = Object.freeze([
   'schemaVersion',
@@ -738,12 +749,55 @@ async function atomicWriteCompleted(finalDir, completed, deps) {
   await rename(tmp, target);
 }
 
-async function exclusiveCreateLock(lockPath, lockBody) {
+/** stale 判定只看 heartbeatAt：now - heartbeatAt >= 30 分钟（含精确边界）。 */
+function isLockStale(lockBody, nowFn) {
+  if (!isRecord(lockBody) || typeof lockBody.heartbeatAt !== 'string') return false;
+  const heartbeatMs = Date.parse(lockBody.heartbeatAt);
+  if (Number.isNaN(heartbeatMs)) return false;
+  return nowFn().getTime() - heartbeatMs >= STALE_LOCK_MS;
+}
+
+function parseLockBody(raw) {
+  if (!isRecord(raw) || raw.schemaVersion !== 1) return null;
+  const keys = Object.keys(raw);
+  if (keys.length !== LOCK_SCHEMA_KEYS.length) return null;
+  for (const key of LOCK_SCHEMA_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) return null;
+  }
+  if (!isUuidLike(raw.attemptId)
+    || typeof raw.ownerToken !== 'string'
+    || raw.ownerToken.length === 0
+    || !isSafeDeviceId(raw.deviceId)
+    || !isUuidLike(raw.snapshotId)
+    || !isSha256(raw.manifestDigest)
+    || !isCanonicalIsoTimestamp(raw.createdAt)
+    || !isCanonicalIsoTimestamp(raw.heartbeatAt)) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    attemptId: raw.attemptId,
+    ownerToken: raw.ownerToken,
+    deviceId: raw.deviceId,
+    snapshotId: raw.snapshotId,
+    manifestDigest: raw.manifestDigest,
+    createdAt: raw.createdAt,
+    heartbeatAt: raw.heartbeatAt,
+  };
+}
+
+async function exclusiveCreateLock(lockPath, lockBody, deps = {}) {
+  const nowFn = deps.now || defaultNow;
   let handle;
   try {
     handle = await open(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
   } catch (error) {
     if (error && error.code === 'EEXIST') {
+      const existingRaw = await readJsonIfExists(lockPath);
+      const existing = existingRaw ? parseLockBody(existingRaw) : null;
+      if (existing && isLockStale(existing, nowFn)) {
+        throw new SmbReplicationError(SMB_REPLICATION_CODES.RECOVERY_REQUIRED, 3);
+      }
       throw new SmbReplicationError(SMB_REPLICATION_CODES.LOCK_HELD, 1);
     }
     failCopy();
@@ -978,7 +1032,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
     manifestDigest,
     createdAt,
     heartbeatAt: createdAt,
-  });
+  }, { now });
 
   let stagingDir = null;
   let finalClaimed = false;
@@ -1187,4 +1241,290 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
       // 清理失败不得覆盖主结果；锁残留留给 Task 6 显式恢复。
     }
   }
+}
+
+/**
+ * 校验 final 的 remote manifest 与文件内容是否与期望一致（不要求 COMPLETED 已存在）。
+ */
+async function verifyFinalDataAgainstExpected(finalDir, expectedRemote, expectedDigest, boundaryRoot) {
+  const remoteRaw = await readJsonIfExists(join(finalDir, 'manifest.json'));
+  if (remoteRaw === undefined) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_INTEGRITY_FAILED, 1);
+  }
+  if (remoteRaw === null) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  let remoteManifest;
+  try {
+    remoteManifest = buildRemoteSnapshotManifest(remoteRaw);
+  } catch {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  const digest = digestRemoteSnapshotManifest(remoteManifest);
+  if (digest !== expectedDigest
+    || remoteManifest.snapshotId !== expectedRemote.snapshotId
+    || remoteManifest.deviceId !== expectedRemote.deviceId
+    || remoteManifest.integrity.totalBytes !== expectedRemote.integrity.totalBytes
+    || remoteManifest.files.length !== expectedRemote.files.length) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  for (let i = 0; i < expectedRemote.files.length; i++) {
+    const expected = expectedRemote.integrity.entries[i];
+    const actual = remoteManifest.integrity.entries[i];
+    if (!actual
+      || actual.path !== expected.path
+      || actual.size !== expected.size
+      || actual.sha256 !== expected.sha256) {
+      throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+    }
+  }
+
+  try {
+    await verifyTreeFiles(join(finalDir, 'files'), expectedRemote, boundaryRoot);
+  } catch (error) {
+    if (error instanceof SmbReplicationError) {
+      throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+    }
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+}
+
+async function readAndParseLock(lockPath) {
+  const raw = await readJsonIfExists(lockPath);
+  if (raw === null) return null;
+  if (raw === undefined) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+  const parsed = parseLockBody(raw);
+  if (!parsed) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+  return parsed;
+}
+
+/**
+ * 显式恢复 stale lock/staging，或在 final 完整时补写缺失的 COMPLETED.json。
+ * 仅在 execute 双门 + recover:true 时运行；永不删除 final。
+ */
+export async function recoverMountedSmbSnapshot(options, deps = {}) {
+  if (!isRecord(options)
+    || options.execute !== true
+    || options.executionGate !== 'enabled'
+    || options.recover !== true
+    || !isRecord(options.config)
+    || !Array.isArray(options.config.nasTargets)
+    || typeof options.targetName !== 'string') {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.EXECUTION_BLOCKED, 2);
+  }
+
+  const target = options.config.nasTargets.find((item) => item?.name === options.targetName);
+  if (!isRecord(target)
+    || target.enabled === false
+    || !['synology', 'ugreen'].includes(target.provider)
+    || !isRecord(target.mountedShare)
+    || target.mountedShare.enabled === false) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.EXECUTION_BLOCKED, 2);
+  }
+  if (!isSafeDeviceId(options.deviceId) || !isUuidLike(options.snapshotId)) {
+    failIntegrity();
+  }
+
+  const { mountPath, relativeRoot } = validateMountedShareConfig(target.mountedShare);
+  const inspectMount = deps.inspectMount || ((path) => inspectMountedSmb(path, deps));
+  const now = deps.now || defaultNow;
+  const uuid = deps.randomUUID || randomUUID;
+
+  const readSnapshotManifest = deps.readSnapshotManifest || getSnapshotManifest;
+  const localManifest = await readSnapshotManifest(
+    options.dataDir,
+    options.deviceId,
+    options.snapshotId,
+  );
+  if (!isRecord(localManifest)) failIntegrity();
+  if (localManifest.schemaVersion === undefined || localManifest.schemaVersion === 1) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.V2_REQUIRED, 2);
+  }
+
+  const remoteManifest = buildRemoteSnapshotManifest(localManifest);
+  if (remoteManifest.deviceId !== options.deviceId
+    || remoteManifest.snapshotId !== options.snapshotId) {
+    failIntegrity();
+  }
+  const manifestDigest = digestRemoteSnapshotManifest(remoteManifest);
+  await verifyLocalSnapshotFiles(options.dataDir, options.deviceId, remoteManifest);
+
+  const mountRoot = await resolveMountRoot(mountPath);
+  await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+
+  const relativeRootPath = join(mountRoot, ...relativeRoot.split('/'));
+  // 恢复只检查既有边界，不主动创建控制树。
+  await assertExistingSafeDir(mountRoot, relativeRootPath);
+  const controlRoot = join(relativeRootPath, '.linke-control');
+  const locksDir = join(controlRoot, 'locks', remoteManifest.deviceId);
+  const stagingParent = join(
+    controlRoot,
+    'staging',
+    remoteManifest.deviceId,
+    remoteManifest.snapshotId,
+  );
+  const finalDir = join(
+    relativeRootPath,
+    'devices',
+    remoteManifest.deviceId,
+    'snapshots',
+    remoteManifest.snapshotId,
+  );
+  const lockPath = join(locksDir, `${remoteManifest.snapshotId}.json`);
+
+  // 读取 lock，绝不覆盖。
+  const lockBody = await readAndParseLock(lockPath);
+  if (!lockBody) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.RECOVERY_REQUIRED, 3);
+  }
+
+  if (lockBody.deviceId !== remoteManifest.deviceId
+    || lockBody.snapshotId !== remoteManifest.snapshotId
+    || lockBody.manifestDigest !== manifestDigest) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  if (!isLockStale(lockBody, now)) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.RECOVERY_REQUIRED, 3);
+  }
+
+  const lockIdentity = {
+    ownerToken: lockBody.ownerToken,
+    attemptId: lockBody.attemptId,
+    deviceId: lockBody.deviceId,
+    snapshotId: lockBody.snapshotId,
+    manifestDigest: lockBody.manifestDigest,
+  };
+
+  const finalStat = await lstatExisting(finalDir);
+  if (finalStat) {
+    if (finalStat.isSymbolicLink() || !finalStat.isDirectory()) {
+      throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+    }
+    await assertPathInsideMount(mountRoot, finalDir);
+
+    // 完整校验 final 数据；失败 fail-closed，永不删除 final。
+    await verifyFinalDataAgainstExpected(
+      finalDir,
+      remoteManifest,
+      manifestDigest,
+      mountRoot,
+    );
+
+    const completed = await readJsonIfExists(join(finalDir, 'COMPLETED.json'));
+    if (completed === undefined) {
+      throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+    }
+    if (completed === null) {
+      const marker = {
+        schemaVersion: 1,
+        state: 'completed',
+        snapshotId: remoteManifest.snapshotId,
+        deviceId: remoteManifest.deviceId,
+        manifestDigest,
+        algorithm: 'sha256',
+        fileCount: remoteManifest.files.length,
+        totalBytes: remoteManifest.integrity.totalBytes,
+        completedAt: now().toISOString(),
+        linkeVersion: LINKE_RELEASE_VERSION,
+      };
+      await atomicWriteCompleted(finalDir, marker, { randomUUID: uuid });
+    } else {
+      try {
+        assertValidCompletedMarker(completed, remoteManifest, manifestDigest);
+      } catch {
+        throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+      }
+    }
+
+    try {
+      await releaseOwnedLock(lockPath, lockIdentity, deps);
+    } catch {
+      // 清理失败不得掩盖已恢复的 final 标记写入成功路径：仍要求 lock identity 匹配才删除。
+      // 若删除失败则 residual lock 保留，但 final 已可用。
+    }
+
+    // 恢复后 preflight：确认 mount 仍可用。
+    await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+
+    return sanitizedResult({
+      state: 'recovered',
+      provider: target.provider,
+      targetName: target.name,
+      deviceId: remoteManifest.deviceId,
+      snapshotId: remoteManifest.snapshotId,
+      manifestDigest,
+      fileCount: remoteManifest.files.length,
+      totalBytes: remoteManifest.integrity.totalBytes,
+      verifiedFileCount: remoteManifest.files.length,
+      attemptId: lockBody.attemptId,
+    });
+  }
+
+  // 无 final：仅清理匹配的 stale staging + lock。
+  const stagingDir = join(stagingParent, lockBody.attemptId);
+  const stagingStat = await lstatExisting(stagingDir);
+  if (!stagingStat || stagingStat.isSymbolicLink() || !stagingStat.isDirectory()) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  // verifyStagingMetadata — 删除前必须显式校验。
+  const attemptMeta = await readJsonIfExists(join(stagingDir, 'attempt.json'));
+  if (!isRecord(attemptMeta)
+    || attemptMeta.schemaVersion !== 1
+    || attemptMeta.attemptId !== lockIdentity.attemptId
+    || attemptMeta.ownerToken !== lockIdentity.ownerToken
+    || attemptMeta.deviceId !== lockIdentity.deviceId
+    || attemptMeta.snapshotId !== lockIdentity.snapshotId
+    || attemptMeta.manifestDigest !== lockIdentity.manifestDigest) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  // 删除 staging 前再次确认 lock 未变。
+  const lockBeforeRemove = await readAndParseLock(lockPath);
+  if (!lockBeforeRemove || !lockIdentityMatches(lockBeforeRemove, lockIdentity)) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  try {
+    await cleanupOwnedStaging(stagingDir, lockIdentity, deps);
+  } catch (error) {
+    if (error instanceof SmbReplicationError) throw error;
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  // 删除后再次确认 lock identity；变化则 abort，保留 residual lock。
+  const lockAfterRemove = await readAndParseLock(lockPath);
+  if (!lockAfterRemove || !lockIdentityMatches(lockAfterRemove, lockIdentity)) {
+    throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
+  }
+
+  try {
+    await releaseOwnedLock(lockPath, lockIdentity, deps);
+  } catch {
+    // 清理失败不掩盖主结果；若 lock 仍在则下一轮仍可恢复。
+  }
+
+  // 恢复后 preflight，确认系统回到可重试态。
+  await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+
+  return sanitizedResult({
+    state: 'recovered',
+    provider: target.provider,
+    targetName: target.name,
+    deviceId: remoteManifest.deviceId,
+    snapshotId: remoteManifest.snapshotId,
+    manifestDigest,
+    fileCount: remoteManifest.files.length,
+    totalBytes: remoteManifest.integrity.totalBytes,
+    verifiedFileCount: remoteManifest.files.length,
+    attemptId: lockBody.attemptId,
+  });
 }

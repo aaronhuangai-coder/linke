@@ -16,8 +16,9 @@ import {
   buildSmbSnapshotReplicationPlan,
   inspectMountedSmb,
   replicateSnapshotToMountedSmb,
+  recoverMountedSmbSnapshot,
 } from '../src/smb-snapshot-replication.js';
-import { safeDevicePath, createBackup } from '../src/storage.js';
+import { safeDevicePath, createBackup, getSnapshotManifest } from '../src/storage.js';
 import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const SNAPSHOT_A = '11111111-1111-1111-1111-111111111111';
@@ -1249,5 +1250,394 @@ describe('SMB snapshot replication lock, retry, cleanup, and heartbeat', () => {
     releaseCopy.resolve();
     const result = await run;
     assert.strictEqual(result.state, 'replicated');
+  });
+});
+
+const STALE_LOCK_MS = 30 * 60 * 1000;
+const ATTEMPT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OWNER_A = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+async function fixtureDigest(root, snapshotId) {
+  const local = await getSnapshotManifest(root, 'device-a', snapshotId);
+  const remote = buildRemoteSnapshotManifest(local);
+  return {
+    local,
+    remote,
+    digest: digestRemoteSnapshotManifest(remote),
+  };
+}
+
+async function plantLock(fixture, {
+  attemptId = ATTEMPT_A,
+  ownerToken = OWNER_A,
+  heartbeatAgeMs = STALE_LOCK_MS,
+  createdAgeMs = 60 * 60 * 1000,
+  nowMs = Date.parse('2026-07-10T12:00:00.000Z'),
+  digest,
+  overrides = {},
+} = {}) {
+  const { mountPath, snapshotId } = fixture;
+  const lockDir = join(mountPath, 'linke-test', '.linke-control', 'locks', 'device-a');
+  await mkdir(lockDir, { recursive: true });
+  const lockPath = join(lockDir, `${snapshotId}.json`);
+  const body = {
+    schemaVersion: 1,
+    attemptId,
+    ownerToken,
+    deviceId: 'device-a',
+    snapshotId,
+    manifestDigest: digest,
+    createdAt: new Date(nowMs - createdAgeMs).toISOString(),
+    heartbeatAt: new Date(nowMs - heartbeatAgeMs).toISOString(),
+    ...overrides,
+  };
+  await writeFile(lockPath, JSON.stringify(body), 'utf8');
+  return { lockPath, lockBody: body, nowMs };
+}
+
+async function plantStaging(fixture, {
+  attemptId = ATTEMPT_A,
+  ownerToken = OWNER_A,
+  digest,
+  createdAt = '2026-07-10T10:00:00.000Z',
+  withFile = true,
+} = {}) {
+  const stagingDir = join(fixture.stagingParent, attemptId);
+  await mkdir(join(stagingDir, 'files'), { recursive: true });
+  await writeFile(
+    join(stagingDir, 'attempt.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      attemptId,
+      ownerToken,
+      deviceId: 'device-a',
+      snapshotId: fixture.snapshotId,
+      manifestDigest: digest,
+      createdAt,
+    }),
+    'utf8',
+  );
+  if (withFile) {
+    await writeFile(join(stagingDir, 'files', 'a.txt'), 'alpha', 'utf8');
+  }
+  return stagingDir;
+}
+
+describe('SMB snapshot explicit stale recovery', () => {
+  it('default execute leaves stale lock/staging and returns recovery_required', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs, heartbeatAgeMs: STALE_LOCK_MS });
+    const stagingDir = await plantStaging(fixture, { digest });
+
+    await assert.rejects(
+      replicateSnapshotToMountedSmb(fixture.options, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.RECOVERY_REQUIRED
+        && error.exitCode === 3,
+    );
+    assert.strictEqual(await pathExists(stagingDir), true);
+    assert.strictEqual(
+      await pathExists(join(
+        fixture.mountPath,
+        'linke-test',
+        '.linke-control',
+        'locks',
+        'device-a',
+        `${fixture.snapshotId}.json`,
+      )),
+      true,
+    );
+  });
+
+  it('recover requires execute double gate and recover:true', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs });
+    await plantStaging(fixture, { digest });
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true, execute: false }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.EXECUTION_BLOCKED
+        && error.exitCode === 2,
+    );
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true, executionGate: 'disabled' }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.EXECUTION_BLOCKED,
+    );
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: false }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.EXECUTION_BLOCKED,
+    );
+  });
+
+  it('non-stale lock is untouched and returns recovery_required', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    // 29 minutes 59 seconds — not stale; createdAt much older must not matter.
+    const { lockPath, lockBody } = await plantLock(fixture, {
+      digest,
+      nowMs,
+      heartbeatAgeMs: STALE_LOCK_MS - 1000,
+      createdAgeMs: 24 * 60 * 60 * 1000,
+    });
+    const stagingDir = await plantStaging(fixture, { digest });
+    const before = await readFile(lockPath, 'utf8');
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.RECOVERY_REQUIRED
+        && error.exitCode === 3,
+    );
+    assert.strictEqual(await readFile(lockPath, 'utf8'), before);
+    assert.strictEqual(await pathExists(stagingDir), true);
+    assert.strictEqual(JSON.parse(before).heartbeatAt, lockBody.heartbeatAt);
+  });
+
+  it('stale boundary uses heartbeatAt exactly at 30 minutes', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, {
+      digest,
+      nowMs,
+      heartbeatAgeMs: STALE_LOCK_MS,
+      createdAgeMs: 1000, // recent createdAt must not block stale when heartbeat is old enough
+    });
+    const stagingDir = await plantStaging(fixture, { digest });
+
+    const recovered = await recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+      ...ampleMountDeps(),
+      now: () => new Date(nowMs),
+    });
+    assert.strictEqual(recovered.state, 'recovered');
+    assert.strictEqual(await pathExists(stagingDir), false);
+  });
+
+  it('identity mismatch returns remote-snapshot-conflict without deleting', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    const wrongDigest = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    const { lockPath } = await plantLock(fixture, { digest: wrongDigest, nowMs });
+    const stagingDir = await plantStaging(fixture, { digest: wrongDigest });
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.REMOTE_CONFLICT,
+    );
+    assert.strictEqual(await pathExists(lockPath), true);
+    assert.strictEqual(await pathExists(stagingDir), true);
+    assert.notStrictEqual(wrongDigest, digest);
+  });
+
+  it('stale lock with matching staging cleanup returns recovered', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    const { lockPath } = await plantLock(fixture, { digest, nowMs });
+    const stagingDir = await plantStaging(fixture, { digest });
+
+    const recovered = await recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+      ...ampleMountDeps(),
+      now: () => new Date(nowMs),
+    });
+    assert.strictEqual(recovered.state, 'recovered');
+    assert.strictEqual(recovered.command, 'nas-snapshot-replicate');
+    assert.strictEqual(recovered.snapshotId, fixture.snapshotId);
+    assert.strictEqual(recovered.manifestDigest, digest);
+    assert.strictEqual(await pathExists(stagingDir), false);
+    assert.strictEqual(await pathExists(lockPath), false);
+    assert.ok(!JSON.stringify(recovered).includes(fixture.mountPath));
+    assert.ok(!JSON.stringify(recovered).includes(OWNER_A));
+  });
+
+  it('complete final missing COMPLETED.json can be marked recovered without deleting final', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest, remote } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    const { lockPath } = await plantLock(fixture, { digest, nowMs });
+
+    await mkdir(join(fixture.finalDir, 'files'), { recursive: true });
+    await writeFile(join(fixture.finalDir, 'files', 'a.txt'), 'alpha', 'utf8');
+    await writeFile(
+      join(fixture.finalDir, 'manifest.json'),
+      serializeCanonicalRemoteManifest(remote),
+      'utf8',
+    );
+
+    const recovered = await recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+      ...ampleMountDeps(),
+      now: () => new Date(nowMs),
+    });
+    assert.strictEqual(recovered.state, 'recovered');
+    assert.strictEqual(await pathExists(fixture.finalDir), true);
+    assert.strictEqual(await readFile(join(fixture.finalDir, 'files', 'a.txt'), 'utf8'), 'alpha');
+    const completed = JSON.parse(await readFile(join(fixture.finalDir, 'COMPLETED.json'), 'utf8'));
+    assert.strictEqual(completed.state, 'completed');
+    assert.strictEqual(completed.manifestDigest, digest);
+    assert.strictEqual(completed.linkeVersion, LINKE_RELEASE_VERSION);
+    assert.strictEqual(await pathExists(lockPath), false);
+  });
+
+  it('incomplete final returns remote-snapshot-conflict without deletion', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs });
+    await mkdir(join(fixture.finalDir, 'files'), { recursive: true });
+    await writeFile(join(fixture.finalDir, 'files', 'a.txt'), 'CORRUPTED', 'utf8');
+    await writeFile(
+      join(fixture.finalDir, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        snapshotId: fixture.snapshotId,
+        deviceId: 'device-a',
+        createdAt: '2026-07-10T00:00:00.000Z',
+        files: ['a.txt'],
+        integrity: {
+          algorithm: 'sha256',
+          totalBytes: 5,
+          entries: [{ path: 'a.txt', size: 5, sha256: HASH_ALPHA }],
+        },
+      }),
+      'utf8',
+    );
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && (
+          error.code === SMB_REPLICATION_CODES.REMOTE_CONFLICT
+          || error.code === SMB_REPLICATION_CODES.REMOTE_INTEGRITY_FAILED
+        ),
+    );
+    assert.strictEqual(await readFile(join(fixture.finalDir, 'files', 'a.txt'), 'utf8'), 'CORRUPTED');
+    assert.strictEqual(await pathExists(join(fixture.finalDir, 'COMPLETED.json')), false);
+    assert.strictEqual(await pathExists(fixture.finalDir), true);
+  });
+
+  it('staging metadata mismatch is preserved without deletion', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    const { lockPath } = await plantLock(fixture, { digest, nowMs });
+    const stagingDir = await plantStaging(fixture, {
+      digest,
+      attemptId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      ownerToken: OWNER_A,
+    });
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.REMOTE_CONFLICT,
+    );
+    assert.strictEqual(await pathExists(stagingDir), true);
+    assert.strictEqual(await pathExists(lockPath), true);
+  });
+
+  it('lock identity change during cleanup aborts and preserves residual lock', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    const { lockPath, lockBody } = await plantLock(fixture, { digest, nowMs });
+    const stagingDir = await plantStaging(fixture, { digest });
+    const { rm: realRm } = await import('node:fs/promises');
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        ...ampleMountDeps(),
+        now: () => new Date(nowMs),
+        rm: async (target, opts) => {
+          // realpath 下 mount 路径可能与 fixture 字符串不同，按 attemptId 识别 staging 删除。
+          if (String(target).includes(ATTEMPT_A) && opts && opts.recursive) {
+            await writeFile(lockPath, JSON.stringify({
+              ...lockBody,
+              ownerToken: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+            }), 'utf8');
+          }
+          return realRm(target, opts);
+        },
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.REMOTE_CONFLICT,
+    );
+    assert.strictEqual(await pathExists(lockPath), true);
+    const residual = JSON.parse(await readFile(lockPath, 'utf8'));
+    assert.strictEqual(residual.ownerToken, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+    // staging 可能已在 identity 复核前删除；lock residual 必须保留。
+    void stagingDir;
+  });
+
+  it('rechecks mount preflight before recovery actions', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs });
+    const stagingDir = await plantStaging(fixture, { digest });
+
+    await assert.rejects(
+      recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+        inspectMount: async () => ({ fsType: 'apfs', availableBytes: 1024 * 1024 * 1024 }),
+        now: () => new Date(nowMs),
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.MOUNT_REQUIRED,
+    );
+    assert.strictEqual(await pathExists(stagingDir), true);
+  });
+
+  it('recovered result is sanitized without absolute paths', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs });
+    await plantStaging(fixture, { digest });
+
+    const recovered = await recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+      ...ampleMountDeps(),
+      now: () => new Date(nowMs),
+    });
+    assert.strictEqual(recovered.state, 'recovered');
+    assert.strictEqual(recovered.command, 'nas-snapshot-replicate');
+    assert.strictEqual(recovered.deviceId, 'device-a');
+    assert.strictEqual(recovered.manifestDigest, digest);
+    const serialized = JSON.stringify(recovered);
+    for (const forbidden of [fixture.root, fixture.mountPath, 'mounted-share', OWNER_A]) {
+      assert.ok(!serialized.includes(forbidden), `must not include ${forbidden}`);
+    }
   });
 });
