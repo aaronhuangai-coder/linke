@@ -39,6 +39,11 @@ async function writeNasConfig(rootDir) {
           remotePath: '/volume1/linke',
           enabled: true,
           credentialRef: 'home-backup',
+          mountedShare: {
+            enabled: true,
+            mountPath: '/Volumes/LinkeBackup',
+            relativeRoot: 'linke/main',
+          },
         },
         {
           name: 'disabled-ugreen',
@@ -72,7 +77,13 @@ describe('Agent nas-dry-run CLI', () => {
       assert.ok(plan.readinessSummary);
       assert.strictEqual(plan.targets.length, 2);
       assert.strictEqual(plan.targets[0].credentialRefConfigured, true);
+      assert.strictEqual(plan.targets[0].mountedShareConfigured, true);
+      assert.strictEqual(plan.targets[0].mountedShareEnabled, true);
       assert.ok(!stdout.includes('home-backup'), 'full plan must not echo raw credentialRef');
+      assert.ok(!stdout.includes('/Volumes/LinkeBackup'), 'full plan must not echo mountedShare mountPath');
+      assert.ok(!stdout.includes('linke/main'), 'full plan must not echo mountedShare relativeRoot');
+      assert.ok(!stdout.includes('mountPath'), 'full plan must not expose mountPath key');
+      assert.ok(!stdout.includes('relativeRoot'), 'full plan must not expose relativeRoot key');
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
@@ -126,6 +137,8 @@ describe('Agent nas-dry-run CLI', () => {
       assert.ok(!stdout.includes('192.168.50.10'), 'summary must not echo endpoint');
       assert.ok(!stdout.includes('/volume1/linke'), 'summary must not echo remotePath');
       assert.ok(!stdout.includes('/Users/example/Documents'), 'summary must not echo sourcePath');
+      assert.ok(!stdout.includes('/Volumes/LinkeBackup'), 'summary must not echo mountedShare mountPath');
+      assert.ok(!stdout.includes('linke/main'), 'summary must not echo mountedShare relativeRoot');
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }

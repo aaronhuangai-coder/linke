@@ -7,7 +7,13 @@
  * Supported providers: synology, ugreen
  */
 
-import { loadConfig, validateConfig, assertNoCredentials, validateNasCredentialRef } from './config.js';
+import {
+  loadConfig,
+  validateConfig,
+  assertNoCredentials,
+  validateNasCredentialRef,
+  validateNasMountedShare,
+} from './config.js';
 
 const VALID_PROVIDERS = ['synology', 'ugreen'];
 
@@ -125,6 +131,7 @@ export function validateNasTarget(target) {
 
   const credentialRef = validateNasCredentialRef(target.credentialRef);
   const appAdapter = validateNasAppAdapter(target.provider, target.appAdapter);
+  const mountedShare = validateNasMountedShare(target.mountedShare);
 
   return {
     name: target.name,
@@ -135,6 +142,7 @@ export function validateNasTarget(target) {
     enabled,
     appAdapter,
     credentialRef,
+    mountedShare,
   };
 }
 
@@ -237,6 +245,8 @@ export function buildNasDryRunPlan(config) {
       remotePath: t.remotePath,
       enabled: t.enabled,
       credentialRefConfigured,
+      mountedShareConfigured: Boolean(t.mountedShare),
+      mountedShareEnabled: Boolean(t.mountedShare?.enabled),
       executionReadiness,
       appAdapter: t.appAdapter,
       adapterPlan: buildNasAppAdapterDryRunPlan(t, config.backupJobs || []),

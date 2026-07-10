@@ -3,7 +3,29 @@ import assert from 'node:assert';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, hostname as osHostname } from 'node:os';
-import { loadConfig, validateConfig, getDefaultIpAddress } from '../src/config.js';
+import {
+  loadConfig,
+  validateConfig,
+  getDefaultIpAddress,
+} from '../src/config.js';
+import * as configModule from '../src/config.js';
+
+function validMountedShareConfig(targetOverrides = {}) {
+  return {
+    serverUrl: 'http://localhost:3000',
+    deviceId: 'mounted-smb-config',
+    backupJobs: [{ name: 'documents', sourcePath: '/tmp/documents' }],
+    nasTargets: [{
+      name: 'primary-nas',
+      provider: 'synology',
+      endpoint: 'https://nas.example.invalid',
+      shareName: 'backup',
+      remotePath: '/provider-owned/path',
+      enabled: true,
+      ...targetOverrides,
+    }],
+  };
+}
 
 describe('Config module', () => {
   let tmpDir;
@@ -277,6 +299,75 @@ describe('Config module', () => {
     });
     assert.deepStrictEqual(cfg.nasTargets, []);
   });
+
+  // ── nasTargets mountedShare ───────────────────────────────────
+
+  it('accepts and normalizes a credential-free mountedShare', () => {
+    const cfg = validateConfig(validMountedShareConfig({
+      mountedShare: {
+        enabled: true,
+        mountPath: '/Volumes/LinkeBackup',
+        relativeRoot: 'linke/main',
+      },
+    }));
+
+    assert.deepStrictEqual(cfg.nasTargets[0].mountedShare, {
+      enabled: true,
+      mountPath: '/Volumes/LinkeBackup',
+      relativeRoot: 'linke/main',
+    });
+  });
+
+  it('preserves a disabled mountedShare and defaults enabled to true when omitted', () => {
+    const disabled = validateConfig(validMountedShareConfig({
+      mountedShare: {
+        enabled: false,
+        mountPath: '/Volumes/LinkeBackup',
+        relativeRoot: 'linke/main',
+      },
+    }));
+    const enabledByDefault = validateConfig(validMountedShareConfig({
+      mountedShare: {
+        mountPath: '/Volumes/LinkeBackup',
+        relativeRoot: 'linke/main',
+      },
+    }));
+
+    assert.strictEqual(disabled.nasTargets[0].mountedShare.enabled, false);
+    assert.strictEqual(enabledByDefault.nasTargets[0].mountedShare.enabled, true);
+    assert.strictEqual(typeof configModule.validateNasMountedShare, 'function');
+    assert.strictEqual(configModule.validateNasMountedShare(undefined), null);
+    assert.strictEqual(configModule.validateNasMountedShare(null), null);
+  });
+
+  const INVALID_MOUNTED_SHARES = [
+    ['non-object', 'invalid'],
+    ['array', []],
+    ['non-boolean enabled', { enabled: 'yes', mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke' }],
+    ['relative mountPath', { enabled: true, mountPath: 'Volumes/relative', relativeRoot: 'linke' }],
+    ['mountPath control character', { enabled: true, mountPath: '/Volumes/Linke\nBackup', relativeRoot: 'linke' }],
+    ['mountPath tab character', { enabled: true, mountPath: '/Volumes/Linke\tBackup', relativeRoot: 'linke' }],
+    ['parent relativeRoot', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: '../escape' }],
+    ['absolute relativeRoot', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: '/absolute' }],
+    ['empty relativeRoot', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: '' }],
+    ['empty relativeRoot segment', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke//main' }],
+    ['dot relativeRoot segment', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke/./main' }],
+    ['parent relativeRoot segment', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke/../main' }],
+    ['backslash relativeRoot', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke\\main' }],
+    ['relativeRoot control character', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke\rmain' }],
+    ['relativeRoot unit-separator character', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke\u001fmain' }],
+    ['unsupported field', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke', label: 'extra' }],
+    ['credential field', { enabled: true, mountPath: '/Volumes/LinkeBackup', relativeRoot: 'linke', password: 'forbidden' }],
+  ];
+
+  for (const [label, mountedShare] of INVALID_MOUNTED_SHARES) {
+    it(`rejects mountedShare with ${label}`, () => {
+      assert.throws(
+        () => validateConfig(validMountedShareConfig({ mountedShare })),
+        /mountedShare|credential/i,
+      );
+    });
+  }
 
   it('rejects appAdapter when null', () => {
     assert.throws(

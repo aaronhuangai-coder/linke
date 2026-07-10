@@ -31,6 +31,45 @@ describe('validateNasTarget', () => {
     assert.strictEqual(result.enabled, true);
   });
 
+  it('normalizes mountedShare by reusing the shared configuration boundary', () => {
+    const result = validateNasTarget({
+      name: 'mounted-synology',
+      provider: 'synology',
+      endpoint: 'https://nas.example.invalid',
+      shareName: 'backup',
+      remotePath: '/provider-owned/path',
+      mountedShare: {
+        enabled: false,
+        mountPath: '/Volumes/LinkeBackup',
+        relativeRoot: 'linke/main',
+      },
+    });
+
+    assert.deepStrictEqual(result.mountedShare, {
+      enabled: false,
+      mountPath: '/Volumes/LinkeBackup',
+      relativeRoot: 'linke/main',
+    });
+  });
+
+  it('rejects unsafe mountedShare input through validateNasTarget', () => {
+    assert.throws(
+      () => validateNasTarget({
+        name: 'mounted-synology',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        mountedShare: {
+          enabled: true,
+          mountPath: '/Volumes/LinkeBackup',
+          relativeRoot: '../escape',
+        },
+      }),
+      /mountedShare/i,
+    );
+  });
+
   it('accepts a valid ugreen target', () => {
     const target = {
       name: 'my-ugreen',
@@ -486,6 +525,40 @@ describe('buildNasDryRunPlan', () => {
     assert.ok(Array.isArray(plan.jobs));
     assert.strictEqual(plan.jobs.length, 1);
     assert.strictEqual(plan.jobs[0].name, 'job1');
+  });
+
+  it('exposes only mountedShare configured flags without leaking either path', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'mounted-share-device',
+      nasTargets: [
+        {
+          name: 'mounted-synology',
+          provider: 'synology',
+          endpoint: 'https://nas.example.invalid',
+          shareName: 'backup',
+          remotePath: '/provider-owned/path',
+          enabled: true,
+          mountedShare: {
+            enabled: false,
+            mountPath: '/Volumes/LinkeBackup',
+            relativeRoot: 'linke/main',
+          },
+        },
+      ],
+      backupJobs: [{ name: 'documents', sourcePath: '/tmp/documents' }],
+    });
+
+    const target = plan.targets[0];
+    const serialized = JSON.stringify(plan);
+    assert.strictEqual(target.mountedShareConfigured, true);
+    assert.strictEqual(target.mountedShareEnabled, false);
+    assert.strictEqual(target.mountedShare, undefined);
+    assert.strictEqual(target.mountPath, undefined);
+    assert.strictEqual(target.relativeRoot, undefined);
+    assert.ok(!serialized.includes('/Volumes/LinkeBackup'));
+    assert.ok(!serialized.includes('linke/main'));
+    assert.ok(!serialized.includes('mountPath'));
+    assert.ok(!serialized.includes('relativeRoot'));
   });
 
   it('handles empty nasTargets gracefully', () => {

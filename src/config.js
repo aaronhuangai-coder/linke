@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { hostname as osHostname, networkInterfaces } from 'node:os';
+import { isAbsolute } from 'node:path';
 
 /** Credential-like field names that must never appear in a nasTarget. */
 export const FORBIDDEN_NAS_CREDENTIAL_FIELDS = Object.freeze([
@@ -48,6 +49,51 @@ export function validateNasCredentialRef(value) {
     throw new Error('nasTargets[].credentialRef must match ^[a-z][a-z0-9-]{1,30}$');
   }
   return value;
+}
+
+/**
+ * 校验本机已挂载 SMB 共享配置，不接受凭证或不安全的相对路径。
+ */
+export function validateNasMountedShare(value) {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('nasTargets[].mountedShare must be an object');
+  }
+
+  assertNoCredentials(value);
+  const allowedKeys = new Set(['enabled', 'mountPath', 'relativeRoot']);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`nasTargets[].mountedShare contains unsupported field "${key}"`);
+    }
+  }
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') {
+    throw new Error('nasTargets[].mountedShare.enabled must be a boolean');
+  }
+  if (typeof value.mountPath !== 'string'
+    || !isAbsolute(value.mountPath)
+    || /[\x00-\x1f\x7f]/.test(value.mountPath)) {
+    throw new Error('nasTargets[].mountedShare.mountPath must be an absolute safe path');
+  }
+  if (typeof value.relativeRoot !== 'string'
+    || value.relativeRoot.length === 0
+    || isAbsolute(value.relativeRoot)
+    || /[\x00-\x1f\x7f\\]/.test(value.relativeRoot)) {
+    throw new Error('nasTargets[].mountedShare.relativeRoot must be a safe relative path');
+  }
+
+  const parts = value.relativeRoot.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) {
+    throw new Error(
+      'nasTargets[].mountedShare.relativeRoot must not contain empty, dot, or parent segments',
+    );
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    mountPath: value.mountPath,
+    relativeRoot: value.relativeRoot,
+  };
 }
 
 /**
@@ -187,6 +233,7 @@ export function validateConfig(config) {
         };
       }
       const credentialRef = validateNasCredentialRef(t.credentialRef);
+      const mountedShare = validateNasMountedShare(t.mountedShare);
 
       nasTargets.push({
         name: t.name,
@@ -197,6 +244,7 @@ export function validateConfig(config) {
         enabled: t.enabled !== undefined ? Boolean(t.enabled) : true,
         appAdapter,
         credentialRef,
+        mountedShare,
       });
     }
   }
