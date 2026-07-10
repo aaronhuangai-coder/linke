@@ -36,6 +36,15 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROGRESS_TIMEOUT_MS = 120_000;
 const MOUNT_RECHECK_FILE_INTERVAL = 50;
 const MOUNT_RECHECK_BYTE_INTERVAL = 100 * 1024 * 1024;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const RETRYABLE_IO_CODES = new Set([
+  'EIO',
+  'EHOSTDOWN',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ECONNRESET',
+  'ETIMEDOUT',
+]);
 const COMPLETED_MARKER_KEYS = Object.freeze([
   'schemaVersion',
   'state',
@@ -48,6 +57,10 @@ const COMPLETED_MARKER_KEYS = Object.freeze([
   'completedAt',
   'linkeVersion',
 ]);
+
+function canRetryBeforePublish(error, retryCount, published) {
+  return !published && retryCount < 1 && RETRYABLE_IO_CODES.has(error?.code);
+}
 
 export const SMB_REPLICATION_CODES = Object.freeze({
   EXECUTION_BLOCKED: 'smb-execution-blocked',
@@ -496,12 +509,13 @@ async function recheckMount(inspectMount, mountPath) {
 
 /**
  * 流式复制单个文件。
- * 先 await exclusive open（wx/O_EXCL）把目标打开错误映射为 COPY_FAILED，
+ * 先 await exclusive open（wx/O_EXCL）；系统 errno 原样抛出供 pre-publish 重试判定，
  * 再 pipeline 传播读/写/进度错误；支持 backpressure 与 await 的 onBytes 复检。
  */
 async function streamCopyFile(src, dest, deps = {}) {
   const now = deps.now || defaultNow;
   const openRead = deps.createReadStream || createReadStream;
+  const openFile = deps.openFile || open;
   let lastProgressAt = now().getTime();
   const readOptions = {};
   if (Number.isSafeInteger(deps.streamHighWaterMark) && deps.streamHighWaterMark > 0) {
@@ -510,14 +524,14 @@ async function streamCopyFile(src, dest, deps = {}) {
 
   let handle;
   try {
-    // 同步于 promise 的 exclusive create，避免 createWriteStream('wx') 在无 listener 时
-    // 异步 emit EEXIST/EISDIR 变成 unhandled error event。
-    handle = await open(
+    // awaitable exclusive create：避免 createWriteStream('wx') 无 listener 时 unhandled error。
+    handle = await openFile(
       dest,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
     );
-  } catch {
-    failCopy();
+  } catch (error) {
+    if (error instanceof SmbReplicationError) throw error;
+    throw error;
   }
 
   const read = openRead(src, readOptions);
@@ -551,7 +565,7 @@ async function streamCopyFile(src, dest, deps = {}) {
     await pipeline(read, progress, write);
   } catch (error) {
     if (error instanceof SmbReplicationError) throw error;
-    failCopy();
+    throw error;
   } finally {
     clearInterval(timer);
   }
@@ -741,16 +755,102 @@ async function exclusiveCreateLock(lockPath, lockBody) {
   }
 }
 
-async function releaseOwnedLock(lockPath, ownerToken) {
+function lockIdentityMatches(parsed, identity) {
+  return Boolean(parsed)
+    && parsed.ownerToken === identity.ownerToken
+    && parsed.attemptId === identity.attemptId
+    && parsed.deviceId === identity.deviceId
+    && parsed.snapshotId === identity.snapshotId
+    && parsed.manifestDigest === identity.manifestDigest;
+}
+
+/** 仅在 ownerToken+attemptId 等 identity 全匹配时，用 temp+rename 刷新 heartbeatAt。 */
+async function updateLockHeartbeat(lockPath, identity, nowFn) {
+  let raw;
   try {
-    const raw = await readFile(lockPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && parsed.ownerToken === ownerToken) {
-      await rm(lockPath, { force: true });
-    }
+    raw = await readFile(lockPath, 'utf8');
   } catch {
-    // 清理失败不掩盖主结果；Task 5 会细化残留策略。
+    return false;
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!lockIdentityMatches(parsed, identity)) return false;
+
+  const next = {
+    schemaVersion: 1,
+    attemptId: parsed.attemptId,
+    ownerToken: parsed.ownerToken,
+    deviceId: parsed.deviceId,
+    snapshotId: parsed.snapshotId,
+    manifestDigest: parsed.manifestDigest,
+    createdAt: parsed.createdAt,
+    heartbeatAt: nowFn().toISOString(),
+  };
+  const tmp = `${lockPath}.${identity.attemptId}.hb-tmp`;
+  try {
+    await writeFile(tmp, JSON.stringify(next), { flag: 'wx' });
+    await rename(tmp, lockPath);
+    return true;
+  } catch {
+    try {
+      await rm(tmp, { force: true });
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+}
+
+/**
+ * compare-and-delete：重新读取 lock，仅删除 identity 全匹配的 owner 锁。
+ * 清理失败向上抛出由调用方吞掉，避免覆盖原始 sanitized 错误。
+ */
+async function releaseOwnedLock(lockPath, identity, deps = {}) {
+  const remove = deps.rm || rm;
+  const raw = await readFile(lockPath, 'utf8');
+  const parsed = JSON.parse(raw);
+  if (!lockIdentityMatches(parsed, identity)) return;
+  await remove(lockPath, { force: true });
+}
+
+/**
+ * 仅删除 attempt metadata 与 owner identity 全匹配的 staging；否则保留。
+ */
+async function cleanupOwnedStaging(stagingDir, identity, deps = {}) {
+  if (!stagingDir) return;
+  const remove = deps.rm || rm;
+  const meta = await readJsonIfExists(join(stagingDir, 'attempt.json'));
+  if (meta === null || meta === undefined) return;
+  if (!lockIdentityMatches({
+    ownerToken: meta.ownerToken,
+    attemptId: meta.attemptId,
+    deviceId: meta.deviceId,
+    snapshotId: meta.snapshotId,
+    manifestDigest: meta.manifestDigest,
+  }, identity)) {
+    return;
+  }
+  await remove(stagingDir, { recursive: true, force: true });
+}
+
+async function resetStagingForRetry(stagingDir, mountRoot) {
+  const filesRoot = join(stagingDir, 'files');
+  await rm(filesRoot, { recursive: true, force: true });
+  await ensureSafeDirectory(mountRoot, filesRoot);
+  try {
+    await rm(join(stagingDir, 'manifest.json'), { force: true });
+  } catch {
+    // ignore
+  }
+}
+
+function mapPrePublishFailure(error) {
+  if (error instanceof SmbReplicationError) throw error;
+  throw new SmbReplicationError(SMB_REPLICATION_CODES.COPY_FAILED, 1);
 }
 
 function sanitizedResult({
@@ -861,6 +961,13 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
   const attemptId = uuid();
   const ownerToken = uuid();
   const createdAt = now().toISOString();
+  const lockIdentity = {
+    ownerToken,
+    attemptId,
+    deviceId: remoteManifest.deviceId,
+    snapshotId: remoteManifest.snapshotId,
+    manifestDigest,
+  };
 
   await exclusiveCreateLock(lockPath, {
     schemaVersion: 1,
@@ -875,8 +982,24 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
 
   let stagingDir = null;
   let finalClaimed = false;
+  let retryCount = 0;
+  let heartbeatTimer = null;
+  const setIntervalFn = deps.setInterval || setInterval;
+  const clearIntervalFn = deps.clearInterval || clearInterval;
+  const heartbeatIntervalMs = Number.isSafeInteger(deps.heartbeatIntervalMs)
+    && deps.heartbeatIntervalMs > 0
+    ? deps.heartbeatIntervalMs
+    : HEARTBEAT_INTERVAL_MS;
 
   try {
+    heartbeatTimer = setIntervalFn(
+      () => updateLockHeartbeat(lockPath, lockIdentity, now).catch(() => false),
+      heartbeatIntervalMs,
+    );
+    if (heartbeatTimer && typeof heartbeatTimer.unref === 'function') {
+      heartbeatTimer.unref();
+    }
+
     const existing = await handleExistingFinal(
       finalDir,
       mountRoot,
@@ -888,13 +1011,14 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
 
     stagingDir = join(stagingParent, attemptId);
     await ensureSafeDirectory(mountRoot, stagingDir);
-    const stagingFilesRoot = await ensureSafeDirectory(mountRoot, join(stagingDir, 'files'));
+    await ensureSafeDirectory(mountRoot, join(stagingDir, 'files'));
 
     await writeFile(
       join(stagingDir, 'attempt.json'),
       JSON.stringify({
         schemaVersion: 1,
         attemptId,
+        ownerToken,
         deviceId: remoteManifest.deviceId,
         snapshotId: remoteManifest.snapshotId,
         manifestDigest,
@@ -912,58 +1036,67 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
       ? deps.mountRecheckByteInterval
       : MOUNT_RECHECK_BYTE_INTERVAL;
 
-    let filesSinceRecheck = 0;
-    let bytesSinceRecheck = 0;
-
-    for (const entry of remoteManifest.integrity.entries) {
-      const src = await assertSafeFileUnderRoot(localFilesRoot, entry.path, {
-        fail: failIntegrity,
-      });
-      const dest = join(stagingFilesRoot, entry.path);
-      const destParent = dirname(dest);
-      if (destParent !== stagingFilesRoot) {
-        await ensureSafeDirectory(mountRoot, destParent);
-      }
-
+    // Pre-publish copy with at most one retry for fixed retryable I/O codes.
+    while (true) {
       try {
-        await streamCopyFile(src, dest, {
-          now,
-          createReadStream: deps.createReadStream,
-          streamHighWaterMark: deps.streamHighWaterMark,
-          onBytes: async (byteCount) => {
-            bytesSinceRecheck += byteCount;
-            while (bytesSinceRecheck >= byteRecheckInterval) {
-              bytesSinceRecheck -= byteRecheckInterval;
-              await recheckMount(inspectMount, mountPath);
-            }
-          },
-        });
-      } catch (error) {
-        if (error instanceof SmbReplicationError) throw error;
-        failCopy();
-      }
+        const stagingFilesRoot = join(stagingDir, 'files');
+        let filesSinceRecheck = 0;
+        let bytesSinceRecheck = 0;
 
-      const hashed = await hashSafeFileUnderRoot(stagingFilesRoot, entry.path, {
-        boundaryRoot: mountRoot,
-        fail: failCopy,
-      });
-      if (hashed.size !== entry.size || hashed.sha256 !== entry.sha256) failCopy();
+        for (const entry of remoteManifest.integrity.entries) {
+          const src = await assertSafeFileUnderRoot(localFilesRoot, entry.path, {
+            fail: failIntegrity,
+          });
+          const dest = join(stagingFilesRoot, entry.path);
+          const destParent = dirname(dest);
+          if (destParent !== stagingFilesRoot) {
+            await ensureSafeDirectory(mountRoot, destParent);
+          }
 
-      filesSinceRecheck += 1;
-      if (filesSinceRecheck >= MOUNT_RECHECK_FILE_INTERVAL) {
+          await streamCopyFile(src, dest, {
+            now,
+            createReadStream: deps.createReadStream,
+            streamHighWaterMark: deps.streamHighWaterMark,
+            openFile: deps.openFile,
+            onBytes: async (byteCount) => {
+              bytesSinceRecheck += byteCount;
+              while (bytesSinceRecheck >= byteRecheckInterval) {
+                bytesSinceRecheck -= byteRecheckInterval;
+                await recheckMount(inspectMount, mountPath);
+              }
+            },
+          });
+
+          const hashed = await hashSafeFileUnderRoot(stagingFilesRoot, entry.path, {
+            boundaryRoot: mountRoot,
+            fail: failCopy,
+          });
+          if (hashed.size !== entry.size || hashed.sha256 !== entry.sha256) failCopy();
+
+          filesSinceRecheck += 1;
+          if (filesSinceRecheck >= MOUNT_RECHECK_FILE_INTERVAL) {
+            await recheckMount(inspectMount, mountPath);
+            filesSinceRecheck = 0;
+          }
+        }
+
+        await verifyTreeFiles(stagingFilesRoot, remoteManifest, mountRoot);
+        await writeFile(
+          join(stagingDir, 'manifest.json'),
+          serializeCanonicalRemoteManifest(remoteManifest),
+          { flag: 'wx' },
+        );
         await recheckMount(inspectMount, mountPath);
-        filesSinceRecheck = 0;
+        break;
+      } catch (error) {
+        if (canRetryBeforePublish(error, retryCount, finalClaimed)) {
+          retryCount += 1;
+          await resetStagingForRetry(stagingDir, mountRoot);
+          continue;
+        }
+        mapPrePublishFailure(error);
       }
     }
-
-    await verifyTreeFiles(stagingFilesRoot, remoteManifest, mountRoot);
-    await writeFile(
-      join(stagingDir, 'manifest.json'),
-      serializeCanonicalRemoteManifest(remoteManifest),
-      { flag: 'wx' },
-    );
-
-    await recheckMount(inspectMount, mountPath);
 
     if (typeof deps.beforePublish === 'function') {
       await deps.beforePublish();
@@ -985,7 +1118,8 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
         if (verified) return verified;
         throw new SmbReplicationError(SMB_REPLICATION_CODES.REMOTE_CONFLICT, 1);
       }
-      failCopy();
+      // 发布阶段不确定/失败：保留 staging 与可能的 final，进入 recovery。
+      throw new SmbReplicationError(SMB_REPLICATION_CODES.RECOVERY_REQUIRED, 3);
     }
 
     try {
@@ -1014,7 +1148,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
     await atomicWriteCompleted(finalDir, completed, { randomUUID: uuid });
     await verifyFinalSnapshot(finalDir, remoteManifest, manifestDigest, mountRoot);
 
-    return sanitizedResult({
+    const result = sanitizedResult({
       state: 'replicated',
       provider: target.provider,
       targetName: target.name,
@@ -1026,17 +1160,31 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
       verifiedFileCount: remoteManifest.files.length,
       attemptId,
     });
+    if (retryCount > 0) result.retryCount = retryCount;
+    return result;
   } catch (error) {
     // 已 exclusive claim 的 final 即使不完整也不得删除，留给显式恢复。
+    // 普通 pre-publish failure：仅清理 owner 匹配的 staging（失败则保留残留）。
     if (!finalClaimed && stagingDir) {
       try {
-        await rm(stagingDir, { recursive: true, force: true });
+        await cleanupOwnedStaging(stagingDir, lockIdentity, deps);
       } catch {
-        // 保留残留给显式恢复（Task 5+）。
+        // 清理失败不得覆盖原始 sanitized code；保留 residual。
       }
     }
     throw error;
   } finally {
-    await releaseOwnedLock(lockPath, ownerToken);
+    if (heartbeatTimer != null) {
+      try {
+        clearIntervalFn(heartbeatTimer);
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      await releaseOwnedLock(lockPath, lockIdentity, deps);
+    } catch {
+      // 清理失败不得覆盖主结果；锁残留留给 Task 6 显式恢复。
+    }
   }
 }

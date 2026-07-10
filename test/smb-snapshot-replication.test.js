@@ -1,10 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
-  mkdir, mkdtemp, rm, writeFile, symlink, readdir, readFile, lstat,
+  mkdir, mkdtemp, rm, writeFile, symlink, readdir, readFile, lstat, open as fsOpen,
 } from 'node:fs/promises';
 import { createReadStream as fsCreateReadStream } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
@@ -916,5 +916,338 @@ describe('SMB snapshot replication preflight and publication', () => {
     assert.ok(totalInspects >= 3, 'expected preflight, mid-stream, and pre-publish mount checks');
     assert.strictEqual(result.totalBytes, payload.length);
     assert.strictEqual(result.fileCount, 1);
+  });
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function pathExists(filePath) {
+  try {
+    await lstat(filePath);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function ioError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+describe('SMB snapshot replication lock, retry, cleanup, and heartbeat', () => {
+  it('returns replication-lock-held when the same snapshot lock is already held', async (t) => {
+    const { options } = await createExecutionFixture(t);
+    const deps = ampleMountDeps();
+    const lockReady = deferred();
+    const releaseCopy = deferred();
+
+    const first = replicateSnapshotToMountedSmb(options, {
+      ...deps,
+      beforeCopy: async () => {
+        lockReady.resolve();
+        await releaseCopy.promise;
+      },
+    });
+    await lockReady.promise;
+
+    await assert.rejects(
+      replicateSnapshotToMountedSmb(options, deps),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.LOCK_HELD,
+    );
+
+    releaseCopy.resolve();
+    const result = await first;
+    assert.strictEqual(result.state, 'replicated');
+  });
+
+  it('does not share locks across different snapshots', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-smb-multilock-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const sourceA = join(root, 'source-a');
+    const sourceB = join(root, 'source-b');
+    const mountPath = join(root, 'mounted-share');
+    await mkdir(sourceA, { recursive: true });
+    await mkdir(sourceB, { recursive: true });
+    await mkdir(mountPath, { recursive: true });
+    await writeFile(join(sourceA, 'a.txt'), 'alpha');
+    await writeFile(join(sourceB, 'b.txt'), 'bravo');
+    const snapA = await createBackup(root, { deviceId: 'device-a', sourcePath: sourceA });
+    const snapB = await createBackup(root, { deviceId: 'device-a', sourcePath: sourceB });
+
+    const base = {
+      config: {
+        nasTargets: [{
+          name: 'primary-nas',
+          provider: 'synology',
+          enabled: true,
+          mountedShare: { enabled: true, mountPath, relativeRoot: 'linke-test' },
+        }],
+      },
+      dataDir: root,
+      targetName: 'primary-nas',
+      deviceId: 'device-a',
+      execute: true,
+      executionGate: 'enabled',
+    };
+    const optionsA = { ...base, snapshotId: snapA.snapshotId };
+    const optionsB = { ...base, snapshotId: snapB.snapshotId };
+
+    const lockReady = deferred();
+    const releaseCopy = deferred();
+    const first = replicateSnapshotToMountedSmb(optionsA, {
+      ...ampleMountDeps(),
+      beforeCopy: async () => {
+        lockReady.resolve();
+        await releaseCopy.promise;
+      },
+    });
+    await lockReady.promise;
+
+    const second = await replicateSnapshotToMountedSmb(optionsB, ampleMountDeps());
+    assert.strictEqual(second.state, 'replicated');
+    assert.strictEqual(second.snapshotId, snapB.snapshotId);
+
+    releaseCopy.resolve();
+    const firstResult = await first;
+    assert.strictEqual(firstResult.state, 'replicated');
+    assert.strictEqual(firstResult.snapshotId, snapA.snapshotId);
+  });
+
+  it('retries retryable pre-publish I/O errors at most once', async (t) => {
+    const { options } = await createExecutionFixture(t);
+    let destOpenAttempts = 0;
+    const result = await replicateSnapshotToMountedSmb(options, {
+      ...ampleMountDeps(),
+      openFile: async (filePath, flags, mode) => {
+        const pathText = String(filePath);
+        if (pathText.endsWith('/a.txt') || pathText.endsWith(`${sep}a.txt`)) {
+          destOpenAttempts += 1;
+          if (destOpenAttempts === 1) throw ioError('EIO');
+        }
+        return fsOpen(filePath, flags, mode);
+      },
+    });
+    assert.strictEqual(result.state, 'replicated');
+    assert.strictEqual(destOpenAttempts, 2);
+    assert.ok((result.retryCount ?? 1) <= 1);
+  });
+
+  it('does not retry EACCES ENOSPC integrity or path errors', async (t) => {
+    const cases = ['EACCES', 'ENOSPC'];
+    for (const code of cases) {
+      const { options } = await createExecutionFixture(t);
+      let destOpenAttempts = 0;
+      await assert.rejects(
+        replicateSnapshotToMountedSmb(options, {
+          ...ampleMountDeps(),
+          openFile: async (filePath, flags, mode) => {
+            const pathText = String(filePath);
+            if (pathText.endsWith('/a.txt') || pathText.endsWith(`${sep}a.txt`)) {
+              destOpenAttempts += 1;
+              throw ioError(code);
+            }
+            return fsOpen(filePath, flags, mode);
+          },
+        }),
+        (error) => error instanceof SmbReplicationError
+          && error.code === SMB_REPLICATION_CODES.COPY_FAILED,
+      );
+      assert.strictEqual(destOpenAttempts, 1, `${code} must not be retried`);
+    }
+  });
+
+  it('cleanup deletes only owner-token matching lock and staging', async (t) => {
+    const {
+      options, stagingParent, mountPath, snapshotId,
+    } = await createExecutionFixture(t);
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const ownerToken = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    let uuidN = 0;
+    const foreignAttemptId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const foreignDir = join(stagingParent, foreignAttemptId);
+    await mkdir(join(foreignDir, 'files'), { recursive: true });
+    await writeFile(
+      join(foreignDir, 'attempt.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        attemptId: foreignAttemptId,
+        ownerToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        deviceId: 'device-a',
+        snapshotId,
+        manifestDigest: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        createdAt: '2026-07-10T00:00:00.000Z',
+      }),
+      'utf8',
+    );
+    await writeFile(join(foreignDir, 'files', 'keep.txt'), 'foreign', 'utf8');
+
+    await assert.rejects(
+      replicateSnapshotToMountedSmb(options, {
+        ...ampleMountDeps(),
+        randomUUID: () => {
+          uuidN += 1;
+          return uuidN === 1 ? attemptId : ownerToken;
+        },
+        openFile: async (filePath, flags, mode) => {
+          const pathText = String(filePath);
+          if (pathText.endsWith('/a.txt') || pathText.endsWith(`${sep}a.txt`)) {
+            throw ioError('EACCES');
+          }
+          return fsOpen(filePath, flags, mode);
+        },
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.COPY_FAILED,
+    );
+
+    assert.strictEqual(await pathExists(join(stagingParent, attemptId)), false);
+    assert.strictEqual(await pathExists(foreignDir), true);
+    assert.strictEqual(await readFile(join(foreignDir, 'files', 'keep.txt'), 'utf8'), 'foreign');
+    assert.strictEqual(
+      await pathExists(join(mountPath, 'linke-test', '.linke-control', 'locks', 'device-a', `${snapshotId}.json`)),
+      false,
+    );
+  });
+
+  it('cleanup failure preserves residual lock/staging and original sanitized error', async (t) => {
+    const {
+      options, stagingParent, mountPath, snapshotId,
+    } = await createExecutionFixture(t);
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const ownerToken = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    let uuidN = 0;
+    const lockPath = join(
+      mountPath,
+      'linke-test',
+      '.linke-control',
+      'locks',
+      'device-a',
+      `${snapshotId}.json`,
+    );
+
+    await assert.rejects(
+      replicateSnapshotToMountedSmb(options, {
+        ...ampleMountDeps(),
+        randomUUID: () => {
+          uuidN += 1;
+          return uuidN === 1 ? attemptId : ownerToken;
+        },
+        openFile: async (filePath, flags, mode) => {
+          const pathText = String(filePath);
+          if (pathText.endsWith('/a.txt') || pathText.endsWith(`${sep}a.txt`)) {
+            throw ioError('EIO');
+          }
+          return fsOpen(filePath, flags, mode);
+        },
+        // First EIO is retryable; second EIO after retry still fails; cleanup rm throws.
+        rm: async () => {
+          throw ioError('EHOSTDOWN');
+        },
+      }),
+      (error) => error instanceof SmbReplicationError
+        && error.code === SMB_REPLICATION_CODES.COPY_FAILED,
+    );
+
+    // With retry, second failure still COPY_FAILED; cleanup failure must not replace it.
+    // Residual may remain because rm is broken.
+    assert.strictEqual(await pathExists(join(stagingParent, attemptId)), true);
+    assert.strictEqual(await pathExists(lockPath), true);
+    await assert.rejects(
+      () => readFile(join(mountPath, 'linke-test', 'devices', 'device-a', 'snapshots', snapshotId, 'COMPLETED.json'), 'utf8'),
+      (error) => error && error.code === 'ENOENT',
+    );
+  });
+
+  it('heartbeat updates only when ownerToken and attemptId still match', async (t) => {
+    const { options, mountPath, snapshotId } = await createExecutionFixture(t);
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const ownerToken = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    let uuidN = 0;
+    let currentMs = Date.parse('2026-07-10T00:00:00.000Z');
+    const lockPath = join(
+      mountPath,
+      'linke-test',
+      '.linke-control',
+      'locks',
+      'device-a',
+      `${snapshotId}.json`,
+    );
+    const lockReady = deferred();
+    const releaseCopy = deferred();
+    const heartbeatFns = [];
+
+    const run = replicateSnapshotToMountedSmb(options, {
+      ...ampleMountDeps(),
+      randomUUID: () => {
+        uuidN += 1;
+        return uuidN === 1 ? attemptId : ownerToken;
+      },
+      now: () => new Date(currentMs),
+      heartbeatIntervalMs: 30_000,
+      setInterval: (fn) => {
+        heartbeatFns.push(fn);
+        return heartbeatFns.length;
+      },
+      clearInterval: () => {},
+      beforeCopy: async () => {
+        lockReady.resolve();
+        await releaseCopy.promise;
+      },
+    });
+
+    await lockReady.promise;
+    assert.ok(heartbeatFns.length >= 1, 'expected heartbeat scheduler registration');
+
+    const before = JSON.parse(await readFile(lockPath, 'utf8'));
+    assert.deepStrictEqual(Object.keys(before).sort(), [
+      'attemptId',
+      'createdAt',
+      'deviceId',
+      'heartbeatAt',
+      'manifestDigest',
+      'ownerToken',
+      'schemaVersion',
+      'snapshotId',
+    ].sort());
+    assert.strictEqual(before.attemptId, attemptId);
+    assert.strictEqual(before.ownerToken, ownerToken);
+    assert.ok(!JSON.stringify(before).includes(mountPath));
+
+    currentMs += 30_000;
+    await heartbeatFns[0]();
+    const afterMatch = JSON.parse(await readFile(lockPath, 'utf8'));
+    assert.strictEqual(afterMatch.heartbeatAt, new Date(currentMs).toISOString());
+    assert.strictEqual(afterMatch.ownerToken, ownerToken);
+    assert.strictEqual(afterMatch.attemptId, attemptId);
+
+    // Identity mismatch must refuse heartbeat rewrite.
+    await writeFile(lockPath, JSON.stringify({
+      ...afterMatch,
+      ownerToken: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    }), 'utf8');
+    const mismatchedAt = afterMatch.heartbeatAt;
+    currentMs += 30_000;
+    await heartbeatFns[0]();
+    const afterMismatch = JSON.parse(await readFile(lockPath, 'utf8'));
+    assert.strictEqual(afterMismatch.ownerToken, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+    assert.strictEqual(afterMismatch.heartbeatAt, mismatchedAt);
+
+    // Restore identity so successful completion can release owned lock path safely.
+    await writeFile(lockPath, JSON.stringify(afterMatch), 'utf8');
+    releaseCopy.resolve();
+    const result = await run;
+    assert.strictEqual(result.state, 'replicated');
   });
 });
