@@ -1234,6 +1234,17 @@ function buildSupervisorLifecycleGuardedRunnerRegistryLines(runnerWiringContract
   ];
 }
 
+function buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(runnerWiringContract) {
+  const policyEntries = Array.isArray(runnerWiringContract?.executionPolicyReadiness?.policyEntries)
+    ? runnerWiringContract.executionPolicyReadiness.policyEntries
+    : [];
+  if (policyEntries.length < 1) return [];
+  return [
+    'executionPolicy:disabled-execution-policy-stub:state:blocked:realImplementationReady:false:' +
+      'wouldAuthorizeExecution:false:blocker:execution-policy-real-implementation-missing',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(runnerWiringContract) {
   const adapterEntries = Array.isArray(runnerWiringContract?.hostMutationAdapterReadiness?.adapterEntries)
     ? runnerWiringContract.hostMutationAdapterReadiness.adapterEntries
@@ -1459,6 +1470,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       validationLines: [
         'realRunnerWiringReady:false',
         'runnerWiringContractReady:false',
+        'executionPolicyReady:false',
         'runnerRegistryReady:false',
         'executionEligible:false',
         'executorReady:false',
@@ -1490,6 +1502,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'manifestReady:false',
         'runnerBindingsReady:false',
         'executeRequested:false',
+        'executionPolicyReady:false',
         'runnerRegistryReady:false',
         'realRunnerWiringReady:false',
         'runnerWiringContractReady:false',
@@ -1519,6 +1532,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(payload.runnerWiringContract);
+  const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(payload.runnerWiringContract);
   const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(payload.runnerWiringContract);
   const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
@@ -1537,6 +1551,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
     requiredFields: [
       ...actionLines,
       ...wiringContractLines,
+      ...executionPolicyLines,
       ...runnerRegistryLines,
       ...hostMutationAdapterLines,
       ...rollbackAnchorLines,
@@ -1550,6 +1565,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `manifestReady:${gates.manifestReady === true ? 'true' : 'false'}`,
       `runnerBindingsReady:${gates.runnerBindingsReady === true ? 'true' : 'false'}`,
       `executeRequested:${gates.executeRequested === true ? 'true' : 'false'}`,
+      'executionPolicyReady:false',
       'runnerRegistryReady:false',
       'realRunnerWiringReady:false',
       'runnerWiringContractReady:false',

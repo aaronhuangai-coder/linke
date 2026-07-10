@@ -166,6 +166,7 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.executionEligible, false);
   assert.strictEqual(body.executorReady, false);
   assert.strictEqual(body.wouldExecute, false);
+  assert.strictEqual(body.gates.executionPolicyReady, false);
   assert.strictEqual(body.gates.realRunnerWiringReady, false);
   assert.strictEqual(body.gates.runnerWiringContractReady, false);
   assert.strictEqual(body.gates.runnerRegistryReady, false);
@@ -180,8 +181,15 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.runnerWiringContract.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.realRunnerWiringReady, false);
   assert.strictEqual(body.runnerWiringContract.readyCount, 0);
-  assert.strictEqual(body.runnerWiringContract.blockedCount, 5);
+  assert.strictEqual(body.runnerWiringContract.blockedCount, 6);
   assert.deepStrictEqual(body.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.state, 'blocked');
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldAuthorizeExecution, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowLifecycleApply, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowRemoteCommand, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldRun, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldWrite, false);
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.hostMutationAdapterReady, false);
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldMutateHost, false);
@@ -223,7 +231,7 @@ function assertBlockedExecutionGate(body) {
   ]);
   assert.deepStrictEqual(
     body.runnerWiringContract.requiredContracts.map((entry) => entry.id),
-    ['runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
+    ['execution-policy', 'runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
   );
   assert.ok(body.runnerWiringContract.requiredContracts.every((entry) =>
     entry.status === 'blocked' && entry.requiredForExecution === true));

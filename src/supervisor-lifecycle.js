@@ -651,6 +651,7 @@ const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
 const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
 const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
+const EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING = 'execution-policy-real-implementation-missing';
 const RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING = 'runner-registry-real-implementation-missing';
 const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter-real-implementation-missing';
 const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
@@ -660,6 +661,29 @@ const ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING = 'attempt-audit-real-implementa
 const DISABLED_ATTEMPT_AUDIT_KIND = 'disabled-attempt-audit-stub';
 const OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING = 'operator-recovery-real-implementation-missing';
 const DISABLED_OPERATOR_RECOVERY_KIND = 'disabled-operator-recovery-stub';
+const DISABLED_EXECUTION_POLICY_KIND = 'disabled-execution-policy-stub';
+const GUARDED_RUNNER_DISABLED_EXECUTION_POLICY_ENTRY = Object.freeze({
+  policyKind: DISABLED_EXECUTION_POLICY_KIND,
+  state: 'blocked',
+  realImplementationReady: false,
+  approvalPolicyDefined: true,
+  approvalPolicyEnforced: false,
+  allowLifecycleApply: false,
+  allowHostMutation: false,
+  allowLaunchctl: false,
+  allowFilesystemWrite: false,
+  allowMetadataWrite: false,
+  allowAuditWrite: false,
+  allowRollbackAnchorWrite: false,
+  allowNasConnection: false,
+  allowBackupRestore: false,
+  allowRemoteCommand: false,
+  wouldAuthorizeExecution: false,
+  wouldRun: false,
+  wouldWrite: false,
+  sensitiveValuesReturned: false,
+  blockerCode: EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING,
+});
 const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
   auditKind: DISABLED_ATTEMPT_AUDIT_KIND,
   state: 'blocked',
@@ -733,6 +757,13 @@ const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
   blockerCode: RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING,
 });
 const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
+  Object.freeze({
+    id: 'execution-policy',
+    status: 'blocked',
+    requiredForExecution: true,
+    evidence: 'Only disabled execution policy readiness exists; real execution policy enforcement is missing.',
+    blockerCode: 'execution-policy-missing',
+  }),
   Object.freeze({
     id: 'runner-registry',
     status: 'blocked',
@@ -1468,6 +1499,25 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guar
   };
 }
 
+export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-execution-policy-readiness',
+    state: 'blocked',
+    executionPolicyDefined: true,
+    executionPolicyReady: false,
+    realExecutionPolicyReady: false,
+    readyCount: 0,
+    blockedCount: 1,
+    policyEntries: [{ ...GUARDED_RUNNER_DISABLED_EXECUTION_POLICY_ENTRY }],
+    blockers: [
+      EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING,
+      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
+    ],
+    nextBlockers: [EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerRegistryReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-registry-readiness',
@@ -1572,6 +1622,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     readyCount: 0,
     blockedCount: requiredContracts.length,
     requiredContracts,
+    executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
     hostMutationAdapterReadiness: buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
     rollbackAnchorReadiness: buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
@@ -1725,6 +1776,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerBindingsReady,
       executionPreviewVerified,
       executeRequested,
+      executionPolicyReady: false,
       runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
