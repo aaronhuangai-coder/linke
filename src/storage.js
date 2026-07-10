@@ -1,8 +1,8 @@
-import { constants } from 'node:fs';
+import { constants, createReadStream } from 'node:fs';
 import { mkdir, readFile, writeFile, rename, readdir, stat, copyFile, lstat, realpath, open } from 'node:fs/promises';
 import { join, resolve, normalize, basename, relative, dirname, isAbsolute } from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 
 // ── Slug & Safety ──────────────────────────────────────────────────
@@ -156,6 +156,38 @@ export function shouldExclude(name, excludePatterns) {
   return false;
 }
 
+function compareUtf8Bytes(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+async function hashFileSha256(filePath) {
+  const entry = await lstat(filePath);
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new Error('unsupported backup file type');
+  }
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return { size: entry.size, sha256: hash.digest('hex') };
+}
+
+async function buildSnapshotIntegrity(filesDir, allFiles) {
+  const entries = [];
+  for (const filePath of allFiles) {
+    const path = relative(filesDir, filePath);
+    const { size, sha256 } = await hashFileSha256(filePath);
+    entries.push({ path, size, sha256 });
+  }
+  entries.sort((a, b) => compareUtf8Bytes(a.path, b.path));
+  return {
+    files: entries.map((entry) => entry.path),
+    integrity: {
+      algorithm: 'sha256',
+      totalBytes: entries.reduce((total, entry) => total + entry.size, 0),
+      entries,
+    },
+  };
+}
+
 async function copyDirRecursive(src, dest, excludePatterns = [], options = {}) {
   if (options.restoreRoot) {
     await ensureDirInsideRestoreRoot(dest, options.restoreRoot);
@@ -169,8 +201,10 @@ async function copyDirRecursive(src, dest, excludePatterns = [], options = {}) {
     const destPath = join(dest, entry.name);
     if (entry.isDirectory()) {
       await copyDirRecursive(srcPath, destPath, excludePatterns, options);
-    } else {
+    } else if (entry.isFile()) {
       await copyFileSafe(srcPath, destPath, options);
+    } else {
+      throw new Error('unsupported backup file type');
     }
   }
 }
@@ -254,9 +288,12 @@ export async function createBackup(dataDir, { deviceId, hostname, ipAddress, sou
   // Validate source exists
   let sourceStat;
   try {
-    sourceStat = await stat(sourcePath);
+    sourceStat = await lstat(sourcePath);
   } catch {
     throw new Error(`Source path does not exist: ${sourcePath}`);
+  }
+  if (!sourceStat.isDirectory() && !sourceStat.isFile()) {
+    throw new Error('unsupported backup file type');
   }
 
   const snapshotId = randomUUID();
@@ -283,14 +320,17 @@ export async function createBackup(dataDir, { deviceId, hostname, ipAddress, sou
 
   // Build manifest
   const allFiles = await collectFilesRecursive(filesDir);
+  const snapshotIntegrity = await buildSnapshotIntegrity(filesDir, allFiles);
   const manifest = {
+    schemaVersion: 2,
     snapshotId,
     deviceId: slug,
     createdAt: new Date().toISOString(),
     hostname: hostname || 'unknown',
     ipAddress: ipAddress || 'unknown',
     sourcePath,
-    files: allFiles.map((f) => relative(filesDir, f)),
+    files: snapshotIntegrity.files,
+    integrity: snapshotIntegrity.integrity,
   };
   await atomicWriteJSON(join(snapshotDir, 'manifest.json'), manifest);
 

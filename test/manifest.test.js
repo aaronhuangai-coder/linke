@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -92,6 +92,73 @@ describe('Manifest — nested directory relative paths', () => {
       manifest.files.includes('a/b/c.txt'),
       `manifest.files should include 'a/b/c.txt', got: ${JSON.stringify(manifest.files)}`,
     );
+  });
+});
+
+describe('Manifest v2 — integrity and symlink rejection', () => {
+  it('creates manifest v2 with stable SHA-256 integrity entries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-manifest-v2-'));
+    try {
+      const source = join(root, 'source');
+      await mkdir(join(source, 'nested'), { recursive: true });
+      await writeFile(join(source, 'z.txt'), 'z');
+      await writeFile(join(source, 'nested', 'a.txt'), 'alpha');
+
+      const snapshot = await createBackup(root, { deviceId: 'manifest-v2', sourcePath: source });
+      const { deviceDir } = safeDevicePath(root, 'manifest-v2');
+      const manifest = await readJSON(join(deviceDir, 'snapshots', snapshot.snapshotId, 'manifest.json'));
+
+      assert.strictEqual(manifest.schemaVersion, 2);
+      assert.deepStrictEqual(manifest.files, ['nested/a.txt', 'z.txt']);
+      assert.strictEqual(manifest.integrity.algorithm, 'sha256');
+      assert.strictEqual(manifest.integrity.totalBytes, 6);
+      assert.deepStrictEqual(manifest.integrity.entries, [
+        { path: 'nested/a.txt', size: 5, sha256: sha256('alpha') },
+        { path: 'z.txt', size: 1, sha256: sha256('z') },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symbolic link instead of creating trusted integrity evidence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-manifest-symlink-'));
+    try {
+      const source = join(root, 'source');
+      await mkdir(source, { recursive: true });
+      await writeFile(join(root, 'outside.txt'), 'outside');
+      await symlink(join(root, 'outside.txt'), join(source, 'linked.txt'));
+      await assert.rejects(
+        createBackup(root, { deviceId: 'manifest-symlink', sourcePath: source }),
+        /unsupported backup file type/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a top-level symbolic link before creating snapshot state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-manifest-source-symlink-'));
+    try {
+      const deviceId = 'manifest-source-symlink';
+      const sourceFile = join(root, 'source.txt');
+      const sourceLink = join(root, 'source-link.txt');
+      await writeFile(sourceFile, 'outside');
+      await symlink(sourceFile, sourceLink);
+
+      await assert.rejects(
+        createBackup(root, { deviceId, sourcePath: sourceLink }),
+        /unsupported backup file type/,
+      );
+
+      const { deviceDir } = safeDevicePath(root, deviceId);
+      await assert.rejects(
+        readdir(join(deviceDir, 'snapshots')),
+        (error) => error.code === 'ENOENT',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
