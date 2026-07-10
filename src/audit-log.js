@@ -17,6 +17,21 @@ const STRING_FIELDS = [
   'snapshotId',
   'operation',
   'message',
+  'targetName',
+  'attemptId',
+  'errorCode',
+];
+
+const NON_NEGATIVE_INTEGER_FIELDS = [
+  'fileCount',
+  'totalBytes',
+  'verifiedFileCount',
+  'retryCount',
+];
+
+const BOOLEAN_FIELDS = [
+  'wouldWrite',
+  'executionRequired',
 ];
 
 function toIsoString(value, fallback = new Date()) {
@@ -126,7 +141,18 @@ export function sanitizeAuditEvent(event = {}, now = new Date()) {
   }
 
   if (Number.isInteger(event.statusCode)) sanitized.statusCode = event.statusCode;
-  if (Number.isInteger(event.fileCount) && event.fileCount >= 0) sanitized.fileCount = event.fileCount;
+
+  for (const field of NON_NEGATIVE_INTEGER_FIELDS) {
+    if (Number.isInteger(event[field]) && event[field] >= 0) {
+      sanitized[field] = event[field];
+    }
+  }
+
+  for (const field of BOOLEAN_FIELDS) {
+    if (typeof event[field] === 'boolean') {
+      sanitized[field] = event[field];
+    }
+  }
 
   return sanitized;
 }

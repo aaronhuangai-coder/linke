@@ -14,6 +14,7 @@
  *   run-once            — run backup once using config file
  *   launchd-dry-run     — generate launchd plist without installing
  *   nas-dry-run         — show NAS dry-run plan (no network, no write)
+ *   nas-snapshot-replicate — plan/execute/recover mounted SMB snapshot replication
  *   retention-dry-run   — show retention dry-run plan (no delete, read-only)
  *   health              — check release health status
  *   auth-status         — show sanitized auth status
@@ -42,13 +43,18 @@
  *   --snapshot <id>      Snapshot ID for restore
  *   --hostname <name>    Hostname for heartbeat
  *   --ip <address>       IP address for heartbeat
- *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+ *   --config <path>      Config file path (run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, nas-snapshot-replicate, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --operation <operation> Supervisor lifecycle operation (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --output <path>      Output path (launchd-dry-run)
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for supervisor lifecycle approval persistence, apply readiness, executor readiness, and guarded runner execution gate
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, and guarded runner execution gate
+ *   --target <name>      NAS target name (nas-snapshot-replicate)
+ *   --device-id <id>     Device ID for local snapshot lookup (nas-snapshot-replicate)
+ *   --snapshot-id <id>   Snapshot ID for local snapshot lookup (nas-snapshot-replicate)
+ *   --execute            Enable real mounted SMB replication write path (requires LINKE_NAS_SMB_EXECUTION=enabled)
+ *   --recover            Explicit stale attempt recovery (requires --execute)
  *   --execute-requested Record explicit execution intent for the guarded runner execution gate without executing
  *   --keep-last <n>      Number of snapshots to keep (retention-dry-run, default: 3)
  *   --limit <n>          Limit read-only audit-log events
@@ -80,6 +86,112 @@ import {
   isPersistablePreview,
   readSupervisorLifecycleApprovalRecords,
 } from './approval-store.js';
+import { appendAuditEvent } from './audit-log.js';
+import {
+  SmbReplicationError,
+  buildSmbSnapshotReplicationPlan,
+  recoverMountedSmbSnapshot,
+  replicateSnapshotToMountedSmb,
+} from './smb-snapshot-replication.js';
+
+const NAS_REPLICATION_ARG_KEYS = new Set([
+  '_',
+  'config',
+  'data-dir',
+  'target',
+  'device-id',
+  'snapshot-id',
+  'execute',
+  'recover',
+]);
+
+const NAS_REPLICATION_SUCCESS_STATES = new Set([
+  'planned',
+  'replicated',
+  'already_verified',
+  'recovered',
+]);
+
+/**
+ * Reject any CLI key outside the mounted SMB replication allowlist.
+ * Fail-closed with a fixed code; never echo parameter names or values.
+ */
+function assertNasReplicationArgs(args) {
+  if (Object.keys(args).some((key) => !NAS_REPLICATION_ARG_KEYS.has(key))) {
+    throw new SmbReplicationError('smb-arguments-invalid', 1);
+  }
+}
+
+/**
+ * Require a non-empty string value for a CLI flag.
+ * Flag-without-value (`true`) is treated as invalid.
+ */
+function requireNasReplicationValue(args, key) {
+  const value = args[key];
+  if (value === undefined || value === true || typeof value !== 'string' || !value.trim()) {
+    throw new SmbReplicationError('smb-arguments-invalid', 1);
+  }
+}
+
+/**
+ * Boolean CLI flags must be present as `true` or absent; values are rejected.
+ */
+function assertNasReplicationBooleanFlag(args, key) {
+  if (args[key] !== undefined && args[key] !== true) {
+    throw new SmbReplicationError('smb-arguments-invalid', 1);
+  }
+}
+
+/**
+ * Map a successful replication result state to a local audit event type.
+ */
+function nasReplicationAuditTypeForState(state) {
+  switch (state) {
+    case 'planned':
+      return 'nas.snapshot.replication.planned';
+    case 'replicated':
+      return 'nas.snapshot.replication.completed';
+    case 'already_verified':
+      return 'nas.snapshot.replication.already_verified';
+    case 'recovered':
+      return 'nas.snapshot.replication.recovered';
+    default:
+      return 'nas.snapshot.replication.failed';
+  }
+}
+
+/**
+ * Best-effort sanitized audit write for NAS snapshot replication.
+ * Never throws into the CLI path; audit failure must not change exit semantics.
+ */
+async function appendNasReplicationAudit(dataDir, event) {
+  if (typeof dataDir !== 'string' || !dataDir.trim()) return;
+  try {
+    await appendAuditEvent(dataDir, event);
+  } catch {
+    // ignore audit I/O failures
+  }
+}
+
+/**
+ * Build allowlisted audit payload fields from a sanitized replication result.
+ */
+function nasReplicationAuditFieldsFromResult(result) {
+  const fields = {
+    outcome: 'success',
+    targetName: result.targetName,
+    deviceId: result.deviceId,
+    snapshotId: result.snapshotId,
+    fileCount: result.fileCount,
+    totalBytes: result.totalBytes,
+  };
+  if (typeof result.attemptId === 'string') fields.attemptId = result.attemptId;
+  if (Number.isInteger(result.verifiedFileCount)) fields.verifiedFileCount = result.verifiedFileCount;
+  if (Number.isInteger(result.retryCount)) fields.retryCount = result.retryCount;
+  if (typeof result.wouldWrite === 'boolean') fields.wouldWrite = result.wouldWrite;
+  if (typeof result.executionRequired === 'boolean') fields.executionRequired = result.executionRequired;
+  return fields;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -705,6 +817,7 @@ Commands:
   run-once            Run backup once using config file
   launchd-dry-run     Generate launchd plist (dry-run, no install)
   nas-dry-run         Show NAS dry-run plan (no network, no write)
+  nas-snapshot-replicate Plan/execute/recover mounted SMB snapshot replication
   retention-dry-run   Show retention dry-run plan (no delete, read-only)
   health              Check release health status
   auth-status         Show sanitized auth status
@@ -733,7 +846,7 @@ Options:
   --snapshot <id>      Snapshot ID (for restore)
   --hostname <name>    Hostname
   --ip <address>       IP address
-  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
+  --config <path>      Config file path (for run-once, launchd-dry-run, supervisor-install-dry-run, nas-dry-run, nas-snapshot-replicate, supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --operation <operation> Supervisor lifecycle operation (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --output <path>      Output path (for launchd-dry-run, project dir only)
   --keep-last <n>      Snapshots to keep (for retention-dry-run, default: 3)
@@ -741,12 +854,16 @@ Options:
   --expected-version <version> Expected release version (for release-readiness)
   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
   --fail-on-blocked   Exit 2 when supported readiness/status output is blocked
+  --execute            Enable mounted SMB replication writes (nas-snapshot-replicate; requires LINKE_NAS_SMB_EXECUTION=enabled)
+  --recover            Explicit stale recovery (nas-snapshot-replicate; requires --execute)
+  --device-id <id>     Device ID (nas-snapshot-replicate)
+  --snapshot-id <id>   Snapshot ID (nas-snapshot-replicate)
   --execute-requested Record explicit execution intent for the guarded runner execution gate without executing
   --token <token>      Bearer token for authenticated Linke Server requests
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate)
 `);
 }
 
@@ -897,6 +1014,91 @@ export async function main() {
         console.log(JSON.stringify(output, null, 2));
         if (args['fail-on-blocked'] === true && readinessSummary.state === 'blocked') {
           process.exitCode = 2;
+        }
+        break;
+      }
+
+      case 'nas-snapshot-replicate': {
+        // Keep all failures inside this case so generic catch never echoes raw err.message.
+        let auditDataDir;
+        try {
+          assertNasReplicationArgs(args);
+          requireNasReplicationValue(args, 'config');
+          requireNasReplicationValue(args, 'data-dir');
+          requireNasReplicationValue(args, 'target');
+          requireNasReplicationValue(args, 'device-id');
+          requireNasReplicationValue(args, 'snapshot-id');
+          assertNasReplicationBooleanFlag(args, 'execute');
+          assertNasReplicationBooleanFlag(args, 'recover');
+          if (args.recover === true && args.execute !== true) {
+            throw new SmbReplicationError('smb-execution-blocked', 2);
+          }
+
+          auditDataDir = args['data-dir'];
+          const config = validateConfig(await loadConfig(args.config));
+          const replicationOptions = {
+            config,
+            dataDir: args['data-dir'],
+            targetName: args.target,
+            deviceId: args['device-id'],
+            snapshotId: args['snapshot-id'],
+            execute: args.execute === true,
+            recover: args.recover === true,
+            executionGate: process.env.LINKE_NAS_SMB_EXECUTION,
+          };
+
+          if (replicationOptions.execute) {
+            await appendNasReplicationAudit(auditDataDir, {
+              type: 'nas.snapshot.replication.started',
+              outcome: 'started',
+              targetName: replicationOptions.targetName,
+              deviceId: replicationOptions.deviceId,
+              snapshotId: replicationOptions.snapshotId,
+            });
+          }
+
+          const result = replicationOptions.recover === true
+            ? await recoverMountedSmbSnapshot(replicationOptions)
+            : replicationOptions.execute === true
+              ? await replicateSnapshotToMountedSmb(replicationOptions)
+              : await buildSmbSnapshotReplicationPlan(replicationOptions);
+
+          if (!result || !NAS_REPLICATION_SUCCESS_STATES.has(result.state)) {
+            throw new SmbReplicationError('nas-snapshot-replicate-failed', 1);
+          }
+
+          await appendNasReplicationAudit(auditDataDir, {
+            type: nasReplicationAuditTypeForState(result.state),
+            ...nasReplicationAuditFieldsFromResult(result),
+          });
+
+          console.log(JSON.stringify(result, null, 2));
+        } catch (err) {
+          if (err instanceof SmbReplicationError) {
+            const auditType = err.code === 'recovery_required'
+              ? 'nas.snapshot.replication.recovery_required'
+              : 'nas.snapshot.replication.failed';
+            await appendNasReplicationAudit(auditDataDir, {
+              type: auditType,
+              outcome: 'failure',
+              errorCode: err.code,
+              targetName: typeof args.target === 'string' ? args.target : undefined,
+              deviceId: typeof args['device-id'] === 'string' ? args['device-id'] : undefined,
+              snapshotId: typeof args['snapshot-id'] === 'string' ? args['snapshot-id'] : undefined,
+            });
+            console.error(`Error: ${err.code}`);
+            process.exit(err.exitCode);
+          }
+          await appendNasReplicationAudit(auditDataDir, {
+            type: 'nas.snapshot.replication.failed',
+            outcome: 'failure',
+            errorCode: 'nas-snapshot-replicate-failed',
+            targetName: typeof args.target === 'string' ? args.target : undefined,
+            deviceId: typeof args['device-id'] === 'string' ? args['device-id'] : undefined,
+            snapshotId: typeof args['snapshot-id'] === 'string' ? args['snapshot-id'] : undefined,
+          });
+          console.error('Error: nas-snapshot-replicate-failed');
+          process.exit(1);
         }
         break;
       }

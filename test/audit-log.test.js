@@ -83,6 +83,14 @@ describe('audit log module', () => {
         snapshotId: 'snapshot-1',
         fileCount: 2,
         message: 'created',
+        targetName: 'primary-nas',
+        attemptId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        errorCode: 'smb-execution-blocked',
+        totalBytes: 12,
+        verifiedFileCount: 2,
+        retryCount: 0,
+        wouldWrite: false,
+        executionRequired: true,
         Authorization: 'Bearer leaked',
         sourcePath: '/private/tmp/source-secret',
         targetPath: '/private/tmp/target-secret',
@@ -90,13 +98,18 @@ describe('audit log module', () => {
         token: 'token-secret',
         password: 'password-secret',
         apiKey: 'api-key-secret',
+        ownerToken: 'owner-token-secret',
+        mountPath: '/Volumes/secret-mount',
       },
       new Date('2026-07-06T12:00:00.000Z'),
     );
 
     assert.deepEqual(Object.keys(event).sort(), [
+      'attemptId',
       'createdAt',
       'deviceId',
+      'errorCode',
+      'executionRequired',
       'fileCount',
       'id',
       'message',
@@ -104,13 +117,26 @@ describe('audit log module', () => {
       'outcome',
       'path',
       'requestId',
+      'retryCount',
       'snapshotId',
       'statusCode',
+      'targetName',
+      'totalBytes',
       'type',
+      'verifiedFileCount',
+      'wouldWrite',
     ].sort());
     assert.equal(event.createdAt, '2026-07-06T12:00:00.000Z');
     assert.match(event.id, /^[a-f0-9-]{36}$/i);
-    assert.doesNotMatch(JSON.stringify(event), /Bearer|private\/tmp|admin:secret|token-secret|password-secret|api-key-secret/);
+    assert.equal(event.targetName, 'primary-nas');
+    assert.equal(event.attemptId, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    assert.equal(event.errorCode, 'smb-execution-blocked');
+    assert.equal(event.totalBytes, 12);
+    assert.equal(event.verifiedFileCount, 2);
+    assert.equal(event.retryCount, 0);
+    assert.equal(event.wouldWrite, false);
+    assert.equal(event.executionRequired, true);
+    assert.doesNotMatch(JSON.stringify(event), /Bearer|private\/tmp|admin:secret|token-secret|password-secret|api-key-secret|owner-token|secret-mount/);
   });
 
   it('returns newest audit events first and clamps the limit', async () => {
