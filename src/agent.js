@@ -33,9 +33,12 @@
  *   audit-log           — show sanitized local audit events
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
+ *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
+ *   device-heartbeat    — authenticated device heartbeat (token from Keychain only)
+ *   device-token-rotate — rotate device token (token from Keychain only)
  *
  * Options:
- *   --server <url>       Server URL (default: http://localhost:3000)
+ *   --server <url>       Server URL (default: http://localhost:3000); device-* require HTTPS Agent URL
  *   --device <id>        Device ID
  *   --source <path>      Source path for backup
  *   --exclude <pattern>  Exclude pattern (repeatable for backup-preflight-dry-run)
@@ -61,7 +64,9 @@
  *   --expected-version <version> Expected release version (release-readiness)
  *   --readiness-summary  Print only readinessSummary for nas-dry-run or supervisor-install-dry-run
  *   --fail-on-blocked   Exit 2 when supported readiness/status output is blocked
- *   --token <token>      Bearer token for authenticated Linke Server requests
+ *   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-* commands)
+ *   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 (64 hex; colons optional)
+ *   --enrollment-code-stdin Read one-time enrollment code from stdin (required for device-enroll; never via argv)
  */
 
 import { fileURLToPath } from 'node:url';
@@ -93,6 +98,13 @@ import {
   recoverMountedSmbSnapshot,
   replicateSnapshotToMountedSmb,
 } from './smb-snapshot-replication.js';
+import { KeychainStore } from './keychain-store.js';
+import {
+  DeviceCredentialStore,
+  enrollDevice,
+  heartbeatDevice,
+  rotateDeviceToken,
+} from './device-client.js';
 
 const NAS_REPLICATION_ARG_KEYS = new Set([
   '_',
@@ -797,9 +809,180 @@ export async function runSupervisorInstallDryRun(configPath) {
   }
 }
 
+// ── Device enrollment / token CLI (secrets from stdin / Keychain only) ──
+
+/**
+ * Read a single secret line from stdin (or injected stream).
+ * Cap 4096 bytes; reject empty, multi-line, and oversized input.
+ * @param {AsyncIterable<unknown>} [input=process.stdin]
+ * @returns {Promise<string>}
+ */
+async function readSingleSecretLine(input = process.stdin) {
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of input) {
+    const buffer = Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > 4_096) throw new Error('stdin secret is invalid');
+    chunks.push(buffer);
+  }
+  const value = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+  if (!value || value.includes('\n') || value.includes('\r')) {
+    throw new Error('stdin secret is invalid');
+  }
+  return value;
+}
+
+/**
+ * Fixed safe CLI error that never echoes argument values.
+ * @returns {Error}
+ */
+function deviceCommandArgsInvalidError() {
+  return new Error('device command arguments are invalid');
+}
+
+/**
+ * Validate public device CLI args before stdin/Keychain/operation access.
+ * Requires non-empty string server, device, and tls-fingerprint.
+ * @param {unknown} args
+ */
+function assertDeviceCommandPublicArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    throw deviceCommandArgsInvalidError();
+  }
+  const record = /** @type {Record<string, unknown>} */ (args);
+  for (const key of ['server', 'device', 'tls-fingerprint']) {
+    const value = record[key];
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw deviceCommandArgsInvalidError();
+    }
+  }
+}
+
+/**
+ * Lazy production credential store; only constructed after public arg validation.
+ * @returns {DeviceCredentialStore}
+ */
+function createDefaultDeviceCredentialStore() {
+  return new DeviceCredentialStore({ keychain: new KeychainStore() });
+}
+
+/**
+ * device-enroll: certificate-pinned enrollment; code only from stdin.
+ * Public args validated before stdin read, Keychain construction, or enroll.
+ * @param {Record<string, unknown>} args
+ * @param {{
+ *   input?: AsyncIterable<unknown>,
+ *   credentialStore?: { getToken: Function, setToken: Function },
+ *   enroll?: Function,
+ *   writeOutput?: (value: unknown) => void,
+ * }} [deps]
+ */
+export async function runDeviceEnrollCommand(args, deps = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    throw deviceCommandArgsInvalidError();
+  }
+  const record = /** @type {Record<string, unknown>} */ (args);
+  // Reject argv secrets before any other work.
+  if (record['enrollment-code'] !== undefined || record.token !== undefined) {
+    throw new Error('device-enroll accepts secrets from stdin and Keychain only');
+  }
+  if (record['enrollment-code-stdin'] !== true) {
+    throw new Error('--enrollment-code-stdin is required');
+  }
+  assertDeviceCommandPublicArgs(record);
+
+  const input = deps.input ?? process.stdin;
+  const credentialStore = deps.credentialStore ?? createDefaultDeviceCredentialStore();
+  const enroll = deps.enroll ?? enrollDevice;
+  const writeOutput = deps.writeOutput
+    ?? ((value) => console.log(JSON.stringify(value, null, 2)));
+
+  const result = await enroll({
+    agentUrl: record.server,
+    tlsFingerprint: record['tls-fingerprint'],
+    deviceId: record.device,
+    enrollmentCode: await readSingleSecretLine(input),
+    credentialStore,
+  });
+  writeOutput(result);
+  return result;
+}
+
+/**
+ * device-heartbeat: token only from Keychain.
+ * Public args validated before Keychain construction or heartbeat.
+ * @param {Record<string, unknown>} args
+ * @param {{
+ *   credentialStore?: { getToken: Function, setToken: Function },
+ *   heartbeat?: Function,
+ *   writeOutput?: (value: unknown) => void,
+ * }} [deps]
+ */
+export async function runDeviceHeartbeatCommand(args, deps = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    throw deviceCommandArgsInvalidError();
+  }
+  const record = /** @type {Record<string, unknown>} */ (args);
+  if (record.token !== undefined) {
+    throw new Error('device-heartbeat reads the token from Keychain');
+  }
+  assertDeviceCommandPublicArgs(record);
+
+  const credentialStore = deps.credentialStore ?? createDefaultDeviceCredentialStore();
+  const heartbeat = deps.heartbeat ?? heartbeatDevice;
+  const writeOutput = deps.writeOutput
+    ?? ((value) => console.log(JSON.stringify(value, null, 2)));
+
+  const result = await heartbeat({
+    agentUrl: record.server,
+    tlsFingerprint: record['tls-fingerprint'],
+    deviceId: record.device,
+    hostname: record.hostname,
+    credentialStore,
+  });
+  writeOutput(result);
+  return result;
+}
+
+/**
+ * device-token-rotate: token only from Keychain.
+ * Public args validated before Keychain construction or rotate.
+ * @param {Record<string, unknown>} args
+ * @param {{
+ *   credentialStore?: { getToken: Function, setToken: Function },
+ *   rotate?: Function,
+ *   writeOutput?: (value: unknown) => void,
+ * }} [deps]
+ */
+export async function runDeviceTokenRotateCommand(args, deps = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    throw deviceCommandArgsInvalidError();
+  }
+  const record = /** @type {Record<string, unknown>} */ (args);
+  if (record.token !== undefined) {
+    throw new Error('device-token-rotate reads the token from Keychain');
+  }
+  assertDeviceCommandPublicArgs(record);
+
+  const credentialStore = deps.credentialStore ?? createDefaultDeviceCredentialStore();
+  const rotate = deps.rotate ?? rotateDeviceToken;
+  const writeOutput = deps.writeOutput
+    ?? ((value) => console.log(JSON.stringify(value, null, 2)));
+
+  const result = await rotate({
+    agentUrl: record.server,
+    tlsFingerprint: record['tls-fingerprint'],
+    deviceId: record.device,
+    credentialStore,
+  });
+  writeOutput(result);
+  return result;
+}
+
 // ── Usage ──────────────────────────────────────────────────────────
 
-function printUsage() {
+export function printUsage() {
   console.log(`
 Linke Agent CLI
 
@@ -836,9 +1019,12 @@ Commands:
   audit-log           Show sanitized local audit events
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
+  device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
+  device-heartbeat    Authenticated device heartbeat (device token from Keychain only)
+  device-token-rotate Rotate device token (device token from Keychain only)
 
 Options:
-  --server <url>       Server URL (default: http://localhost:3000)
+  --server <url>       Server URL (default: http://localhost:3000). device-* commands require an HTTPS Agent URL only
   --device <id>        Device ID
   --source <path>      Source path (for backup)
   --exclude <pattern>  Exclude pattern (repeatable for backup-preflight-dry-run)
@@ -859,7 +1045,9 @@ Options:
   --device-id <id>     Device ID (nas-snapshot-replicate)
   --snapshot-id <id>   Snapshot ID (nas-snapshot-replicate)
   --execute-requested Record explicit execution intent for the guarded runner execution gate without executing
-  --token <token>      Bearer token for authenticated Linke Server requests
+  --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-enroll / device-heartbeat / device-token-rotate)
+  --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 fingerprint (64 hex, colons optional; independent channel)
+  --enrollment-code-stdin Required for device-enroll: read one-time enrollment code from stdin (max 4096 bytes, single line). Enrollment codes and device tokens are never accepted as CLI arguments; tokens are stored and read only via Keychain
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
@@ -1942,6 +2130,21 @@ export async function main() {
         if (args['fail-on-blocked'] === true && gate.state === 'blocked') {
           process.exitCode = 2;
         }
+        break;
+      }
+
+      case 'device-enroll': {
+        await runDeviceEnrollCommand(args);
+        break;
+      }
+
+      case 'device-heartbeat': {
+        await runDeviceHeartbeatCommand(args);
+        break;
+      }
+
+      case 'device-token-rotate': {
+        await runDeviceTokenRotateCommand(args);
         break;
       }
 
