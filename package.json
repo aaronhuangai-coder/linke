@@ -4,7 +4,7 @@
   "description": "Linke — lightweight backup & restore agent with web console",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node src/controller-runtime.js",
     "test": "node --test test/*.test.js"
   },
   "license": "MIT"

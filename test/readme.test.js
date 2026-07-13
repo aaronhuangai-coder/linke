@@ -930,6 +930,132 @@ describe('README — default binding', () => {
   });
 });
 
+// ── G0a controller runtime startup boundaries ───────────────────────
+
+describe('README — G0a controller runtime', () => {
+  it('documents npm start / node src/controller-runtime.js as the default production entry', () => {
+    assertReadmeContains(
+      /npm start|node src\/controller-runtime\.js/,
+      'default production start via controller-runtime',
+    );
+    assert.ok(
+      /npm start/.test(readme) && /node src\/controller-runtime\.js/.test(readme),
+      'README must mention both npm start and node src/controller-runtime.js',
+    );
+  });
+
+  it('states LINKE_AGENT_HOST is required and only private IP literals are accepted', () => {
+    assertReadmeContains(/LINKE_AGENT_HOST/, 'LINKE_AGENT_HOST env var');
+    assertReadmeContains(
+      /LINKE_AGENT_HOST[\s\S]{0,200}(必填|required)/i,
+      'LINKE_AGENT_HOST required',
+    );
+    assertReadmeContains(
+      /私网|RFC1918|ULA|private\s+IP/i,
+      'agent host private IP only',
+    );
+  });
+
+  it('states management remains fixed on loopback', () => {
+    assertReadmeContains(
+      /管理面[\s\S]{0,120}(loopback|127\.0\.0\.1)|management[\s\S]{0,120}(loopback|127\.0\.0\.1)/i,
+      'management fixed loopback',
+    );
+  });
+
+  it('keeps node src/server.js as the no-enrollment local development entry', () => {
+    assertReadmeContains(
+      /node src\/server\.js[\s\S]{0,200}(开发|development|enrollment|无设备|不启用设备)/i,
+      'server.js local development without enrollment',
+    );
+  });
+
+  it('states server.js is loopback-only local compat/debug, not production controller management', () => {
+    assertReadmeContains(
+      /node src\/server\.js[\s\S]{0,280}(loopback|127\.0\.0\.1)/i,
+      'server.js remains loopback-only',
+    );
+    assertReadmeContains(
+      /node src\/server\.js[\s\S]{0,320}(不是|not)[\s\S]{0,80}(production controller|生产.*controller|controller management|生产管理)/i,
+      'server.js is not production controller management',
+    );
+    assertReadmeContains(
+      /node src\/server\.js[\s\S]{0,240}(不启用|无设备|不会启动)[\s\S]{0,80}enrollment/i,
+      'server.js does not enable enrollment',
+    );
+  });
+
+  it('does not recommend wildcard HOST=0.0.0.0 bind as a development posture', () => {
+    // Rejection of wildcard remains documented for production runtime.
+    assertReadmeContains(
+      /(拒绝|不读取)[\s\S]{0,80}(wildcard|0\.0\.0\.0)|0\.0\.0\.0[\s\S]{0,40}wildcard|wildcard[\s\S]{0,40}(拒绝|reject)/i,
+      'documents that production runtime rejects wildcard / 0.0.0.0 binds',
+    );
+    // README must not teach operators the HOST=0.0.0.0 open-bind command posture.
+    assert.doesNotMatch(
+      readme,
+      /HOST=0\.0\.0\.0/,
+      'README must not present HOST=0.0.0.0 as an operator command/posture',
+    );
+    assert.doesNotMatch(
+      readme,
+      /(局域网|开发|调试)[\s\S]{0,80}(HOST\s*=\s*0\.0\.0\.0|绑定.*0\.0\.0\.0)|(HOST\s*=\s*0\.0\.0\.0)[\s\S]{0,80}(局域网|开发|调试|受控环境)/,
+      'README must not recommend wildcard bind for local/LAN development',
+    );
+  });
+
+  it('keeps production runtime fixed to loopback management and private Agent bind', () => {
+    assertReadmeContains(
+      /管理面[\s\S]{0,80}(固定|只绑定)[\s\S]{0,40}(loopback|127\.0\.0\.1)|management[\s\S]{0,80}(loopback|127\.0\.0\.1)/i,
+      'production management fixed loopback',
+    );
+    assertReadmeContains(
+      /LINKE_AGENT_HOST[\s\S]{0,200}(私网|RFC1918|ULA|private)/i,
+      'production agent requires private IP literal',
+    );
+    assertReadmeContains(
+      /(拒绝|reject)[\s\S]{0,80}(wildcard|0\.0\.0\.0|::)|wildcard[\s\S]{0,40}(拒绝|reject)/i,
+      'production rejects agent wildcard binds',
+    );
+  });
+
+  it('states enrollment and revoke management POSTs require admin-capable tokens', () => {
+    assertReadmeContains(
+      /LINKE_AUTH_TOKEN|LINKE_WRITE_TOKEN/,
+      'admin-capable token env names for enrollment/revoke',
+    );
+    assertReadmeContains(
+      /(enrollment|revoke|设备注册|撤销)[\s\S]{0,220}(LINKE_AUTH_TOKEN|LINKE_WRITE_TOKEN)|(LINKE_AUTH_TOKEN|LINKE_WRITE_TOKEN)[\s\S]{0,220}(enrollment|revoke|设备注册|撤销)/i,
+      'enrollment/revoke require LINKE_AUTH_TOKEN or LINKE_WRITE_TOKEN',
+    );
+    assertReadmeContains(
+      /auth-admin-required|503/,
+      'unconfigured admin token returns 503 auth-admin-required',
+    );
+    assertReadmeContains(
+      /未配置.*(admin|管理|token|TOKEN).*503|503.*auth-admin-required|auth-admin-required/i,
+      'no default open enrollment without admin token',
+    );
+  });
+
+  it('does not treat automated tests as real Keychain or second-Mac PASS, and keeps the real gate blocked', () => {
+    assertReadmeContains(
+      /自动测试.*(不等于|不是|≠).*真实|automated tests?\s+(are\s+)?not\s+(real|equal)/i,
+      'auto tests are not real Keychain/second Mac evidence',
+    );
+    assertReadmeContains(
+      /(真实\s*)?Keychain[\s\S]{0,160}(BLOCKED|blocked)|第二\s*Mac[\s\S]{0,160}(BLOCKED|blocked)|(real\s+)?Keychain[\s\S]{0,160}BLOCKED/i,
+      'real Keychain / second Mac gate blocked',
+    );
+    assertReadmeContains(
+      /不得将 G0a 表述为 Gold 发布条件已满足|Gold 依旧 blocked|Gold remains blocked/i,
+      'explicit non-claim of G0a/Gold completion',
+    );
+    // Existing suite already forbids the literal phrase "Gold ready"; keep that invariant.
+    assert.doesNotMatch(readme, /Gold ready|Gold-ready/i);
+  });
+});
+
 // ── Security boundaries ─────────────────────────────────────────────
 
 describe('README — security boundaries', () => {

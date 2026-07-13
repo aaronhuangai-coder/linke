@@ -210,30 +210,38 @@
 
 ## 快速开始
 
+默认生产入口为双 listener Controller Runtime：管理面固定 loopback（`127.0.0.1`），Agent HTTPS 必须绑定显式私网 IP literal（RFC1918 / ULA）。`LINKE_AGENT_HOST` 必填，缺失时 fail-closed 退出，不会自动选择网卡。
+
 ```bash
-# 启动服务器（默认监听 127.0.0.1:3000，数据目录 ./data）
-node src/server.js
+# 默认生产启动（管理面 127.0.0.1:3000；Agent 需显式私网绑定）
+LINKE_AGENT_HOST=192.168.10.4 npm start
+# 等价于：
+LINKE_AGENT_HOST=192.168.10.4 node src/controller-runtime.js
 
-# 指定端口和数据目录
-PORT=8080 DATA_DIR=/tmp/linke-data node src/server.js
+# 指定管理端口、数据目录与 Agent 端口（Agent 默认 3443）
+PORT=8080 DATA_DIR=./data LINKE_AGENT_HOST=10.0.0.5 LINKE_AGENT_PORT=3443 npm start
 
-# 启用可选 API Bearer token 认证骨架（示例 token 仅用于本地测试）
-LINKE_AUTH_TOKEN=dev-test-token node src/server.js
+# 启用可选 API Bearer token 认证骨架（示例 token 仅用于本地测试；切勿提交真实 token）
+LINKE_AGENT_HOST=192.168.10.4 LINKE_AUTH_TOKEN=dev-test-token npm start
 
 # 启用可选 API read/write token foundation（示例 token 仅用于本地测试）
-LINKE_READ_TOKEN=dev-read-token LINKE_WRITE_TOKEN=dev-write-token node src/server.js
+LINKE_AGENT_HOST=192.168.10.4 LINKE_READ_TOKEN=dev-read-token LINKE_WRITE_TOKEN=dev-write-token npm start
 
-# 启用可选 API rate-limit foundation（示例：每分钟 60 个 /api/* 请求）
-LINKE_RATE_LIMIT_PER_MINUTE=60 node src/server.js
+# 启用可选 API rate-limit / audit retention foundation
+LINKE_AGENT_HOST=192.168.10.4 LINKE_RATE_LIMIT_PER_MINUTE=60 LINKE_AUDIT_MAX_EVENTS=500 npm start
 
-# 启用可选 audit retention foundation（示例：保留最新 500 条审计事件）
-LINKE_AUDIT_MAX_EVENTS=500 node src/server.js
-
-# 局域网测试（受控环境，显式开放监听地址）
-HOST=0.0.0.0 PORT=3000 node src/server.js
+# 仅当运营商明确接受 TLS fingerprint 变更并暂停全部 active 设备时：
+# LINKE_ACCEPT_TLS_FINGERPRINT_CHANGE=enabled npm start
+# 其它任何值（含 true/1/yes）均为 false。
 ```
 
-> **默认只监听 127.0.0.1**，不暴露到局域网/公网。如需局域网测试可设置 `HOST=0.0.0.0`，仅限受控测试环境使用；若同时未配置任何 token，GET `/api/auth-status` 会公开显示 `enabled:false`，因此开放监听时应配置 `LINKE_AUTH_TOKEN`、`LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN`。
+> **管理面固定 loopback**：Controller Runtime 的管理 HTTP 只绑定 `127.0.0.1`（测试可注入 `::1`），不读取开放监听 / wildcard bind 配置。Agent listener 只接受私网 IP literal，拒绝 hostname、loopback、link-local、公网与 `0.0.0.0`/`::` wildcard。
+
+> **设备 enrollment / revoke 管理写路由**：调用 management 的 `POST /api/device-enrollment-codes` 与 `POST /api/device-revoke` 必须配置 admin-capable token（`LINKE_AUTH_TOKEN` 或 `LINKE_WRITE_TOKEN`）。未配置时这些管理 POST 固定返回 **503** `auth-admin-required`；**不要**把默认无 token 的开放 API 兼容行为理解成可直接 enrollment。
+
+> **本机开发入口（不启用设备 enrollment）**：`node src/server.js` 只是 loopback 本机兼容/调试入口（默认 `127.0.0.1:3000`），**不是** production controller management，也不会启动 Agent HTTPS enrollment listener。请勿将其当作开放监听或 wildcard bind 的生产姿势；生产边界仍由 `npm start` / `node src/controller-runtime.js` 固定为 loopback 管理面 + 显式私网 Agent。若未配置 token，GET `/api/auth-status` 会显示 `enabled:false`。
+
+> **G0a 真实验收边界**：仓库内自动测试使用内存 Keychain、合成证书、临时目录与回环 adapter，**自动测试不等于真实 Keychain / 第二 Mac 验收**。真实 Keychain 与第二 Mac / 隔离端点门禁在获得用户明确授权并完成脱敏证据前保持 **BLOCKED**；当前不得将 G0a 表述为 Gold 发布条件已满足，Gold 依旧 blocked。
 
 > 设置 `LINKE_AUTH_TOKEN`、兼容变量 `LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。`LINKE_READ_TOKEN` 只能访问只读 API，访问 `POST /api/heartbeat`、`POST /api/backups` 或 `POST /api/restore` 会返回 `403 Forbidden` 并记录 `auth.forbidden`；`LINKE_WRITE_TOKEN` 可访问读写 API。GET `/api/auth-status` 也是只读 API，返回 `configuredScopes` 与 `writeRoutes` 等 sanitized 认证状态，不返回 token 值。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
 
