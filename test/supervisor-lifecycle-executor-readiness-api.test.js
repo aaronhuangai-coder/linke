@@ -71,7 +71,7 @@ function assertNoSensitiveText(text, dataDir = '') {
 
 describe('Supervisor lifecycle executor readiness API', () => {
   it('keeps executor readiness outside API write routes', () => {
-    assert.strictEqual(API_WRITE_ROUTES.length, 4);
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
     assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-executor-readiness'), false);
     assert.strictEqual(API_WRITE_ROUTES.some((route) => (
       route.method === 'POST' && route.path === '/api/supervisor-lifecycle-executor-readiness'

@@ -244,7 +244,7 @@ function assertBlockedExecutionGate(body) {
 
 describe('Supervisor lifecycle guarded runner execution gate API', () => {
   it('keeps guarded runner execution gate outside API write routes', () => {
-    assert.strictEqual(API_WRITE_ROUTES.length, 4);
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
     assert.strictEqual(isApiWriteRoute('POST', ROUTE), false);
     assert.strictEqual(API_WRITE_ROUTES.some((route) => (
       route.method === 'POST' && route.path === ROUTE

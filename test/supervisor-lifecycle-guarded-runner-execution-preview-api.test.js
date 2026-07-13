@@ -150,7 +150,7 @@ function assertExecutionPreviewSafety(safety) {
 
 describe('Supervisor lifecycle guarded runner execution preview API', () => {
   it('keeps guarded runner execution preview outside API write routes', () => {
-    assert.strictEqual(API_WRITE_ROUTES.length, 4);
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
     assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-guarded-runner-execution-preview'), false);
     assert.strictEqual(API_WRITE_ROUTES.some((route) => (
       route.method === 'POST' && route.path === '/api/supervisor-lifecycle-guarded-runner-execution-preview'

@@ -49,4 +49,28 @@ describe('Server API Isolation Regression', () => {
     assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-approval-persistence-preview'), false);
     assert.ok(!API_WRITE_ROUTES.some((route) => route.path === '/api/supervisor-lifecycle-approval-persistence-preview'));
   });
+
+  it('registers device administration write routes and keeps listener status read-only', () => {
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/device-enrollment-codes'), true);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/device-revoke'), true);
+    assert.strictEqual(isApiWriteRoute('GET', '/api/agent-listener-status'), false);
+    assert.strictEqual(isApiWriteRoute('POST', '/api/agent-listener-status'), false);
+    assert.ok(!API_WRITE_ROUTES.some((route) => route.path === '/api/agent-listener-status'));
+  });
+
+  it('returns 404 for wrong methods on device administration paths without auth open-leak', async () => {
+    const getEnroll = await fetch(`http://localhost:${port}/api/device-enrollment-codes`);
+    assert.strictEqual(getEnroll.status, 404);
+
+    const getRevoke = await fetch(`http://localhost:${port}/api/device-revoke`);
+    assert.strictEqual(getRevoke.status, 404);
+
+    const postStatus = await fetch(`http://localhost:${port}/api/agent-listener-status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.strictEqual(postStatus.status, 404);
+  });
 });

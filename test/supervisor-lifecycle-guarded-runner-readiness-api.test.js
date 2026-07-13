@@ -130,7 +130,7 @@ function assertNoSensitiveText(text, dataDir = '') {
 
 describe('Supervisor lifecycle guarded runner readiness API', () => {
   it('keeps guarded runner readiness outside API write routes', () => {
-    assert.strictEqual(API_WRITE_ROUTES.length, 4);
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
     assert.strictEqual(isApiWriteRoute('POST', '/api/supervisor-lifecycle-guarded-runner-readiness'), false);
     assert.strictEqual(API_WRITE_ROUTES.some((route) => (
       route.method === 'POST' && route.path === '/api/supervisor-lifecycle-guarded-runner-readiness'

@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { createServer, MAX_JSON_BODY_BYTES, API_WRITE_ROUTES } from '../src/server.js';
 import { slugify, safeDevicePath, createBackup } from '../src/storage.js';
 import { readAuditEvents } from '../src/audit-log.js';
+import { ERROR_CODES, LinkeError } from '../src/error-codes.js';
+import { DEVICE_PROTOCOL_VERSION } from '../src/device-protocol.js';
 
 function postJSON(port, path, body) {
   return fetch(`http://localhost:${port}${path}`, {
@@ -742,5 +744,589 @@ describe('Security — API request body and error hardening', () => {
       const body = await res.json();
       assert.deepStrictEqual(body, { error: 'Internal Server Error' });
     });
+  });
+});
+
+describe('Security — loopback device administration routes', () => {
+  const SYNTHETIC_CODE = 'one-time-code-SYNTHETIC-SECRET-9f3a';
+  const SYNTHETIC_FINGERPRINT = 'a'.repeat(64);
+  const SYNTHETIC_TOKEN = 'admin-write-token-SYNTHETIC';
+  const SYNTHETIC_PATH = '/tmp/linke-secret-path-SYNTHETIC';
+  const AGENT_URL = 'https://linke-controller.local:3443';
+
+  function baseAdmin(overrides = {}) {
+    return {
+      issueEnrollment: async ({ deviceId }) => ({
+        deviceId,
+        code: SYNTHETIC_CODE,
+        expiresAt: '2026-07-13T00:10:00.000Z',
+      }),
+      revokeDevice: async (deviceId) => ({ deviceId, revoked: true }),
+      getStatus: async () => ({
+        bindConfigured: true,
+        listening: true,
+        tlsFingerprintConfigured: true,
+        active: 0,
+        revoked: 0,
+      }),
+      agentUrl: AGENT_URL,
+      tlsFingerprint: SYNTHETIC_FINGERPRINT,
+      ...overrides,
+    };
+  }
+
+  async function withServer(options, fn) {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-device-admin-'));
+    const server = createServer({ dataDir, ...options });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+    try {
+      return await fn(port, dataDir);
+    } finally {
+      await new Promise((r) => server.close(r));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  function postJson(port, path, body, token) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  }
+
+  async function assertAuditHasNoSecrets(dataDir) {
+    const events = await readAuditEvents(dataDir, { limit: 100 });
+    const serialized = JSON.stringify(events);
+    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_CODE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_FINGERPRINT));
+    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(serialized, /linke-controller\.local|3443|tokenDigest|codeDigest|enrollmentCode/i);
+    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_PATH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    for (const event of events) {
+      assert.ok(!('enrollmentCode' in event));
+      assert.ok(!('tlsFingerprint' in event));
+      assert.ok(!('agentUrl' in event));
+      assert.ok(!('code' in event));
+      assert.ok(!('token' in event));
+    }
+    return events;
+  }
+
+  it('requires a configured admin-capable token for device enrollment', async () => {
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => ({ code: 'one-time-code', expiresAt: '2026-07-13T00:10:00.000Z' }),
+      revokeDevice: async () => {},
+      getStatus: async () => ({ active: 0, revoked: 0 }),
+    });
+    let called = false;
+    deviceAdministration.issueEnrollment = async () => {
+      called = true;
+      return { code: 'one-time-code', expiresAt: '2026-07-13T00:10:00.000Z' };
+    };
+    deviceAdministration.revokeDevice = async () => {
+      called = true;
+    };
+
+    await withServer({ deviceAdministration }, async (port) => {
+      for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+        const response = await postJson(port, path, { deviceId: 'mac-alpha' });
+        assert.strictEqual(response.status, 503);
+        assert.deepStrictEqual(await response.json(), { error: 'auth-admin-required' });
+      }
+    });
+    assert.strictEqual(called, false);
+  });
+
+  it('rejects null or missing device ids before calling administration services', async () => {
+    let called = false;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => { called = true; },
+      revokeDevice: async () => { called = true; },
+      getStatus: async () => ({ active: 0, revoked: 0 }),
+    });
+    await withServer({ deviceAdministration, writeToken: 'admin-write' }, async (port) => {
+      for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+        for (const body of [null, {}, { deviceId: 42 }]) {
+          const response = await postJson(port, path, body, 'admin-write');
+          assert.strictEqual(response.status, 400, `path=${path} body=${JSON.stringify(body)}`);
+          assert.deepStrictEqual(await response.json(), { error: 'device-request-invalid' });
+        }
+      }
+    });
+    assert.strictEqual(called, false);
+  });
+
+  it('rejects array, blank, and out-of-range device ids without calling services', async () => {
+    let callCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => { callCount += 1; },
+      revokeDevice: async () => { callCount += 1; },
+    });
+    const invalidBodies = [
+      [],
+      { deviceId: '' },
+      { deviceId: '   ' },
+      { deviceId: 'Mac-Alpha' },
+      { deviceId: '-leading' },
+      { deviceId: 'has_underscore' },
+      { deviceId: 'a'.repeat(64) },
+      { deviceId: '../escape' },
+    ];
+    await withServer({ deviceAdministration, writeToken: SYNTHETIC_TOKEN }, async (port) => {
+      for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+        for (const body of invalidBodies) {
+          const response = await postJson(port, path, body, SYNTHETIC_TOKEN);
+          assert.strictEqual(response.status, 400);
+          assert.deepStrictEqual(await response.json(), { error: 'device-request-invalid' });
+        }
+      }
+    });
+    assert.strictEqual(callCount, 0);
+  });
+
+  it('allows write token, rejects read token, and returns the code exactly once', async () => {
+    let issueCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: `code-${issueCount}`, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async () => {},
+      getStatus: async () => ({ active: 0, revoked: 0 }),
+    });
+    await withServer({ deviceAdministration, readToken: 'read-only', writeToken: 'admin-write' }, async (port, dataDir) => {
+      const denied = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'read-only');
+      assert.strictEqual(denied.status, 403);
+      assert.deepStrictEqual(await denied.json(), { error: 'Forbidden' });
+
+      const allowed = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'admin-write');
+      assert.strictEqual(allowed.status, 201);
+      assert.strictEqual(allowed.headers.get('cache-control'), 'no-store');
+      const raw = await allowed.text();
+      assert.strictEqual(Number(allowed.headers.get('content-length')), Buffer.byteLength(raw));
+      const body = JSON.parse(raw);
+      assert.deepStrictEqual(body, {
+        deviceId: 'mac-alpha',
+        enrollmentCode: 'code-1',
+        expiresAt: '2026-07-13T00:10:00.000Z',
+        agentUrl: AGENT_URL,
+        tlsFingerprint: SYNTHETIC_FINGERPRINT,
+        protocolVersion: DEVICE_PROTOCOL_VERSION,
+      });
+      assert.strictEqual(issueCount, 1);
+
+      const events = await assertAuditHasNoSecrets(dataDir);
+      const success = events.find((event) => event.type === 'api.device-enrollment.success');
+      assert.ok(success);
+      assert.strictEqual(success.path, '/api/device-enrollment-codes');
+      assert.strictEqual(success.statusCode, 201);
+      assert.strictEqual(success.outcome, 'success');
+      assert.strictEqual(success.deviceId, 'mac-alpha');
+      assert.ok(success.requestId);
+      assert.doesNotMatch(JSON.stringify(success), /code-1|enrollmentCode|agentUrl|tlsFingerprint/);
+    });
+  });
+
+  it('accepts full authToken for enrollment and keeps wrong/missing token as 401', async () => {
+    let issueCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+    });
+    await withServer({
+      deviceAdministration,
+      authToken: 'full-admin',
+      readToken: 'read-only',
+      writeToken: 'write-only',
+    }, async (port) => {
+      const missing = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' });
+      assert.strictEqual(missing.status, 401);
+      assert.deepStrictEqual(await missing.json(), { error: 'Unauthorized' });
+
+      const wrong = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'nope');
+      assert.strictEqual(wrong.status, 401);
+
+      const full = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'full-admin');
+      assert.strictEqual(full.status, 201);
+      const body = await full.json();
+      assert.strictEqual(body.enrollmentCode, SYNTHETIC_CODE);
+      assert.strictEqual(body.protocolVersion, DEVICE_PROTOCOL_VERSION);
+      assert.strictEqual(issueCount, 1);
+    });
+  });
+
+  it('revokes devices, preserves LinkeError codes, and sanitizes raw service errors', async () => {
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      revokeDevice: async (deviceId) => {
+        revokeCount += 1;
+        if (deviceId === 'mac-missing') {
+          throw new LinkeError(ERROR_CODES.DEVICE_NOT_FOUND, { statusCode: 404 });
+        }
+        if (deviceId === 'mac-boom') {
+          throw new Error(`secret failure at ${SYNTHETIC_PATH} token=${SYNTHETIC_TOKEN}`);
+        }
+        return { deviceId, revoked: true };
+      },
+    });
+
+    await withServer({ deviceAdministration, writeToken: SYNTHETIC_TOKEN }, async (port, dataDir) => {
+      const ok = await postJson(port, '/api/device-revoke', { deviceId: 'mac-alpha' }, SYNTHETIC_TOKEN);
+      assert.strictEqual(ok.status, 200);
+      assert.deepStrictEqual(await ok.json(), { deviceId: 'mac-alpha', revoked: true });
+
+      const missing = await postJson(port, '/api/device-revoke', { deviceId: 'mac-missing' }, SYNTHETIC_TOKEN);
+      assert.strictEqual(missing.status, 404);
+      assert.deepStrictEqual(await missing.json(), { error: 'device-not-found' });
+
+      const boomLogs = [];
+      const originalError = console.error;
+      console.error = (...args) => { boomLogs.push(args.map(String).join(' ')); };
+      try {
+        const boom = await postJson(port, '/api/device-revoke', { deviceId: 'mac-boom' }, SYNTHETIC_TOKEN);
+        assert.strictEqual(boom.status, 500);
+        assert.deepStrictEqual(await boom.json(), { error: 'device-internal-error' });
+      } finally {
+        console.error = originalError;
+      }
+      assert.strictEqual(boomLogs.length, 0, 'raw service errors must not console.error secret text');
+      assert.strictEqual(revokeCount, 3);
+
+      await assertAuditHasNoSecrets(dataDir);
+      const events = await readAuditEvents(dataDir, { limit: 20 });
+      assert.ok(events.some((event) => event.type === 'api.device-revoke.success' && event.statusCode === 200));
+      assert.ok(events.some((event) => event.type === 'api.device-revoke.failure' && event.statusCode === 404));
+      assert.ok(events.some((event) => event.type === 'api.device-revoke.failure' && event.statusCode === 500));
+    });
+  });
+
+  it('returns only sanitized Agent listener status', async () => {
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => {},
+      revokeDevice: async () => {},
+      getStatus: async () => ({
+        bindConfigured: true,
+        listening: true,
+        tlsFingerprintConfigured: true,
+        active: 2,
+        revoked: 1,
+        host: '192.168.10.4',
+        tlsFingerprint: 'b'.repeat(64),
+        tokenDigest: 'c'.repeat(64),
+        agentUrl: AGENT_URL,
+        enrollmentCode: SYNTHETIC_CODE,
+      }),
+    });
+    await withServer({ deviceAdministration, readToken: 'read-only', writeToken: 'admin-write' }, async (port) => {
+      for (const token of ['read-only', 'admin-write']) {
+        const response = await fetch(`http://127.0.0.1:${port}/api/agent-listener-status`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        assert.strictEqual(response.status, 200);
+        const body = await response.json();
+        assert.deepStrictEqual(body, {
+          status: 'ok',
+          listener: { bindConfigured: true, listening: true, tlsFingerprintConfigured: true },
+          devices: { active: 2, revoked: 1 },
+        });
+        assert.doesNotMatch(JSON.stringify(body), /192\.168|linke-controller|3443|[abc]{64}|digest|token|one-time-code/i);
+      }
+    });
+  });
+
+  it('normalizes malformed listener status values and does not echo secrets', async () => {
+    const deviceAdministration = baseAdmin({
+      getStatus: async () => ({
+        bindConfigured: 'yes',
+        listening: 1,
+        tlsFingerprintConfigured: 'true',
+        active: -3,
+        revoked: 'many',
+        secret: SYNTHETIC_CODE,
+        path: SYNTHETIC_PATH,
+      }),
+    });
+    await withServer({ deviceAdministration, authToken: 'full-admin' }, async (port) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-listener-status`, {
+        headers: { authorization: 'Bearer full-admin' },
+      });
+      assert.strictEqual(response.status, 200);
+      const body = await response.json();
+      assert.deepStrictEqual(Object.keys(body).sort(), ['devices', 'listener', 'status']);
+      assert.strictEqual(body.status, 'degraded');
+      assert.strictEqual(typeof body.listener.bindConfigured, 'boolean');
+      assert.strictEqual(typeof body.listener.listening, 'boolean');
+      assert.strictEqual(typeof body.listener.tlsFingerprintConfigured, 'boolean');
+      assert.strictEqual(body.listener.bindConfigured, false);
+      assert.strictEqual(body.listener.listening, false);
+      assert.strictEqual(body.listener.tlsFingerprintConfigured, false);
+      assert.ok(Number.isInteger(body.devices.active) && body.devices.active >= 0);
+      assert.ok(Number.isInteger(body.devices.revoked) && body.devices.revoked >= 0);
+      assert.doesNotMatch(JSON.stringify(body), new RegExp(SYNTHETIC_CODE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.doesNotMatch(JSON.stringify(body), new RegExp(SYNTHETIC_PATH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+  });
+
+  it('returns registered errors when deviceAdministration is missing or malformed', async () => {
+    await withServer({ writeToken: 'admin-write' }, async (port) => {
+      for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+        const response = await postJson(port, path, { deviceId: 'mac-alpha' }, 'admin-write');
+        assert.strictEqual(response.status, 503);
+        assert.deepStrictEqual(await response.json(), { error: 'device-request-invalid' });
+      }
+      const status = await fetch(`http://127.0.0.1:${port}/api/agent-listener-status`, {
+        headers: { authorization: 'Bearer admin-write' },
+      });
+      assert.strictEqual(status.status, 503);
+      assert.deepStrictEqual(await status.json(), { error: 'device-request-invalid' });
+    });
+
+    await withServer({
+      writeToken: 'admin-write',
+      deviceAdministration: { agentUrl: AGENT_URL, tlsFingerprint: SYNTHETIC_FINGERPRINT },
+    }, async (port) => {
+      const enroll = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'admin-write');
+      assert.strictEqual(enroll.status, 503);
+      const text = await enroll.text();
+      assert.deepStrictEqual(JSON.parse(text), { error: 'device-request-invalid' });
+      assert.doesNotMatch(text, /TypeError|is not a function|Cannot read/i);
+    });
+  });
+
+  it('maps oversize and invalid JSON to registered codes with safe audit', async () => {
+    let called = false;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => { called = true; },
+      revokeDevice: async () => { called = true; },
+    });
+    await withServer({ deviceAdministration, writeToken: 'admin-write' }, async (port, dataDir) => {
+      for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+        const oversize = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer admin-write',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ deviceId: 'mac-alpha', padding: 'x'.repeat(MAX_JSON_BODY_BYTES) }),
+        });
+        assert.strictEqual(oversize.status, 413, path);
+        assert.deepStrictEqual(await oversize.json(), { error: 'device-request-invalid' });
+
+        const invalid = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer admin-write',
+            'Content-Type': 'application/json',
+          },
+          body: '{',
+        });
+        assert.strictEqual(invalid.status, 400, path);
+        assert.deepStrictEqual(await invalid.json(), { error: 'device-request-invalid' });
+      }
+
+      const events = await assertAuditHasNoSecrets(dataDir);
+      assert.ok(events.some((event) => (
+        event.type === 'api.device-enrollment.failure'
+        && event.statusCode === 413
+        && event.outcome === 'failure'
+        && event.path === '/api/device-enrollment-codes'
+      )));
+      assert.ok(events.some((event) => (
+        event.type === 'api.device-enrollment.failure'
+        && event.statusCode === 400
+        && event.outcome === 'failure'
+      )));
+      assert.ok(events.some((event) => (
+        event.type === 'api.device-revoke.failure'
+        && event.statusCode === 413
+        && event.outcome === 'failure'
+      )));
+      assert.ok(events.some((event) => (
+        event.type === 'api.device-revoke.failure'
+        && event.statusCode === 400
+        && event.outcome === 'failure'
+      )));
+      assert.doesNotMatch(JSON.stringify(events), /Request body too large|Invalid JSON body|padding|mac-alpha/);
+    });
+    assert.strictEqual(called, false);
+  });
+
+  it('fail-closes LinkeError status codes outside 400-599', async () => {
+    const deviceAdministration = baseAdmin({
+      revokeDevice: async (deviceId) => {
+        if (deviceId === 'mac-ok-status') {
+          throw new LinkeError(ERROR_CODES.DEVICE_NOT_FOUND, { statusCode: 200 });
+        }
+        if (deviceId === 'mac-high-status') {
+          throw new LinkeError(ERROR_CODES.DEVICE_NOT_FOUND, { statusCode: 999 });
+        }
+        throw new LinkeError(ERROR_CODES.DEVICE_NOT_FOUND, { statusCode: 404 });
+      },
+    });
+    await withServer({ deviceAdministration, writeToken: SYNTHETIC_TOKEN }, async (port, dataDir) => {
+      for (const deviceId of ['mac-ok-status', 'mac-high-status']) {
+        const response = await postJson(port, '/api/device-revoke', { deviceId }, SYNTHETIC_TOKEN);
+        assert.strictEqual(response.status, 500);
+        const text = await response.text();
+        assert.deepStrictEqual(JSON.parse(text), { error: 'device-internal-error' });
+        assert.doesNotMatch(text, /200|999|device-not-found|secret|SYNTHETIC/i);
+      }
+
+      const valid = await postJson(port, '/api/device-revoke', { deviceId: 'mac-missing' }, SYNTHETIC_TOKEN);
+      assert.strictEqual(valid.status, 404);
+      assert.deepStrictEqual(await valid.json(), { error: 'device-not-found' });
+
+      await assertAuditHasNoSecrets(dataDir);
+    });
+  });
+
+  it('rejects query-string variants of administration routes without calling services', async () => {
+    let issueCount = 0;
+    let revokeCount = 0;
+    let statusCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => { issueCount += 1; return { deviceId: 'mac-alpha', code: 'c', expiresAt: '2026-07-13T00:10:00.000Z' }; },
+      revokeDevice: async () => { revokeCount += 1; },
+      getStatus: async () => {
+        statusCount += 1;
+        return { bindConfigured: true, listening: true, tlsFingerprintConfigured: true, active: 0, revoked: 0 };
+      },
+    });
+    await withServer({ deviceAdministration, writeToken: 'admin-write' }, async (port) => {
+      const enroll = await postJson(port, '/api/device-enrollment-codes?x=1', { deviceId: 'mac-alpha' }, 'admin-write');
+      assert.strictEqual(enroll.status, 404);
+
+      const revoke = await postJson(port, '/api/device-revoke?x=1', { deviceId: 'mac-alpha' }, 'admin-write');
+      assert.strictEqual(revoke.status, 404);
+
+      const status = await fetch(`http://127.0.0.1:${port}/api/agent-listener-status?x=1`, {
+        headers: { authorization: 'Bearer admin-write' },
+      });
+      assert.strictEqual(status.status, 404);
+    });
+    assert.strictEqual(issueCount, 0);
+    assert.strictEqual(revokeCount, 0);
+    assert.strictEqual(statusCount, 0);
+  });
+
+  it('fail-closes invalid enrollment public metadata and service outputs', async () => {
+    const cases = [
+      {
+        name: 'http-agent-url',
+        admin: baseAdmin({ agentUrl: 'http://linke-controller.local:3443' }),
+        secret: 'http://linke-controller.local:3443',
+      },
+      {
+        name: 'agent-url-with-userinfo',
+        admin: baseAdmin({ agentUrl: 'https://user:pass@linke-controller.local:3443' }),
+        secret: 'user:pass',
+      },
+      {
+        name: 'agent-url-with-query',
+        admin: baseAdmin({ agentUrl: 'https://linke-controller.local:3443?token=leak' }),
+        secret: 'token=leak',
+      },
+      {
+        name: 'agent-url-with-hash',
+        admin: baseAdmin({ agentUrl: 'https://linke-controller.local:3443#frag' }),
+        secret: '#frag',
+      },
+      {
+        name: 'bad-fingerprint',
+        admin: baseAdmin({ tlsFingerprint: 'A'.repeat(64) }),
+        secret: 'A'.repeat(64),
+      },
+      {
+        name: 'empty-code',
+        admin: baseAdmin({
+          issueEnrollment: async ({ deviceId }) => ({
+            deviceId,
+            code: '',
+            expiresAt: '2026-07-13T00:10:00.000Z',
+          }),
+        }),
+        secret: '',
+      },
+      {
+        name: 'invalid-expiresAt',
+        admin: baseAdmin({
+          issueEnrollment: async ({ deviceId }) => ({
+            deviceId,
+            code: SYNTHETIC_CODE,
+            expiresAt: 'not-an-iso',
+          }),
+        }),
+        secret: 'not-an-iso',
+      },
+      {
+        name: 'deviceId-mismatch',
+        admin: baseAdmin({
+          issueEnrollment: async () => ({
+            deviceId: 'mac-other',
+            code: SYNTHETIC_CODE,
+            expiresAt: '2026-07-13T00:10:00.000Z',
+          }),
+        }),
+        secret: 'mac-other',
+      },
+    ];
+
+    for (const testCase of cases) {
+      await withServer({ deviceAdministration: testCase.admin, writeToken: 'admin-write' }, async (port, dataDir) => {
+        const response = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, 'admin-write');
+        assert.strictEqual(response.status, 500, testCase.name);
+        const text = await response.text();
+        assert.deepStrictEqual(JSON.parse(text), { error: 'device-internal-error' }, testCase.name);
+        if (testCase.secret) {
+          assert.ok(!text.includes(testCase.secret), `${testCase.name} must not leak secret`);
+        }
+        assert.doesNotMatch(text, /user:pass|token=leak|not-an-iso|mac-other|Request body|TypeError/i);
+        const events = await assertAuditHasNoSecrets(dataDir);
+        assert.ok(events.some((event) => (
+          event.type === 'api.device-enrollment.failure'
+          && event.statusCode === 500
+          && event.outcome === 'failure'
+        )), testCase.name);
+      });
+    }
+  });
+
+  it('does not match wrong methods or nearby paths for administration routes', async () => {
+    const deviceAdministration = baseAdmin();
+    await withServer({ deviceAdministration, writeToken: 'admin-write' }, async (port) => {
+      for (const [method, path] of [
+        ['GET', '/api/device-enrollment-codes'],
+        ['PUT', '/api/device-enrollment-codes'],
+        ['POST', '/api/device-enrollment-codes/'],
+        ['POST', '/api/device-enrollment'],
+        ['GET', '/api/device-revoke'],
+        ['POST', '/api/device-revoke/'],
+        ['POST', '/api/agent-listener-status'],
+        ['GET', '/api/agent-listener'],
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method,
+          headers: {
+            Authorization: 'Bearer admin-write',
+            'Content-Type': 'application/json',
+          },
+          body: method === 'GET' || method === 'HEAD' ? undefined : JSON.stringify({ deviceId: 'mac-alpha' }),
+        });
+        assert.strictEqual(response.status, 404, `${method} ${path}`);
+      }
+    });
+  });
+
+  it('keeps agent-listener-status outside write routes while counting six write routes', () => {
+    assert.strictEqual(API_WRITE_ROUTES.length, 6);
+    assert.ok(API_WRITE_ROUTES.some((route) => route.method === 'POST' && route.path === '/api/device-enrollment-codes'));
+    assert.ok(API_WRITE_ROUTES.some((route) => route.method === 'POST' && route.path === '/api/device-revoke'));
+    assert.ok(!API_WRITE_ROUTES.some((route) => route.path === '/api/agent-listener-status'));
   });
 });

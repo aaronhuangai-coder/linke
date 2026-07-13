@@ -41,6 +41,8 @@ import { buildReleaseReadinessReport } from './release-readiness.js';
 import { buildGoldReadinessReport } from './gold-readiness.js';
 import { appendAuditEvent, parseAuditRetentionMaxEvents, readAuditEvents } from './audit-log.js';
 import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
+import { ERROR_CODES, LinkeError } from './error-codes.js';
+import { DEVICE_PROTOCOL_VERSION } from './device-protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -70,7 +72,12 @@ export const API_WRITE_ROUTES = [
   { method: 'POST', path: '/api/backups' },
   { method: 'POST', path: '/api/restore' },
   { method: 'POST', path: '/api/supervisor-lifecycle-approval-persist' },
+  { method: 'POST', path: '/api/device-enrollment-codes' },
+  { method: 'POST', path: '/api/device-revoke' },
 ];
+
+/** Task4 deviceId grammar: lowercase alnum, optional hyphens, max 63 chars. */
+const DEVICE_ADMIN_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export function formatApiRoute(route) {
   return `${String(route.method).toUpperCase()} ${route.path}`;
@@ -93,8 +100,99 @@ function sendJSON(res, status, data) {
   res.end(body);
 }
 
+function sendNoStoreJSON(res, status, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
 function sendError(res, status, message) {
   sendJSON(res, status, { error: message });
+}
+
+const DEVICE_ADMIN_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/;
+
+function isDeviceAdministrationService(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof value.issueEnrollment === 'function'
+    && typeof value.revokeDevice === 'function'
+    && typeof value.getStatus === 'function',
+  );
+}
+
+function isExactApiRoute(url, method, expectedMethod, expectedPath) {
+  return method === expectedMethod && url.pathname === expectedPath && url.search === '';
+}
+
+function parseAdminDeviceId(body) {
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (typeof body.deviceId !== 'string' || !DEVICE_ADMIN_ID_PATTERN.test(body.deviceId)) return null;
+  return body.deviceId;
+}
+
+function isValidAdminAgentUrl(value) {
+  if (typeof value !== 'string' || !value) return false;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  if (parsed.search || parsed.hash) return false;
+  return true;
+}
+
+function isValidAdminTlsFingerprint(value) {
+  return typeof value === 'string' && DEVICE_ADMIN_FINGERPRINT_PATTERN.test(value);
+}
+
+function isCanonicalIsoTimestamp(value) {
+  if (typeof value !== 'string' || !value) return false;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return false;
+  return date.toISOString() === value;
+}
+
+function isValidEnrollmentCode(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function toStrictBoolean(value) {
+  return value === true;
+}
+
+function toNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * Sanitize admin-route errors. LinkeError status codes outside 400-599 fail closed.
+ * Body size/JSON failures map to registered device-request-invalid (status preserved).
+ */
+function sanitizeDeviceAdminError(err) {
+  if (err instanceof LinkeError) {
+    const statusCode = err.statusCode;
+    if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
+      return { statusCode, code: err.code };
+    }
+    return { statusCode: 500, code: ERROR_CODES.DEVICE_INTERNAL_ERROR };
+  }
+  if (err && err.message === 'Request body too large' && err.statusCode === 413) {
+    return { statusCode: 413, code: ERROR_CODES.DEVICE_REQUEST_INVALID };
+  }
+  if (err && err.message === 'Invalid JSON body' && err.statusCode === 400) {
+    return { statusCode: 400, code: ERROR_CODES.DEVICE_REQUEST_INVALID };
+  }
+  return { statusCode: 500, code: ERROR_CODES.DEVICE_INTERNAL_ERROR };
 }
 
 function createHttpError(statusCode, message) {
@@ -450,13 +548,25 @@ async function isDataDirReadable(dataDir) {
   }
 }
 
-export function createServer({ dataDir, backupHooks, authToken, readToken, writeToken, restoreRoot, rateLimit, auditRetention } = {}) {
+export function createServer({
+  dataDir,
+  backupHooks,
+  authToken,
+  readToken,
+  writeToken,
+  restoreRoot,
+  rateLimit,
+  auditRetention,
+  deviceAdministration,
+} = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
   const expectedReadToken = normalizeReadToken(readToken);
   const expectedWriteToken = normalizeWriteToken(writeToken);
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
+  const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken);
+  const hasDeviceAdministration = isDeviceAdministrationService(deviceAdministration);
 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -528,6 +638,240 @@ export function createServer({ dataDir, backupHooks, authToken, readToken, write
               return sendError(res, 403, 'Forbidden');
             }
           }
+        }
+      }
+
+      // POST /api/device-enrollment-codes — loopback admin; requires full/write token config
+      if (isExactApiRoute(url, method, 'POST', '/api/device-enrollment-codes')) {
+        if (!adminAuthConfigured) {
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: 503,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, 503, ERROR_CODES.AUTH_ADMIN_REQUIRED);
+        }
+        if (!hasDeviceAdministration) {
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: 503,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, 503, ERROR_CODES.DEVICE_REQUEST_INVALID);
+        }
+
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          const sanitized = sanitizeDeviceAdminError(err);
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: sanitized.statusCode,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, sanitized.statusCode, sanitized.code);
+        }
+
+        const deviceId = parseAdminDeviceId(body);
+        if (!deviceId) {
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(body?.deviceId),
+          }, auditRetention);
+          return sendError(res, 400, ERROR_CODES.DEVICE_REQUEST_INVALID);
+        }
+
+        // Validate public metadata before issuing so a bad injection never leaks a code.
+        if (!isValidAdminAgentUrl(deviceAdministration.agentUrl)
+          || !isValidAdminTlsFingerprint(deviceAdministration.tlsFingerprint)) {
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: 500,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(deviceId),
+          }, auditRetention);
+          return sendError(res, 500, ERROR_CODES.DEVICE_INTERNAL_ERROR);
+        }
+
+        try {
+          const enrollment = await deviceAdministration.issueEnrollment({ deviceId });
+          const source = enrollment && typeof enrollment === 'object' && !Array.isArray(enrollment)
+            ? enrollment
+            : null;
+          const codeValid = source && isValidEnrollmentCode(source.code);
+          const expiresValid = source && isCanonicalIsoTimestamp(source.expiresAt);
+          const deviceIdValid = source
+            && (source.deviceId === undefined || source.deviceId === deviceId);
+          if (!codeValid || !expiresValid || !deviceIdValid) {
+            await recordAudit(dataDir, {
+              type: 'api.device-enrollment.failure',
+              method,
+              path: pathname,
+              statusCode: 500,
+              outcome: 'failure',
+              requestId,
+              deviceId: auditDeviceId(deviceId),
+            }, auditRetention);
+            return sendError(res, 500, ERROR_CODES.DEVICE_INTERNAL_ERROR);
+          }
+
+          const responseBody = {
+            deviceId,
+            enrollmentCode: source.code,
+            expiresAt: source.expiresAt,
+            agentUrl: deviceAdministration.agentUrl,
+            tlsFingerprint: deviceAdministration.tlsFingerprint,
+            protocolVersion: DEVICE_PROTOCOL_VERSION,
+          };
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.success',
+            method,
+            path: pathname,
+            statusCode: 201,
+            outcome: 'success',
+            requestId,
+            deviceId: auditDeviceId(deviceId),
+          }, auditRetention);
+          return sendNoStoreJSON(res, 201, responseBody);
+        } catch (err) {
+          const sanitized = sanitizeDeviceAdminError(err);
+          await recordAudit(dataDir, {
+            type: 'api.device-enrollment.failure',
+            method,
+            path: pathname,
+            statusCode: sanitized.statusCode,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(deviceId),
+          }, auditRetention);
+          return sendError(res, sanitized.statusCode, sanitized.code);
+        }
+      }
+
+      // POST /api/device-revoke — loopback admin; requires full/write token config
+      if (isExactApiRoute(url, method, 'POST', '/api/device-revoke')) {
+        if (!adminAuthConfigured) {
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.failure',
+            method,
+            path: pathname,
+            statusCode: 503,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, 503, ERROR_CODES.AUTH_ADMIN_REQUIRED);
+        }
+        if (!hasDeviceAdministration) {
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.failure',
+            method,
+            path: pathname,
+            statusCode: 503,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, 503, ERROR_CODES.DEVICE_REQUEST_INVALID);
+        }
+
+        let body;
+        try {
+          body = await readBody(req);
+        } catch (err) {
+          const sanitized = sanitizeDeviceAdminError(err);
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.failure',
+            method,
+            path: pathname,
+            statusCode: sanitized.statusCode,
+            outcome: 'failure',
+            requestId,
+          }, auditRetention);
+          return sendError(res, sanitized.statusCode, sanitized.code);
+        }
+
+        const deviceId = parseAdminDeviceId(body);
+        if (!deviceId) {
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.failure',
+            method,
+            path: pathname,
+            statusCode: 400,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(body?.deviceId),
+          }, auditRetention);
+          return sendError(res, 400, ERROR_CODES.DEVICE_REQUEST_INVALID);
+        }
+
+        try {
+          await deviceAdministration.revokeDevice(deviceId);
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.success',
+            method,
+            path: pathname,
+            statusCode: 200,
+            outcome: 'success',
+            requestId,
+            deviceId: auditDeviceId(deviceId),
+          }, auditRetention);
+          return sendJSON(res, 200, { deviceId, revoked: true });
+        } catch (err) {
+          const sanitized = sanitizeDeviceAdminError(err);
+          await recordAudit(dataDir, {
+            type: 'api.device-revoke.failure',
+            method,
+            path: pathname,
+            statusCode: sanitized.statusCode,
+            outcome: 'failure',
+            requestId,
+            deviceId: auditDeviceId(deviceId),
+          }, auditRetention);
+          return sendError(res, sanitized.statusCode, sanitized.code);
+        }
+      }
+
+      // GET /api/agent-listener-status — read-only allowlist; not a write route
+      if (isExactApiRoute(url, method, 'GET', '/api/agent-listener-status')) {
+        if (!hasDeviceAdministration) {
+          return sendError(res, 503, ERROR_CODES.DEVICE_REQUEST_INVALID);
+        }
+        try {
+          const status = await deviceAdministration.getStatus();
+          const source = status && typeof status === 'object' && !Array.isArray(status) ? status : {};
+          const listening = toStrictBoolean(source.listening);
+          return sendJSON(res, 200, {
+            status: listening ? 'ok' : 'degraded',
+            listener: {
+              bindConfigured: toStrictBoolean(source.bindConfigured),
+              listening,
+              tlsFingerprintConfigured: toStrictBoolean(source.tlsFingerprintConfigured),
+            },
+            devices: {
+              active: toNonNegativeInteger(source.active),
+              revoked: toNonNegativeInteger(source.revoked),
+            },
+          });
+        } catch (err) {
+          const sanitized = sanitizeDeviceAdminError(err);
+          return sendError(res, sanitized.statusCode, sanitized.code);
         }
       }
 
