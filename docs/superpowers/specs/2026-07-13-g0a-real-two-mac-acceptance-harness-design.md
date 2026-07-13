@@ -81,6 +81,10 @@ Common 模块不能访问网络或 Keychain；所有 I/O 依赖必须可注入�
 
 Controller runner 不监听额外 TCP 管理端口，不新增测试控制 HTTP route。stdin 是唯一控制面，避免额外认证凭证持久化。
 
+Controller runner 只从当前专用 run directory 内固定名称的 `controller-config.json` 读取非秘密 bind 配置。该文件必须为普通文件、非 symlink、mode `0600`，且只含 schema version、私网 Agent IP literal、固定非零 Agent port 和 loopback management port；不得包含 token、code、fingerprint 或 Keychain 值。真实验收禁止 Agent port `0`，确保 restart 与 fingerprint replacement 前后 URL 不变；不自动发现网卡。测试可通过注入配置使用 ephemeral listener，但不得把它记作真实证据。
+
+私网 Agent host 校验必须复用 production `isPrivateAgentHost()`，避免 harness 与真实 Controller 对 RFC1918/ULA 边界产生漂移。
+
 所有 `ack-*` 命令只读取 Controller 专用 run directory 下固定名称的 Endpoint phase receipt，不接受 stdin payload 或动态路径。receipt 必须先由 PM 通过 SCP 从第二台 Mac 复制到固定 inbox；runner 校验其 `0600`、非 symlink、schema、run id、phase 和 PASS 状态后才允许迁移。缺失、重复、跨 run、错误 phase 或非 PASS receipt 均 fail-closed，且不得删除当前可恢复状态。
 
 ### Endpoint runner
@@ -132,9 +136,10 @@ Endpoint 在任何 Keychain/network 副作用前还要创建自己的 `0600` 原
 
 ### Schema
 
-bundle 仅包含：
+initial bundle 仅包含：
 
 - schema version；
+- kind=`initial`；
 - run id；
 - Agent HTTPS URL；
 - TLS fingerprint；
@@ -142,6 +147,18 @@ bundle 仅包含：
 - current/N-1/N-2 一次性 enrollment code；
 - 专用 Endpoint Keychain service；
 - bundle 生成时间和过期时间。
+
+reenrollment bundle 仅包含：
+
+- schema version；
+- kind=`reenrollment`；
+- 同一 run id；
+- replacement 后的 Agent HTTPS URL 与 TLS fingerprint；
+- current device id 与新的一次性 enrollment code；
+- 同一个专用 Endpoint Keychain service；
+- bundle 生成时间和过期时间。
+
+`prepare-reenrollment` 只签发 current device 的一个新 code，不生成未使用的 N-1/N-2 code。Endpoint 保留已删除 code 的 initial bundle 公共元数据用于 post-revoke、post-restart 与旧 pin 检查；新 bundle 只用于 replacement 后重新 enrollment。
 
 任何未知字段、过期 bundle、重复 run id、空值或错误类型都 fail-closed。实际值不得写入设计、测试快照、错误消息或验收报告。
 
@@ -156,6 +173,8 @@ receipt 仅包含：
 - UTC 时间。
 
 receipt 未经校验不得驱动 Controller 状态迁移；FAIL/BLOCKED receipt 只能记录脱敏结果，不能推进状态。
+
+receipt 的 count、boolean 与 registered error code 均为可选字段；存在时必须严格校验类型/注册表，PASS receipt 不要求伪造 error code。
 
 ## SSH 与跨 Mac 边界
 
@@ -220,29 +239,57 @@ runner stdout 只允许：
 ```text
 initialized
 → controller-ready
+→ preparing-bundle
 → bundle-prepared
 → endpoint-pre-revoke-passed
+→ revoking-current
 → current-revoked
 → endpoint-post-revoke-passed
+→ restarting-controller
 → controller-restarted
 → restart-passed
+→ replacing-fingerprint
 → fingerprint-replaced
+→ preparing-reenrollment
 → reenrollment-bundle-prepared
 → fingerprint-mismatch-passed
 → reenrollment-passed
+→ cleaning
 → cleaned
 ```
+
+任一已验证 Controller state 都允许固定 `stop` 进入 `cleaning`；任一已验证 Endpoint state 都允许固定 `cleanup` 进入 `cleaning`。这是 BLOCKED/crash run 的唯一自动逃生边，不允许借 cleanup 继续业务 phase。
+
+Endpoint 在第二台 Mac 上使用独立持久化状态机：
+
+```text
+initialized
+→ pre-revoke-running → pre-revoke-passed
+→ post-revoke-running → post-revoke-passed
+→ post-restart-running → post-restart-passed
+→ post-fingerprint-change-running → post-fingerprint-change-passed
+→ reenroll-running → reenroll-passed
+→ cleaning → cleaned
+```
+
+每次独立 SSH phase 进程读取并验证 Endpoint state，只允许从上一完成态进入当前 running intent。`pre-revoke-running` 中断后不得自动重放整个 phase：尤其 rotate 成功但 old-token 检查未完成时，旧 token 已丢失，真实门固定 BLOCKED 并重建专用 run。后续 running intent 也只有在 production 操作明确幂等且 state 足以证明时才可恢复；其余均 BLOCKED。
 
 规则：
 
 - 每次阶段转换先验证当前状态，再执行副作用，最后原子持久化下一状态。
+- 对会签发 code、revoke、restart、replacement 或 cleanup 的命令，必须在副作用前先原子持久化对应 intent 状态；不得把“副作用完成”和“完成状态写入”假设为原子操作。
 - 重复同一已完成 phase 返回 sanitized idempotent PASS，不重复生成 code、token 或 identity。
 - 跳阶段、倒序、未知命令或跨 run bundle 固定拒绝。
 - `ack-*` 只消费当前预期 phase 的固定 receipt；成功迁移后精确删除该 receipt，重复 ack 返回 idempotent PASS 且不重复副作用。
-- crash 后只从已持久化状态继续；不得猜测 Keychain 内容或自动扫描。
+- crash 后只从已持久化状态继续；不得猜测 Keychain 内容或自动扫描。`preparing-bundle`、`revoking-current` 等无法证明是否完成的 intent 状态固定 BLOCKED 并要求精确清理/重建专用 run；只有 restart、paired identity replacement 和幂等 cleanup 可按明确恢复规则继续。
+- ack 的顺序固定为：验证 receipt → 原子写入完成状态 → 精确删除 receipt。若删除前 crash，重复 ack 只清理同一 receipt 并返回 idempotent PASS。
 - SCP/SSH 失败保持 `bundle-prepared`，允许有界重传同一 bundle；不得新签发 code。
 - 若 bundle 过期，必须由 Controller runner 精确废弃旧 state 后重新 `prepare`，不得复用旧 code。
 - cleanup 只处理 state 中已知的专用文件和专用 Keychain items；任何不确定项转人工处理。
+- cleanup 先关闭已存在 listener，再逐项 unlink state allowlist 的文件、逐项删除专用 Keychain item，最后只用 `rmdir` 删除 state allowlist 中预先排序的已知空目录；禁止递归删除、glob、readdir 扫描或扩大到 run directory 之外。
+- Controller 幂等对固定为：`bundle-prepared/prepare`、`endpoint-pre-revoke-passed/ack-pre-revoke`、`current-revoked/revoke-current`、`endpoint-post-revoke-passed/ack-post-revoke`、`controller-restarted/restart`、`restart-passed/ack-post-restart`、`fingerprint-replaced/replace-identity-confirmed`、`reenrollment-bundle-prepared/prepare-reenrollment`、`fingerprint-mismatch-passed/ack-post-fingerprint-change`、`reenrollment-passed/ack-reenroll`、`cleaned/stop`。其它越序重复固定拒绝；重复 ack 只允许清理可能残留的同一 receipt。
+- Endpoint 幂等对固定为每个 `*-passed` state 重复其同名 phase，以及 `cleaned/cleanup`。重复 phase 不重放 network/Keychain，只重新生成同一 sanitized PASS receipt，供丢失 receipt 的 SCP 重传。
+- cleanup allowlist validator 接收专用 run directory，拒绝 absolute、空段、`.`/`..`、NUL 和 resolve 后越界路径。每次 unlink/rmdir 前重新 resolve，并对 run directory 到目标的每级既有 ancestor 做 `lstat`；发现 symlink 或非预期类型立即 BLOCKED。
 
 ## 运行韧性设计门
 
@@ -257,6 +304,7 @@ initialized
 | 环境门缺失 | 零副作用退出 | exact gate | fixed blocker | 单测 |
 | bundle 权限/schema 非法 | 网络/Keychain 前拒绝 | lstat/mode/schema validation | fixed code | 单测 |
 | SCP/SSH 中断 | 不生成新 code | 状态停在 bundle-prepared | BLOCKED | fault test + real drill |
+| intent 状态中断 | 不猜测副作用结果 | 非可证明安全阶段固定 BLOCKED | fixed code | fault test |
 | rotate 中断 | 保留 Keychain pending recovery 语义 | production rotate recovery | fixed code | 单测 + real retry |
 | rotate pending 过期 | 有界 FAIL，不重新 begin | production TTL 边界 | fixed code | fault test |
 | old token 意外成功 | 立即停止 | strict expected error | FAIL | real gate |
@@ -267,6 +315,7 @@ initialized
 ### 异常恢复
 
 - 以原子 run state 为唯一恢复锚点。
+- 每个外部副作用前先写 intent；只有 restart、paired replacement 和 cleanup 允许按显式恢复分支继续，其余 intent 状态不自动重放。
 - 网络传输失败只重传同一 bundle。
 - rotate confirm 中断复用 production pending-token confirm recovery。
 - rotate pending 超过 production TTL 后固定 FAIL 并停止；不得无限重试、重新 begin 或把过期恢复误报为 PASS，后续只能按专用测试清理/重建流程恢复。
@@ -297,12 +346,13 @@ initialized
 10. old token 只存在闭包/局部内存，rotate 后真实 request adapter 得到固定拒绝。
 11. N-1 enrollment/heartbeat body 使用 current-1；N-2 body 使用 current-2 并严格要求 426。
 12. revoke、restart、fingerprint replacement 与 reenrollment 的状态迁移。
-13. SCP 中断保持同一 bundle 可重传，不签发新 code。
-14. Endpoint state 在凭证写入前记录由 `DeviceCredentialStore.itemId()` 精确派生的 item id；cleanup 只能删除 state allowlist 中的精确对象。
-15. TLS identity 内部标识的注入式契约测试，命名漂移时在真实 replacement 前失败。
-16. rotate pending 未过期可恢复，过期后固定 FAIL 且不重新 begin。
-17. import helper 不自动执行、不注册 signal、不访问 Keychain/network。
-18. README 明确 test-only、显式 gate、SSH alias、secret-safe bundle 和 Gold 仍 blocked。
+13. 每个外部副作用前持久化 intent；不安全 intent crash 固定 BLOCKED，不重复签发 code/revoke。
+14. SCP 中断保持同一 bundle 可重传，不签发新 code。
+15. Endpoint state 在凭证写入前记录由 `DeviceCredentialStore.itemId()` 精确派生的 item id；cleanup 只能删除 state allowlist 中的精确对象。
+16. TLS identity 内部标识的注入式契约测试，命名漂移时在真实 replacement 前失败。
+17. rotate pending 未过期可恢复，过期后固定 FAIL 且不重新 begin。
+18. import helper 不自动执行、不注册 signal、不访问 Keychain/network。
+19. README 明确 test-only、显式 gate、SSH alias、secret-safe bundle 和 Gold 仍 blocked。
 
 自动测试使用注入 adapter、临时目录与合成 secret；它只证明 harness 契约，不得标记真实门 PASS。
 
