@@ -18,7 +18,9 @@ import {
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
   resolveSupervisorLifecycleGuardedRunnerRegistry,
+  resolveSupervisorLifecycleGuardedRunnerRollbackAnchor,
   sanitizeHostMutationAdapterDecision,
+  sanitizeRollbackAnchorDecision,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -51,7 +53,7 @@ const EXPECTED_WIRING_CONTRACTS = Object.freeze([
   ['execution-policy', null, 'ready', 'execution-policy-ready'],
   ['runner-registry', null, 'ready', 'runner-registry-ready'],
   ['host-mutation-adapter', null, 'ready', 'host-mutation-adapter-ready'],
-  ['rollback-anchor', 'rollback-anchor-missing', 'blocked', 'rollback-anchor-missing'],
+  ['rollback-anchor', null, 'ready', 'rollback-anchor-ready'],
   ['attempt-audit', 'attempt-audit-missing', 'blocked', 'attempt-audit-missing'],
   ['operator-recovery', 'operator-recovery-missing', 'blocked', 'operator-recovery-missing'],
 ]);
@@ -244,20 +246,35 @@ const CODE_OWNED_ACTION_MUTATION_MAP = Object.freeze({
 });
 const EXPECTED_ROLLBACK_ANCHOR_ENTRIES = Object.freeze([
   {
-    anchorKind: 'disabled-rollback-anchor-stub',
-    state: 'blocked',
-    realImplementationReady: false,
+    anchorKind: 'code-owned-rollback-anchor',
+    state: 'ready',
+    codeOwnedResolverWired: true,
+    realRollbackAnchorImplementationReady: false,
     wouldWriteAnchor: false,
+    wouldRestore: false,
+    wouldExecute: false,
     wouldRun: false,
     wouldWrite: false,
     filesystemWriteAllowed: false,
     metadataWriteAllowed: false,
     rollbackAnchorWriteAllowed: false,
     rollbackRestoreAllowed: false,
-    sensitiveValuesReturned: false,
-    blockerCode: 'rollback-anchor-real-implementation-missing',
+    blockerCode: null,
+    evidenceCode: 'rollback-anchor-ready',
   },
 ]);
+const CODE_OWNED_ACTION_ANCHOR_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-anchor',
+  'write-launch-agent-plist': 'write-plist-anchor',
+  'load-launch-agent': 'load-agent-anchor',
+  'unload-launch-agent': 'unload-agent-anchor',
+  'remove-launch-agent-plist': 'remove-plist-anchor',
+  'remove-supervisor-metadata': 'remove-metadata-anchor',
+  'capture-current-state': 'capture-state-anchor',
+  'restore-previous-plist': 'restore-plist-anchor',
+  'restart-previous-supervisor': 'restart-supervisor-anchor',
+  'start-recovery-supervisor': 'recovery-supervisor-anchor',
+});
 const EXPECTED_ATTEMPT_AUDIT_ENTRIES = Object.freeze([
   {
     auditKind: 'disabled-attempt-audit-stub',
@@ -439,9 +456,11 @@ function buildGate(inputs = getReadyInputs(), options = {}) {
 function assertAlwaysBlockedGate(result, {
   runnerRegistryReady,
   hostMutationAdapterReady,
+  rollbackAnchorReady,
 }) {
   assert.strictEqual(typeof runnerRegistryReady, 'boolean');
   assert.strictEqual(typeof hostMutationAdapterReady, 'boolean');
+  assert.strictEqual(typeof rollbackAnchorReady, 'boolean');
   assert.strictEqual(result.command, 'supervisor-lifecycle-guarded-runner-execution-gate');
   assert.strictEqual(result.operation, 'install');
   assert.strictEqual(result.state, 'blocked');
@@ -455,13 +474,13 @@ function assertAlwaysBlockedGate(result, {
   assert.strictEqual(result.gates.executionPolicyReady, true);
   assert.strictEqual(result.gates.runnerRegistryReady, runnerRegistryReady);
   assert.strictEqual(result.gates.hostMutationAdapterReady, hostMutationAdapterReady);
-  assert.strictEqual(result.gates.rollbackAnchorReady, false);
+  assert.strictEqual(result.gates.rollbackAnchorReady, rollbackAnchorReady);
   assert.strictEqual(result.gates.attemptAuditReady, false);
   assert.strictEqual(result.gates.operatorRecoveryReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
-  assert.strictEqual(result.runnerWiringContract.readyCount, 3);
-  assert.strictEqual(result.runnerWiringContract.blockedCount, 3);
+  assert.strictEqual(result.runnerWiringContract.readyCount, 4);
+  assert.strictEqual(result.runnerWiringContract.blockedCount, 2);
   assert.ok(result.adapterDecision && typeof result.adapterDecision === 'object');
   assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
   assert.strictEqual(result.adapterDecision.wouldExecute, false);
@@ -475,6 +494,18 @@ function assertAlwaysBlockedGate(result, {
   assert.strictEqual(result.adapterDecision.rollbackAnchorWriteAllowed, false);
   assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
   assert.strictEqual(result.adapterDecision.codeOwnedResolverWired, true);
+  assert.ok(result.anchorDecision && typeof result.anchorDecision === 'object');
+  assert.strictEqual(result.anchorDecision.codeOwnedResolverWired, true);
+  assert.strictEqual(result.anchorDecision.realRollbackAnchorImplementationReady, false);
+  assert.strictEqual(result.anchorDecision.wouldWriteAnchor, false);
+  assert.strictEqual(result.anchorDecision.wouldRestore, false);
+  assert.strictEqual(result.anchorDecision.wouldExecute, false);
+  assert.strictEqual(result.anchorDecision.wouldRun, false);
+  assert.strictEqual(result.anchorDecision.wouldWrite, false);
+  assert.strictEqual(result.anchorDecision.filesystemWriteAllowed, false);
+  assert.strictEqual(result.anchorDecision.metadataWriteAllowed, false);
+  assert.strictEqual(result.anchorDecision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(result.anchorDecision.rollbackRestoreAllowed, false);
   assert.ok(result.policyDecision && typeof result.policyDecision === 'object');
   assert.strictEqual(result.policyDecision.state, 'denied');
   assert.strictEqual(result.policyDecision.authorized, false);
@@ -503,15 +534,21 @@ function assertAlwaysBlockedGate(result, {
   assert.strictEqual(readiness.codeOwnedAdapterResolverReady, true);
   assert.strictEqual(readiness.realHostMutationImplementationReady, false);
   assert.deepStrictEqual(readiness.adapterEntries, EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES);
+  const anchorReadiness = result.runnerWiringContract.rollbackAnchorReadiness;
+  assert.strictEqual(anchorReadiness.state, 'ready');
+  assert.strictEqual(anchorReadiness.rollbackAnchorReady, true);
+  assert.strictEqual(anchorReadiness.codeOwnedAnchorResolverReady, true);
+  assert.strictEqual(anchorReadiness.realRollbackAnchorImplementationReady, false);
+  assert.deepStrictEqual(anchorReadiness.anchorEntries, EXPECTED_ROLLBACK_ANCHOR_ENTRIES);
 }
 
 function assertWiringContract(contract) {
   assert.strictEqual(contract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(contract.state, 'blocked');
   assert.strictEqual(contract.realRunnerWiringReady, false);
-  // V1.26 aggregate：3 ready / 3 blocked
-  assert.strictEqual(contract.readyCount, 3);
-  assert.strictEqual(contract.blockedCount, 3);
+  // V1.27 aggregate：4 ready / 2 blocked
+  assert.strictEqual(contract.readyCount, 4);
+  assert.strictEqual(contract.blockedCount, 2);
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
@@ -540,8 +577,13 @@ function assertWiringContract(contract) {
   assert.strictEqual(adapterContract.status, 'ready');
   assert.strictEqual(adapterContract.blockerCode, null);
   assert.strictEqual(adapterContract.evidenceCode, 'host-mutation-adapter-ready');
-  // 后三：仅 slice(3) blocked — 绝不得 slice(2)
-  assert.ok(contract.requiredContracts.slice(3).every((entry) =>
+  const anchorContract = contract.requiredContracts[3];
+  assert.strictEqual(anchorContract.id, 'rollback-anchor');
+  assert.strictEqual(anchorContract.status, 'ready');
+  assert.strictEqual(anchorContract.blockerCode, null);
+  assert.strictEqual(anchorContract.evidenceCode, 'rollback-anchor-ready');
+  // 后二：仅 slice(4) blocked — 绝不得 slice(3)
+  assert.ok(contract.requiredContracts.slice(4).every((entry) =>
     entry.status === 'blocked' &&
       entry.requiredForExecution === true &&
       typeof entry.blockerCode === 'string' &&
@@ -573,6 +615,14 @@ function assertWiringContract(contract) {
   assert.deepStrictEqual(
     contract.rollbackAnchorReadiness,
     buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
+  );
+  assert.strictEqual(contract.rollbackAnchorReadiness.state, 'ready');
+  assert.strictEqual(contract.rollbackAnchorReadiness.rollbackAnchorReady, true);
+  assert.strictEqual(contract.rollbackAnchorReadiness.codeOwnedAnchorResolverReady, true);
+  assert.strictEqual(contract.rollbackAnchorReadiness.realRollbackAnchorImplementationReady, false);
+  assert.deepStrictEqual(
+    contract.rollbackAnchorReadiness.anchorEntries,
+    EXPECTED_ROLLBACK_ANCHOR_ENTRIES,
   );
   assert.deepStrictEqual(
     contract.attemptAuditReadiness,
@@ -688,6 +738,105 @@ function assertAdapterResolved(decision, operation) {
     assert.strictEqual(row.rollbackAnchorWriteAllowed, false);
     assert.strictEqual(row.blockerCode, null);
     assert.strictEqual(row.evidenceCode, 'host-mutation-adapter-mutation-ready');
+    assert.strictEqual(Object.hasOwn(row, 'codeOwnedResolverWired'), false);
+  }
+}
+
+function validAnchorCandidate(actionId, maxAttempts = 1) {
+  return {
+    actionId,
+    implementationId: CODE_OWNED_REGISTRY_MAPPINGS[actionId],
+    runnerKind: 'guarded-runner-stub',
+    mode: 'guarded-host-action',
+    status: 'blocked',
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    maxAttempts,
+  };
+}
+
+function validAnchorCandidatesFor(operation) {
+  return OPERATION_EXPECTED_ACTION_IDS[operation].map((id) => validAnchorCandidate(id, 1));
+}
+
+/**
+ * assertAnchorUnresolvedExact：第三参 operation **必传**，禁止默认 `'unknown'`。
+ * - typeof operation === 'string' 且 decision.operation === operation（严格全等）
+ * - 合法 install/uninstall/rollback/recover 输入上的 **任意** unresolved：第三参传对应合法 operation
+ * - **仅** invalid operation 传 expected output `'unknown'`
+ */
+function assertAnchorUnresolvedExact(decision, primaryBlocker, operation) {
+  assert.strictEqual(typeof operation, 'string');
+  assert.strictEqual(typeof primaryBlocker, 'string');
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-rollback-anchor');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'unresolved');
+  assert.strictEqual(decision.anchorReady, false);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realRollbackAnchorImplementationReady, false);
+  assert.strictEqual(decision.wouldWriteAnchor, false);
+  assert.strictEqual(decision.wouldRestore, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(decision.rollbackRestoreAllowed, false);
+  assert.strictEqual(decision.resolvedCount, 0);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.deepStrictEqual(decision.anchors, []);
+  assert.deepStrictEqual(decision.blockers, [primaryBlocker]);
+  assert.strictEqual(decision.primaryBlocker, primaryBlocker);
+  assert.deepStrictEqual(decision.nextBlockers, [primaryBlocker]);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  assert.ok(!Object.values(decision).some((v) => typeof v === 'function'));
+}
+
+function assertAnchorResolved(decision, operation) {
+  const expected = OPERATION_EXPECTED_ACTION_IDS[operation];
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-rollback-anchor');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'resolved');
+  assert.strictEqual(decision.anchorReady, true);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realRollbackAnchorImplementationReady, false);
+  assert.strictEqual(decision.wouldWriteAnchor, false);
+  assert.strictEqual(decision.wouldRestore, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(decision.rollbackRestoreAllowed, false);
+  assert.strictEqual(decision.resolvedCount, expected.length);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.strictEqual(decision.primaryBlocker, null);
+  assert.deepStrictEqual(decision.blockers, []);
+  assert.deepStrictEqual(decision.nextBlockers, []);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.anchors.length, expected.length);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  for (let i = 0; i < expected.length; i += 1) {
+    const row = decision.anchors[i];
+    assert.strictEqual(row.actionId, expected[i]);
+    assert.strictEqual(row.anchorKind, CODE_OWNED_ACTION_ANCHOR_MAP[expected[i]]);
+    assert.strictEqual(row.anchorReady, true);
+    assert.strictEqual(row.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(row.wouldWriteAnchor, false);
+    assert.strictEqual(row.wouldRestore, false);
+    assert.strictEqual(row.wouldExecute, false);
+    assert.strictEqual(row.wouldRun, false);
+    assert.strictEqual(row.wouldWrite, false);
+    assert.strictEqual(row.filesystemWriteAllowed, false);
+    assert.strictEqual(row.metadataWriteAllowed, false);
+    assert.strictEqual(row.rollbackAnchorWriteAllowed, false);
+    assert.strictEqual(row.rollbackRestoreAllowed, false);
+    assert.strictEqual(row.blockerCode, null);
+    assert.strictEqual(row.evidenceCode, 'rollback-anchor-plan-ready');
     assert.strictEqual(Object.hasOwn(row, 'codeOwnedResolverWired'), false);
   }
 }
@@ -1507,48 +1656,402 @@ describe('resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter', () => {
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness', () => {
-  it('returns fixed blocked disabled rollback anchor readiness evidence', () => {
-    const readiness = buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness();
+  it('OPERATION_EXPECTED_ACTION_IDS matches buildLifecycleActions via apply plan actions', () => {
+    for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
+      assert.deepStrictEqual(
+        OPERATION_EXPECTED_ACTION_IDS[operation],
+        buildSupervisorLifecycleApplyPlan({}, { operation }).actions.map((a) => a.id),
+      );
+    }
+  });
 
+  it('returns fixed ready pure data evidence', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness();
     assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-rollback-anchor-readiness');
-    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.state, 'ready');
     assert.strictEqual(readiness.rollbackAnchorDefined, true);
-    assert.strictEqual(readiness.rollbackAnchorReady, false);
-    assert.strictEqual(readiness.realRollbackAnchorReady, false);
-    assert.strictEqual(readiness.readyCount, 0);
-    assert.strictEqual(readiness.blockedCount, 1);
-    assert.ok(readiness.blockers.includes('rollback-anchor-real-implementation-missing'));
-    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
-    assert.deepStrictEqual(readiness.nextBlockers, ['rollback-anchor-real-implementation-missing']);
+    assert.strictEqual(readiness.rollbackAnchorReady, true);
+    assert.strictEqual(readiness.codeOwnedAnchorResolverReady, true);
+    assert.strictEqual(readiness.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(readiness.readyCount, 1);
+    assert.strictEqual(readiness.blockedCount, 0);
     assert.deepStrictEqual(readiness.anchorEntries, EXPECTED_ROLLBACK_ANCHOR_ENTRIES);
+    assert.deepStrictEqual(readiness.blockers, []);
+    assert.deepStrictEqual(readiness.nextBlockers, []);
+    assert.strictEqual(readiness.safety.sensitiveValuesReturned, false);
     assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+    assert.strictEqual(Object.hasOwn(readiness, 'realRollbackAnchorReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'realImplementationReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'sensitiveValuesReturned'), false);
+    const entry = readiness.anchorEntries[0];
+    assert.strictEqual(Object.hasOwn(entry, 'realImplementationReady'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'sensitiveValuesReturned'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'realRollbackAnchorReady'), false);
+    assert.strictEqual(entry.realRollbackAnchorImplementationReady, false);
   });
 
   it('ignores all runtime-looking inputs and never leaks malicious material', () => {
     const baseline = buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness();
     const maliciousInput = {
-      rollbackAnchorReady: true,
+      rollbackAnchorReady: false,
+      realRollbackAnchorImplementationReady: true,
       anchorEntries: [
         {
-          anchorKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          anchorKind: UNSAFE_SECRET_MATERIAL,
           wouldWriteAnchor: true,
+          wouldRestore: true,
           wouldRun: true,
           wouldWrite: true,
+          OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
         },
       ],
-      config: { token: 'SECRET_XYZ' },
-      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
-      hash: 'sha256:abc',
-      path: '/Users/ah/private',
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
     };
-
+    assert.strictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness.length, 0);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(maliciousInput), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(null), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(), baseline);
+    assert.doesNotMatch(JSON.stringify(baseline), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
     assert.doesNotMatch(
       JSON.stringify(baseline),
-      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node |curl/i,
+      /disabled-rollback-anchor-stub|rollback-anchor-real-implementation-missing/i,
     );
+  });
+});
+
+
+describe('resolveSupervisorLifecycleGuardedRunnerRollbackAnchor', () => {
+  it('A1: install happy path resolves restricted anchors without write/restore side effects', () => {
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+        validAnchorCandidatesFor('install'),
+        'install',
+      ),
+      'install',
+    );
+  });
+
+  it('A2: uninstall happy path resolves restricted anchors', () => {
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+        validAnchorCandidatesFor('uninstall'),
+        'uninstall',
+      ),
+      'uninstall',
+    );
+  });
+
+  it('A3: rollback happy path resolves restricted anchors', () => {
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+        validAnchorCandidatesFor('rollback'),
+        'rollback',
+      ),
+      'rollback',
+    );
+  });
+
+  it('A4: recover happy path resolves recovery-supervisor-anchor only', () => {
+    const decision = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+      validAnchorCandidatesFor('recover'),
+      'recover',
+    );
+    assertAnchorResolved(decision, 'recover');
+    assert.strictEqual(decision.anchors[0].anchorKind, 'recovery-supervisor-anchor');
+  });
+
+  it('A5: non-array / null candidates is rollback-anchor-candidates-invalid', () => {
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(null, 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor({ length: 1 }, 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('A6: install subset len=2 (valid shape) is rollback-anchor-action-missing', () => {
+    const candidates = validAnchorCandidatesFor('install').slice(0, 2);
+    assert.strictEqual(candidates.length, 2);
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-missing',
+      'install',
+    );
+  });
+
+  it('A7: empty array is rollback-anchor-candidates-invalid', () => {
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor([], 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('A8: extra own key on element is rollback-anchor-candidates-invalid', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], anchorKind: 'render-plist-anchor' };
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('A9: missing own key on element is rollback-anchor-candidates-invalid', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    const { mode: _mode, ...rest } = candidates[0];
+    candidates[0] = rest;
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('A10: getter / accessor property is rollback-anchor-candidates-invalid', () => {
+    const base = validAnchorCandidate('render-launch-agent-plist', 1);
+    const poisoned = {};
+    for (const key of Object.keys(base)) {
+      Object.defineProperty(poisoned, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return base[key];
+        },
+      });
+    }
+    const candidates = [poisoned, ...validAnchorCandidatesFor('install').slice(1)];
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('A11: Proxy trap throw on ownKeys is rollback-anchor-candidates-invalid without secret leak', () => {
+    const base = validAnchorCandidate('render-launch-agent-plist', 1);
+    const trapped = new Proxy(base, {
+      ownKeys() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+    const candidates = [trapped, ...validAnchorCandidatesFor('install').slice(1)];
+    const decision = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install');
+    assertAnchorUnresolvedExact(decision, 'rollback-anchor-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  it('A12: wouldExecute true is rollback-anchor-unsafe-anchor', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldExecute: true };
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-unsafe-anchor',
+      'install',
+    );
+  });
+
+  it('A13: wouldRun true is rollback-anchor-unsafe-anchor', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldRun: true };
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-unsafe-anchor',
+      'install',
+    );
+  });
+
+  it('A14: wouldWrite true is rollback-anchor-unsafe-anchor', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldWrite: true };
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-unsafe-anchor',
+      'install',
+    );
+  });
+
+  it('A15: status !== blocked is rollback-anchor-unsafe-anchor', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], status: 'ready' };
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-unsafe-anchor',
+      'install',
+    );
+  });
+
+  it('A16: non-empty string actionId unknown after shape ok is rollback-anchor-action-unknown', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[2] = validAnchorCandidate('start-recovery-supervisor', 1);
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-unknown',
+      'install',
+    );
+  });
+
+  for (const operation of ['nope', undefined, null, 0, 1, false, true]) {
+    it(`A17: invalid operation ${String(operation)} is operation-invalid with decision.operation unknown`, () => {
+      assertAnchorUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+          validAnchorCandidatesFor('install'),
+          operation,
+        ),
+        'rollback-anchor-operation-invalid',
+        'unknown',
+      );
+    });
+  }
+
+  it('A18: duplicate actionId is rollback-anchor-action-duplicate', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[1] = validAnchorCandidate('render-launch-agent-plist', 1);
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-duplicate',
+      'install',
+    );
+  });
+
+  it('A19: non-catalog implementationId still resolved (anchor ignores implementationId)', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], implementationId: 'other-plist-impl' };
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('A20: maxAttempts [redacted] still resolved (anchor ignores maxAttempts)', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[0] = { ...candidates[0], maxAttempts: '[redacted]' };
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('A21: post-call input mutation does not change decision', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    const first = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install');
+    assertAnchorResolved(first, 'install');
+    const snapshot = JSON.stringify(first);
+    candidates[0] = { ...candidates[0], actionId: 'start-recovery-supervisor' };
+    assert.strictEqual(JSON.stringify(first), snapshot);
+  });
+
+  it('A22: returned decision mutation does not pollute next call', () => {
+    const first = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+      validAnchorCandidatesFor('install'),
+      'install',
+    );
+    assertAnchorResolved(first, 'install');
+    first.operation = 'unknown';
+    first.anchors.push({ actionId: OPAQUE_UNSAFE_FIELD });
+    first.wouldWriteAnchor = true;
+    const second = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+      validAnchorCandidatesFor('install'),
+      'install',
+    );
+    assertAnchorResolved(second, 'install');
+    assert.strictEqual(second.wouldWriteAnchor, false);
+  });
+
+  it('A23: len>|E| + unknown action (no dup) is rollback-anchor-action-unknown', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates.push(validAnchorCandidate('start-recovery-supervisor', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-unknown',
+      'install',
+    );
+  });
+
+  it('A24: len>|E| + duplicate is rollback-anchor-action-duplicate', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates.push(validAnchorCandidate('render-launch-agent-plist', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-duplicate',
+      'install',
+    );
+  });
+
+  for (const { label, actionId } of [
+    { label: 'empty-string', actionId: '' },
+    { label: 'number', actionId: 1 },
+    { label: 'null', actionId: null },
+  ]) {
+    it(`A25: snapshot actionId ${label} is candidates-invalid only`, () => {
+      const candidates = validAnchorCandidatesFor('install');
+      candidates[0] = { ...candidates[0], actionId };
+      assertAnchorUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+        'rollback-anchor-candidates-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('A26: primary priority — duplicate before unknown when both present', () => {
+    const candidates = validAnchorCandidatesFor('install');
+    candidates[1] = validAnchorCandidate('render-launch-agent-plist', 1);
+    candidates.push(validAnchorCandidate('start-recovery-supervisor', 1));
+    assertAnchorUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'rollback-anchor-action-duplicate',
+      'install',
+    );
+  });
+
+  it('A27: non-catalog + redacted — anchor resolved AND adapter resolved AND registry unresolved', () => {
+    const candidates = validAnchorCandidatesFor('install').map((c, i) => (
+      i === 0
+        ? { ...c, implementationId: 'other-plist-impl', maxAttempts: '[redacted]' }
+        : c
+    ));
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'install',
+    );
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'install',
+    );
+    assert.strictEqual(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install').state,
+      'unresolved',
+    );
+  });
+
+  it('sanitize remaps anchorKind mismatch to code-owned mapping (never passthrough)', () => {
+    const FOREIGN_ANCHOR_KIND = 'attacker-forced-anchor-kind';
+    const resolved = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+      validAnchorCandidatesFor('install'),
+      'install',
+    );
+    assertAnchorResolved(resolved, 'install');
+    const poisoned = {
+      ...resolved,
+      anchors: resolved.anchors.map((row) => ({
+        ...row,
+        anchorKind: FOREIGN_ANCHOR_KIND,
+      })),
+    };
+    const sanitized = sanitizeRollbackAnchorDecision(poisoned);
+    assertAnchorResolved(sanitized, 'install');
+    for (const row of sanitized.anchors) {
+      assert.strictEqual(row.anchorKind, CODE_OWNED_ACTION_ANCHOR_MAP[row.actionId]);
+      assert.notStrictEqual(row.anchorKind, FOREIGN_ANCHOR_KIND);
+    }
+    assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(FOREIGN_ANCHOR_KIND, 'i'));
   });
 });
 
@@ -1692,6 +2195,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.ok(result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.gates, {
@@ -1707,13 +2211,15 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: true,
-      rollbackAnchorReady: false,
+      rollbackAnchorReady: true,
       attemptAuditReady: false,
       operatorRecoveryReady: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.adapterReady, true);
+    assert.strictEqual(result.anchorDecision.state, 'resolved');
+    assert.strictEqual(result.anchorDecision.anchorReady, true);
     assertWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -1752,12 +2258,13 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     ]);
   });
 
-  it('G1/G6/G7: production ready inputs resolve adapter but still deny via rollback-anchor', () => {
+  it('G1/G6/G7: production ready inputs resolve registry/adapter/anchor but still deny via attempt-audit', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
 
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
@@ -1766,6 +2273,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.gates.executionPolicyReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, true);
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
+    assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.registryDecision.registryReady, true);
     assert.strictEqual(result.registryDecision.codeOwnedResolverWired, true);
@@ -1787,19 +2295,25 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.adapterDecision.metadataWriteAllowed, false);
     assert.strictEqual(result.adapterDecision.auditWriteAllowed, false);
     assert.strictEqual(result.adapterDecision.rollbackAnchorWriteAllowed, false);
+    assert.strictEqual(result.anchorDecision.state, 'resolved');
+    assert.strictEqual(result.anchorDecision.anchorReady, true);
+    assert.strictEqual(result.anchorDecision.codeOwnedResolverWired, true);
+    assert.strictEqual(result.anchorDecision.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(result.anchorDecision.wouldWriteAnchor, false);
+    assert.strictEqual(result.anchorDecision.wouldRestore, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
     assert.strictEqual(result.policyDecision.state, 'denied');
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'rollback-anchor-not-ready');
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'attempt-audit-not-ready');
     assert.strictEqual(result.policyDecision.wouldRun, false);
     assert.strictEqual(result.policyDecision.wouldWrite, false);
     for (const code of [
-      'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
       'operator-recovery-not-ready',
     ]) {
       assert.ok(result.policyDecision.blockers.includes(code));
     }
+    assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.strictEqual(result.executionEligible, false);
@@ -1810,8 +2324,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       assert.strictEqual(c.wouldWrite, false);
     }
     assertWiringContract(result.runnerWiringContract);
-    assert.strictEqual(result.runnerWiringContract.readyCount, 3);
-    assert.strictEqual(result.runnerWiringContract.blockedCount, 3);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 4);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 2);
 
     const pureRegistry = resolveSupervisorLifecycleGuardedRunnerRegistry(result.actionCandidates, 'install');
     assert.strictEqual(result.registryDecision.state, pureRegistry.state);
@@ -1825,9 +2339,19 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       result.adapterDecision.mutations.map((row) => row.actionId),
       pureAdapter.mutations.map((row) => row.actionId),
     );
+    const pureAnchor = resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(
+      result.actionCandidates,
+      'install',
+    );
+    assert.strictEqual(result.anchorDecision.state, pureAnchor.state);
+    assert.strictEqual(result.anchorDecision.anchorReady, pureAnchor.anchorReady);
+    assert.deepStrictEqual(
+      result.anchorDecision.anchors.map((row) => row.actionId),
+      pureAnchor.anchors.map((row) => row.actionId),
+    );
   });
 
-  it('G3: empty candidates path keeps registry and adapter not ready', () => {
+  it('G3: empty candidates path keeps registry/adapter/anchor not ready', () => {
     const notVerifiedInputs = getReadyInputs();
     notVerifiedInputs.executionPreview = {
       ...notVerifiedInputs.executionPreview,
@@ -1839,17 +2363,21 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assert.deepStrictEqual(result.actionCandidates, []);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
     assert.strictEqual(result.registryDecision.primaryBlocker, 'runner-registry-candidates-invalid');
     assert.strictEqual(result.adapterDecision.state, 'unresolved');
     assert.strictEqual(result.adapterDecision.primaryBlocker, 'host-mutation-adapter-candidates-invalid');
+    assert.strictEqual(result.anchorDecision.state, 'unresolved');
+    assert.strictEqual(result.anchorDecision.primaryBlocker, 'rollback-anchor-candidates-invalid');
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
+    assert.ok(result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
   });
 
-  it('G8: ignores forged registry/adapter overrides on options', () => {
+  it('G6/G8: ignores forged registry/adapter/anchor overrides on options', () => {
     const result = buildGate(getReadyInputs(), {
       executeRequested: true,
       registryDecision: {
@@ -1867,6 +2395,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
       hostMutationAdapterReady: false,
       adapterContext: { hostMutationAdapterReady: true },
+      anchorDecision: {
+        state: 'unresolved',
+        anchorReady: false,
+        wouldWriteAnchor: true,
+        wouldRestore: true,
+      },
+      rollbackAnchorReady: false,
+      anchorContext: { rollbackAnchorReady: true },
       policyContext: buildAllTruePolicyContext(),
       policyDecision: {
         state: 'authorized',
@@ -1878,18 +2414,23 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
     assert.strictEqual(result.adapterDecision.launchctlAllowed, false);
+    assert.strictEqual(result.anchorDecision.state, 'resolved');
+    assert.strictEqual(result.anchorDecision.wouldWriteAnchor, false);
+    assert.strictEqual(result.anchorDecision.wouldRestore, false);
     assert.strictEqual(result.policyDecision.authorized, false);
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'attempt-audit-not-ready');
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.doesNotMatch(JSON.stringify(result), /forged|wouldRun":true/i);
   });
 
-  it('G4: non-catalog implementationId keeps registry false and adapter true', () => {
+  it('G4: non-catalog implementationId keeps registry false and adapter/anchor true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -1906,6 +2447,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
@@ -1917,8 +2459,12 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.adapterDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.adapterReady, true);
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
+    assert.strictEqual(result.anchorDecision.state, 'resolved');
+    assert.strictEqual(result.anchorDecision.anchorReady, true);
+    assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
@@ -1927,6 +2473,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.registryDecision.wouldRun, false);
     assert.strictEqual(result.registryDecision.wouldWrite, false);
     assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
+    assert.strictEqual(result.anchorDecision.wouldWriteAnchor, false);
     for (const c of result.actionCandidates) {
       assert.strictEqual(c.wouldExecute, false);
       assert.strictEqual(c.wouldRun, false);
@@ -1934,7 +2481,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     }
   });
 
-  it('G5: redacted maxAttempts keeps registry false and adapter true', () => {
+  it('G5: redacted maxAttempts keeps registry false and adapter/anchor true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -1951,6 +2498,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(
@@ -1967,8 +2515,11 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.adapterDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.adapterReady, true);
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
+    assert.strictEqual(result.anchorDecision.state, 'resolved');
+    assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
@@ -1996,6 +2547,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.ok(result.blockers.includes('approval-record-gate-not-ready'));
     assert.doesNotMatch(serialized, /gate-operator|approval reason|acknowledgement|sha256:|\/Users\/ah|localhost|token|secret/i);
@@ -2011,6 +2563,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(invalidManifestResult, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.ok(invalidManifestResult.blockers.includes('executor-manifest-readiness-invalid'));
     assert.strictEqual(invalidManifestResult.gates.manifestReady, false);
@@ -2027,6 +2580,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(runnerResult, {
       runnerRegistryReady: true,
       hostMutationAdapterReady: true,
+      rollbackAnchorReady: true,
     });
     assert.ok(runnerResult.blockers.includes('guarded-runner-readiness-not-ready'));
     assert.strictEqual(runnerResult.gates.runnerBindingsReady, false);
@@ -2041,6 +2595,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(previewResult, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assert.ok(previewResult.blockers.includes('execution-preview-operation-mismatch'));
     assert.strictEqual(previewResult.gates.executionPreviewVerified, false);
@@ -2050,6 +2605,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(invalidPreview, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assert.ok(invalidPreview.blockers.includes('execution-preview-invalid'));
     assert.strictEqual(invalidPreview.gates.executionPreviewVerified, false);
@@ -2066,6 +2622,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(notVerifiedResult, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assert.ok(notVerifiedResult.blockers.includes('execution-preview-not-verified'));
     assert.strictEqual(notVerifiedResult.gates.executionPreviewVerified, false);
@@ -2097,6 +2654,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assertAlwaysBlockedGate(result, {
       runnerRegistryReady: false,
       hostMutationAdapterReady: false,
+      rollbackAnchorReady: false,
     });
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -2471,11 +3029,12 @@ describe('areSupervisorLifecycleGuardedRunnerActionCandidatesReady', () => {
 });
 
 describe('gates.actionCandidatesReady gate integration (empty/valid only)', () => {
-  it('G1: production valid candidates => actionCandidatesReady true but policy denied via three remaining downstream', () => {
+  it('G1: production valid candidates => actionCandidatesReady true but policy denied via two remaining downstream', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, true);
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
+    assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.strictEqual(
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
         result.actionCandidates,
@@ -2485,11 +3044,10 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
     );
     assert.strictEqual(result.policyDecision.state, 'denied');
     assert.strictEqual(result.policyDecision.authorized, false);
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'rollback-anchor-not-ready');
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'attempt-audit-not-ready');
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     for (const code of [
-      'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
       'operator-recovery-not-ready',
     ]) {
@@ -2497,6 +3055,7 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
     }
     assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
   });
 
   it('G2: empty sanitized candidates => actionCandidatesReady false + action-candidates-not-ready', () => {

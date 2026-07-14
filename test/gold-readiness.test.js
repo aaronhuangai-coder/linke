@@ -83,17 +83,24 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('host-mutation-adapter-ready'));
   assert.ok(evidence.includes('realHostMutationImplementationReady:false'));
   assert.ok(evidence.includes('adapterDecision'));
-  assert.ok(evidence.includes('readyCount:3'));
-  assert.ok(evidence.includes('blockedCount:3'));
+  assert.ok(evidence.includes('resolveSupervisorLifecycleGuardedRunnerRollbackAnchor'));
+  assert.ok(evidence.includes('rollbackAnchorReadiness.state:ready'));
+  assert.ok(evidence.includes('rollbackAnchorReady:true'));
+  assert.ok(evidence.includes('codeOwnedAnchorResolverReady:true'));
+  assert.ok(evidence.includes('codeOwnedResolverWired'));
+  assert.ok(evidence.includes('rollback-anchor-ready'));
+  assert.ok(evidence.includes('realRollbackAnchorImplementationReady:false'));
+  assert.ok(evidence.includes('anchorDecision'));
+  assert.ok(evidence.includes('readyCount:4'));
+  assert.ok(evidence.includes('blockedCount:2'));
+  assert.ok(!evidence.includes('rollback-anchor-real-implementation-missing'));
+  assert.ok(!evidence.includes('rollbackAnchorReadiness.state:blocked'));
   assert.ok(!evidence.includes('runner-registry-real-implementation-missing'));
   assert.ok(!evidence.includes('runnerRegistryReadiness.state:blocked'));
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness'));
   assert.ok(!evidence.includes('hostMutationAdapterReadiness.state:blocked'));
   assert.ok(!evidence.includes('host-mutation-adapter-real-implementation-missing'));
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness'));
-  assert.ok(evidence.includes('rollbackAnchorReadiness.state:blocked'));
-  assert.ok(evidence.includes('rollbackAnchorReady:false'));
-  assert.ok(evidence.includes('rollback-anchor-real-implementation-missing'));
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness'));
   assert.ok(evidence.includes('attemptAuditReadiness.state:blocked'));
   assert.ok(evidence.includes('attemptAuditReady:false'));
@@ -105,13 +112,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.26', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.26');
+  it('expects LINKE_RELEASE_VERSION to be V1.27', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.27');
   });
 
-  it('expects report.version to be V1.26', () => {
+  it('expects report.version to be V1.27', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.26');
+    assert.strictEqual(report.version, 'V1.27');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -346,6 +353,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.27'));
+    assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerRollbackAnchor'));
+    assert.ok(automationItem.nextStep.includes('attempt-audit'));
     assert.ok(automationItem.nextStep.includes('V1.26'));
     assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter'));
     assert.ok(automationItem.nextStep.includes('rollback-anchor'));
@@ -557,6 +567,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.27'));
+    assert.ok(hardeningItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerRollbackAnchor'));
+    assert.ok(hardeningItem.nextStep.includes('attempt-audit'));
     assert.ok(hardeningItem.nextStep.includes('V1.26'));
     assert.ok(hardeningItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter'));
     assert.ok(hardeningItem.nextStep.includes('rollback-anchor'));

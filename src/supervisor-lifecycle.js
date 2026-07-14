@@ -824,19 +824,59 @@ const GUARDED_RUNNER_READY_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   blockerCode: null,
   evidenceCode: HOST_MUTATION_ADAPTER_READY_EVIDENCE,
 });
-const GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY = Object.freeze({
-  anchorKind: DISABLED_ROLLBACK_ANCHOR_KIND,
-  state: 'blocked',
-  realImplementationReady: false,
+const ROLLBACK_ANCHOR_READY_EVIDENCE = 'rollback-anchor-ready';
+const ROLLBACK_ANCHOR_PLAN_READY_EVIDENCE = 'rollback-anchor-plan-ready';
+const CODE_OWNED_ROLLBACK_ANCHOR_KIND = 'code-owned-rollback-anchor';
+const ROLLBACK_ANCHOR_BLOCKER_CODES = Object.freeze([
+  'rollback-anchor-candidates-invalid',
+  'rollback-anchor-operation-invalid',
+  'rollback-anchor-action-missing',
+  'rollback-anchor-action-duplicate',
+  'rollback-anchor-action-unknown',
+  'rollback-anchor-unsafe-anchor',
+]);
+const ROLLBACK_ANCHOR_BLOCKER_CODE_SET = new Set(ROLLBACK_ANCHOR_BLOCKER_CODES);
+// Identifiers only — pure data plan labels; not files, blobs, host executors, or shell/launchctl argv.
+const CODE_OWNED_ACTION_ANCHOR_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-anchor',
+  'write-launch-agent-plist': 'write-plist-anchor',
+  'load-launch-agent': 'load-agent-anchor',
+  'unload-launch-agent': 'unload-agent-anchor',
+  'remove-launch-agent-plist': 'remove-plist-anchor',
+  'remove-supervisor-metadata': 'remove-metadata-anchor',
+  'capture-current-state': 'capture-state-anchor',
+  'restore-previous-plist': 'restore-plist-anchor',
+  'restart-previous-supervisor': 'restart-supervisor-anchor',
+  'start-recovery-supervisor': 'recovery-supervisor-anchor',
+});
+const ROLLBACK_ANCHOR_KIND_ALLOWLIST = Object.freeze([
+  'render-plist-anchor',
+  'write-plist-anchor',
+  'load-agent-anchor',
+  'unload-agent-anchor',
+  'remove-plist-anchor',
+  'remove-metadata-anchor',
+  'capture-state-anchor',
+  'restore-plist-anchor',
+  'restart-supervisor-anchor',
+  'recovery-supervisor-anchor',
+]);
+const GUARDED_RUNNER_READY_ROLLBACK_ANCHOR_ENTRY = Object.freeze({
+  anchorKind: CODE_OWNED_ROLLBACK_ANCHOR_KIND,
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realRollbackAnchorImplementationReady: false,
   wouldWriteAnchor: false,
+  wouldRestore: false,
+  wouldExecute: false,
   wouldRun: false,
   wouldWrite: false,
   filesystemWriteAllowed: false,
   metadataWriteAllowed: false,
   rollbackAnchorWriteAllowed: false,
   rollbackRestoreAllowed: false,
-  sensitiveValuesReturned: false,
-  blockerCode: ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: ROLLBACK_ANCHOR_READY_EVIDENCE,
 });
 const RUNNER_REGISTRY_READY_EVIDENCE = 'runner-registry-ready';
 const RUNNER_REGISTRY_MAPPING_READY_EVIDENCE = 'runner-registry-mapping-ready';
@@ -907,11 +947,11 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: 'rollback-anchor',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'No rollback anchor write and verification strategy is wired.',
-    evidenceCode: 'rollback-anchor-missing',
-    blockerCode: 'rollback-anchor-missing',
+    evidence: 'Code-owned fail-closed restricted rollback-anchor pure data plan resolver is wired.',
+    evidenceCode: ROLLBACK_ANCHOR_READY_EVIDENCE,
+    blockerCode: null,
   }),
   Object.freeze({
     id: 'attempt-audit',
@@ -2437,6 +2477,263 @@ export function resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candi
   }
 }
 
+function buildUnresolvedAnchorDecision(operation, primaryBlocker) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-rollback-anchor',
+    operation,
+    state: 'unresolved',
+    anchorReady: false,
+    codeOwnedResolverWired: true,
+    realRollbackAnchorImplementationReady: false,
+    wouldWriteAnchor: false,
+    wouldRestore: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    filesystemWriteAllowed: false,
+    metadataWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    rollbackRestoreAllowed: false,
+    resolvedCount: 0,
+    unresolvedCount: 0,
+    anchors: [],
+    primaryBlocker,
+    blockers: [primaryBlocker],
+    nextBlockers: [primaryBlocker],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedAnchorDecision(operation, anchors) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-rollback-anchor',
+    operation,
+    state: 'resolved',
+    anchorReady: true,
+    codeOwnedResolverWired: true,
+    realRollbackAnchorImplementationReady: false,
+    wouldWriteAnchor: false,
+    wouldRestore: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    filesystemWriteAllowed: false,
+    metadataWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    rollbackRestoreAllowed: false,
+    resolvedCount: anchors.length,
+    unresolvedCount: 0,
+    anchors,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+export function sanitizeRollbackAnchorDecision(decision) {
+  const fallback = () => buildUnresolvedAnchorDecision('unknown', 'rollback-anchor-candidates-invalid');
+  if (!isObject(decision)) return fallback();
+  try {
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+    const state = decision.state === 'resolved' ? 'resolved' : 'unresolved';
+    const anchorReady = decision.anchorReady === true;
+    if ((state === 'resolved') !== anchorReady) {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code === 'string' && ROLLBACK_ANCHOR_BLOCKER_CODE_SET.has(code)) {
+        blockers.push(code);
+      }
+    }
+
+    if (state === 'resolved') {
+      if (blockers.length !== 0 || decision.primaryBlocker !== null) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+      }
+      const anchors = Array.isArray(decision.anchors)
+        ? decision.anchors.map((row) => {
+          const actionId = typeof row?.actionId === 'string' ? row.actionId : 'unknown';
+          // Always code-owned mapping; never passthrough input anchorKind on mismatch.
+          const mappedKind = CODE_OWNED_ACTION_ANCHOR_MAP[actionId];
+          return {
+            actionId,
+            anchorKind: typeof mappedKind === 'string' ? mappedKind : 'unknown',
+            anchorReady: true,
+            realRollbackAnchorImplementationReady: false,
+            wouldWriteAnchor: false,
+            wouldRestore: false,
+            wouldExecute: false,
+            wouldRun: false,
+            wouldWrite: false,
+            filesystemWriteAllowed: false,
+            metadataWriteAllowed: false,
+            rollbackAnchorWriteAllowed: false,
+            rollbackRestoreAllowed: false,
+            blockerCode: null,
+            evidenceCode: ROLLBACK_ANCHOR_PLAN_READY_EVIDENCE,
+          };
+        })
+        : [];
+      return buildResolvedAnchorDecision(operation, anchors);
+    }
+
+    const primary = typeof decision.primaryBlocker === 'string' && ROLLBACK_ANCHOR_BLOCKER_CODE_SET.has(decision.primaryBlocker)
+      ? decision.primaryBlocker
+      : (blockers[0] || 'rollback-anchor-candidates-invalid');
+    return buildUnresolvedAnchorDecision(
+      primary === 'rollback-anchor-operation-invalid' ? 'unknown' : operation,
+      primary,
+    );
+  } catch {
+    return fallback();
+  }
+}
+
+/**
+ * Resolve and verify sanitized guarded-runner action candidates against the
+ * code-owned restricted rollback-anchor mapping table (pure data plan only).
+ *
+ * Ready resolution means only that every candidate actionId maps to the fixed
+ * restricted anchorKind for the given operation. It does NOT write anchors,
+ * restore previous state, execute launchctl/shell/filesystem/process/metadata/
+ * audit/network; does NOT set wouldWriteAnchor / wouldRestore / *Allowed /
+ * wouldExecute/wouldRun/wouldWrite true; does NOT imply
+ * realRollbackAnchorImplementationReady, realHostMutationImplementationReady,
+ * or executionEligible.
+ *
+ * Returns a deep-copied plain decision object only — never functions,
+ * command strings, paths, hosts, tokens, hashes, or raw Error objects.
+ * Invalid input, getters, traps, unsafe mutation flags, or set mismatch →
+ * fail-closed unresolved.
+ *
+ * @param {unknown} candidates
+ * @param {unknown} operation
+ * @returns {object}
+ */
+export function resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnresolvedAnchorDecision('unknown', 'rollback-anchor-operation-invalid');
+    }
+
+    if (!Array.isArray(candidates)) {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len)) {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+    if (len < 1) {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+      }
+      snapshots.push(snapshot);
+    }
+
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-candidates-invalid');
+      }
+    }
+
+    // Authority: buildLifecycleActions only — never a second drift-able action list.
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-action-duplicate');
+      }
+      seen.add(actionId);
+    }
+
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId)) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-action-unknown');
+      }
+    }
+
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-action-missing');
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const anchors = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      // intentional layered fail-closed: ignore implementationId / runnerKind / mode / maxAttempts values;
+      // do not read mutationKind / adapterDecision / registryDecision.
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return buildUnresolvedAnchorDecision(operation, 'rollback-anchor-unsafe-anchor');
+      }
+      const anchorKind = CODE_OWNED_ACTION_ANCHOR_MAP[actionId];
+      anchors.push({
+        actionId,
+        anchorKind,
+        anchorReady: true,
+        realRollbackAnchorImplementationReady: false,
+        wouldWriteAnchor: false,
+        wouldRestore: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        filesystemWriteAllowed: false,
+        metadataWriteAllowed: false,
+        rollbackAnchorWriteAllowed: false,
+        rollbackRestoreAllowed: false,
+        blockerCode: null,
+        evidenceCode: ROLLBACK_ANCHOR_PLAN_READY_EVIDENCE,
+      });
+    }
+
+    return buildResolvedAnchorDecision(operation, anchors);
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return buildUnresolvedAnchorDecision(
+      op === 'unknown' ? 'unknown' : op,
+      op === 'unknown' ? 'rollback-anchor-operation-invalid' : 'rollback-anchor-candidates-invalid',
+    );
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-policy-readiness',
@@ -2490,18 +2787,16 @@ export function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadines
 export function buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-rollback-anchor-readiness',
-    state: 'blocked',
+    state: 'ready',
     rollbackAnchorDefined: true,
-    rollbackAnchorReady: false,
-    realRollbackAnchorReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    anchorEntries: [{ ...GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY }],
-    blockers: [
-      ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING],
+    rollbackAnchorReady: true,
+    codeOwnedAnchorResolverReady: true,
+    realRollbackAnchorImplementationReady: false,
+    readyCount: 1,
+    blockedCount: 0,
+    anchorEntries: [{ ...GUARDED_RUNNER_READY_ROLLBACK_ANCHOR_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -2550,8 +2845,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 3,
-    blockedCount: 3,
+    readyCount: 4,
+    blockedCount: 2,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -2701,6 +2996,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(actionCandidates, operation),
   );
 
+  // Ignore options.anchorDecision / options.rollbackAnchorReady / options.anchorContext.
+  const anchorDecision = sanitizeRollbackAnchorDecision(
+    resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(actionCandidates, operation),
+  );
+
   const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
   const executionPolicyReady =
     executionPolicyReadiness?.executionPolicyReady === true &&
@@ -2742,9 +3042,30 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     adapterDecision?.auditWriteAllowed === false &&
     adapterDecision?.rollbackAnchorWriteAllowed === false;
 
+  const rollbackAnchorReadiness = runnerWiringContract.rollbackAnchorReadiness;
+  const rollbackAnchorReady =
+    rollbackAnchorReadiness?.rollbackAnchorReady === true &&
+    rollbackAnchorReadiness?.codeOwnedAnchorResolverReady === true &&
+    rollbackAnchorReadiness?.state === 'ready' &&
+    rollbackAnchorReadiness?.realRollbackAnchorImplementationReady === false &&
+    anchorDecision?.anchorReady === true &&
+    anchorDecision?.state === 'resolved' &&
+    anchorDecision?.codeOwnedResolverWired === true &&
+    anchorDecision?.realRollbackAnchorImplementationReady === false &&
+    anchorDecision?.wouldWriteAnchor === false &&
+    anchorDecision?.wouldRestore === false &&
+    anchorDecision?.wouldExecute === false &&
+    anchorDecision?.wouldRun === false &&
+    anchorDecision?.wouldWrite === false &&
+    anchorDecision?.filesystemWriteAllowed === false &&
+    anchorDecision?.metadataWriteAllowed === false &&
+    anchorDecision?.rollbackAnchorWriteAllowed === false &&
+    anchorDecision?.rollbackRestoreAllowed === false;
+
   // Production policy context: local primitive booleans only — never request/options objects.
   // Ignore options.registryDecision / options.runnerRegistryReady / options.registryContext.
   // Ignore options.adapterDecision / options.hostMutationAdapterReady / options.adapterContext.
+  // Ignore options.anchorDecision / options.rollbackAnchorReady / options.anchorContext.
   const policyContext = {
     operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
     lifecyclePlanValid: lifecyclePlanValid === true,
@@ -2756,7 +3077,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     actionCandidatesReady: actionCandidatesReady === true,
     runnerRegistryReady: runnerRegistryReady === true,
     hostMutationAdapterReady: hostMutationAdapterReady === true,
-    rollbackAnchorReady: false,
+    rollbackAnchorReady: rollbackAnchorReady === true,
     attemptAuditReady: false,
     operatorRecoveryReady: false,
   };
@@ -2780,6 +3101,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     actionCandidates,
     registryDecision,
     adapterDecision,
+    anchorDecision,
     policyDecision,
     gates: {
       lifecyclePlanValid,
@@ -2794,7 +3116,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: hostMutationAdapterReady === true,
-      rollbackAnchorReady: false,
+      rollbackAnchorReady: rollbackAnchorReady === true,
       attemptAuditReady: false,
       operatorRecoveryReady: false,
     },

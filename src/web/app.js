@@ -1234,18 +1234,19 @@ function sanitizeAllowlistedExecutionPolicyBlocker(value) {
 }
 
 /**
- * V1.26 Web security boundary for requiredContracts rendering:
+ * V1.27 Web security boundary for requiredContracts rendering:
  * - `execution-policy` may display ready under its strict V1.24 contract.
  * - `runner-registry` ready only under shared C∧R∧G∧D canonical predicate
  *   (see isCanonicalRunnerRegistryReady); otherwise fixed blocked + missing.
  * - `host-mutation-adapter` ready only under shared C∧A∧G∧D_adapter canonical
  *   predicate (see isCanonicalHostMutationAdapterReady).
- * - Three remaining contracts are always blocked with canonical missing codes;
+ * - `rollback-anchor` ready only under shared C∧A∧G∧D_anchor canonical
+ *   predicate (see isCanonicalRollbackAnchorReady).
+ * - Two remaining contracts are always blocked with canonical missing codes;
  *   never trust payload status/blocker/evidence for them.
  * - Unknown / redacted ids stay blocked without leaking payload blocker text.
  */
 const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
-  'rollback-anchor': 'rollback-anchor-missing',
   'attempt-audit': 'attempt-audit-missing',
   'operator-recovery': 'operator-recovery-missing',
 });
@@ -1333,10 +1334,55 @@ function resolveCanonicalHostMutationAdapterReady(payload) {
   return isCanonicalHostMutationAdapterReady({ C, A, G, D });
 }
 
+/**
+ * Shared single canonical predicate for rollback-anchor wiring line,
+ * anchor readiness line, and validationLines.rollbackAnchorReady.
+ * Ready iff C ∧ A ∧ G ∧ D all hold; any missing/contradictory/side-effect
+ * drift (including wouldWriteAnchor / wouldRestore / *Allowed true) fails closed.
+ */
+function isCanonicalRollbackAnchorReady({ C, A, G, D }) {
+  return (
+    C?.status === 'ready' &&
+    C?.blockerCode === null &&
+    C?.evidenceCode === 'rollback-anchor-ready' &&
+    C?.requiredForExecution === true &&
+    A?.state === 'ready' &&
+    A?.rollbackAnchorReady === true &&
+    A?.codeOwnedAnchorResolverReady === true &&
+    A?.realRollbackAnchorImplementationReady === false &&
+    G === true &&
+    D?.state === 'resolved' &&
+    D?.anchorReady === true &&
+    D?.codeOwnedResolverWired === true &&
+    D?.realRollbackAnchorImplementationReady === false &&
+    D?.wouldWriteAnchor === false &&
+    D?.wouldRestore === false &&
+    D?.wouldExecute === false &&
+    D?.wouldRun === false &&
+    D?.wouldWrite === false &&
+    D?.filesystemWriteAllowed === false &&
+    D?.metadataWriteAllowed === false &&
+    D?.rollbackAnchorWriteAllowed === false &&
+    D?.rollbackRestoreAllowed === false
+  );
+}
+
+function resolveCanonicalRollbackAnchorReady(payload) {
+  const requiredContracts = Array.isArray(payload?.runnerWiringContract?.requiredContracts)
+    ? payload.runnerWiringContract.requiredContracts
+    : [];
+  const C = requiredContracts.find((entry) => entry && entry.id === 'rollback-anchor') || null;
+  const A = payload?.runnerWiringContract?.rollbackAnchorReadiness || null;
+  const G = payload?.gates?.rollbackAnchorReady === true;
+  const D = payload?.anchorDecision || null;
+  return isCanonicalRollbackAnchorReady({ C, A, G, D });
+}
+
 function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
   runnerWiringContract,
   canonicalRunnerRegistryReady = false,
   canonicalHostMutationAdapterReady = false,
+  canonicalRollbackAnchorReady = false,
 ) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
@@ -1373,6 +1419,13 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
         return 'wiringContract:host-mutation-adapter:status:ready:requiredForExecution:true:blocker:none';
       }
       return 'wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing';
+    }
+
+    if (id === 'rollback-anchor') {
+      if (canonicalRollbackAnchorReady === true) {
+        return 'wiringContract:rollback-anchor:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:rollback-anchor:status:blocked:requiredForExecution:true:blocker:rollback-anchor-missing';
     }
 
     // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
@@ -1433,14 +1486,17 @@ function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(canonical
   ];
 }
 
-function buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(runnerWiringContract) {
-  const anchorEntries = Array.isArray(runnerWiringContract?.rollbackAnchorReadiness?.anchorEntries)
-    ? runnerWiringContract.rollbackAnchorReadiness.anchorEntries
-    : [];
-  if (anchorEntries.length < 1) return [];
+function buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(canonicalRollbackAnchorReady = false) {
+  // Always emit exactly one stable line; never copy payload anchorKind/would*/blocker text.
+  if (canonicalRollbackAnchorReady === true) {
+    return [
+      'rollbackAnchor:code-owned-rollback-anchor:state:ready:codeOwnedResolverWired:true:' +
+        'realRollbackAnchorImplementationReady:false:wouldWriteAnchor:false:wouldRestore:false:blocker:none',
+    ];
+  }
   return [
-    'rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:' +
-      'wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing',
+    'rollbackAnchor:code-owned-rollback-anchor:state:blocked:codeOwnedResolverWired:true:' +
+      'realRollbackAnchorImplementationReady:false:wouldWriteAnchor:false:wouldRestore:false:blocker:rollback-anchor-not-ready',
   ];
 }
 
@@ -1708,13 +1764,15 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
-  // Single shared canonical booleans for wiring / registry / adapter / validation lines.
+  // Single shared canonical booleans for wiring / registry / adapter / anchor / validation lines.
   const canonicalRunnerRegistryReady = resolveCanonicalRunnerRegistryReady(payload) === true;
   const canonicalHostMutationAdapterReady = resolveCanonicalHostMutationAdapterReady(payload) === true;
+  const canonicalRollbackAnchorReady = resolveCanonicalRollbackAnchorReady(payload) === true;
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(
     payload.runnerWiringContract,
     canonicalRunnerRegistryReady,
     canonicalHostMutationAdapterReady,
+    canonicalRollbackAnchorReady,
   );
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
@@ -1722,7 +1780,9 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(
     canonicalHostMutationAdapterReady,
   );
-  const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
+  const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(
+    canonicalRollbackAnchorReady,
+  );
   const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(payload.runnerWiringContract);
   const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(payload.runnerWiringContract);
 
@@ -1760,7 +1820,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       'executionEligible:false',
       'executorReady:false',
       `hostMutationAdapterReady:${canonicalHostMutationAdapterReady ? 'true' : 'false'}`,
-      'rollbackAnchorReady:false',
+      `rollbackAnchorReady:${canonicalRollbackAnchorReady ? 'true' : 'false'}`,
       'attemptAuditReady:false',
       'operatorRecoveryReady:false',
     ],
