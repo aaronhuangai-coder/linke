@@ -1,8 +1,13 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 import { assertSupportedDeviceProtocol } from './device-protocol.js';
+import {
+  ensureSafeDataRoot,
+  safeAtomicWriteText,
+  safeReadText,
+} from './safe-data-files.js';
 
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000;
 const USED_ENROLLMENT_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -179,6 +184,8 @@ export class DeviceRegistry {
     if (!dataDir) throw new Error('dataDir is required');
     this.statePath = join(dataDir, 'device-registry-v1.json');
     this.tempPath = join(dataDir, 'device-registry-v1.json.new');
+    this.stateRelativePath = 'device-registry-v1.json';
+    this.tempRelativePath = 'device-registry-v1.json.new';
     this.dataDir = dataDir;
     this.now = now;
     this.randomToken = randomToken;
@@ -255,9 +262,18 @@ export class DeviceRegistry {
   async readState() {
     let raw;
     try {
-      raw = await readFile(this.statePath, 'utf8');
+      let rootStat;
+      try {
+        rootStat = await lstat(this.dataDir);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') return emptyState();
+        throw internalError();
+      }
+      if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw internalError();
+      raw = await safeReadText(this.dataDir, this.stateRelativePath);
     } catch (error) {
       if (error && error.code === 'ENOENT') return emptyState();
+      if (error instanceof LinkeError) throw error;
       throw internalError();
     }
     try {
@@ -271,16 +287,30 @@ export class DeviceRegistry {
   }
 
   /**
-   * Atomically publish state via same-dir temp file, forced 0600, then rename.
+   * Atomically publish state via same-dir fixed `.new` temp, forced 0600, then rename.
+   * Fixed temp name preserves stale 0644→published 0600 compatibility; nofollow on temp/final.
    * @param {object} state
    * @returns {Promise<void>}
    */
   async writeState(state) {
-    await mkdir(this.dataDir, { recursive: true });
-    await writeFile(this.tempPath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
-    // writeFile mode is ignored for existing files; force 0600 before publish.
-    await chmod(this.tempPath, 0o600);
-    await rename(this.tempPath, this.statePath);
+    try {
+      // First-create and existing roots use segment-safe creation (no recursive mkdir).
+      await ensureSafeDataRoot(this.dataDir);
+      await safeAtomicWriteText(
+        this.dataDir,
+        this.stateRelativePath,
+        `${JSON.stringify(state)}\n`,
+        {
+          // Fixed temp name: intentional cross-call compatibility for stale `.new` (0600 publish).
+          tempRelativePath: this.tempRelativePath,
+          allowExistingTemp: true,
+          mode: 0o600,
+        },
+      );
+    } catch (error) {
+      if (error instanceof LinkeError) throw error;
+      throw internalError();
+    }
   }
 
   /**

@@ -299,3 +299,119 @@ describe('Restore target guard — optional restoreRoot', () => {
     }
   });
 });
+
+describe('Restore snapshot source no-follow (dataDir)', () => {
+  it('rejects when snapshot files/ directory is replaced with a symlink', async () => {
+    const { restoreSnapshot, createBackup, safeDevicePath } = await import('../src/storage.js');
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-rest-src-dir-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-rest-src-out-'));
+    const source = await mkdtemp(join(tmpdir(), 'linke-rest-src-in-'));
+    const target = await mkdtemp(join(tmpdir(), 'linke-rest-src-tgt-'));
+    try {
+      await writeFile(join(source, 'important.txt'), 'inside-snapshot');
+      await writeFile(join(outside, 'important.txt'), 'OUTSIDE-RESTORE-SRC');
+      const snap = await createBackup(dataDir, {
+        deviceId: 'restore-src-dir',
+        sourcePath: source,
+      });
+      const { deviceDir } = safeDevicePath(dataDir, 'restore-src-dir');
+      const filesDir = join(deviceDir, 'snapshots', snap.snapshotId, 'files');
+      await rm(filesDir, { recursive: true, force: true });
+      await symlink(outside, filesDir, 'dir');
+
+      await assert.rejects(
+        () => restoreSnapshot(dataDir, {
+          deviceId: 'restore-src-dir',
+          snapshotId: snap.snapshotId,
+          targetPath: target,
+        }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}\n${error?.code || ''}`;
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes('OUTSIDE-RESTORE-SRC'), false);
+          assert.equal(text.includes(dataDir), false);
+          return true;
+        },
+      );
+      assert.strictEqual(await pathExists(join(target, 'important.txt')), false);
+      assert.strictEqual(await readFile(join(outside, 'important.txt'), 'utf-8'), 'OUTSIDE-RESTORE-SRC');
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+      await rm(source, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects snapshot leaf file symlink without writing outside or following source', async () => {
+    const { restoreSnapshot, createBackup, safeDevicePath } = await import('../src/storage.js');
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-rest-leaf-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-rest-leaf-out-'));
+    const source = await mkdtemp(join(tmpdir(), 'linke-rest-leaf-in-'));
+    const target = await mkdtemp(join(tmpdir(), 'linke-rest-leaf-tgt-'));
+    try {
+      await writeFile(join(source, 'important.txt'), 'inside-leaf');
+      const outsideFile = join(outside, 'important.txt');
+      await writeFile(outsideFile, 'OUTSIDE-LEAF');
+      const snap = await createBackup(dataDir, {
+        deviceId: 'restore-src-leaf',
+        sourcePath: source,
+      });
+      const { deviceDir } = safeDevicePath(dataDir, 'restore-src-leaf');
+      const leaf = join(deviceDir, 'snapshots', snap.snapshotId, 'files', 'important.txt');
+      await rm(leaf, { force: true });
+      await symlink(outsideFile, leaf, 'file');
+
+      await assert.rejects(
+        () => restoreSnapshot(dataDir, {
+          deviceId: 'restore-src-leaf',
+          snapshotId: snap.snapshotId,
+          targetPath: target,
+        }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}`;
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes('OUTSIDE-LEAF'), false);
+          return true;
+        },
+      );
+      assert.strictEqual(await pathExists(join(target, 'important.txt')), false);
+      assert.strictEqual(await readFile(outsideFile, 'utf-8'), 'OUTSIDE-LEAF');
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+      await rm(source, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps restoreRoot destination defenses when restoring a clean snapshot tree', async () => {
+    const restoreRoot = await mkdtemp(join(tmpdir(), 'linke-rest-keep-root-'));
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'linke-rest-keep-out-'));
+    const fixture = await createRestoreFixture({ restoreRoot });
+    try {
+      await symlink(outsideRoot, join(restoreRoot, 'escape'), 'dir');
+      const restoreRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'escape/blocked',
+      });
+      assert.strictEqual(restoreRes.status, 400);
+      assert.strictEqual(await pathExists(join(outsideRoot, 'blocked', 'important.txt')), false);
+
+      const okRes = await postJSON(fixture.port, '/api/restore', {
+        deviceId: 'restore-root-guard',
+        snapshotId: fixture.snapshotId,
+        targetPath: 'clean-target',
+      });
+      assert.strictEqual(okRes.status, 200);
+      assert.strictEqual(
+        await readFile(join(await realpath(restoreRoot), 'clean-target', 'important.txt'), 'utf-8'),
+        fixture.content,
+      );
+    } finally {
+      await cleanupRestoreFixture(fixture);
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+});

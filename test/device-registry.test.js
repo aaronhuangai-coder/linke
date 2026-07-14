@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DeviceRegistry } from '../src/device-registry.js';
@@ -583,5 +583,121 @@ describe('DeviceRegistry', () => {
         throw new Error('injected-token-boom');
       },
     });
+  });
+
+  it('rejects registry .new and final symlinks without writing outside or leaking paths', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-registry-outside-'));
+    try {
+      await withRegistry('linke-registry-temp-symlink-', async (registry, root) => {
+        const outsideTemp = join(outside, 'registry-new-target');
+        await writeFile(outsideTemp, 'OUTSIDE-REGISTRY-NEW');
+        await symlink(outsideTemp, join(root, 'device-registry-v1.json.new'), 'file');
+        await assert.rejects(
+          registry.issueEnrollment({ deviceId: 'mac-symlink-new' }),
+          (error) => (
+            isRegisteredLinkeError(error, 'device-internal-error')
+            && !String(error.message || '').includes(outside)
+            && !String(error.stack || '').includes('OUTSIDE-REGISTRY-NEW')
+            && !String(error.message || '').includes(root)
+          ),
+        );
+        assert.strictEqual(await readFile(outsideTemp, 'utf8'), 'OUTSIDE-REGISTRY-NEW');
+        assert.ok((await lstat(join(root, 'device-registry-v1.json.new'))).isSymbolicLink());
+      });
+
+      await withRegistry('linke-registry-final-symlink-', async (registry, root) => {
+        const outsideFinal = join(outside, 'registry-final-target');
+        await writeFile(outsideFinal, 'OUTSIDE-REGISTRY-FINAL');
+        await symlink(outsideFinal, join(root, 'device-registry-v1.json'), 'file');
+        await assert.rejects(
+          registry.issueEnrollment({ deviceId: 'mac-symlink-final' }),
+          (error) => (
+            isRegisteredLinkeError(error, 'device-internal-error')
+            && !String(error.message || '').includes(outside)
+            && !String(error.stack || '').includes('OUTSIDE-REGISTRY-FINAL')
+          ),
+        );
+        assert.strictEqual(await readFile(outsideFinal, 'utf8'), 'OUTSIDE-REGISTRY-FINAL');
+        assert.ok((await lstat(join(root, 'device-registry-v1.json'))).isSymbolicLink());
+        const outsideNames = await readdir(outside);
+        assert.deepStrictEqual(outsideNames.sort(), ['registry-final-target', 'registry-new-target'].sort());
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects reading registry final symlink as durable state', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-registry-read-out-'));
+    try {
+      await withRegistry('linke-registry-read-symlink-', async (registry, root) => {
+        const outsideFinal = join(outside, 'leaked-state.json');
+        await writeFile(outsideFinal, JSON.stringify({
+          schemaVersion: 1,
+          controllerTlsFingerprint: null,
+          enrollments: [],
+          devices: [],
+        }));
+        await symlink(outsideFinal, join(root, 'device-registry-v1.json'), 'file');
+        await assert.rejects(
+          registry.getStatus(),
+          (error) => (
+            isRegisteredLinkeError(error, 'device-internal-error')
+            && !String(error.message || '').includes(outside)
+            && !String(error.message || '').includes('leaked-state')
+          ),
+        );
+        assert.strictEqual(
+          (await readFile(outsideFinal, 'utf8')).includes('schemaVersion'),
+          true,
+        );
+      });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects first-create dataDir when an ancestor is a symlink and creates nothing outside', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-registry-anc-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-registry-anc-out-'));
+    try {
+      const link = join(base, 'evil');
+      await symlink(outside, link, 'dir');
+      const dataDir = join(link, 'registry-root');
+      const registry = new DeviceRegistry({ dataDir });
+      await assert.rejects(
+        registry.issueEnrollment({ deviceId: 'mac-anc' }),
+        (error) => (
+          isRegisteredLinkeError(error, 'device-internal-error')
+          && !String(error.message || '').includes(outside)
+          && !String(error.message || '').includes(dataDir)
+        ),
+      );
+      const outsideEntries = await readdir(outside);
+      assert.strictEqual(outsideEntries.includes('registry-root'), false);
+      assert.strictEqual(outsideEntries.includes('device-registry-v1.json'), false);
+      assert.strictEqual(outsideEntries.includes('device-registry-v1.json.new'), false);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('creates missing nested dataDir under a real ancestor on first write', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-registry-create-'));
+    try {
+      const dataDir = join(base, 'nested', 'data');
+      const registry = new DeviceRegistry({ dataDir });
+      const issued = await registry.issueEnrollment({ deviceId: 'mac-create' });
+      assert.match(issued.code, /^[A-Za-z0-9_-]{43}$/);
+      const st = await lstat(dataDir);
+      assert.strictEqual(st.isDirectory(), true);
+      assert.strictEqual(st.isSymbolicLink(), false);
+      const published = await lstat(join(dataDir, 'device-registry-v1.json'));
+      assert.strictEqual(published.isFile(), true);
+      assert.strictEqual(published.mode & 0o777, 0o600);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });

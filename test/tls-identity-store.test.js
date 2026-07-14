@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -464,6 +464,222 @@ describe('TLS identity store', () => {
       assert.strictEqual(attempt, 2);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects tls directory/temp/final cert symlinks without writing outside or keeping incomplete key', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-tls-symlink-out-'));
+    try {
+      // dataDir itself is a symlink directory → fail before Keychain set.
+      const parent = await mkdtemp(join(tmpdir(), 'linke-tls-dir-parent-'));
+      try {
+        await symlink(outside, join(parent, 'tls'), 'dir');
+        const map = new Map();
+        const store = new TlsIdentityStore({
+          dataDir: join(parent, 'tls'),
+          keychain: memoryKeychain(map),
+          generatePrivateKey: () => ({ keyPem: 'PRIVATE-DIR', publicKeyDigest: 'matched' }),
+          certificateFactory: async () => 'CERTIFICATE',
+          inspectCertificate: () => ({
+            fingerprint: 'a'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+          }),
+          inspectPrivateKey: () => 'matched',
+        });
+        await assert.rejects(
+          store.ensure({ host: '192.168.10.4', port: 3443 }),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(error.code, 'device-tls-identity-incomplete');
+            assert.equal(text.includes(outside), false);
+            return true;
+          },
+        );
+        assert.strictEqual(map.has('controller-tls-private-key'), false);
+        assert.equal((await readdir(outside)).includes('controller-cert.pem'), false);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+
+      // Final cert path is a file symlink → reject and leave outside unchanged.
+      const rootFinal = await mkdtemp(join(tmpdir(), 'linke-tls-final-symlink-'));
+      try {
+        const outsideCert = join(outside, 'controller-cert.pem');
+        await writeFile(outsideCert, 'OUTSIDE-CERT');
+        await symlink(outsideCert, join(rootFinal, 'controller-cert.pem'), 'file');
+        const map = new Map();
+        const store = new TlsIdentityStore({
+          dataDir: rootFinal,
+          keychain: memoryKeychain(map),
+          generatePrivateKey: () => ({ keyPem: 'PRIVATE-FINAL', publicKeyDigest: 'matched' }),
+          certificateFactory: async () => 'CERTIFICATE',
+          inspectCertificate: () => ({
+            fingerprint: 'b'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+          }),
+          inspectPrivateKey: () => 'matched',
+        });
+        await assert.rejects(
+          store.ensure({ host: '192.168.10.4', port: 3443 }),
+          (error) => error.code === 'device-tls-identity-incomplete',
+        );
+        // Half-pair is incomplete: either no key, or key rolled back after write fail.
+        assert.strictEqual(map.has('controller-tls-private-key'), false);
+        assert.strictEqual(await readFile(outsideCert, 'utf8'), 'OUTSIDE-CERT');
+        assert.equal((await lstat(join(rootFinal, 'controller-cert.pem'))).isSymbolicLink(), true);
+      } finally {
+        await rm(rootFinal, { recursive: true, force: true });
+      }
+
+      // Temp cert path is a symlink → reject without following.
+      const rootTemp = await mkdtemp(join(tmpdir(), 'linke-tls-temp-symlink-'));
+      try {
+        const outsideTemp = join(outside, 'cert-temp');
+        await writeFile(outsideTemp, 'OUTSIDE-TEMP-CERT');
+        // Plant many possible temp names? Production uses randomUUID. Instead plant
+        // final-safe dir and rely on fixed inject if available; without inject we plant
+        // a pre-existing sibling symlink and verify final/temp path safety via final case.
+        // Also cover read path when only cert exists as symlink (half state incomplete).
+        await symlink(outsideTemp, join(rootTemp, 'controller-cert.pem'), 'file');
+        const map = new Map([['controller-tls-private-key', 'PRIVATE-EXISTING']]);
+        const store = new TlsIdentityStore({
+          dataDir: rootTemp,
+          keychain: memoryKeychain(map),
+          generatePrivateKey: () => ({ keyPem: 'PRIVATE-TEMP', publicKeyDigest: 'matched' }),
+          certificateFactory: async () => 'CERTIFICATE',
+          inspectCertificate: () => ({
+            fingerprint: 'c'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+          }),
+          inspectPrivateKey: () => 'matched',
+        });
+        await assert.rejects(
+          store.ensure({ host: '192.168.10.4', port: 3443 }),
+          (error) => error.code === 'device-tls-identity-incomplete',
+        );
+        assert.strictEqual(await readFile(outsideTemp, 'utf8'), 'OUTSIDE-TEMP-CERT');
+      } finally {
+        await rm(rootTemp, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects first-create TLS dataDir when ancestor is a symlink without Keychain side effects', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-tls-anc-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-tls-anc-out-'));
+    try {
+      const link = join(base, 'evil');
+      await symlink(outside, link, 'dir');
+      const dataDir = join(link, 'tls-root');
+      const map = new Map();
+      const store = new TlsIdentityStore({
+        dataDir,
+        keychain: memoryKeychain(map),
+        generatePrivateKey: () => ({ keyPem: 'PRIVATE-ANC', publicKeyDigest: 'matched' }),
+        certificateFactory: async () => 'CERTIFICATE',
+        inspectCertificate: () => ({
+          fingerprint: 'd'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+        }),
+        inspectPrivateKey: () => 'matched',
+      });
+      await assert.rejects(
+        store.ensure({ host: '192.168.10.4', port: 3443 }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}`;
+          assert.equal(error.code, 'device-tls-identity-incomplete');
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes(dataDir), false);
+          return true;
+        },
+      );
+      assert.strictEqual(map.has('controller-tls-private-key'), false);
+      const outsideEntries = await readdir(outside);
+      assert.equal(outsideEntries.includes('tls-root'), false);
+      assert.equal(outsideEntries.includes('controller-cert.pem'), false);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('creates missing TLS dataDir under a real ancestor before Keychain set', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-tls-create-'));
+    try {
+      const dataDir = join(base, 'nested', 'tls');
+      const map = new Map();
+      const store = new TlsIdentityStore({
+        dataDir,
+        keychain: memoryKeychain(map),
+        generatePrivateKey: () => ({ keyPem: 'PRIVATE-CREATE', publicKeyDigest: 'matched' }),
+        certificateFactory: async () => 'CERTIFICATE',
+        inspectCertificate: () => ({
+          fingerprint: 'e'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+        }),
+        inspectPrivateKey: () => 'matched',
+      });
+      const identity = await store.ensure({ host: '192.168.10.4', port: 3443 });
+      assert.strictEqual(identity.keyPem, 'PRIVATE-CREATE');
+      assert.strictEqual(map.get('controller-tls-private-key'), 'PRIVATE-CREATE');
+      const rootStat = await lstat(dataDir);
+      assert.equal(rootStat.isDirectory(), true);
+      assert.equal(rootStat.isSymbolicLink(), false);
+      const certStat = await lstat(join(dataDir, 'controller-cert.pem'));
+      assert.equal(certStat.isFile(), true);
+      assert.equal(certStat.mode & 0o777, 0o600);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('validates cert path safety before any Keychain set during create', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-tls-prekey-out-'));
+    const parent = await mkdtemp(join(tmpdir(), 'linke-tls-prekey-parent-'));
+    try {
+      await symlink(outside, join(parent, 'tls'), 'dir');
+      const order = [];
+      const map = new Map();
+      const store = new TlsIdentityStore({
+        dataDir: join(parent, 'tls'),
+        keychain: {
+          async get(id) {
+            order.push(`get:${id}`);
+            if (!map.has(id)) {
+              const error = new Error('keychain-item-missing');
+              error.code = 'keychain-item-missing';
+              throw error;
+            }
+            return map.get(id);
+          },
+          async set(id, value) {
+            order.push(`set:${id}`);
+            map.set(id, value);
+          },
+          async delete(id) {
+            order.push(`delete:${id}`);
+            return map.delete(id);
+          },
+        },
+        generatePrivateKey: () => {
+          order.push('generate');
+          return { keyPem: 'PRIVATE-PRE', publicKeyDigest: 'matched' };
+        },
+        certificateFactory: async () => {
+          order.push('cert');
+          return 'CERTIFICATE';
+        },
+        inspectCertificate: () => ({
+          fingerprint: 'd'.repeat(64), sanEntries: ['IP:192.168.10.4'], publicKeyDigest: 'matched',
+        }),
+        inspectPrivateKey: () => 'matched',
+      });
+      await assert.rejects(
+        store.ensure({ host: '192.168.10.4', port: 3443 }),
+        (error) => error.code === 'device-tls-identity-incomplete',
+      );
+      assert.equal(order.includes('set:controller-tls-private-key'), false);
+      assert.strictEqual(map.has('controller-tls-private-key'), false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

@@ -110,6 +110,8 @@ Controller runner 只从当前专用 run directory 内固定名称的 `controlle
 8. 用 production `requestPinnedJson()` 发起 protocolVersion=N-2 的真实 enrollment，必须得到 `device-protocol-unsupported` / HTTP 426，且不写 token。
 9. 删除已经消费的一次性 enrollment code 字段并原子重写本地 bundle。
 
+第 9 步必须把 bundle 从 `kind=initial` 转换为 `kind=initial-consumed`：只保留同一 run id、Agent URL、旧 TLS fingerprint、三个 device id、专用 Endpoint Keychain service、原始 createdAt 与新的 consumedAt。该 continuation bundle 已无一次性秘密，不再使用 enrollment code TTL 作为后续阶段期限；post-revoke、post-restart 与 post-fingerprint-change 只接受它，并始终绑定已持久化的 Endpoint `state.runId`。
+
 `post-revoke` 使用 current 的专用 Keychain token请求真实 heartbeat，必须得到 `device-revoked`。
 
 `post-restart` 使用仍 active 的 N-1 设备完成 heartbeat，证明 Controller registry、TLS identity 和 Endpoint Keychain token 跨进程重启持续有效。
@@ -147,6 +149,18 @@ initial bundle 仅包含：
 - current/N-1/N-2 一次性 enrollment code；
 - 专用 Endpoint Keychain service；
 - bundle 生成时间和过期时间。
+
+initial-consumed bundle 仅包含：
+
+- schema version；
+- kind=`initial-consumed`；
+- 同一 run id；
+- Agent HTTPS URL 与旧 TLS fingerprint；
+- current/N-1/N-2 device id（不得再有 enrollment code key）；
+- 同一个专用 Endpoint Keychain service；
+- 原始生成时间与 consumedAt。
+
+initial-consumed bundle 没有 enrollment secret，不以原始 code TTL 阻断后续真实阶段；它仍必须是 `0600`、非 symlink、exact schema、与 Endpoint state 同 run，并在 cleanup 删除。
 
 reenrollment bundle 仅包含：
 
@@ -205,7 +219,7 @@ runner 使用 `KeychainStore.delete('controller-tls-private-key')` 和精确证�
 
 出现只删 key 或只删 cert 的半状态时立即停止，固定报告 `device-tls-identity-incomplete`，不得继续自动修复或重新生成。
 
-`controller-tls-private-key` 与 `controller-cert.pem` 当前是 production identity store 的内部持久化契约，不为 harness 扩大生产导出。harness 以测试专用常量精确固定这两个标识，并用 `TlsIdentityStore` 注入式契约测试捕获 production 命名漂移；契约测试未通过时禁止真实 replacement。
+`controller-tls-private-key` 与 `controller-cert.pem` 当前是 production identity store 的内部持久化契约，不为 harness 扩大生产导出。harness 以测试专用常量精确固定这两个标识，并用 `TlsIdentityStore` 注入式契约测试捕获 production 命名漂移；契约测试未通过时禁止真实 replacement。replacement 删除前必须分别证明 key 与 cert 同时存在；`delete()` 返回 false、只存在一项或任一检查不可用都不能进入删除，Keychain unavailable 必须保留原 registered code。
 
 ## 输出与证据
 
@@ -249,6 +263,8 @@ initialized
 → controller-restarted
 → restart-passed
 → replacing-fingerprint
+→ identity-deleted
+→ identity-regenerated
 → fingerprint-replaced
 → preparing-reenrollment
 → reenrollment-bundle-prepared
@@ -282,11 +298,15 @@ initialized
 - 跳阶段、倒序、未知命令或跨 run bundle 固定拒绝。
 - `ack-*` 只消费当前预期 phase 的固定 receipt；成功迁移后精确删除该 receipt，重复 ack 返回 idempotent PASS 且不重复副作用。
 - crash 后只从已持久化状态继续；不得猜测 Keychain 内容或自动扫描。`preparing-bundle`、`revoking-current` 等无法证明是否完成的 intent 状态固定 BLOCKED 并要求精确清理/重建专用 run；只有 restart、paired identity replacement 和幂等 cleanup 可按明确恢复规则继续。
+- state file 只有明确 ENOENT 才表示首次运行；mode/schema/JSON/symlink/读取失败一律 fail-closed，禁止覆盖为新 run。
+- `restarting-controller` 在新进程中只复用同一 data/keychain/port 启动并写 `controller-restarted`。`cleaning` 只恢复 exact cleanup。
+- replacement 恢复固定分段：`replacing-fingerprint` 检查 pair；both present 可执行成对删除，both missing 视为删除已完成，half-state BLOCKED；`identity-deleted` 只允许生成新 identity 并严格观察 no-accept mismatch；`identity-regenerated` 若 no-accept 仍 mismatch 则执行 accept，若已匹配则证明 accept 已完成，之后写 `fingerprint-replaced`。不得从这些状态执行其它业务命令。
 - ack 的顺序固定为：验证 receipt → 原子写入完成状态 → 精确删除 receipt。若删除前 crash，重复 ack 只清理同一 receipt 并返回 idempotent PASS。
 - SCP/SSH 失败保持 `bundle-prepared`，允许有界重传同一 bundle；不得新签发 code。
 - 若 bundle 过期，必须由 Controller runner 精确废弃旧 state 后重新 `prepare`，不得复用旧 code。
 - cleanup 只处理 state 中已知的专用文件和专用 Keychain items；任何不确定项转人工处理。
 - cleanup 先关闭已存在 listener，再逐项 unlink state allowlist 的文件、逐项删除专用 Keychain item，最后只用 `rmdir` 删除 state allowlist 中预先排序的已知空目录；禁止递归删除、glob、readdir 扫描或扩大到 run directory 之外。
+- Keychain `delete()` 只有返回 false 才表示 missing；`keychain-unavailable` 或其它 throw 固定 BLOCKED/FAIL，禁止写 `cleaned`。Endpoint state journal 在 cleanup 完成态持久化前不得删除。
 - Controller 幂等对固定为：`bundle-prepared/prepare`、`endpoint-pre-revoke-passed/ack-pre-revoke`、`current-revoked/revoke-current`、`endpoint-post-revoke-passed/ack-post-revoke`、`controller-restarted/restart`、`restart-passed/ack-post-restart`、`fingerprint-replaced/replace-identity-confirmed`、`reenrollment-bundle-prepared/prepare-reenrollment`、`fingerprint-mismatch-passed/ack-post-fingerprint-change`、`reenrollment-passed/ack-reenroll`、`cleaned/stop`。其它越序重复固定拒绝；重复 ack 只允许清理可能残留的同一 receipt。
 - Endpoint 幂等对固定为每个 `*-passed` state 重复其同名 phase，以及 `cleaned/cleanup`。重复 phase 不重放 network/Keychain，只重新生成同一 sanitized PASS receipt，供丢失 receipt 的 SCP 重传。
 - cleanup allowlist validator 接收专用 run directory，拒绝 absolute、空段、`.`/`..`、NUL 和 resolve 后越界路径。每次 unlink/rmdir 前重新 resolve，并对 run directory 到目标的每级既有 ancestor 做 `lstat`；发现 symlink 或非预期类型立即 BLOCKED。
@@ -332,6 +352,21 @@ initialized
 
 ## TDD 测试要求
 
+### Gold production dataDir 写入安全修订
+
+Fresh review 已用 synthetic 临时目录稳定复现：`device-registry-v1.json.new` 最终文件 symlink、`audit/` 目录 symlink、`repo/` 目录 symlink 会使现有 production `writeFile` / `appendFile` / recursive `mkdir` 把 registry、audit 或 heartbeat 元数据写到 dataDir 外。该缺口不能靠 harness 单次 `lstat` preflight 根治，因此它是本设计原“test-only / 不改 src”边界的唯一安全例外，也是 Gold 真实门的前置 blocker。
+
+修订后的分层边界：
+
+1. harness 在任何 Keychain/runtime 副作用前继续验证 dedicated run directory、dataDir、TLS cert、registry、audit 与 repo 的已知 ancestor；静态 symlink/type mismatch 固定拒绝。
+2. production 共用写原语必须逐级创建并 `lstat` dataDir 内相对目录，拒绝 symlink/非目录；最终文件使用 `O_NOFOLLOW` 打开并通过已打开 fd 的 `stat` 复核为普通文件。
+3. registry/TLS/JSON 原子发布使用同目录 temp、exclusive/no-follow open、fd 写入/`sync`/`chmod` 后 rename；rename 前再次验证 parent 与既有 target 类型。audit append 使用 `O_APPEND | O_CREAT | O_NOFOLLOW`，compaction 使用同一安全原子发布。
+4. production read 也不得跟随 registry/audit/TLS 最终文件 symlink；错误必须映射为既有 sanitized/registered 失败，不输出原始路径或内容。
+5. heartbeat 的 repo/device 路径必须相对 dataDir 且在创建目录、读取与原子写 `device.json` 时使用相同 no-follow 约束。已有 restore-root no-follow 行为不得回退。
+6. Node 标准库没有跨平台 `openat` 目录 fd API，无法防御拥有同一账户权限的恶意进程在每个 syscall 之间无限竞态；本门要求阻断预置 symlink、最终目标替换和可测试的 write-window swap，并通过 dedicated 目录权限、写前复核与 fd no-follow 把剩余竞态降为明确的同 UID 信任边界，不能把单次 preflight 宣称为完全原子。
+
+必须先用 production API 写 RED：registry temp/final、audit dir/file、repo/devices/device path、TLS temp/final 的 symlink 均不得在 outside 留文件；正常 missing/create、并发 append、mode `0600`、restart/replacement 与现有全量测试继续通过。
+
 `test/g0a-real-acceptance.test.js` 必须先 RED，至少覆盖：
 
 1. gate 缺失时所有依赖调用次数为零。
@@ -369,6 +404,8 @@ initialized
 9. `prepare-reenrollment` 后传输新 bundle；Endpoint `post-fingerprint-change`、回传并 `ack-post-fingerprint-change`，再执行 `reenroll`、回传并 `ack-reenroll`。
 10. 精确 cleanup，运行 Grok fresh review 和 Codex PM 终验，生成脱敏报告。
 
+两个 runner 文件作为 module import 时必须零副作用；作为 `node <runner>` 入口执行时必须调用对应 main。Controller 接受 stdin 固定 command；Endpoint 只接受恰好一个固定 phase argv，额外 argv 固定拒绝。gate/config/state 错误也只输出一个 sanitized result，不允许静默 exit 0。
+
 ## 非目标
 
 - 不新增生产 endpoint、正式 CLI command、Web UI 或默认脚本。
@@ -380,6 +417,7 @@ initialized
 - 不自动执行 macOS Keychain lock/unlock 或修改密码。
 - 不绕过 TLS pin，不使用 `rejectUnauthorized:false` 作为信任替代。
 - 不用 mock 或自动测试填充真实证据。
+- 不借本修订新增生产 endpoint、CLI 或功能面；`src/` 改动仅限修复已复现的 dataDir no-follow 写入/读取安全缺口。
 
 ## 完成标准
 

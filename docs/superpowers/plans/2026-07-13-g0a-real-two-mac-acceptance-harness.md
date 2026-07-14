@@ -10,13 +10,13 @@
 
 ## Global Constraints
 
-- 只新增 `test/helpers/g0a-real-common.js`、`test/helpers/g0a-real-controller-runner.js`、`test/helpers/g0a-real-endpoint-runner.js`、`test/g0a-real-acceptance.test.js`，并最小修改 `README.md` 与 `test/readme.test.js`。
-- 不修改 `src/`、`package.json`、版本号、Gold 状态或生产 API；若现有 export 不足，停止并返回 PM。
+- 主要新增 `test/helpers/g0a-real-common.js`、`test/helpers/g0a-real-controller-runner.js`、`test/helpers/g0a-real-endpoint-runner.js`、`test/g0a-real-acceptance.test.js`，并最小修改 `README.md` 与 `test/readme.test.js`。
+- 默认不修改 `src/`、`package.json`、版本号、Gold 状态或生产 API；Task 4.9 是唯一例外，只修复 fresh review 已用 synthetic temp 稳定复现的 production dataDir symlink/no-follow 写入安全缺口，不扩大功能面。
 - 只有 `LINKE_REAL_G0A_ACCEPTANCE === 'enabled'` 才允许真实 Keychain/network/file cleanup 副作用；import helper 必须零副作用。
 - 真实 Controller config、state、bundle、receipt 必须是非 symlink 普通文件且 mode `0600`；读取使用 `O_NOFOLLOW` 并在已打开 fd 上复核 mode/schema。
 - bundle/token/code/fingerprint/URL/host/IP/路径/Keychain service/item/原始错误不得进入 stdout、stderr、报告或 Git；management token 只在 Controller 进程内存。
 - Controller config 使用显式私网 IP literal 与固定非零 Agent port；不自动发现网卡，不读取或修改 `~/.ssh`。
-- initial bundle 生成 current、N-1、N-2 三个 code；reenrollment bundle 只生成 current 一个 code。
+- initial bundle 生成 current、N-1、N-2 三个 code；pre-revoke 后原子转换为无 code/TTL 的 `initial-consumed` continuation bundle；reenrollment bundle 只生成 current 一个 code。
 - current heartbeat 使用 production `heartbeatDevice()`；N-1 heartbeat 使用 `requestPinnedJson()` 且 body protocolVersion 为 current-1；N-2 必须是 HTTP 426 / `device-protocol-unsupported`。
 - rotate old token 只保留在当前函数局部内存；rotate 后立即用它请求 heartbeat 并严格要求 `device-token-invalid`。
 - fingerprint replacement 只操作专用 Keychain service 下 `controller-tls-private-key` 和专用 data directory 下 `tls/controller-cert.pem`；禁止 wildcard、扫描和 production service。
@@ -31,6 +31,9 @@
 - Create `test/g0a-real-acceptance.test.js` — Common/Controller/Endpoint 的 RED→GREEN 契约与 fault injection。
 - Modify `README.md` — test-only 操作边界、SSH alias、真实门仍 BLOCKED。
 - Modify `test/readme.test.js` — 锁定 README 不误报 Gold。
+- Create `src/safe-data-files.js` — production dataDir 相对路径、ancestor、`O_NOFOLLOW`、fd 复核、原子发布与 append/read 安全原语。
+- Modify `src/device-registry.js`、`src/audit-log.js`、`src/storage.js`、`src/tls-identity-store.js`、`src/controller-runtime.js` — 仅把已复现写路径接入安全原语。
+- Modify production 对应 tests — registry/audit/repo/TLS symlink RED→GREEN 与非回退测试。
 
 ---
 
@@ -234,7 +237,8 @@ export const CONTROLLER_STATES = Object.freeze([
   'initialized', 'controller-ready', 'preparing-bundle', 'bundle-prepared',
   'endpoint-pre-revoke-passed', 'revoking-current', 'current-revoked',
   'endpoint-post-revoke-passed', 'restarting-controller', 'controller-restarted',
-  'restart-passed', 'replacing-fingerprint', 'fingerprint-replaced',
+  'restart-passed', 'replacing-fingerprint', 'identity-deleted',
+  'identity-regenerated', 'fingerprint-replaced',
   'preparing-reenrollment', 'reenrollment-bundle-prepared',
   'fingerprint-mismatch-passed', 'reenrollment-passed', 'cleaning', 'cleaned',
 ]);
@@ -296,7 +300,9 @@ const TRANSITIONS = Object.freeze({
   'restarting-controller:restart-complete': 'controller-restarted',
   'controller-restarted:ack-post-restart': 'restart-passed',
   'restart-passed:replace-identity-confirmed': 'replacing-fingerprint',
-  'replacing-fingerprint:replacement-complete': 'fingerprint-replaced',
+  'replacing-fingerprint:identity-delete-complete': 'identity-deleted',
+  'identity-deleted:identity-regenerate-complete': 'identity-regenerated',
+  'identity-regenerated:replacement-complete': 'fingerprint-replaced',
   'fingerprint-replaced:prepare-reenrollment': 'preparing-reenrollment',
   'preparing-reenrollment:prepare-reenrollment-complete': 'reenrollment-bundle-prepared',
   'reenrollment-bundle-prepared:ack-post-fingerprint-change': 'fingerprint-mismatch-passed',
@@ -1195,6 +1201,240 @@ Expected: no output, exit 0。
 Run: `git status --short`
 
 Expected: 仅包含本计划允许的 6 个 implementation/doc files 与已批准的 spec/plan 文档变更；不得出现 bundle/state/receipt/config/marker 或报告。
+
+---
+
+### Task 4.5: Fresh-Review Remediation and Real-Runner Operability
+
+**Files:**
+- Modify: `test/helpers/g0a-real-common.js`
+- Modify: `test/helpers/g0a-real-controller-runner.js`
+- Modify: `test/helpers/g0a-real-endpoint-runner.js`
+- Modify: `test/g0a-real-acceptance.test.js`
+- Modify: `README.md`
+- Modify: `test/readme.test.js`
+
+**Interfaces:**
+- Consumes: Tasks 1–4 implementation and Grok fresh review P0/P1 findings。
+- Produces: `readOptionalPrivateJson()`、`kind=initial-consumed`、recoverable replacement substates、direct main guards、strict response/cleanup semantics。
+
+- [ ] **Step 1: 写 review finding regression RED tests**
+
+每个 finding 必须先有独立失败测试，至少包括：
+
+```js
+describe('G0a fresh-review regressions', () => {
+  it('distinguishes missing state from corrupt, 0644 and symlink state', async () => {
+    for (const fault of ['bad-schema', 'truncated-json', '0644', 'symlink']) {
+      const counters = { stateWrites: 0, keychain: 0, network: 0 };
+      const harness = await controllerWithStateFault(fault, counters);
+      await assert.rejects(harness.start(), (e) => e.code === ERROR_CODES.DEVICE_REQUEST_INVALID);
+      assert.deepEqual(counters, { stateWrites: 0, keychain: 0, network: 0 });
+    }
+  });
+
+  it('allows stop-only recovery from unsafe controller intent', async () => {
+    const calls = [];
+    const harness = await controllerAtIntent('preparing-bundle', calls);
+    const started = await harness.start();
+    assert.equal(started.status, 'BLOCKED');
+    assert.equal(calls.includes('network'), false);
+    assert.equal((await harness.execute('prepare')).status, 'BLOCKED');
+    assert.equal((await harness.execute('stop')).status, 'PASS');
+  });
+
+  it('resumes restart, replacement substates and cleaning without replaying unsafe work', async () => {
+    for (const phase of [
+      'restarting-controller', 'replacing-fingerprint',
+      'identity-deleted', 'identity-regenerated', 'cleaning',
+    ]) {
+      const result = await exerciseSafeControllerResume(phase);
+      assert.equal(result.unsafeReplay, false);
+      assert.equal(result.status, 'PASS');
+    }
+  });
+
+  it('does not mark cleanup complete when dedicated Keychain deletion is unavailable', async () => {
+    for (const role of ['controller', 'endpoint']) {
+      const result = await cleanupWithKeychainFailure(role, ERROR_CODES.KEYCHAIN_UNAVAILABLE);
+      assert.equal(result.status, 'BLOCKED');
+      assert.equal(result.state.phase, 'cleaning');
+    }
+  });
+
+  it('binds every post-init bundle to Endpoint state runId', async () => {
+    const calls = { keychain: 0, network: 0 };
+    const harness = await endpointWithCrossRunBundle(calls);
+    const result = await harness.runPhase('post-revoke');
+    assert.notEqual(result.status, 'PASS');
+    assert.deepEqual(calls, { keychain: 0, network: 0 });
+  });
+
+  it('uses initial-consumed metadata after the enrollment TTL without retaining codes', async () => {
+    const consumed = await runSyntheticPreRevokeAndReadBundle();
+    assert.equal(consumed.kind, 'initial-consumed');
+    assert.equal('expiresAt' in consumed, false);
+    assert.equal(JSON.stringify(consumed).includes('enrollmentCode'), false);
+    assert.doesNotThrow(() => validateBundle(consumed, {
+      runId: consumed.runId,
+      now: new Date('2031-01-01T00:00:00.000Z'),
+    }));
+  });
+
+  it('strictly validates management and N-1 response shapes', async () => {
+    for (const responseFault of [
+      'enrollment-expiry-missing', 'enrollment-expiry-noncanonical',
+      'revoke-device-mismatch', 'revoke-flag-false',
+      'n1-short-token', 'n1-heartbeat-missing-accepted',
+      'post-restart-heartbeat-missing-accepted',
+    ]) {
+      const result = await exerciseMalformedResponse(responseFault);
+      assert.notEqual(result.status, 'PASS');
+      assert.equal(result.passReceiptWritten, false);
+    }
+  });
+
+  it('preflights paired identity and preserves Keychain unavailable', async () => {
+    for (const fault of ['key-only', 'cert-only', 'delete-false', 'keychain-unavailable']) {
+      const result = await exerciseReplacementFault(fault);
+      assert.equal(result.status, 'BLOCKED');
+      assert.equal(result.state.phase, 'replacing-fingerprint');
+    }
+  });
+
+  it('returns BLOCKED after an irreversible intent-side-effect failure', async () => {
+    const result = await failSecondEnrollmentIssue();
+    assert.equal(result.status, 'BLOCKED');
+    assert.equal(result.state.phase, 'preparing-bundle');
+  });
+});
+```
+
+测试 helpers 必须真正调用 harness/public helpers，不得直接返回预期常量。loopback management 测试使用本机 ephemeral HTTP fixture；Keychain 使用会区分 `false` 与 `KEYCHAIN_UNAVAILABLE` 的 adapter。
+
+- [ ] **Step 2: 运行 remediation RED**
+
+Run: `node --test --test-name-pattern="G0a fresh-review regressions" test/g0a-real-acceptance.test.js`
+
+Expected: FAIL on corrupt-state reset、intent cleanup、direct entry、cross-run、response shape、identity preflight 或 initial-consumed behavior；逐项记录正确失败原因。
+
+- [ ] **Step 3: 修复 Common 与 schemas**
+
+新增 `readOptionalPrivateJson(path, validator, deps)`：先 `lstat`；只有 ENOENT 返回 null，symlink/权限/schema/JSON/其它错误全部抛 registered sanitized error。Controller/Endpoint state load 必须使用它。
+
+`validateBundle()` 增加 exact `kind=initial-consumed`：字段固定为 schemaVersion、kind、runId、agentUrl、tlsFingerprint、current/N-1/N-2（只含 deviceId）、endpointKeychainService、createdAt、consumedAt；禁止 enrollmentCode 与 expiresAt。initial/reenrollment 仍严格检查 canonical expiresAt 且未过期。
+
+Common Controller states/transitions必须包含：
+
+```js
+'restart-passed:replace-identity-confirmed' -> 'replacing-fingerprint'
+'replacing-fingerprint:identity-delete-complete' -> 'identity-deleted'
+'identity-deleted:identity-regenerate-complete' -> 'identity-regenerated'
+'identity-regenerated:replacement-complete' -> 'fingerprint-replaced'
+```
+
+`atomicWritePrivateJson()` 用已打开 `FileHandle.chmod(0o600)` 而非按路径 chmod，缩小 temp swap TOCTOU；sanitized count 必须非负。
+
+- [ ] **Step 4: 修复 Controller recovery、response、replacement 与 main**
+
+`start()` 对 state 分类：
+
+- missing：首次创建 state；任何其它 state read error 直接拒绝且零副作用；
+- cleaned：idempotent PASS，不启动 listener；
+- preparing-bundle/revoking-current/preparing-reenrollment：返回 sanitized BLOCKED 并进入 cleanup-only，只有 stop 可执行；
+- restarting-controller：同 data/keychain/port 启动一次，写 controller-restarted；
+- cleaning：不启动 listener，允许继续 stop cleanup；
+- replacing-fingerprint/identity-deleted/identity-regenerated：调用明确的 replacement resume helper；
+- 其它完成态：正常启动 runtime。
+
+replacement helper 必须在删除前只判断 key/cert presence，不输出内容：both present 才删除；both missing 表示 delete 已完成；half state→`device-tls-identity-incomplete`；Keychain unavailable 保持 `keychain-unavailable`。`delete()` 返回 false 在预期 key present 时是 BLOCKED。每个阶段完成后写对应 substate，再进入下一阶段。`identity-regenerated` no-accept mismatch 时执行 accept；no-accept 已成功说明 accept 在 crash 前完成，可直接完成 state。
+
+enrollment response 严格验证 exact fields、canonical expiresAt、相同 agentUrl/fingerprint/protocol；initial bundle expiresAt 使用三者最早时间。revoke response 必须是 status 200 + matching deviceId + `revoked:true`。任何已经写 intent 后的不可证明失败返回 BLOCKED，保留 intent state。
+
+cleanup 的 Keychain delete：false=missing 幂等；throw 一律非 PASS，保留 cleaning。不得吞 `keychain-unavailable`。
+
+文件尾使用 `pathToFileURL(resolve(process.argv[1])).href === import.meta.url` main guard；import 仍零副作用。direct main 的 gate/config/state error 输出一个 sanitized result。Controller BLOCKED start 结果写出后继续 stdin，但 cleanup-only 模式拒绝非 stop command。
+
+- [ ] **Step 5: 修复 Endpoint run binding、strict protocol、cleanup 与 main**
+
+Endpoint state load 使用 `readOptionalPrivateJson`。首次 pre-revoke 可从 initial bundle bootstrap runId；state 存在后所有 bundle validation 必须传 `state.runId`。pre-revoke 成功后写 `kind=initial-consumed`；post-revoke/post-restart/post-fingerprint-change 只接受它，且不受原 code TTL 限制。
+
+N-1 enroll token 至少 32 字符；N-1 与 post-restart heartbeat response 必须 matching deviceId + `accepted:true`；post-revoke 必须 `device-revoked` + 403。所有失败都不能写 PASS receipt。
+
+cleanup 不吞 Keychain throw，且 cleanupFiles 不包含 Endpoint state journal；state 先写 cleaning，全部成功后写 cleaned。running intent 重启只允许 cleanup，其它 phase 返回 BLOCKED。
+
+Endpoint direct main 只接受恰好一个 phase argv；额外 argv 拒绝并输出一个 sanitized result。文件尾 main guard 使 direct node 可运行，module import 继续零副作用。
+
+- [ ] **Step 6: README 与 direct-entry tests**
+
+README 增加 repository-relative test-only 命令形态，不包含任何真实连接/认证值：Controller `node test/helpers/g0a-real-controller-runner.js`，Endpoint `node test/helpers/g0a-real-endpoint-runner.js <phase>`；强调 cwd 必须是 dedicated run directory，真实 gate 由本地环境预先设置。
+
+用 child process 测试 direct entry：gate 缺失时单行 sanitized FAIL；import 时无输出/副作用；Endpoint 额外 argv 固定拒绝。不得在 child argv/env 放合成 token/code/fingerprint。
+
+- [ ] **Step 7: 运行 remediation GREEN 与全量回归**
+
+Run: `node --test --test-name-pattern="G0a fresh-review regressions" test/g0a-real-acceptance.test.js`
+
+Expected: PASS。
+
+Run: `node --test test/g0a-real-acceptance.test.js test/readme.test.js`
+
+Expected: PASS。
+
+Run: `node --test test/error-codes.test.js test/keychain-store.test.js test/tls-identity-store.test.js test/device-registry.test.js test/agent-listener.test.js test/device-client.test.js test/controller-runtime.test.js test/server.test.js test/g0a-real-acceptance.test.js`
+
+Expected: PASS。
+
+Run: `npm test`
+
+Expected: PASS with only the existing real Keychain default skip。
+
+Run: `git diff --check`
+
+Expected: no output。
+
+---
+
+### Task 4.9: Production dataDir No-Follow Hardening
+
+**Files:**
+- Create: `src/safe-data-files.js`
+- Modify: `src/device-registry.js`
+- Modify: `src/audit-log.js`
+- Modify: `src/storage.js`
+- Modify: `src/tls-identity-store.js`
+- Modify: `src/controller-runtime.js` only if root-relative wiring is required
+- Modify: `test/device-registry.test.js`
+- Modify: `test/audit-log.test.js`
+- Modify: `test/storage.test.js` or the existing storage test owner
+- Modify: `test/tls-identity-store.test.js`
+- Modify: `test/g0a-real-acceptance.test.js`
+
+**Interfaces:**
+- Consumes: confirmed synthetic reproductions for registry temp symlink、audit directory symlink、repo directory symlink and reviewer TLS write-window finding。
+- Produces: shared root-relative no-follow file primitives plus production callers that fail closed before writing outside dataDir。
+
+- [ ] **Step 1: Add production RED reproductions**
+
+Tests must use private temporary roots and only boolean/synthetic assertions. Cover registry `.new` and final symlink, audit directory and final file symlink, repo/devices/device directory and `device.json` symlink, TLS directory/temp/final symlink, plus a deterministic injected preflight-to-write swap where an existing injection seam permits it. Every case asserts outside remains unchanged and the production operation rejects with its existing safe error contract.
+
+- [ ] **Step 2: Implement shared safe data-file primitives**
+
+The new module must validate relative paths, walk/create each directory component without recursive symlink following, reject symlink/non-directory ancestors, open final files with `O_NOFOLLOW`, verify the opened fd is a regular file, and expose bounded read、append and same-directory atomic write operations. Atomic temp files are `O_EXCL | O_NOFOLLOW`, mode `0600`, fd-synced/chmodded, then renamed only after parent/target revalidation. No raw path is included in outward errors.
+
+- [ ] **Step 3: Wire production owners**
+
+Device registry read/write, audit read/append/compaction, heartbeat repo directory/read/write and TLS cert read/create/publish use the shared primitives while preserving existing response/error semantics, concurrency serialization and file formats. Harness runtime preflight expands to the known registry/audit/repo ancestors as defense in depth; it is not the root fix.
+
+- [ ] **Step 4: Verify focused and full**
+
+```bash
+node --test test/device-registry.test.js test/audit-log.test.js test/storage.test.js test/tls-identity-store.test.js test/controller-runtime.test.js test/g0a-real-acceptance.test.js
+npm test
+git diff --check
+```
+
+Expected: all new RED cases GREEN, existing concurrency/mode/format tests pass, no outside file is created, no secret/raw path output, and the only skip remains the existing real Keychain default skip. Parent-shell color warning must be reported separately and may not be hidden as a passing bare run.
 
 ---
 

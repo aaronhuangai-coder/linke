@@ -1,7 +1,7 @@
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createHttpServer } from 'node:http';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -465,6 +465,69 @@ describe('controller-runtime host/port fail-closed', () => {
         return true;
       },
     );
+  });
+
+  it('rejects dataDir first-create through an ancestor symlink without creating outside', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-ctrl-anc-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-ctrl-anc-out-'));
+    try {
+      const link = join(base, 'evil');
+      await symlink(outside, link, 'dir');
+      const dataDir = join(link, 'controller-data');
+      let keychainTouched = false;
+      await assert.rejects(
+        () => startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: {
+            async get() {
+              keychainTouched = true;
+              throw new Error('keychain should not be called');
+            },
+            async set() { keychainTouched = true; },
+            async delete() { keychainTouched = true; },
+          },
+          listenServer: createLoopbackTestListenAdapter(),
+        }),
+        (error) => {
+          assert.match(String(error.message), /dataDir is required/);
+          assert.doesNotMatch(String(error.message), new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+          return true;
+        },
+      );
+      assert.equal(keychainTouched, false);
+      const outsideEntries = await readdir(outside);
+      assert.equal(outsideEntries.includes('controller-data'), false);
+      assert.equal(outsideEntries.includes('tls'), false);
+      assert.equal(outsideEntries.includes('device-registry-v1.json'), false);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('creates missing nested dataDir under a real ancestor without recursive symlink follow', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'linke-ctrl-create-'));
+    try {
+      const dataDir = join(base, 'nested', 'controller-data');
+      const runtime = await startRuntimeFixture({ dataDir });
+      try {
+        const rootStat = await lstat(dataDir);
+        assert.equal(rootStat.isDirectory(), true);
+        assert.equal(rootStat.isSymbolicLink(), false);
+        const tlsStat = await lstat(join(dataDir, 'tls'));
+        assert.equal(tlsStat.isDirectory(), true);
+        assert.equal(tlsStat.isSymbolicLink(), false);
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 
   it('defers production KeychainStore construction until after bind validation', async () => {

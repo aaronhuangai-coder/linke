@@ -2384,3 +2384,33 @@ describe('README — V0.52 Gold readiness scorecard docs', () => {
     assert.match(readme, /security-auth[\s\S]*(partial|部分)|Bearer[\s\S]*(partial|部分)|不.*完整.*鉴权/i);
   });
 });
+
+
+describe('README — G0a real two-Mac acceptance harness', () => {
+  it('documents the exact test-only safety boundary', () => {
+    assertReadmeContains(/LINKE_REAL_G0A_ACCEPTANCE=enabled/, 'exact real G0a gate');
+    assertReadmeContains(/SSH alias/i, 'preconfigured SSH alias only');
+    assertReadmeContains(/0600/, 'private bundle and receipt mode');
+    assertReadmeContains(/test-only|测试专用/i, 'test-only harness');
+    assertReadmeContains(/Gold[^\n]*(BLOCKED|blocked)/, 'Gold remains blocked before real gates');
+  });
+
+  it('documents repository-relative direct node entry without secrets', () => {
+    assertReadmeContains(
+      /node test\/helpers\/g0a-real-controller-runner\.js/,
+      'controller direct entry',
+    );
+    assertReadmeContains(
+      /node test\/helpers\/g0a-real-endpoint-runner\.js <phase>/,
+      'endpoint direct entry with phase',
+    );
+    assertReadmeContains(/dedicated run directory/i, 'cwd must be dedicated run directory');
+    assertReadmeContains(/额外 argv 固定拒绝|exactly one fixed phase/i, 'extra argv rejection');
+    assertReadmeContains(/零副作用|zero side effects/i, 'import has zero side effects');
+  });
+
+  it('does not describe automation as real hardware proof', () => {
+    assertReadmeDoesNotContain(/自动测试[^\n]*(真实双 Mac|真实 Keychain)[^\n]*(PASS|通过)/i,
+      'automation must not claim real hardware PASS');
+  });
+});

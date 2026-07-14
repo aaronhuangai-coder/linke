@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -291,6 +291,138 @@ describe('audit log module', () => {
       for (const event of events) {
         assert.match(event.requestId, /^req-concurrent-retained-/);
       }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects audit directory and events final symlinks without mutating outside', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-audit-symlink-out-'));
+    try {
+      const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-dir-symlink-'));
+      try {
+        await symlink(outside, join(dataDir, 'audit'), 'dir');
+        await assert.rejects(
+          () => appendAuditEvent(dataDir, {
+            type: 'api.heartbeat.success',
+            method: 'POST',
+            path: '/api/heartbeat',
+            statusCode: 200,
+            outcome: 'success',
+            requestId: 'req-audit-dir-symlink',
+          }),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            assert.equal(text.includes(dataDir), false);
+            assert.equal(text.includes('req-audit-dir-symlink'), false);
+            return true;
+          },
+        );
+        assert.equal((await readdir(outside)).includes('events.jsonl'), false);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+
+      const dataDirFile = await mkdtemp(join(tmpdir(), 'linke-audit-file-symlink-'));
+      try {
+        await mkdir(join(dataDirFile, 'audit'));
+        const outsideEvents = join(outside, 'events.jsonl');
+        await writeFile(outsideEvents, 'OUTSIDE-AUDIT\n');
+        await symlink(outsideEvents, join(dataDirFile, 'audit', 'events.jsonl'), 'file');
+        await assert.rejects(
+          () => appendAuditEvent(dataDirFile, {
+            type: 'api.heartbeat.success',
+            method: 'POST',
+            path: '/api/heartbeat',
+            statusCode: 200,
+            outcome: 'success',
+            requestId: 'req-audit-file-symlink',
+          }),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            assert.equal(text.includes('OUTSIDE-AUDIT'), false);
+            return true;
+          },
+        );
+        assert.equal(await readFile(outsideEvents, 'utf8'), 'OUTSIDE-AUDIT\n');
+        await assert.rejects(
+          () => readAuditEvents(dataDirFile),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            return true;
+          },
+        );
+      } finally {
+        await rm(dataDirFile, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects audit compaction temp/final symlink without mutating outside', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-audit-compact-out-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-compact-symlink-'));
+    try {
+      await mkdir(join(dataDir, 'audit'));
+      const outsideEvents = join(outside, 'events-compact.jsonl');
+      await writeFile(outsideEvents, 'OUTSIDE-COMPACT\n');
+      // Seed a real events file first so retention compaction runs, then swap final to symlink.
+      for (let index = 0; index < 3; index++) {
+        await appendAuditEvent(dataDir, {
+          type: 'api.heartbeat.success',
+          method: 'POST',
+          path: '/api/heartbeat',
+          statusCode: 200,
+          outcome: 'success',
+          requestId: `req-seed-${index}`,
+        }, { retention: { maxEvents: 10 } });
+      }
+      await rm(join(dataDir, 'audit', 'events.jsonl'));
+      await symlink(outsideEvents, join(dataDir, 'audit', 'events.jsonl'), 'file');
+      let rejected = null;
+      try {
+        await appendAuditEvent(dataDir, {
+          type: 'api.heartbeat.success',
+          method: 'POST',
+          path: '/api/heartbeat',
+          statusCode: 200,
+          outcome: 'success',
+          requestId: 'req-compact-symlink',
+        }, { retention: { maxEvents: 2 } });
+      } catch (error) {
+        rejected = error;
+      }
+      assert.ok(rejected, 'append over final symlink must reject');
+      assert.equal(rejected.code, 'safe-data-file-error');
+      assert.equal(rejected.message, 'safe-data-file-error');
+      assert.equal(String(rejected.stack || '').includes('OUTSIDE-COMPACT'), false);
+      assert.equal(await readFile(outsideEvents, 'utf8'), 'OUTSIDE-COMPACT\n');
+      assert.equal((await lstat(join(dataDir, 'audit', 'events.jsonl'))).isSymbolicLink(), true);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('writes audit events as mode 0600 regular files', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-audit-mode-'));
+    try {
+      await appendAuditEvent(dataDir, {
+        type: 'api.heartbeat.success',
+        method: 'POST',
+        path: '/api/heartbeat',
+        statusCode: 200,
+        outcome: 'success',
+        requestId: 'req-mode',
+      });
+      const st = await lstat(join(dataDir, 'audit', 'events.jsonl'));
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.mode & 0o777, 0o600);
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

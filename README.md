@@ -1583,6 +1583,57 @@ npm test
 
 测试覆盖：心跳、备份/恢复、并发隔离、路径安全、excludePatterns、run-once、launchd-dry-run、nas-dry-run、NAS app adapter dry-run、NAS credentialRef 非密钥引用、`validateNasCredentialRef`、`ALLOWED_NAS_CREDENTIAL_REF_PATTERN`、`FORBIDDEN_NAS_CREDENTIAL_FIELDS` 15 字段 denylist、`credentialRefConfigured`、`executionGate`、`readinessSummary`、per-target `executionReadiness`、固定 NAS blocker codes、Web NAS execution gate display、Web NAS execution readiness summary rendering、Agent nas-dry-run CLI readiness summary、Agent nas-dry-run CLI fail-on-blocked、retention-dry-run、restore-dry-run、backup-preflight-dry-run、manifest 详情 API、snapshot diff dry-run API、Web Console 契约、保留计划面板、快照清单详情面板、恢复预检面板、备份预检面板、NAS dry-run 面板、备份预检命令提示与快照差异预览面板、设备详情面板、备份任务概览面板、备份任务详情时间线面板、备份任务时间线 snapshot 联动、事件日志面板增强、设备备份健康面板、备份版本一致性面板、版本一致性 snapshot 联动、版本一致性筛选与搜索、版本一致性非最新摘要、版本一致性排序控制、覆盖缺口摘要、版本一致性覆盖筛选、版本一致性覆盖缺口排序、版本一致性覆盖率显示、版本一致性无可观测设备回退、版本一致性无可观测设备筛选、统一管理态、管理态筛选、管理态分桶统计、管理态分桶选中态、管理态分桶作用域、管理态判定提示、设备列表空态筛选上下文、设备筛选重置、设备筛选重置状态、设备筛选摘要、设备筛选摘要状态、设备筛选计数状态、设备筛选计数指标、发布健康检查、发布健康检查 CLI、发布健康检查面板、发布版本一致性守卫、发布就绪检查 CLI、发布就绪网页控制台、Gold readiness scorecard、GET /api/gold-readiness、gold-readiness-panel、Agent gold-readiness CLI、Agent gold-readiness fail-on-blocked、可选 Bearer token API 认证骨架、Agent CLI `--token`、Agent auth-status CLI、Agent hardening-status CLI、Agent supervisor-status CLI、Agent supervisor-install-dry-run CLI、Agent supervisor-install-dry-run CLI readiness summary、test/agent-supervisor-install-dry-run.test.js、buildSupervisorInstallDryRunPlan、buildSupervisorInstallReadinessSummary、buildSupervisorInstallCommandPreview、readinessSummary.state:blocked、installCommandPreview.state:blocked、installCommandPreview.actions:wouldRun:false、wouldWrite:false、supervisor-install-dry-run --readiness-summary、supervisor-install-dry-run --fail-on-blocked、退出码 2、config read/validation error sanitization、Web hardening-status panel、GET /api/hardening-status、buildHardeningStatusResponse、buildHardeningStatusViewModel、GET /api/supervisor-status、buildSupervisorStatusResponse、Web supervisor-status panel、supervisor-status-panel、buildSupervisorStatusViewModel、supervisor.state:not_configured、supervisorInstalled:false、wouldInstall:false、wouldStart:false、launchctlCalled:false、processListRead:false、launchdFileWritten:false、metadataWritten:false、nasConnected:false、backupTriggered:false、restoreTriggered:false、remoteCommandExecuted:false、POST /api/supervisor-lifecycle-approval-persist、GET /api/supervisor-lifecycle-approval-records、test/supervisor-lifecycle-approval-persist-api.test.js、supervisor-lifecycle-approval-persist-button、supervisor-lifecycle-approval-records-button、test/web-console.test.js supervisor lifecycle approval persist、validateSupervisorLifecycleExecutorManifest、test/supervisor-lifecycle-executor-manifest.test.js、src/agent.js supervisor-lifecycle-executor-manifest-readiness、test/agent-supervisor-lifecycle-executor-manifest-readiness.test.js、POST /api/supervisor-lifecycle-executor-manifest-readiness、test/supervisor-lifecycle-executor-manifest-readiness-api.test.js、executorManifestReadiness.state:blocked、guarded-executor-runner-missing、POST /api/supervisor-lifecycle-guarded-runner-execution-gate、test/supervisor-lifecycle-guarded-runner-execution-gate-api.test.js、supervisor-lifecycle-guarded-runner-execution-gate-button、src/web/app.js buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel、test/web-console.test.js supervisor lifecycle guarded runner execution gate、src/agent.js supervisor-lifecycle-guarded-runner-execution-gate、test/agent-supervisor-lifecycle-guarded-runner-execution-gate.test.js、--data-dir <path>、--execute-requested、src/agent.js supervisor-lifecycle-guarded-runner-execution-preview、test/agent-supervisor-lifecycle-guarded-runner-execution-preview.test.js、POST /api/supervisor-lifecycle-guarded-runner-execution-preview、test/supervisor-lifecycle-guarded-runner-execution-preview-api.test.js、supervisor-lifecycle-guarded-runner-execution-preview-button、src/web/app.js buildSupervisorLifecycleGuardedRunnerExecutionPreviewViewModel、test/web-console.test.js supervisor lifecycle guarded runner execution preview、buildSupervisorLifecycleGuardedRunnerExecutionPreview、test/supervisor-lifecycle-guarded-runner-execution-preview.test.js、buildSupervisorLifecycleGuardedRunnerExecutionGate、test/supervisor-lifecycle-guarded-runner-execution-gate.test.js、executionEligible:false、execute-request-missing、realRunnerWiringReady:false、executionReady:false、executorReady:false、wouldExecute:false、wouldRun:false、wouldWrite:false、guarded-runner-execution-preview-only、real-guarded-runner-execution-wiring-missing、Web Console 内存态 API token UX、API read/write token foundation、`LINKE_READ_TOKEN`、`LINKE_WRITE_TOKEN`、403 `Forbidden`、auth.forbidden、shared write-route registry、`API_WRITE_ROUTES`、`formatApiRoute`、`isApiWriteRoute`、auth status readiness API、GET /api/auth-status、buildAuthStatusResponse、configuredScopes、writeRoutes、tokenValuesReturned:false、请求体上限 413、未知 500 `Internal Server Error` 脱敏、`LINKE_RESTORE_ROOT` 恢复目标 guard、restoreRoot symlink 逃逸拒绝、目标文件 symlink 拒绝、中间目录 symlink 拒绝、`O_NOFOLLOW` restore 写入防护、本地 audit log foundation、GET /api/audit-log、Agent audit-log CLI、Web audit-log panel、buildAuditLogViewModel、JSONL 事件 allowlist、auth.denied、敏感字段不落盘、API rate-limit foundation、`LINKE_RATE_LIMIT_PER_MINUTE`、429 `Rate limit exceeded`、`api.rate_limited`、audit retention foundation、`LINKE_AUDIT_MAX_EVENTS`、最新 N 条审计事件保留、审计保留并发 append 串行化。
 
+
+
+## G0a 真实双 Mac 验收（测试专用）
+
+本仓库内 G0a harness 为 **test-only / 测试专用** 验收工具，仅在显式启用后用于双机边界演练。
+默认 `npm test` 与 mock fixture 只证明 harness 契约，不能当作硬件或 Keychain 真实验收结论。
+
+### 安全门与目录
+
+- 精确环境门：仅当 `LINKE_REAL_G0A_ACCEPTANCE=enabled` 时才允许真实 Keychain / network / 文件清理副作用。
+- 专用 run directory 必须含固定 marker 与 `0600` 的 `controller-config.json`（普通文件、非 symlink）。
+- Agent 使用私网 IP literal 与固定非零 Agent port；不自动发现网卡。
+- 跨机仅使用用户预配置的 **SSH alias**；harness **不读取** `~/.ssh`，不在命令中展开 secret。
+- bundle / receipt 仅使用专用目录内固定相对文件名，文件 mode 必须为 `0600`，不得进入 Git、stdout、stderr 或报告正文。
+
+### 固定 phase（仅占位 label，无真实 secret 示例）
+
+Controller stdin phases:
+
+```text
+prepare → ack-pre-revoke → revoke-current → ack-post-revoke
+→ restart → ack-post-restart → replace-identity-confirmed
+→ prepare-reenrollment → ack-post-fingerprint-change → ack-reenroll → stop
+```
+
+Endpoint phases:
+
+```text
+pre-revoke → post-revoke → post-restart
+→ post-fingerprint-change → reenroll → cleanup
+```
+
+### 直接入口（repository-relative，测试专用）
+
+在 **dedicated run directory** 作为 cwd 时，可用下列相对仓库路径的 node 入口（勿把真实连接/认证值写入 argv 或 env）：
+
+```text
+node test/helpers/g0a-real-controller-runner.js
+node test/helpers/g0a-real-endpoint-runner.js <phase>
+```
+
+- Controller：stdin 读取固定 command；Endpoint：恰好一个固定 phase 位置参数，额外 argv 固定拒绝。
+- 真实 gate（`LINKE_REAL_G0A_ACCEPTANCE=enabled`）与 `0600` marker/config 必须由本地环境预先设置；gate 缺失时只输出一行 sanitized FAIL。
+- 作为 module import 时零副作用，不会自动启动 listener 或访问 Keychain/network。
+
+### Keychain UI 与 Gold
+
+- Keychain allow / deny / lock / unlock 由用户通过 macOS UI 处理；runner 只观察注册错误码与 fail-closed / recovery 结果。
+- 在全部真实门通过并生成脱敏报告之前，**Gold 保持 BLOCKED / blocked**。
+- mock 与同进程 fixture 不能替代硬件侧证据。
+
 ## 技术约束
 
 - Node.js ESM，零外部运行时依赖

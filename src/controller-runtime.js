@@ -9,6 +9,7 @@ import { TlsIdentityStore } from './tls-identity-store.js';
 import { recordHeartbeat } from './storage.js';
 import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
 import { parseAuditRetentionMaxEvents } from './audit-log.js';
+import { ensureSafeDataRoot, ensureSafeRelativeDir } from './safe-data-files.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -284,6 +285,16 @@ export async function startController({
 
   const resolvedKeychain = keychain ?? new KeychainStore();
   const identityPort = agentPort === 0 ? DEFAULT_AGENT_PORT : agentPort;
+  // Root-relative safe wiring: create/validate dataDir without recursive symlink follow;
+  // tls/ is then created with the same no-follow segment walk.
+  try {
+    await ensureSafeDataRoot(dataDir);
+    await ensureSafeRelativeDir(dataDir, 'tls');
+  } catch (error) {
+    if (error && error.message === 'dataDir is required') throw error;
+    throw new Error('dataDir is required');
+  }
+  // Independent TlsIdentityStore constructor remains dataDir=tls directory for compatibility.
   const identityStore = new TlsIdentityStore({ dataDir: join(dataDir, 'tls'), keychain: resolvedKeychain });
   const identity = await identityStore.ensure({ host: agentHost, port: identityPort });
   const registry = new DeviceRegistry({ dataDir });

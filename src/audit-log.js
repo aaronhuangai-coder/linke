@@ -1,10 +1,15 @@
-import { appendFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import {
+  SafeDataFileError,
+  safeAppendText,
+  safeAtomicWriteText,
+  safeReadText,
+} from './safe-data-files.js';
 
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 100;
 const auditFileQueues = new Map();
+const AUDIT_RELATIVE_PATH = 'audit/events.jsonl';
 const STRING_FIELDS = [
   'id',
   'createdAt',
@@ -52,13 +57,17 @@ function normalizeLimit(limit) {
   return Math.min(parsed, MAX_AUDIT_LIMIT);
 }
 
-function auditFilePath(dataDir) {
-  return join(dataDir, 'audit', 'events.jsonl');
+function auditQueueKey(dataDir) {
+  return `${dataDir}\0${AUDIT_RELATIVE_PATH}`;
 }
 
 function positiveIntegerOrZero(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function auditIoError() {
+  return new SafeDataFileError();
 }
 
 export function normalizeAuditRetention(retention) {
@@ -88,43 +97,45 @@ export function parseAuditRetentionMaxEvents(value) {
   return { maxEvents };
 }
 
-function withAuditFileQueue(filePath, task) {
-  const previous = auditFileQueues.get(filePath) || Promise.resolve();
+function withAuditFileQueue(queueKey, task) {
+  const previous = auditFileQueues.get(queueKey) || Promise.resolve();
   const run = previous.catch(() => {}).then(task);
   const cleanup = run.finally(() => {
-    if (auditFileQueues.get(filePath) === cleanup) {
-      auditFileQueues.delete(filePath);
+    if (auditFileQueues.get(queueKey) === cleanup) {
+      auditFileQueues.delete(queueKey);
     }
   });
-  auditFileQueues.set(filePath, cleanup);
+  // Keep chain linked via cleanup, but do not leave its rejection unhandled when
+  // callers only await `run` (intentional fail-closed append/compaction errors).
+  cleanup.catch(() => {});
+  auditFileQueues.set(queueKey, cleanup);
   return run;
 }
 
-async function compactAuditFile(filePath, retention) {
-  let raw;
+async function readAuditRaw(dataDir) {
   try {
-    raw = await readFile(filePath, 'utf-8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return;
-    throw err;
+    return await safeReadText(dataDir, AUDIT_RELATIVE_PATH);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    if (error instanceof SafeDataFileError) throw error;
+    throw auditIoError();
   }
+}
+
+async function compactAuditFile(dataDir, retention) {
+  const raw = await readAuditRaw(dataDir);
+  if (raw === null) return;
 
   const lines = raw.split('\n').filter((line) => line.trim());
   if (lines.length <= retention.maxEvents) return;
 
   const retained = lines.slice(-retention.maxEvents);
-  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(tmpPath, `${retained.join('\n')}\n`, 'utf-8');
-    await rename(tmpPath, filePath);
-  } catch (err) {
-    try {
-      await unlink(tmpPath);
-    } catch {
-      // Best effort cleanup; caller still receives the compaction failure.
-    }
-    throw err;
-  }
+  await safeAtomicWriteText(
+    dataDir,
+    AUDIT_RELATIVE_PATH,
+    `${retained.join('\n')}\n`,
+    { mode: 0o600 },
+  );
 }
 
 export function sanitizeAuditEvent(event = {}, now = new Date()) {
@@ -158,22 +169,30 @@ export function sanitizeAuditEvent(event = {}, now = new Date()) {
 }
 
 export async function appendAuditEvent(dataDir, event, options = {}) {
-  const dir = join(dataDir, 'audit');
-  await mkdir(dir, { recursive: true });
-  const filePath = auditFilePath(dataDir);
   const sanitized = sanitizeAuditEvent(event);
   const line = `${JSON.stringify(sanitized)}\n`;
   const retention = normalizeAuditRetention(options.retention);
+  const queueKey = auditQueueKey(dataDir);
 
-  if (!retention && !auditFileQueues.has(filePath)) {
-    await appendFile(filePath, line, 'utf-8');
+  if (!retention && !auditFileQueues.has(queueKey)) {
+    try {
+      await safeAppendText(dataDir, AUDIT_RELATIVE_PATH, line);
+    } catch (error) {
+      if (error instanceof SafeDataFileError) throw error;
+      throw auditIoError();
+    }
     return sanitized;
   }
 
-  await withAuditFileQueue(filePath, async () => {
-    await appendFile(filePath, line, 'utf-8');
-    if (retention) {
-      await compactAuditFile(filePath, retention);
+  await withAuditFileQueue(queueKey, async () => {
+    try {
+      await safeAppendText(dataDir, AUDIT_RELATIVE_PATH, line);
+      if (retention) {
+        await compactAuditFile(dataDir, retention);
+      }
+    } catch (error) {
+      if (error instanceof SafeDataFileError) throw error;
+      throw auditIoError();
     }
   });
   return sanitized;
@@ -182,11 +201,12 @@ export async function appendAuditEvent(dataDir, event, options = {}) {
 export async function readAuditEvents(dataDir, options = {}) {
   let raw;
   try {
-    raw = await readFile(auditFilePath(dataDir), 'utf-8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
+    raw = await readAuditRaw(dataDir);
+  } catch (error) {
+    if (error instanceof SafeDataFileError) throw error;
+    throw auditIoError();
   }
+  if (raw === null) return [];
 
   const events = [];
   for (const line of raw.split('\n')) {

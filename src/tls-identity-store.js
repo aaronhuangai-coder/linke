@@ -8,9 +8,14 @@ import {
   X509Certificate,
 } from 'node:crypto';
 import { isIP } from 'node:net';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
+import {
+  ensureSafeDataRoot,
+  safeAtomicWriteText,
+  safeReadText,
+} from './safe-data-files.js';
 
 const TLS_KEY_ITEM = 'controller-tls-private-key';
 const CERT_FILE = 'controller-cert.pem';
@@ -372,8 +377,8 @@ export class TlsIdentityStore {
    */
   async #ensureIdentity({ host, port = 3443, approvedFingerprint } = {}) {
     const bind = validateAgentBind(host, port);
-    await mkdir(this.dataDir, { recursive: true });
-    const certPath = join(this.dataDir, CERT_FILE);
+    // Validate cert directory root before any Keychain side effects.
+    await this.#ensureTlsDataDir();
 
     let keyPem = null;
     let certPem = null;
@@ -385,9 +390,11 @@ export class TlsIdentityStore {
     }
 
     try {
-      certPem = await readFile(certPath, 'utf8');
+      certPem = await safeReadText(this.dataDir, CERT_FILE);
     } catch (error) {
-      if (error.code !== 'ENOENT') {
+      if (error && error.code === 'ENOENT') {
+        certPem = null;
+      } else {
         throw incompleteError();
       }
     }
@@ -397,7 +404,7 @@ export class TlsIdentityStore {
     }
 
     if (!keyPem) {
-      return this.#createAndPersistIdentity({ bind, certPath, approvedFingerprint });
+      return this.#createAndPersistIdentity({ bind, approvedFingerprint });
     }
 
     // Existing pair: fail closed on mismatch; never silently regenerate.
@@ -420,15 +427,28 @@ export class TlsIdentityStore {
   }
 
   /**
+   * Ensure TLS dataDir exists as a non-symlink directory before Keychain writes.
+   * Uses ensureSafeDataRoot so first-create never follows ancestor symlinks via recursive mkdir.
+   * @returns {Promise<void>}
+   */
+  async #ensureTlsDataDir() {
+    try {
+      await ensureSafeDataRoot(this.dataDir);
+    } catch {
+      throw incompleteError();
+    }
+  }
+
+  /**
    * Generate key/cert in memory, validate fully, then persist atomically.
+   * Path safety is checked before Keychain set; write failures delete the new key.
    * Validation failures leave no Keychain key and no controller-cert.pem.
    * @param {{
    *   bind: { host: string, port: number, san: string },
-   *   certPath: string,
    *   approvedFingerprint?: string,
    * }} args
    */
-  async #createAndPersistIdentity({ bind, certPath, approvedFingerprint }) {
+  async #createAndPersistIdentity({ bind, approvedFingerprint }) {
     const generated = this.generatePrivateKey();
     const generatedCert = await this.certificateFactory({
       keyPem: generated.keyPem,
@@ -445,13 +465,24 @@ export class TlsIdentityStore {
       approvedFingerprint,
     });
 
-    const tempPath = `${certPath}.${randomUUID()}.new`;
+    // Re-validate root/cert leaf before Keychain set (final symlink fail-closed).
+    await this.#ensureTlsDataDir();
+    try {
+      await lstat(join(this.dataDir, CERT_FILE));
+      // Existing leaf before create is unexpected for the missing-pair path; fail closed.
+      throw incompleteError();
+    } catch (error) {
+      if (error instanceof LinkeError) throw error;
+      if (!error || error.code !== 'ENOENT') throw incompleteError();
+    }
+
     await this.keychain.set(TLS_KEY_ITEM, generated.keyPem);
     try {
-      await writeFile(tempPath, generatedCert, { mode: 0o600, flag: 'wx' });
-      await rename(tempPath, certPath);
+      await safeAtomicWriteText(this.dataDir, CERT_FILE, generatedCert, {
+        mode: 0o600,
+        tempRelativePath: `${CERT_FILE}.${randomUUID()}.new`,
+      });
     } catch {
-      await unlink(tempPath).catch(() => {});
       await this.keychain.delete(TLS_KEY_ITEM).catch(() => {});
       throw incompleteError();
     }

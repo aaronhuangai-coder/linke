@@ -1,12 +1,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from '../src/server.js';
 import { startController } from '../src/controller-runtime.js';
 import { DEVICE_PROTOCOL_VERSION } from '../src/device-protocol.js';
 import { requestPinnedJson } from '../src/device-client.js';
+import { createBackup, recordHeartbeat } from '../src/storage.js';
 
 function postJSON(port, path, body) {
   return fetch(`http://localhost:${port}${path}`, {
@@ -201,7 +202,6 @@ describe('Agent HTTPS enrollment + heartbeat through controller runtime', () => 
   });
 
   it('uses Task 7 pin client and does not import node https directly', async () => {
-    const { readFile } = await import('node:fs/promises');
     const source = await readFile(new URL(import.meta.url), 'utf8');
     assert.match(source, /requestPinnedJson/);
     assert.ok(
@@ -212,5 +212,217 @@ describe('Agent HTTPS enrollment + heartbeat through controller runtime', () => 
       !new RegExp(['rejectUnauthorized', '\\s*:\\s*false'].join('')).test(source),
       'must not set TLS trust bypass in this test file',
     );
+  });
+});
+
+describe('storage dataDir no-follow hardening', () => {
+  it('rejects repo/devices/device directory and device.json final symlinks without writing outside', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-repo-out-'));
+    try {
+      const dataDir = await mkdtemp(join(tmpdir(), 'linke-repo-dir-'));
+      try {
+        await mkdir(join(dataDir, 'repo'), { recursive: true });
+        await symlink(outside, join(dataDir, 'repo', 'devices'), 'dir');
+        await assert.rejects(
+          () => recordHeartbeat(dataDir, 'mac-repo', 'Host', '10.0.0.1'),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            assert.equal(text.includes(dataDir), false);
+            return true;
+          },
+        );
+        assert.equal((await readdir(outside)).includes('mac-repo'), false);
+        assert.equal((await readdir(outside)).includes('device.json'), false);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+
+      const dataDirDevice = await mkdtemp(join(tmpdir(), 'linke-device-dir-'));
+      try {
+        await mkdir(join(dataDirDevice, 'repo', 'devices'), { recursive: true });
+        await symlink(outside, join(dataDirDevice, 'repo', 'devices', 'mac-device'), 'dir');
+        await assert.rejects(
+          () => recordHeartbeat(dataDirDevice, 'mac-device', 'Host', '10.0.0.2'),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            return true;
+          },
+        );
+        assert.equal((await readdir(outside)).includes('device.json'), false);
+      } finally {
+        await rm(dataDirDevice, { recursive: true, force: true });
+      }
+
+      const dataDirFinal = await mkdtemp(join(tmpdir(), 'linke-device-json-'));
+      try {
+        await mkdir(join(dataDirFinal, 'repo', 'devices', 'mac-final'), { recursive: true });
+        const outsideFile = join(outside, 'device.json');
+        await writeFile(outsideFile, 'OUTSIDE-DEVICE');
+        await symlink(outsideFile, join(dataDirFinal, 'repo', 'devices', 'mac-final', 'device.json'), 'file');
+        await assert.rejects(
+          () => recordHeartbeat(dataDirFinal, 'mac-final', 'Host', '10.0.0.3'),
+          (error) => {
+            const text = `${error?.message || ''}\n${error?.stack || ''}`;
+            assert.equal(text.includes(outside), false);
+            assert.equal(text.includes('OUTSIDE-DEVICE'), false);
+            return true;
+          },
+        );
+        assert.equal(await readFile(outsideFile, 'utf8'), 'OUTSIDE-DEVICE');
+        assert.equal((await lstat(join(dataDirFinal, 'repo', 'devices', 'mac-final', 'device.json'))).isSymbolicLink(), true);
+      } finally {
+        await rm(dataDirFinal, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects backup internal destination path symlink without writing outside dataDir', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-backup-out-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-backup-repo-'));
+    const source = await mkdtemp(join(tmpdir(), 'linke-backup-src-'));
+    try {
+      await writeFile(join(source, 'note.txt'), 'payload');
+      await mkdir(join(dataDir, 'repo'), { recursive: true });
+      await symlink(outside, join(dataDir, 'repo', 'devices'), 'dir');
+      await assert.rejects(
+        () => createBackup(dataDir, {
+          deviceId: 'mac-backup',
+          hostname: 'Host',
+          ipAddress: '10.0.0.4',
+          sourcePath: source,
+        }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}`;
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes(source), false);
+          return true;
+        },
+      );
+      assert.equal((await readdir(outside)).includes('mac-backup'), false);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(source, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects afterCopy files/ directory symlink swap without publishing manifest', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-backup-files-out-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-backup-files-swap-'));
+    const source = await mkdtemp(join(tmpdir(), 'linke-backup-files-src-'));
+    try {
+      await writeFile(join(source, 'alpha.txt'), 'alpha-payload');
+      await writeFile(join(outside, 'planted.txt'), 'OUTSIDE-PLANTED');
+      await assert.rejects(
+        () => createBackup(dataDir, {
+          deviceId: 'mac-files-swap',
+          hostname: 'Host',
+          ipAddress: '10.0.0.5',
+          sourcePath: source,
+        }, {
+          afterCopy: async (snapshotId) => {
+            const filesDir = join(
+              dataDir,
+              'repo',
+              'devices',
+              'mac-files-swap',
+              'snapshots',
+              snapshotId,
+              'files',
+            );
+            await rm(filesDir, { recursive: true, force: true });
+            await symlink(outside, filesDir, 'dir');
+          },
+        }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}\n${error?.code || ''}`;
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes('OUTSIDE-PLANTED'), false);
+          assert.equal(text.includes(dataDir), false);
+          return true;
+        },
+      );
+      // Manifest must not be published under the snapshot.
+      const snapshotsDir = join(dataDir, 'repo', 'devices', 'mac-files-swap', 'snapshots');
+      let snapshotIds = [];
+      try {
+        snapshotIds = await readdir(snapshotsDir);
+      } catch {
+        snapshotIds = [];
+      }
+      for (const id of snapshotIds) {
+        await assert.rejects(
+          () => readFile(join(snapshotsDir, id, 'manifest.json'), 'utf8'),
+          (error) => error && error.code === 'ENOENT',
+        );
+      }
+      assert.equal(await readFile(join(outside, 'planted.txt'), 'utf8'), 'OUTSIDE-PLANTED');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(source, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects top-level single-file backup when afterDirSetup plants dest leaf symlink', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'linke-backup-leaf-out-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-backup-leaf-swap-'));
+    const sourceFile = join(await mkdtemp(join(tmpdir(), 'linke-backup-leaf-src-')), 'solo.txt');
+    try {
+      await writeFile(sourceFile, 'solo-payload');
+      const outsideFile = join(outside, 'solo.txt');
+      await writeFile(outsideFile, 'OUTSIDE-SOLO');
+      await assert.rejects(
+        () => createBackup(dataDir, {
+          deviceId: 'mac-leaf-swap',
+          hostname: 'Host',
+          ipAddress: '10.0.0.6',
+          sourcePath: sourceFile,
+        }, {
+          afterDirSetup: async (snapshotId) => {
+            const destLeaf = join(
+              dataDir,
+              'repo',
+              'devices',
+              'mac-leaf-swap',
+              'snapshots',
+              snapshotId,
+              'files',
+              'solo.txt',
+            );
+            await symlink(outsideFile, destLeaf, 'file');
+          },
+        }),
+        (error) => {
+          const text = `${error?.message || ''}\n${error?.stack || ''}`;
+          assert.equal(text.includes(outside), false);
+          assert.equal(text.includes('OUTSIDE-SOLO'), false);
+          return true;
+        },
+      );
+      assert.equal(await readFile(outsideFile, 'utf8'), 'OUTSIDE-SOLO');
+      const snapshotsDir = join(dataDir, 'repo', 'devices', 'mac-leaf-swap', 'snapshots');
+      let snapshotIds = [];
+      try {
+        snapshotIds = await readdir(snapshotsDir);
+      } catch {
+        snapshotIds = [];
+      }
+      for (const id of snapshotIds) {
+        await assert.rejects(
+          () => readFile(join(snapshotsDir, id, 'manifest.json'), 'utf8'),
+          (error) => error && error.code === 'ENOENT',
+        );
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(sourceFile, { force: true }).catch(() => {});
+      await rm(join(sourceFile, '..'), { recursive: true, force: true }).catch(() => {});
+    }
   });
 });
