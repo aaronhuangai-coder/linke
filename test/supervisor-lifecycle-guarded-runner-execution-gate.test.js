@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
+  areSupervisorLifecycleGuardedRunnerActionCandidatesReady,
   buildSupervisorLifecycleApplyPlan,
   buildSupervisorLifecycleApplyReadiness,
   buildSupervisorLifecycleApprovalPersistencePreview,
@@ -14,6 +15,7 @@ import {
   buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness,
   buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness,
   buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness,
+  evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -43,20 +45,20 @@ const EXPECTED_EXECUTION_PREVIEW_SAFETY = Object.freeze({
   remoteCommandExecuted: false,
 });
 const EXPECTED_WIRING_CONTRACTS = Object.freeze([
-  ['execution-policy', 'execution-policy-missing'],
-  ['runner-registry', 'runner-registry-missing'],
-  ['host-mutation-adapter', 'host-mutation-adapter-missing'],
-  ['rollback-anchor', 'rollback-anchor-missing'],
-  ['attempt-audit', 'attempt-audit-missing'],
-  ['operator-recovery', 'operator-recovery-missing'],
+  ['execution-policy', null, 'ready', 'execution-policy-ready'],
+  ['runner-registry', 'runner-registry-missing', 'blocked', 'runner-registry-missing'],
+  ['host-mutation-adapter', 'host-mutation-adapter-missing', 'blocked', 'host-mutation-adapter-missing'],
+  ['rollback-anchor', 'rollback-anchor-missing', 'blocked', 'rollback-anchor-missing'],
+  ['attempt-audit', 'attempt-audit-missing', 'blocked', 'attempt-audit-missing'],
+  ['operator-recovery', 'operator-recovery-missing', 'blocked', 'operator-recovery-missing'],
 ]);
 const EXPECTED_EXECUTION_POLICY_ENTRIES = Object.freeze([
   {
-    policyKind: 'disabled-execution-policy-stub',
-    state: 'blocked',
-    realImplementationReady: false,
+    policyKind: 'fail-closed-execution-policy',
+    state: 'ready',
+    realImplementationReady: true,
     approvalPolicyDefined: true,
-    approvalPolicyEnforced: false,
+    approvalPolicyEnforced: true,
     allowLifecycleApply: false,
     allowHostMutation: false,
     allowLaunchctl: false,
@@ -71,9 +73,110 @@ const EXPECTED_EXECUTION_POLICY_ENTRIES = Object.freeze([
     wouldRun: false,
     wouldWrite: false,
     sensitiveValuesReturned: false,
-    blockerCode: 'execution-policy-real-implementation-missing',
+    blockerCode: null,
+    evidenceCode: 'execution-policy-ready',
   },
 ]);
+const POLICY_FACT_KEYS = Object.freeze([
+  'lifecyclePlanValid',
+  'approvalRecordReady',
+  'manifestReady',
+  'runnerBindingsReady',
+  'executionPreviewVerified',
+  'executeRequested',
+  'actionCandidatesReady',
+  'runnerRegistryReady',
+  'hostMutationAdapterReady',
+  'rollbackAnchorReady',
+  'attemptAuditReady',
+  'operatorRecoveryReady',
+]);
+const POLICY_FACT_BLOCKERS = Object.freeze({
+  lifecyclePlanValid: 'lifecycle-plan-not-ready',
+  approvalRecordReady: 'approval-record-gate-not-ready',
+  manifestReady: 'executor-manifest-not-ready',
+  runnerBindingsReady: 'guarded-runner-readiness-not-ready',
+  executionPreviewVerified: 'execution-preview-not-verified',
+  executeRequested: 'execute-request-missing',
+  actionCandidatesReady: 'action-candidates-not-ready',
+  runnerRegistryReady: 'runner-registry-not-ready',
+  hostMutationAdapterReady: 'host-mutation-adapter-not-ready',
+  rollbackAnchorReady: 'rollback-anchor-not-ready',
+  attemptAuditReady: 'attempt-audit-not-ready',
+  operatorRecoveryReady: 'operator-recovery-not-ready',
+});
+// Opaque synthetic strings only — no path/host/email/hash/command/credential shapes.
+const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
+const OPERATION_EXPECTED_ACTION_IDS = Object.freeze({
+  install: Object.freeze([
+    'render-launch-agent-plist',
+    'write-launch-agent-plist',
+    'load-launch-agent',
+  ]),
+  uninstall: Object.freeze([
+    'unload-launch-agent',
+    'remove-launch-agent-plist',
+    'remove-supervisor-metadata',
+  ]),
+  rollback: Object.freeze([
+    'capture-current-state',
+    'restore-previous-plist',
+    'restart-previous-supervisor',
+  ]),
+  recover: Object.freeze([
+    'start-recovery-supervisor',
+  ]),
+});
+
+function buildAllTruePolicyContext(operation = 'install') {
+  return {
+    operation,
+    lifecyclePlanValid: true,
+    approvalRecordReady: true,
+    manifestReady: true,
+    runnerBindingsReady: true,
+    executionPreviewVerified: true,
+    executeRequested: true,
+    actionCandidatesReady: true,
+    runnerRegistryReady: true,
+    hostMutationAdapterReady: true,
+    rollbackAnchorReady: true,
+    attemptAuditReady: true,
+    operatorRecoveryReady: true,
+  };
+}
+
+function assertPolicyDecisionInvariants(decision) {
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-execution-policy');
+  assert.strictEqual(decision.policyKind, 'fail-closed-execution-policy');
+  assert.strictEqual(decision.realImplementationReady, true);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.allowLifecycleApply, false);
+  assert.strictEqual(decision.allowHostMutation, false);
+  assert.strictEqual(decision.allowLaunchctl, false);
+  assert.strictEqual(decision.allowFilesystemWrite, false);
+  assert.strictEqual(decision.allowMetadataWrite, false);
+  assert.strictEqual(decision.allowAuditWrite, false);
+  assert.strictEqual(decision.allowRollbackAnchorWrite, false);
+  assert.strictEqual(decision.allowNasConnection, false);
+  assert.strictEqual(decision.allowBackupRestore, false);
+  assert.strictEqual(decision.allowRemoteCommand, false);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  const authorized = decision.state === 'authorized';
+  assert.strictEqual(decision.authorized, authorized);
+  assert.strictEqual(decision.wouldAuthorizeExecution, authorized);
+  if (authorized) {
+    assert.deepStrictEqual(decision.blockers, []);
+    assert.strictEqual(decision.primaryBlocker, null);
+    assert.deepStrictEqual(decision.nextBlockers, []);
+  } else {
+    assert.ok(decision.blockers.length >= 1);
+    assert.strictEqual(decision.primaryBlocker, decision.blockers[0]);
+    assert.deepStrictEqual(decision.nextBlockers, [decision.primaryBlocker]);
+  }
+}
 const EXPECTED_RUNNER_REGISTRY_ENTRIES = Object.freeze([
   {
     runnerKind: 'guarded-runner-stub',
@@ -308,7 +411,7 @@ function assertAlwaysBlockedGate(result) {
   assert.deepStrictEqual(result.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.strictEqual(result.gates.realRunnerWiringReady, false);
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
-  assert.strictEqual(result.gates.executionPolicyReady, false);
+  assert.strictEqual(result.gates.executionPolicyReady, true);
   assert.strictEqual(result.gates.runnerRegistryReady, false);
   assert.strictEqual(result.gates.hostMutationAdapterReady, false);
   assert.strictEqual(result.gates.rollbackAnchorReady, false);
@@ -316,6 +419,12 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.gates.operatorRecoveryReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
+  assert.ok(result.policyDecision && typeof result.policyDecision === 'object');
+  assert.strictEqual(result.policyDecision.state, 'denied');
+  assert.strictEqual(result.policyDecision.authorized, false);
+  assert.strictEqual(result.policyDecision.wouldAuthorizeExecution, false);
+  assert.strictEqual(result.policyDecision.wouldRun, false);
+  assert.strictEqual(result.policyDecision.wouldWrite, false);
   assert.strictEqual(result.safety.readOnly, true);
   assert.strictEqual(result.safety.dryRun, true);
   assert.strictEqual(result.safety.hostMutation, false);
@@ -334,21 +443,35 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.safety.sensitiveValuesReturned, false);
 }
 
-function assertBlockedWiringContract(contract) {
+function assertWiringContract(contract) {
   assert.strictEqual(contract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(contract.state, 'blocked');
   assert.strictEqual(contract.realRunnerWiringReady, false);
-  assert.strictEqual(contract.readyCount, 0);
-  assert.strictEqual(contract.blockedCount, EXPECTED_WIRING_CONTRACTS.length);
+  assert.strictEqual(contract.readyCount, 1);
+  assert.strictEqual(contract.blockedCount, 5);
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
   assert.strictEqual(contract.requiredContracts.length, 6);
-  assert.strictEqual(contract.requiredContracts.length, EXPECTED_WIRING_CONTRACTS.length);
   assert.deepStrictEqual(
-    contract.requiredContracts.map((entry) => [entry.id, entry.blockerCode]),
+    contract.requiredContracts.map((entry) => [
+      entry.id,
+      entry.blockerCode,
+      entry.status,
+      entry.evidenceCode,
+    ]),
     EXPECTED_WIRING_CONTRACTS,
   );
+  const policyContract = contract.requiredContracts[0];
+  assert.strictEqual(policyContract.id, 'execution-policy');
+  assert.strictEqual(policyContract.status, 'ready');
+  assert.strictEqual(policyContract.blockerCode, null);
+  assert.strictEqual(policyContract.evidenceCode, 'execution-policy-ready');
+  assert.ok(contract.requiredContracts.slice(1).every((entry) =>
+    entry.status === 'blocked' &&
+      entry.requiredForExecution === true &&
+      typeof entry.blockerCode === 'string' &&
+      entry.blockerCode.length > 0));
   assert.deepStrictEqual(
     contract.executionPolicyReadiness,
     buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
@@ -370,58 +493,45 @@ function assertBlockedWiringContract(contract) {
     contract.operatorRecoveryReadiness,
     buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
   );
-  assert.ok(contract.requiredContracts.every((entry) =>
-    entry.status === 'blocked' &&
-      entry.requiredForExecution === true &&
-      typeof entry.evidence === 'string' &&
-      entry.evidence.length > 0));
 }
 
 describe('buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness', () => {
-  it('returns fixed blocked disabled execution policy readiness evidence', () => {
+  it('returns fixed real ready fail-closed execution policy evidence', () => {
     const readiness = buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness();
-
     assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-execution-policy-readiness');
-    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.state, 'ready');
     assert.strictEqual(readiness.executionPolicyDefined, true);
-    assert.strictEqual(readiness.executionPolicyReady, false);
-    assert.strictEqual(readiness.realExecutionPolicyReady, false);
-    assert.strictEqual(readiness.readyCount, 0);
-    assert.strictEqual(readiness.blockedCount, 1);
-    assert.ok(readiness.blockers.includes('execution-policy-real-implementation-missing'));
-    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
-    assert.deepStrictEqual(readiness.nextBlockers, ['execution-policy-real-implementation-missing']);
+    assert.strictEqual(readiness.executionPolicyReady, true);
+    assert.strictEqual(readiness.realExecutionPolicyReady, true);
+    assert.strictEqual(readiness.readyCount, 1);
+    assert.strictEqual(readiness.blockedCount, 0);
+    assert.deepStrictEqual(readiness.blockers, []);
+    assert.deepStrictEqual(readiness.nextBlockers, []);
     assert.deepStrictEqual(readiness.policyEntries, EXPECTED_EXECUTION_POLICY_ENTRIES);
+    assert.strictEqual(readiness.policyEntries[0].blockerCode, null);
+    assert.strictEqual(readiness.policyEntries[0].evidenceCode, 'execution-policy-ready');
     assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
   });
 
-  it('ignores all runtime-looking inputs and never leaks malicious policy material', () => {
+  it('ignores runtime-looking inputs and never leaks opaque unsafe material', () => {
     const baseline = buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness();
     const maliciousInput = {
-      executionPolicyReady: true,
-      policyEntries: [
-        {
-          policyKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
-          wouldAuthorizeExecution: true,
-          allowLifecycleApply: true,
-          allowRemoteCommand: true,
-          wouldRun: true,
-          wouldWrite: true,
-        },
-      ],
-      authorization: 'Bearer SECRET_XYZ',
-      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
-      hash: 'sha256:abc',
-      path: '/Users/ah/private',
+      executionPolicyReady: false,
+      policyEntries: [{
+        policyKind: UNSAFE_SECRET_MATERIAL,
+        wouldAuthorizeExecution: true,
+        allowLifecycleApply: true,
+        OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
+      }],
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
     };
-
     assert.strictEqual(buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness.length, 0);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(maliciousInput), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(null), baseline);
-    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(), baseline);
+    assert.doesNotMatch(JSON.stringify(baseline), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
     assert.doesNotMatch(
       JSON.stringify(baseline),
-      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl \/|launchctl load|Bearer/i,
+      /disabled-execution-policy-stub|execution-policy-real-implementation-missing/i,
     );
   });
 });
@@ -663,7 +773,7 @@ describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
   it('returns the fixed blocked real runner wiring contract with complete safety evidence', () => {
     const contract = buildSupervisorLifecycleGuardedRunnerWiringContract(getReadyInputs().executionPreview);
 
-    assertBlockedWiringContract(contract);
+    assertWiringContract(contract);
   });
 
   it('ignores execution preview input completely and never leaks malicious fields', () => {
@@ -675,16 +785,16 @@ describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
       normalPreview,
       { ...normalPreview, wouldExecute: true },
       {
-        command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
-        path: '/Users/ah/secret-path',
-        token: 'SECRET_XYZ',
-        secret: 'sk-abc123def456',
-        hostname: 'unsafe.example',
-        hash: 'sha256:abc',
+        command: 'opaque-command-material',
+        path: 'opaque-path-material',
+        token: UNSAFE_SECRET_MATERIAL,
+        secret: UNSAFE_SECRET_MATERIAL,
+        hostname: 'opaque-host-material',
+        hash: 'opaque-hash-material',
         approval: {
-          approvedBy: 'operator@example.invalid',
-          reason: 'do not leak',
-          acknowledgements: ['do not leak acknowledgement'],
+          approvedBy: 'opaque-operator',
+          reason: 'opaque-reason',
+          acknowledgements: ['opaque-acknowledgement'],
         },
       },
     ];
@@ -693,7 +803,8 @@ describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
       assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerWiringContract(sample), baseline);
     }
     const serialized = JSON.stringify(baseline);
-    assert.doesNotMatch(serialized, /\/Users\/ah|SECRET_XYZ|sk-abc|unsafe\.example|sha256:|operator@example|do not leak|launchctl load/i);
+    assert.doesNotMatch(serialized, new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+    assert.doesNotMatch(serialized, /disabled-execution-policy-stub|execution-policy-real-implementation-missing/i);
   });
 });
 
@@ -710,7 +821,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       runnerBindingsReady: true,
       executionPreviewVerified: true,
       executeRequested: false,
-      executionPolicyReady: false,
+      actionCandidatesReady: true,
+      executionPolicyReady: true,
       runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
@@ -719,7 +831,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       attemptAuditReady: false,
       operatorRecoveryReady: false,
     });
-    assertBlockedWiringContract(result.runnerWiringContract);
+    assertWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
       {
         actionId: 'render-launch-agent-plist',
@@ -764,16 +876,58 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
     assert.strictEqual(result.gates.executeRequested, true);
-    assert.strictEqual(result.gates.executionPolicyReady, false);
+    assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(result.gates.executionPolicyReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
-    assertBlockedWiringContract(result.runnerWiringContract);
+    assertWiringContract(result.runnerWiringContract);
     assert.ok(result.actionCandidates.every((entry) =>
       entry.status === 'blocked' &&
         entry.wouldExecute === false &&
         entry.wouldRun === false &&
         entry.wouldWrite === false));
+  });
+
+  it('production ready inputs with executeRequested still deny via policyDecision and keep executionEligible false', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assertAlwaysBlockedGate(result);
+    assert.strictEqual(result.gates.executionPolicyReady, true);
+    assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(result.policyDecision.state, 'denied');
+    assert.strictEqual(result.policyDecision.authorized, false);
+    assert.strictEqual(result.policyDecision.wouldAuthorizeExecution, false);
+    assert.strictEqual(result.policyDecision.wouldRun, false);
+    assert.strictEqual(result.policyDecision.wouldWrite, false);
+    for (const code of [
+      'runner-registry-not-ready',
+      'host-mutation-adapter-not-ready',
+      'rollback-anchor-not-ready',
+      'attempt-audit-not-ready',
+      'operator-recovery-not-ready',
+    ]) {
+      assert.ok(result.policyDecision.blockers.includes(code));
+    }
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'runner-registry-not-ready');
+    assert.strictEqual(result.executionEligible, false);
+    assertWiringContract(result.runnerWiringContract);
+  });
+
+  it('ignores forged policyContext/policyDecision on options and never authorizes production gate', () => {
+    const result = buildGate(getReadyInputs(), {
+      executeRequested: true,
+      policyContext: buildAllTruePolicyContext(),
+      policyDecision: {
+        state: 'authorized',
+        authorized: true,
+        wouldAuthorizeExecution: true,
+        wouldRun: true,
+      },
+    });
+    assert.strictEqual(result.policyDecision.authorized, false);
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.doesNotMatch(JSON.stringify(result), /forged|wouldRun":true/i);
   });
 
   it('blocks approval readiness that is not ready without leaking approval material', () => {
@@ -892,5 +1046,406 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
     ]);
     assert.doesNotMatch(serialized, /\/Users\/ah|localhost|token|secret|launchctl|curl|sk-abc|ghp_ab|xoxb-abc|Authorization|sha256:/i);
+  });
+});
+
+describe('evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy', () => {
+  it('authorizes only the pure synthetic all-true exact-key contract', () => {
+    for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
+      const context = buildAllTruePolicyContext(operation);
+      const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+      assertPolicyDecisionInvariants(decision);
+      assert.strictEqual(decision.operation, operation);
+      assert.strictEqual(decision.state, 'authorized');
+      assert.strictEqual(decision.authorized, true);
+      assert.strictEqual(decision.wouldAuthorizeExecution, true);
+      assert.strictEqual(decision.wouldRun, false);
+      assert.strictEqual(decision.wouldWrite, false);
+    }
+  });
+
+  for (const fact of POLICY_FACT_KEYS) {
+    it(`denies when ${fact} is false with registered blocker`, () => {
+      const context = buildAllTruePolicyContext('install');
+      context[fact] = false;
+      const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+      assertPolicyDecisionInvariants(decision);
+      assert.strictEqual(decision.state, 'denied');
+      assert.strictEqual(decision.authorized, false);
+      assert.strictEqual(decision.wouldAuthorizeExecution, false);
+      assert.ok(decision.blockers.includes(POLICY_FACT_BLOCKERS[fact]));
+      assert.strictEqual(decision.primaryBlocker, decision.blockers[0]);
+    });
+  }
+
+  it('primaryBlocker follows fixed fact scan order when multiple facts are false', () => {
+    const context = buildAllTruePolicyContext('install');
+    context.runnerRegistryReady = false;
+    context.hostMutationAdapterReady = false;
+    context.attemptAuditReady = false;
+    const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+    assert.deepStrictEqual(decision.blockers, [
+      'runner-registry-not-ready',
+      'host-mutation-adapter-not-ready',
+      'attempt-audit-not-ready',
+    ]);
+    assert.strictEqual(decision.primaryBlocker, 'runner-registry-not-ready');
+    assert.deepStrictEqual(decision.nextBlockers, ['runner-registry-not-ready']);
+  });
+
+  it('denies unknown keys, missing keys, type-confused values, arrays, null, and non-objects', () => {
+    const baselineAllTrue = buildAllTruePolicyContext();
+    const samples = [
+      null,
+      undefined,
+      [],
+      'install',
+      1,
+      true,
+      { ...baselineAllTrue, extra: true },
+      (() => {
+        const c = { ...baselineAllTrue };
+        delete c.executeRequested;
+        return c;
+      })(),
+      { ...baselineAllTrue, lifecyclePlanValid: 'true' },
+      { ...baselineAllTrue, lifecyclePlanValid: 1 },
+      { ...baselineAllTrue, executeRequested: null },
+      Object.assign(Object.create({ polluted: true }), baselineAllTrue),
+    ];
+    for (const sample of samples) {
+      const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(sample);
+      assertPolicyDecisionInvariants(decision);
+      assert.strictEqual(decision.state, 'denied');
+      assert.ok(decision.blockers.includes('execution-policy-context-invalid'));
+    }
+  });
+
+  it('denies invalid operation as cross-operation / operation-invalid', () => {
+    const context = buildAllTruePolicyContext();
+    context.operation = 'apply-all';
+    const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+    assertPolicyDecisionInvariants(decision);
+    assert.strictEqual(decision.state, 'denied');
+    assert.ok(decision.blockers.includes('execution-policy-operation-invalid'));
+  });
+
+  it('denies empty-actions via actionCandidatesReady false', () => {
+    const context = buildAllTruePolicyContext();
+    context.actionCandidatesReady = false;
+    const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+    assertPolicyDecisionInvariants(decision);
+    assert.ok(decision.blockers.includes('action-candidates-not-ready'));
+  });
+
+  it('best-effort rejects observable accessor contexts and maps trap throw to fixed invalid', () => {
+    const withGetter = {};
+    for (const [k, v] of Object.entries(buildAllTruePolicyContext())) {
+      Object.defineProperty(withGetter, k, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return v;
+        },
+      });
+    }
+
+    const throwingDescriptorTarget = buildAllTruePolicyContext();
+    const throwingProxy = new Proxy(throwingDescriptorTarget, {
+      getOwnPropertyDescriptor() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+
+    const opaqueLeakProbe = new Proxy(buildAllTruePolicyContext(), {
+      get(obj, prop) {
+        if (prop === 'OPAQUE_UNSAFE_FIELD') return UNSAFE_SECRET_MATERIAL;
+        return obj[prop];
+      },
+      ownKeys() {
+        return [...Object.keys(buildAllTruePolicyContext()), 'OPAQUE_UNSAFE_FIELD'];
+      },
+      getOwnPropertyDescriptor(obj, prop) {
+        if (prop === 'OPAQUE_UNSAFE_FIELD') {
+          return { configurable: true, enumerable: true, value: UNSAFE_SECRET_MATERIAL };
+        }
+        return Object.getOwnPropertyDescriptor(obj, prop);
+      },
+    });
+
+    for (const sample of [withGetter, throwingProxy, opaqueLeakProbe]) {
+      const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(sample);
+      assertPolicyDecisionInvariants(decision);
+      assert.strictEqual(decision.state, 'denied');
+      assert.ok(decision.blockers.includes('execution-policy-context-invalid'));
+      assert.strictEqual(decision.primaryBlocker, 'execution-policy-context-invalid');
+      assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+    }
+  });
+
+  it('input mutation does not change an already-returned decision; output mutation does not affect later calls', () => {
+    const context = buildAllTruePolicyContext();
+    const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context);
+    const snapshot = JSON.stringify(decision);
+
+    context.runnerRegistryReady = false;
+    context.operation = 'hacked';
+    context.lifecyclePlanValid = false;
+    assert.strictEqual(JSON.stringify(decision), snapshot);
+    assert.strictEqual(decision.state, 'authorized');
+    assert.strictEqual(decision.authorized, true);
+    assert.strictEqual(decision.wouldAuthorizeExecution, true);
+    assert.strictEqual(decision.wouldRun, false);
+
+    decision.authorized = false;
+    decision.wouldAuthorizeExecution = false;
+    decision.state = 'denied';
+    decision.blockers.push('forged-blocker');
+    decision.wouldRun = true;
+    decision.primaryBlocker = 'forged-blocker';
+
+    const again = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(buildAllTruePolicyContext());
+    assert.strictEqual(again.state, 'authorized');
+    assert.strictEqual(again.authorized, true);
+    assert.strictEqual(again.wouldAuthorizeExecution, true);
+    assert.strictEqual(again.wouldRun, false);
+    assert.strictEqual(again.wouldWrite, false);
+    assert.deepStrictEqual(again.blockers, []);
+    assert.strictEqual(again.primaryBlocker, null);
+    assert.ok(!JSON.stringify(again).includes('forged-blocker'));
+    assert.notStrictEqual(again, decision);
+  });
+
+  it('never echoes opaque unsafe material from malicious context bag', () => {
+    const context = buildAllTruePolicyContext();
+    const malicious = {
+      ...context,
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
+      nestedOpaque: { material: UNSAFE_SECRET_MATERIAL },
+    };
+    const decision = evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(malicious);
+    assert.strictEqual(decision.state, 'denied');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+});
+
+describe('areSupervisorLifecycleGuardedRunnerActionCandidatesReady', () => {
+  function validCandidate(actionId) {
+    return {
+      actionId,
+      implementationId: 'impl-synthetic',
+      runnerKind: 'guarded-host-action',
+      mode: 'guarded-host-action',
+      status: 'blocked',
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      maxAttempts: 1,
+    };
+  }
+
+  function validCandidatesFor(operation) {
+    const expectedIds = OPERATION_EXPECTED_ACTION_IDS[operation];
+    return expectedIds.map((id) => validCandidate(id));
+  }
+
+  it('A1: nonempty + exact schema + unique actionId + full expected-set match + sensitive-field-free => true', () => {
+    for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
+      assert.strictEqual(
+        areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
+          validCandidatesFor(operation),
+          operation,
+        ),
+        true,
+      );
+    }
+  });
+
+  it('A2: empty array => false', () => {
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady([], 'install'),
+      false,
+    );
+  });
+
+  it('A3: missing required schema field or unknown key => false', () => {
+    const base = validCandidatesFor('install');
+    const missingField = base.map((c, i) => (i === 0
+      ? {
+          actionId: c.actionId,
+        }
+      : c));
+    const unknownKey = base.map((c, i) => (i === 0
+      ? { ...c, OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL }
+      : c));
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(missingField, 'install'),
+      false,
+    );
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(unknownKey, 'install'),
+      false,
+    );
+  });
+
+  it('A4: duplicate actionId => false', () => {
+    const base = validCandidatesFor('install');
+    const duped = [...base, { ...base[0] }];
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(duped, 'install'),
+      false,
+    );
+  });
+
+  it('A5: candidates set does not fully match operation expected set => false', () => {
+    const base = validCandidatesFor('install');
+    const missingOne = base.slice(0, Math.max(0, base.length - 1));
+    const extraOne = [...base, validCandidate('synthetic-extra-action-id')];
+    const wrongOpSet = validCandidatesFor('uninstall');
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(missingOne, 'install'),
+      false,
+    );
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(extraOne, 'install'),
+      false,
+    );
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(wrongOpSet, 'install'),
+      false,
+    );
+  });
+
+  it('A6: trap / getter / non-array / null / invalid operation / type-confused => false', () => {
+    const base = validCandidatesFor('install');
+    const withGetterElement = [...base];
+    const trapped = {};
+    for (const [k, v] of Object.entries(base[0])) {
+      Object.defineProperty(trapped, k, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return v;
+        },
+      });
+    }
+    withGetterElement[0] = trapped;
+
+    const throwingProxy = new Proxy(base, {
+      get() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+
+    const samples = [
+      null,
+      undefined,
+      'install',
+      1,
+      true,
+      { not: 'array' },
+      withGetterElement,
+      throwingProxy,
+    ];
+    for (const sample of samples) {
+      assert.strictEqual(
+        areSupervisorLifecycleGuardedRunnerActionCandidatesReady(sample, 'install'),
+        false,
+      );
+    }
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(base, 'apply-all'),
+      false,
+    );
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(base, null),
+      false,
+    );
+  });
+
+  it('A7: sensitive-field-free failure + boolean-only / not authorize-or-wouldRun boundary', () => {
+    const base = validCandidatesFor('install');
+    const withSensitive = base.map((c, i) => (i === 0
+      ? { ...c, OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL }
+      : c));
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(withSensitive, 'install'),
+      false,
+    );
+    const ready = areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
+      validCandidatesFor('install'),
+      'install',
+    );
+    assert.strictEqual(typeof ready, 'boolean');
+    assert.strictEqual(ready, true);
+  });
+
+  it('A8: maxAttempts accepts 1..3 and [redacted], rejects 4 and 99', () => {
+    for (const ok of [1, 2, 3, '[redacted]']) {
+      const candidates = validCandidatesFor('install').map((c, i) => (
+        i === 0 ? { ...c, maxAttempts: ok } : c
+      ));
+      assert.strictEqual(
+        areSupervisorLifecycleGuardedRunnerActionCandidatesReady(candidates, 'install'),
+        true,
+        `maxAttempts=${String(ok)} must be accepted`,
+      );
+    }
+    for (const bad of [4, 99]) {
+      const candidates = validCandidatesFor('install').map((c, i) => (
+        i === 0 ? { ...c, maxAttempts: bad } : c
+      ));
+      assert.strictEqual(
+        areSupervisorLifecycleGuardedRunnerActionCandidatesReady(candidates, 'install'),
+        false,
+        `maxAttempts=${bad} must be rejected`,
+      );
+    }
+  });
+});
+
+describe('gates.actionCandidatesReady gate integration (empty/valid only)', () => {
+  it('G1: production valid candidates => actionCandidatesReady true but policy denied via five downstream', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
+        result.actionCandidates,
+        result.operation,
+      ),
+      true,
+    );
+    assert.strictEqual(result.policyDecision.state, 'denied');
+    assert.strictEqual(result.policyDecision.authorized, false);
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    for (const code of [
+      'runner-registry-not-ready',
+      'host-mutation-adapter-not-ready',
+      'rollback-anchor-not-ready',
+      'attempt-audit-not-ready',
+      'operator-recovery-not-ready',
+    ]) {
+      assert.ok(result.policyDecision.blockers.includes(code));
+    }
+  });
+
+  it('G2: empty sanitized candidates => actionCandidatesReady false + action-candidates-not-ready', () => {
+    const emptyPathInputs = getReadyInputs();
+    emptyPathInputs.executionPreview = {
+      ...emptyPathInputs.executionPreview,
+      actionPreviews: emptyPathInputs.executionPreview.actionPreviews.map((entry, index) => (
+        index === 0 ? { ...entry, wouldExecute: true } : entry
+      )),
+    };
+    const result = buildGate(emptyPathInputs, { executeRequested: true });
+    assert.deepStrictEqual(result.actionCandidates, []);
+    assert.strictEqual(result.gates.actionCandidatesReady, false);
+    assert.ok(result.policyDecision.blockers.includes('action-candidates-not-ready'));
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(result.actionCandidates, result.operation),
+      false,
+    );
   });
 });

@@ -651,7 +651,6 @@ const GUARDED_RUNNER_KIND = 'guarded-runner-stub';
 const GUARDED_RUNNER_EXECUTION_DISABLED = 'guarded-runner-execution-disabled';
 const GUARDED_RUNNER_EXECUTION_PREVIEW_ONLY = 'guarded-runner-execution-preview-only';
 const REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
-const EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING = 'execution-policy-real-implementation-missing';
 const RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING = 'runner-registry-real-implementation-missing';
 const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter-real-implementation-missing';
 const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
@@ -661,13 +660,76 @@ const ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING = 'attempt-audit-real-implementa
 const DISABLED_ATTEMPT_AUDIT_KIND = 'disabled-attempt-audit-stub';
 const OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING = 'operator-recovery-real-implementation-missing';
 const DISABLED_OPERATOR_RECOVERY_KIND = 'disabled-operator-recovery-stub';
-const DISABLED_EXECUTION_POLICY_KIND = 'disabled-execution-policy-stub';
-const GUARDED_RUNNER_DISABLED_EXECUTION_POLICY_ENTRY = Object.freeze({
-  policyKind: DISABLED_EXECUTION_POLICY_KIND,
-  state: 'blocked',
-  realImplementationReady: false,
+const FAIL_CLOSED_EXECUTION_POLICY_KIND = 'fail-closed-execution-policy';
+const EXECUTION_POLICY_READY_EVIDENCE = 'execution-policy-ready';
+const EXECUTION_POLICY_CONTEXT_INVALID = 'execution-policy-context-invalid';
+const EXECUTION_POLICY_OPERATION_INVALID = 'execution-policy-operation-invalid';
+const POLICY_FACT_KEYS = Object.freeze([
+  'lifecyclePlanValid',
+  'approvalRecordReady',
+  'manifestReady',
+  'runnerBindingsReady',
+  'executionPreviewVerified',
+  'executeRequested',
+  'actionCandidatesReady',
+  'runnerRegistryReady',
+  'hostMutationAdapterReady',
+  'rollbackAnchorReady',
+  'attemptAuditReady',
+  'operatorRecoveryReady',
+]);
+const POLICY_FACT_BLOCKERS = Object.freeze({
+  lifecyclePlanValid: 'lifecycle-plan-not-ready',
+  approvalRecordReady: 'approval-record-gate-not-ready',
+  manifestReady: 'executor-manifest-not-ready',
+  runnerBindingsReady: 'guarded-runner-readiness-not-ready',
+  executionPreviewVerified: 'execution-preview-not-verified',
+  executeRequested: 'execute-request-missing',
+  actionCandidatesReady: 'action-candidates-not-ready',
+  runnerRegistryReady: 'runner-registry-not-ready',
+  hostMutationAdapterReady: 'host-mutation-adapter-not-ready',
+  rollbackAnchorReady: 'rollback-anchor-not-ready',
+  attemptAuditReady: 'attempt-audit-not-ready',
+  operatorRecoveryReady: 'operator-recovery-not-ready',
+});
+const EXECUTION_POLICY_CONTEXT_KEYS = Object.freeze([
+  'operation',
+  ...POLICY_FACT_KEYS,
+]);
+const EXECUTION_POLICY_BLOCKER_CODES = Object.freeze([
+  EXECUTION_POLICY_CONTEXT_INVALID,
+  EXECUTION_POLICY_OPERATION_INVALID,
+  'lifecycle-plan-not-ready',
+  'approval-record-gate-not-ready',
+  'executor-manifest-not-ready',
+  'guarded-runner-readiness-not-ready',
+  'execution-preview-not-verified',
+  'execute-request-missing',
+  'action-candidates-not-ready',
+  'runner-registry-not-ready',
+  'host-mutation-adapter-not-ready',
+  'rollback-anchor-not-ready',
+  'attempt-audit-not-ready',
+  'operator-recovery-not-ready',
+]);
+const EXECUTION_POLICY_BLOCKER_CODE_SET = new Set(EXECUTION_POLICY_BLOCKER_CODES);
+const ACTION_CANDIDATE_ALLOWED_KEYS = Object.freeze([
+  'actionId',
+  'implementationId',
+  'runnerKind',
+  'mode',
+  'status',
+  'wouldExecute',
+  'wouldRun',
+  'wouldWrite',
+  'maxAttempts',
+]);
+const GUARDED_RUNNER_READY_EXECUTION_POLICY_ENTRY = Object.freeze({
+  policyKind: FAIL_CLOSED_EXECUTION_POLICY_KIND,
+  state: 'ready',
+  realImplementationReady: true,
   approvalPolicyDefined: true,
-  approvalPolicyEnforced: false,
+  approvalPolicyEnforced: true,
   allowLifecycleApply: false,
   allowHostMutation: false,
   allowLaunchctl: false,
@@ -682,7 +744,8 @@ const GUARDED_RUNNER_DISABLED_EXECUTION_POLICY_ENTRY = Object.freeze({
   wouldRun: false,
   wouldWrite: false,
   sensitiveValuesReturned: false,
-  blockerCode: EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: EXECUTION_POLICY_READY_EVIDENCE,
 });
 const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
   auditKind: DISABLED_ATTEMPT_AUDIT_KIND,
@@ -759,16 +822,18 @@ const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
 const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   Object.freeze({
     id: 'execution-policy',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'Only disabled execution policy readiness exists; real execution policy enforcement is missing.',
-    blockerCode: 'execution-policy-missing',
+    evidence: 'Code-owned fail-closed execution policy evaluator is wired.',
+    evidenceCode: EXECUTION_POLICY_READY_EVIDENCE,
+    blockerCode: null,
   }),
   Object.freeze({
     id: 'runner-registry',
     status: 'blocked',
     requiredForExecution: true,
     evidence: 'No code-owned guarded runner registry is wired.',
+    evidenceCode: 'runner-registry-missing',
     blockerCode: 'runner-registry-missing',
   }),
   Object.freeze({
@@ -776,6 +841,7 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
     status: 'blocked',
     requiredForExecution: true,
     evidence: 'No restricted host mutation adapter is wired.',
+    evidenceCode: 'host-mutation-adapter-missing',
     blockerCode: 'host-mutation-adapter-missing',
   }),
   Object.freeze({
@@ -783,6 +849,7 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
     status: 'blocked',
     requiredForExecution: true,
     evidence: 'No rollback anchor write and verification strategy is wired.',
+    evidenceCode: 'rollback-anchor-missing',
     blockerCode: 'rollback-anchor-missing',
   }),
   Object.freeze({
@@ -790,6 +857,7 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
     status: 'blocked',
     requiredForExecution: true,
     evidence: 'No immutable real execution attempt audit strategy is wired.',
+    evidenceCode: 'attempt-audit-missing',
     blockerCode: 'attempt-audit-missing',
   }),
   Object.freeze({
@@ -797,6 +865,7 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
     status: 'blocked',
     requiredForExecution: true,
     evidence: 'No failure recovery, retry limit, and operator runbook is wired.',
+    evidenceCode: 'operator-recovery-missing',
     blockerCode: 'operator-recovery-missing',
   }),
 ]);
@@ -1499,21 +1568,314 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPreview(plan, guar
   };
 }
 
+function snapshotExactKeyPlainPolicyContext(context) {
+  if (context === null || typeof context !== 'object' || Array.isArray(context)) return null;
+  const proto = Object.getPrototypeOf(context);
+  if (proto !== Object.prototype && proto !== null) return null;
+
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(context);
+  } catch {
+    return null;
+  }
+
+  const expected = new Set(EXECUTION_POLICY_CONTEXT_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (typeof key !== 'string' || !expected.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of EXECUTION_POLICY_CONTEXT_KEYS) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(context, key);
+    } catch {
+      return null;
+    }
+    if (!desc || desc.get !== undefined || desc.set !== undefined || !Object.prototype.hasOwnProperty.call(desc, 'value')) {
+      return null;
+    }
+    snapshot[key] = desc.value;
+  }
+
+  if (typeof snapshot.operation !== 'string') return null;
+  for (const key of POLICY_FACT_KEYS) {
+    if (snapshot[key] !== true && snapshot[key] !== false) return null;
+  }
+  return snapshot;
+}
+
+function buildExecutionPolicyDecisionBase(fields) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-execution-policy',
+    operation: fields.operation,
+    state: fields.state,
+    authorized: fields.authorized,
+    wouldAuthorizeExecution: fields.wouldAuthorizeExecution,
+    wouldRun: false,
+    wouldWrite: false,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: [...fields.blockers],
+    nextBlockers: [...fields.nextBlockers],
+    policyKind: FAIL_CLOSED_EXECUTION_POLICY_KIND,
+    realImplementationReady: true,
+    approvalPolicyDefined: true,
+    approvalPolicyEnforced: true,
+    allowLifecycleApply: false,
+    allowHostMutation: false,
+    allowLaunchctl: false,
+    allowFilesystemWrite: false,
+    allowMetadataWrite: false,
+    allowAuditWrite: false,
+    allowRollbackAnchorWrite: false,
+    allowNasConnection: false,
+    allowBackupRestore: false,
+    allowRemoteCommand: false,
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function denyExecutionPolicyDecision(operation, blockers) {
+  const safeBlockers = blockers.filter((code) => EXECUTION_POLICY_BLOCKER_CODE_SET.has(code));
+  const finalBlockers = safeBlockers.length > 0
+    ? safeBlockers
+    : [EXECUTION_POLICY_CONTEXT_INVALID];
+  return buildExecutionPolicyDecisionBase({
+    operation,
+    state: 'denied',
+    authorized: false,
+    wouldAuthorizeExecution: false,
+    primaryBlocker: finalBlockers[0],
+    blockers: finalBlockers,
+    nextBlockers: [finalBlockers[0]],
+  });
+}
+
+function authorizeExecutionPolicyDecision(operation) {
+  return buildExecutionPolicyDecisionBase({
+    operation,
+    state: 'authorized',
+    authorized: true,
+    wouldAuthorizeExecution: true,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+  });
+}
+
+/**
+ * Pure fail-closed execution policy evaluator for guarded runner lifecycle.
+ * Authorizes only exact-key plain boolean context with all facts true.
+ * Never sets wouldRun/wouldWrite/allow* true. Deep-copy output.
+ *
+ * @param {unknown} context
+ * @returns {object}
+ */
+export function evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(context) {
+  try {
+    const snapshot = snapshotExactKeyPlainPolicyContext(context);
+    if (!snapshot) {
+      return denyExecutionPolicyDecision('unknown', [EXECUTION_POLICY_CONTEXT_INVALID]);
+    }
+
+    const operation = snapshot.operation;
+    if (!ALLOWED_OPERATIONS.has(operation)) {
+      return denyExecutionPolicyDecision('unknown', [EXECUTION_POLICY_OPERATION_INVALID]);
+    }
+
+    const blockers = [];
+    for (const key of POLICY_FACT_KEYS) {
+      if (snapshot[key] !== true) {
+        blockers.push(POLICY_FACT_BLOCKERS[key]);
+      }
+    }
+    if (blockers.length > 0) {
+      return denyExecutionPolicyDecision(operation, blockers);
+    }
+    return authorizeExecutionPolicyDecision(operation);
+  } catch {
+    return denyExecutionPolicyDecision('unknown', [EXECUTION_POLICY_CONTEXT_INVALID]);
+  }
+}
+
+function sanitizePolicyDecision(decision) {
+  const deniedInvalid = () => denyExecutionPolicyDecision('unknown', [EXECUTION_POLICY_CONTEXT_INVALID]);
+  if (!isObject(decision)) return deniedInvalid();
+
+  try {
+    // Only allowlisted lifecycle operations keep their id; anything else is unknown.
+    // Do not invent a default operation here — authorize path never falls back to install.
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : null;
+    if (rawBlockers === null) return deniedInvalid();
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code !== 'string' || !EXECUTION_POLICY_BLOCKER_CODE_SET.has(code)) {
+        return deniedInvalid();
+      }
+      blockers.push(code);
+    }
+
+    let primaryBlocker = decision.primaryBlocker;
+    if (primaryBlocker !== null && primaryBlocker !== undefined) {
+      if (typeof primaryBlocker !== 'string' || !EXECUTION_POLICY_BLOCKER_CODE_SET.has(primaryBlocker)) {
+        return deniedInvalid();
+      }
+    } else {
+      primaryBlocker = null;
+    }
+
+    const state = decision.state;
+    const authorized = decision.authorized === true;
+    const wouldAuthorizeExecution = decision.wouldAuthorizeExecution === true;
+    // Authorize only when flags are consistent AND operation is allowlisted.
+    // unknown/invalid operation with authorized flags collapses to deniedInvalid —
+    // never authorizeExecutionPolicyDecision('install') as a fallback.
+    const consistentAuthorized =
+      state === 'authorized' &&
+      authorized &&
+      wouldAuthorizeExecution &&
+      ALLOWED_OPERATIONS.has(operation);
+    const consistentDenied = state === 'denied' && !authorized && !wouldAuthorizeExecution &&
+      decision.authorized === false && decision.wouldAuthorizeExecution === false;
+
+    if (!consistentAuthorized && !consistentDenied) {
+      return deniedInvalid();
+    }
+
+    if (consistentAuthorized) {
+      if (blockers.length !== 0 || primaryBlocker !== null) return deniedInvalid();
+      return authorizeExecutionPolicyDecision(operation);
+    }
+
+    if (blockers.length < 1) return deniedInvalid();
+    if (primaryBlocker !== blockers[0]) return deniedInvalid();
+    return denyExecutionPolicyDecision(operation, blockers);
+  } catch {
+    return deniedInvalid();
+  }
+}
+
+function isPlainDataPropertyObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function snapshotPlainCandidate(candidate) {
+  if (!isPlainDataPropertyObject(candidate)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(candidate);
+  } catch {
+    return null;
+  }
+  if (ownKeys.length !== ACTION_CANDIDATE_ALLOWED_KEYS.length) return null;
+  const allowed = new Set(ACTION_CANDIDATE_ALLOWED_KEYS);
+  for (const key of ownKeys) {
+    if (typeof key !== 'string' || !allowed.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of ACTION_CANDIDATE_ALLOWED_KEYS) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(candidate, key);
+    } catch {
+      return null;
+    }
+    if (!desc || desc.get !== undefined || desc.set !== undefined || !Object.prototype.hasOwnProperty.call(desc, 'value')) {
+      return null;
+    }
+    snapshot[key] = desc.value;
+  }
+  return snapshot;
+}
+
+function isValidActionCandidateSnapshot(snapshot) {
+  if (!snapshot) return false;
+  if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) return false;
+  if (typeof snapshot.implementationId !== 'string') return false;
+  if (typeof snapshot.runnerKind !== 'string') return false;
+  if (typeof snapshot.mode !== 'string') return false;
+  if (snapshot.status !== 'blocked') return false;
+  if (snapshot.wouldExecute !== false) return false;
+  if (snapshot.wouldRun !== false) return false;
+  if (snapshot.wouldWrite !== false) return false;
+  if (!(
+    (typeof snapshot.maxAttempts === 'number' &&
+      Number.isInteger(snapshot.maxAttempts) &&
+      snapshot.maxAttempts >= 1 &&
+      snapshot.maxAttempts <= 3) ||
+    snapshot.maxAttempts === '[redacted]'
+  )) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Structural readiness for sanitized guarded-runner action candidates.
+ * Returns true only when candidates pass exact schema / nonempty / unique
+ * actionId / operation expected-set match / sensitive-field-free checks.
+ * Does NOT authorize execution, wouldRun, wouldWrite, or executionEligible.
+ * Invalid input, getters, or traps yield false. Returns boolean only — no metadata.
+ *
+ * @param {unknown} candidates - already-sanitized candidate array (or invalid input)
+ * @param {unknown} operation - allowlisted lifecycle operation string
+ * @returns {boolean}
+ */
+export function areSupervisorLifecycleGuardedRunnerActionCandidatesReady(candidates, operation) {
+  try {
+    if (!ALLOWED_OPERATIONS.has(operation)) return false;
+    if (!Array.isArray(candidates) || candidates.length < 1) return false;
+
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    if (candidates.length !== expectedIds.length) return false;
+
+    const seen = new Set();
+    const actualIds = [];
+    for (const candidate of candidates) {
+      const snapshot = snapshotPlainCandidate(candidate);
+      if (!isValidActionCandidateSnapshot(snapshot)) return false;
+      if (seen.has(snapshot.actionId)) return false;
+      seen.add(snapshot.actionId);
+      actualIds.push(snapshot.actionId);
+    }
+
+    if (actualIds.length !== expectedIds.length) return false;
+    const expectedSet = new Set(expectedIds);
+    if (actualIds.length !== expectedSet.size) return false;
+    for (const id of actualIds) {
+      if (!expectedSet.has(id)) return false;
+    }
+    for (const id of expectedIds) {
+      if (!seen.has(id)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-policy-readiness',
-    state: 'blocked',
+    state: 'ready',
     executionPolicyDefined: true,
-    executionPolicyReady: false,
-    realExecutionPolicyReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    policyEntries: [{ ...GUARDED_RUNNER_DISABLED_EXECUTION_POLICY_ENTRY }],
-    blockers: [
-      EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [EXECUTION_POLICY_REAL_IMPLEMENTATION_MISSING],
+    executionPolicyReady: true,
+    realExecutionPolicyReady: true,
+    readyCount: 1,
+    blockedCount: 0,
+    policyEntries: [{ ...GUARDED_RUNNER_READY_EXECUTION_POLICY_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -1619,8 +1981,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 0,
-    blockedCount: requiredContracts.length,
+    readyCount: 1,
+    blockedCount: 5,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -1755,6 +2117,38 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
   }
   blockers.push(REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING);
   const runnerWiringContract = buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview);
+  const actionCandidates = buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview);
+  const actionCandidatesReady = areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
+    actionCandidates,
+    operation,
+  );
+
+  const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
+  const executionPolicyReady =
+    executionPolicyReadiness?.executionPolicyReady === true &&
+    executionPolicyReadiness?.realExecutionPolicyReady === true &&
+    executionPolicyReadiness?.state === 'ready';
+
+  // Production policy context: local primitive booleans only — never request/options objects.
+  const policyContext = {
+    operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
+    lifecyclePlanValid: lifecyclePlanValid === true,
+    approvalRecordReady: approvalRecordReady === true,
+    manifestReady: manifestReady === true,
+    runnerBindingsReady: runnerBindingsReady === true,
+    executionPreviewVerified: executionPreviewVerified === true,
+    executeRequested: executeRequested === true,
+    actionCandidatesReady: actionCandidatesReady === true,
+    runnerRegistryReady: false,
+    hostMutationAdapterReady: false,
+    rollbackAnchorReady: false,
+    attemptAuditReady: false,
+    operatorRecoveryReady: false,
+  };
+
+  const policyDecision = sanitizePolicyDecision(
+    evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(policyContext),
+  );
 
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
@@ -1768,7 +2162,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     blockers: [...new Set(blockers)],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     runnerWiringContract,
-    actionCandidates: buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview),
+    actionCandidates,
+    policyDecision,
     gates: {
       lifecyclePlanValid,
       approvalRecordReady,
@@ -1776,7 +2171,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerBindingsReady,
       executionPreviewVerified,
       executeRequested,
-      executionPolicyReady: false,
+      actionCandidatesReady,
+      executionPolicyReady,
       runnerRegistryReady: false,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,

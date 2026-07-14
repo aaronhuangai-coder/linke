@@ -1211,6 +1211,44 @@ function sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(value, ke
   return redactedHighEntropy.includes('[redacted') ? '[redacted]' : redactedHighEntropy;
 }
 
+const EXECUTION_POLICY_DECISION_BLOCKER_ALLOWLIST = new Set([
+  'execution-policy-context-invalid',
+  'execution-policy-operation-invalid',
+  'lifecycle-plan-not-ready',
+  'approval-record-gate-not-ready',
+  'executor-manifest-not-ready',
+  'guarded-runner-readiness-not-ready',
+  'execution-preview-not-verified',
+  'execute-request-missing',
+  'action-candidates-not-ready',
+  'runner-registry-not-ready',
+  'host-mutation-adapter-not-ready',
+  'rollback-anchor-not-ready',
+  'attempt-audit-not-ready',
+  'operator-recovery-not-ready',
+]);
+
+function sanitizeAllowlistedExecutionPolicyBlocker(value) {
+  if (typeof value !== 'string') return null;
+  return EXECUTION_POLICY_DECISION_BLOCKER_ALLOWLIST.has(value) ? value : null;
+}
+
+/**
+ * V1.24 Web security boundary for requiredContracts rendering:
+ * - Only `execution-policy` may display ready, and only under the strict
+ *   ready + blockerCode:null + evidenceCode:execution-policy-ready contract.
+ * - Five downstream contracts are always blocked with canonical missing codes;
+ *   never trust payload status/blocker/evidence for them.
+ * - Unknown / redacted ids stay blocked without leaking payload blocker text.
+ */
+const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
+  'runner-registry': 'runner-registry-missing',
+  'host-mutation-adapter': 'host-mutation-adapter-missing',
+  'rollback-anchor': 'rollback-anchor-missing',
+  'attempt-audit': 'attempt-audit-missing',
+  'operator-recovery': 'operator-recovery-missing',
+});
+
 function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringContract) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
@@ -1218,8 +1256,25 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringCo
   return requiredContracts.map((contract) => {
     const source = contract && typeof contract === 'object' ? contract : {};
     const id = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.id, 'id') || 'unknown';
-    const blockerCode = sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(source.blockerCode, 'blockerCode') || 'unknown';
-    return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:${blockerCode}`;
+
+    const fixedMissing = WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS[id];
+    if (fixedMissing) {
+      return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:${fixedMissing}`;
+    }
+
+    if (id === 'execution-policy') {
+      const strictReady =
+        source.status === 'ready' &&
+        source.blockerCode === null &&
+        source.evidenceCode === 'execution-policy-ready';
+      if (strictReady) {
+        return 'wiringContract:execution-policy:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:execution-policy:status:blocked:requiredForExecution:true:blocker:execution-policy-missing';
+    }
+
+    // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
+    return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:unknown`;
   });
 }
 
@@ -1239,9 +1294,23 @@ function buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(runnerWiringC
     ? runnerWiringContract.executionPolicyReadiness.policyEntries
     : [];
   if (policyEntries.length < 1) return [];
+  // Fixed ready fail-closed policy line; ignore malicious payload policyKind/blocker content.
   return [
-    'executionPolicy:disabled-execution-policy-stub:state:blocked:realImplementationReady:false:' +
-      'wouldAuthorizeExecution:false:blocker:execution-policy-real-implementation-missing',
+    'executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:' +
+      'wouldAuthorizeExecution:false:blocker:none',
+  ];
+}
+
+/**
+ * V1.24 VERSION SECURITY BOUNDARY:
+ * Always render denied on the Web production surface. Do not trust
+ * payload.authorized / state / wouldAuthorizeExecution / wouldRun.
+ * A future independent version may lift this only with a new trusted contract.
+ */
+function buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload) {
+  const primary = sanitizeAllowlistedExecutionPolicyBlocker(payload?.policyDecision?.primaryBlocker) || 'unknown';
+  return [
+    `policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:${primary}`,
   ];
 }
 
@@ -1533,6 +1602,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(payload.runnerWiringContract);
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
+  const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
   const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(payload.runnerWiringContract);
   const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(payload.runnerWiringContract);
   const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
@@ -1552,6 +1622,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...actionLines,
       ...wiringContractLines,
       ...executionPolicyLines,
+      ...policyDecisionLines,
       ...runnerRegistryLines,
       ...hostMutationAdapterLines,
       ...rollbackAnchorLines,
@@ -1565,7 +1636,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `manifestReady:${gates.manifestReady === true ? 'true' : 'false'}`,
       `runnerBindingsReady:${gates.runnerBindingsReady === true ? 'true' : 'false'}`,
       `executeRequested:${gates.executeRequested === true ? 'true' : 'false'}`,
-      'executionPolicyReady:false',
+      `executionPolicyReady:${gates.executionPolicyReady === true ? 'true' : 'false'}`,
       'runnerRegistryReady:false',
       'realRunnerWiringReady:false',
       'runnerWiringContractReady:false',

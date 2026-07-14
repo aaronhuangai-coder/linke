@@ -10782,19 +10782,24 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         },
         requiredContracts: [
           {
+            // Strict ready contract only (status + null blocker + evidenceCode); opaque
+            // evidence/command strings must not leak into the Web line.
             id: 'execution-policy',
             status: 'ready',
             requiredForExecution: false,
             evidence: '/Users/ah/secret-path token=SECRET_XYZ approval reason',
-            blockerCode: 'execution-policy-missing',
+            evidenceCode: 'execution-policy-ready',
+            blockerCode: null,
             command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
           },
           {
+            // Malicious ready injection for a non-execution-policy contract — must stay blocked.
             id: 'runner-registry',
             status: 'ready',
             requiredForExecution: false,
             evidence: '/Users/ah/secret-path token=SECRET_XYZ approval reason',
-            blockerCode: 'runner-registry-missing',
+            evidenceCode: 'runner-registry-ready',
+            blockerCode: null,
             command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
           },
         ],
@@ -10832,15 +10837,19 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /wouldWrite:false/);
     assert.match(text, /status:blocked/);
     assert.match(text, /candidate:render-launch-agent-plist:impl:\[redacted\]:mode:\[redacted\]:runner:\[redacted\]:status:blocked:wouldExecute:false:wouldRun:false:wouldWrite:false/);
-    assert.match(text, /wiringContract:execution-policy:status:blocked:requiredForExecution:true:blocker:execution-policy-missing/);
+    assert.match(text, /wiringContract:execution-policy:status:ready:requiredForExecution:true:blocker:none/);
+    // V1.24 Web security boundary: non-execution-policy required contracts stay blocked
+    // with canonical missing blockers even when payload claims status:ready.
     assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
-    assert.match(text, /executionPolicy:disabled-execution-policy-stub:state:blocked:realImplementationReady:false:wouldAuthorizeExecution:false:blocker:execution-policy-real-implementation-missing/);
+    assert.doesNotMatch(text, /wiringContract:runner-registry:status:ready/);
+    assert.match(text, /executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:wouldAuthorizeExecution:false:blocker:none/);
+    assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:/);
     assert.match(text, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
     assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
     assert.match(text, /rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing/);
     assert.match(text, /attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing/);
     assert.match(text, /operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:wouldRecover:false:blocker:operator-recovery-real-implementation-missing/);
-    assert.match(text, /executionPolicyReady:false/);
+    assert.match(text, /executionPolicyReady:true/);
     assert.match(text, /hostMutationAdapterReady:false/);
     assert.match(text, /rollbackAnchorReady:false/);
     assert.match(text, /attemptAuditReady:false/);
@@ -10860,6 +10869,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /filesystemWritten:false/);
     assert.match(text, /auditEventWritten:false/);
     assert.match(text, /metadataWritten:false/);
+    assert.ok(viewModel.requiredFields.some((line) =>
+      line.startsWith('policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false')));
     assert.ok(!text.includes('/Users/ah'), 'must not expose paths');
     assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token values');
     assert.ok(!text.includes('sha256:'), 'must not expose raw hashes');
@@ -10872,19 +10883,79 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.doesNotMatch(text, /\bnode\b/i, 'must not expose command-like runner kind');
     assert.doesNotMatch(text, /\bcurl\b/i, 'must not expose command-like mode');
     assert.doesNotMatch(text, /\bpassword\b/i, 'must not expose secret key names');
+    assert.doesNotMatch(text, /policyDecision:state:authorized|executionEligible:true|wouldExecute:true/);
   });
 
   it('keeps guarded runner execution gate unknown and error validation fail-closed for execution policy and operator recovery', () => {
     const unknown = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel();
     const error = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(null, 'launchctl /Users/ah token=SECRET_XYZ');
 
-    assert.ok(unknown.validationLines.includes('executionPolicyReady:false'));
-    assert.ok(unknown.validationLines.includes('operatorRecoveryReady:false'));
-    assert.ok(error.validationLines.includes('executionPolicyReady:false'));
-    assert.ok(error.validationLines.includes('operatorRecoveryReady:false'));
+    for (const vm of [unknown, error]) {
+      assert.deepStrictEqual(vm.requiredFields, []);
+      assert.ok(vm.validationLines.includes('executionPolicyReady:false'));
+      assert.ok(vm.validationLines.includes('executionEligible:false'));
+      assert.ok(vm.validationLines.includes('operatorRecoveryReady:false'));
+      assert.doesNotMatch(vm.requiredFields.join('\n'), /policyDecision:state:authorized/);
+      assert.doesNotMatch(vm.validationLines.join('\n'), /executionEligible:true/);
+    }
     assert.ok(!error.messageText.includes('/Users/ah'), 'must not expose error path');
     assert.ok(!error.messageText.includes('SECRET_XYZ'), 'must not expose error token');
     assert.ok(!error.messageText.includes('launchctl'), 'must not expose error command');
+  });
+
+  it('maps ready contract blockerCode null to UI sentinel none without throw', () => {
+    const readyPayload = {
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'blocked',
+      executionEligible: false,
+      wouldExecute: false,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        executionPolicyReady: true,
+        runnerRegistryReady: false,
+      },
+      actionCandidates: [],
+      policyDecision: {
+        state: 'denied',
+        authorized: false,
+        wouldAuthorizeExecution: false,
+        primaryBlocker: 'runner-registry-not-ready',
+        blockers: ['runner-registry-not-ready'],
+      },
+      runnerWiringContract: {
+        requiredContracts: [{
+          id: 'execution-policy',
+          status: 'ready',
+          requiredForExecution: true,
+          blockerCode: null,
+          evidenceCode: 'execution-policy-ready',
+        }],
+        executionPolicyReadiness: {
+          state: 'ready',
+          executionPolicyReady: true,
+          policyEntries: [{
+            policyKind: 'fail-closed-execution-policy',
+            state: 'ready',
+            wouldAuthorizeExecution: false,
+            blockerCode: null,
+            evidenceCode: 'execution-policy-ready',
+          }],
+        },
+      },
+    };
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(readyPayload);
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(text, /wiringContract:execution-policy:status:ready:.*blocker:none/);
+    assert.match(text, /executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:wouldAuthorizeExecution:false:blocker:none/);
+    assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:runner-registry-not-ready/);
+    assert.ok(viewModel.validationLines.includes('executionPolicyReady:true'));
+    assert.ok(viewModel.validationLines.includes('executionEligible:false'));
   });
 
   it('handles malicious host mutation adapter payload without leaking or execution permissions', () => {
@@ -10955,7 +11026,84 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
   });
 
+  it('keeps host-mutation-adapter wiring contract blocked when payload injects status ready', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'ready',
+      executionGateState: 'completed',
+      executionEligible: true,
+      executorReady: true,
+      wouldExecute: true,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        executionPolicyReady: true,
+        hostMutationAdapterReady: true,
+        realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
+      },
+      actionCandidates: [],
+      runnerWiringContract: {
+        command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
+        state: 'ready',
+        realRunnerWiringReady: true,
+        requiredContracts: [
+          {
+            id: 'host-mutation-adapter',
+            status: 'ready',
+            requiredForExecution: false,
+            evidence: 'UNSAFE_SECRET_MATERIAL launchctl /Users/ah/.ssh/id_rsa',
+            evidenceCode: 'host-mutation-adapter-ready',
+            blockerCode: null,
+            command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+          },
+          {
+            id: 'host-mutation-adapter',
+            status: 'ready',
+            requiredForExecution: true,
+            blockerCode: null,
+            evidenceCode: 'host-mutation-adapter-ready',
+          },
+        ],
+        safety: {
+          readOnly: false,
+          filesystemWritten: true,
+        },
+      },
+      safety: {
+        readOnly: true,
+        lifecycleApplied: true,
+        filesystemWritten: true,
+        auditEventWritten: true,
+        metadataWritten: true,
+      },
+    });
+
+    const text = [
+      ...viewModel.requiredFields,
+      ...viewModel.validationLines,
+      viewModel.messageText,
+    ].join('\n');
+
+    assert.match(
+      text,
+      /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/,
+    );
+    assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
+    assert.doesNotMatch(text, /host-mutation-adapter-ready/);
+    assert.ok(!text.includes('UNSAFE_SECRET_MATERIAL'), 'must not leak injected evidence');
+    assert.ok(!text.includes('/Users/ah'), 'must not expose paths from ready injection');
+    assert.ok(!text.includes('launchctl'), 'must not expose command-like contract fields');
+    assert.match(text, /hostMutationAdapterReady:false/);
+  });
+
   it('handles malicious execution policy payload without leaking or execution permissions', () => {
+    const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
     const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
       command: 'supervisor-lifecycle-guarded-runner-execution-gate',
       state: 'ready',
@@ -10977,6 +11125,14 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         runnerWiringContractReady: true,
       },
       actionCandidates: [],
+      policyDecision: {
+        state: 'authorized',
+        authorized: true,
+        wouldAuthorizeExecution: true,
+        wouldRun: true,
+        primaryBlocker: null,
+        blockers: [],
+      },
       runnerWiringContract: {
         command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
         state: 'ready',
@@ -10984,16 +11140,20 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         executionPolicyReadiness: {
           executionPolicyReady: true,
           policyEntries: [{
-            policyKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
-            allowLifecycleApply: true,
-            allowRemoteCommand: true,
+            policyKind: UNSAFE_SECRET_MATERIAL,
+            state: 'ready',
             wouldAuthorizeExecution: true,
-            wouldRun: true,
-            wouldWrite: true,
-            blockerCode: 'Authorization sha256:abc operator@example.invalid',
+            allowRemoteCommand: true,
+            blockerCode: UNSAFE_SECRET_MATERIAL,
+            evidenceCode: UNSAFE_SECRET_MATERIAL,
           }],
         },
-        requiredContracts: [],
+        requiredContracts: [{
+          id: 'execution-policy',
+          status: 'ready',
+          blockerCode: null,
+          evidenceCode: 'execution-policy-ready',
+        }],
         safety: {
           readOnly: false,
           filesystemWritten: true,
@@ -11009,26 +11169,18 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     });
 
     const text = [
-      ...viewModel.blockers,
-      ...viewModel.nextBlockers,
       ...viewModel.requiredFields,
       ...viewModel.validationLines,
-      ...viewModel.safetyLines,
-      viewModel.messageText,
-    ].join(' ');
+    ].join('\n');
 
-    assert.ok(text.includes(
-      'executionPolicy:disabled-execution-policy-stub:state:blocked:realImplementationReady:false:' +
-        'wouldAuthorizeExecution:false:blocker:execution-policy-real-implementation-missing'
-    ));
-    assert.match(text, /executionPolicyReady:false/);
-    assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
-    assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
-    assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');
-    assert.ok(!text.includes('token='), 'must not expose token assignment in malicious payload');
-    assert.ok(!text.includes('Authorization'), 'must not expose Authorization in malicious payload');
-    assert.ok(!text.includes('sha256:'), 'must not expose hash material in malicious payload');
-    assert.ok(!text.includes('operator@example'), 'must not expose operator identity in malicious payload');
+    assert.match(text, /executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:wouldAuthorizeExecution:false:blocker:none/);
+    assert.match(text, /wiringContract:execution-policy:status:ready:requiredForExecution:true:blocker:none/);
+    assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false/);
+    assert.match(text, /executionEligible:false/);
+    assert.doesNotMatch(text, new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+    assert.doesNotMatch(text, /executionEligible:true|wouldExecute:true|policyDecision:state:authorized/);
+    assert.ok(viewModel.requiredFields.some((line) =>
+      line.includes('policyDecision:state:denied:authorized:false')));
   });
 
   it('handles malicious rollback anchor payload without leaking or execution permissions', () => {

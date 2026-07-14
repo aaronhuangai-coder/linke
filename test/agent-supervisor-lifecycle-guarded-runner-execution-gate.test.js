@@ -186,7 +186,7 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.executionEligible, false);
   assert.strictEqual(report.executorReady, false);
   assert.strictEqual(report.wouldExecute, false);
-  assert.strictEqual(report.gates.executionPolicyReady, false);
+  assert.strictEqual(report.gates.executionPolicyReady, true);
   assert.strictEqual(report.gates.realRunnerWiringReady, false);
   assert.strictEqual(report.gates.runnerWiringContractReady, false);
   assert.strictEqual(report.gates.runnerRegistryReady, false);
@@ -200,16 +200,28 @@ function assertBlockedGate(report) {
   assert.strictEqual(report.runnerWiringContract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(report.runnerWiringContract.state, 'blocked');
   assert.strictEqual(report.runnerWiringContract.realRunnerWiringReady, false);
-  assert.strictEqual(report.runnerWiringContract.readyCount, 0);
-  assert.strictEqual(report.runnerWiringContract.blockedCount, 6);
+  assert.strictEqual(report.runnerWiringContract.readyCount, 1);
+  assert.strictEqual(report.runnerWiringContract.blockedCount, 5);
   assert.deepStrictEqual(report.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
-  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.state, 'blocked');
-  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, false);
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.state, 'ready');
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, true);
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.realExecutionPolicyReady, true);
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].policyKind, 'fail-closed-execution-policy');
   assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldAuthorizeExecution, false);
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].blockerCode, null);
+  assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].evidenceCode, 'execution-policy-ready');
   assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowLifecycleApply, false);
   assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowRemoteCommand, false);
   assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldRun, false);
   assert.strictEqual(report.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldWrite, false);
+  assert.strictEqual(report.runnerWiringContract.requiredContracts[0].status, 'ready');
+  assert.strictEqual(report.runnerWiringContract.requiredContracts[0].blockerCode, null);
+  assert.strictEqual(report.runnerWiringContract.requiredContracts[0].evidenceCode, 'execution-policy-ready');
+  assert.strictEqual(report.policyDecision.state, 'denied');
+  assert.strictEqual(report.policyDecision.authorized, false);
+  assert.strictEqual(report.policyDecision.wouldAuthorizeExecution, false);
+  assert.strictEqual(report.policyDecision.wouldRun, false);
+  assert.strictEqual(report.policyDecision.wouldWrite, false);
   assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.state, 'blocked');
   assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.hostMutationAdapterReady, false);
   assert.strictEqual(report.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldMutateHost, false);
@@ -251,7 +263,8 @@ function assertBlockedGate(report) {
     report.runnerWiringContract.requiredContracts.map((entry) => entry.id),
     ['execution-policy', 'runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
   );
-  assert.ok(report.runnerWiringContract.requiredContracts.every((entry) =>
+  assert.strictEqual(report.runnerWiringContract.requiredContracts[0].status, 'ready');
+  assert.ok(report.runnerWiringContract.requiredContracts.slice(1).every((entry) =>
     entry.status === 'blocked' && entry.requiredForExecution === true));
   assert.strictEqual(report.actionCandidates.length, 3);
   assert.ok(report.actionCandidates.every((entry) =>

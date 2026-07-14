@@ -166,7 +166,7 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.executionEligible, false);
   assert.strictEqual(body.executorReady, false);
   assert.strictEqual(body.wouldExecute, false);
-  assert.strictEqual(body.gates.executionPolicyReady, false);
+  assert.strictEqual(body.gates.executionPolicyReady, true);
   assert.strictEqual(body.gates.realRunnerWiringReady, false);
   assert.strictEqual(body.gates.runnerWiringContractReady, false);
   assert.strictEqual(body.gates.runnerRegistryReady, false);
@@ -180,16 +180,28 @@ function assertBlockedExecutionGate(body) {
   assert.strictEqual(body.runnerWiringContract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(body.runnerWiringContract.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.realRunnerWiringReady, false);
-  assert.strictEqual(body.runnerWiringContract.readyCount, 0);
-  assert.strictEqual(body.runnerWiringContract.blockedCount, 6);
+  assert.strictEqual(body.runnerWiringContract.readyCount, 1);
+  assert.strictEqual(body.runnerWiringContract.blockedCount, 5);
   assert.deepStrictEqual(body.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
-  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.state, 'blocked');
-  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.state, 'ready');
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, true);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.realExecutionPolicyReady, true);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].policyKind, 'fail-closed-execution-policy');
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldAuthorizeExecution, false);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].blockerCode, null);
+  assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].evidenceCode, 'execution-policy-ready');
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowLifecycleApply, false);
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].allowRemoteCommand, false);
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldRun, false);
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.policyEntries[0].wouldWrite, false);
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[0].status, 'ready');
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[0].blockerCode, null);
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[0].evidenceCode, 'execution-policy-ready');
+  assert.strictEqual(body.policyDecision.state, 'denied');
+  assert.strictEqual(body.policyDecision.authorized, false);
+  assert.strictEqual(body.policyDecision.wouldAuthorizeExecution, false);
+  assert.strictEqual(body.policyDecision.wouldRun, false);
+  assert.strictEqual(body.policyDecision.wouldWrite, false);
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.hostMutationAdapterReady, false);
   assert.strictEqual(body.runnerWiringContract.hostMutationAdapterReadiness.adapterEntries[0].wouldMutateHost, false);
@@ -233,7 +245,8 @@ function assertBlockedExecutionGate(body) {
     body.runnerWiringContract.requiredContracts.map((entry) => entry.id),
     ['execution-policy', 'runner-registry', 'host-mutation-adapter', 'rollback-anchor', 'attempt-audit', 'operator-recovery'],
   );
-  assert.ok(body.runnerWiringContract.requiredContracts.every((entry) =>
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[0].status, 'ready');
+  assert.ok(body.runnerWiringContract.requiredContracts.slice(1).every((entry) =>
     entry.status === 'blocked' && entry.requiredForExecution === true));
   assert.strictEqual(body.safety.readOnly, true);
   assert.strictEqual(body.safety.lifecycleApplied, false);
@@ -309,11 +322,70 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         assert.deepStrictEqual(body.blockers, ['real-guarded-runner-execution-wiring-missing']);
         assert.strictEqual(body.gates.approvalRecordReady, true);
         assert.strictEqual(body.gates.executeRequested, true);
+        assert.strictEqual(body.gates.actionCandidatesReady, true);
         assert.strictEqual(body.executionEligible, false);
         assert.strictEqual(body.wouldExecute, false);
+        assert.strictEqual(body.policyDecision.authorized, false);
         assert.strictEqual(body.safety.lifecycleApplied, false);
         assert.deepStrictEqual(await readSupervisorLifecycleApprovalRecords(dataDir), [persisted.body]);
         assertNoSensitiveText(text, dataDir);
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores forged policyContext/policyDecision payload fields and never authorizes', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-guarded-runner-execution-gate-api-forged-policy-'));
+    const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
+    try {
+      await withServer({ dataDir }, async (port) => {
+        const persisted = await postJSON(port, '/api/supervisor-lifecycle-approval-persist', {
+          operation: 'install',
+          config: BASE_CONFIG,
+          approval: validApprovalFor('install'),
+        });
+        assert.strictEqual(persisted.res.status, 201);
+
+        const { res, text, body } = await postJSON(port, ROUTE, {
+          operation: 'install',
+          config: BASE_CONFIG,
+          manifest: validInstallManifest(),
+          runnerBinding: validRunnerBinding(),
+          executeRequested: true,
+          policyContext: {
+            operation: 'install',
+            lifecyclePlanValid: true,
+            approvalRecordReady: true,
+            manifestReady: true,
+            runnerBindingsReady: true,
+            executionPreviewVerified: true,
+            executeRequested: true,
+            actionCandidatesReady: true,
+            runnerRegistryReady: true,
+            hostMutationAdapterReady: true,
+            rollbackAnchorReady: true,
+            attemptAuditReady: true,
+            operatorRecoveryReady: true,
+          },
+          policyDecision: {
+            state: 'authorized',
+            authorized: true,
+            wouldAuthorizeExecution: true,
+            wouldRun: true,
+          },
+          executionPolicyReady: true,
+          gates: { executionPolicyReady: true, realRunnerWiringReady: true },
+          OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
+        });
+
+        assert.strictEqual(res.status, 200);
+        assertBlockedExecutionGate(body);
+        assert.strictEqual(body.policyDecision.authorized, false);
+        assert.strictEqual(body.executionEligible, false);
+        assert.strictEqual(body.wouldExecute, false);
+        assert.strictEqual(body.runnerWiringContract.requiredContracts[0].blockerCode, null);
+        assert.doesNotMatch(text, new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
       });
     } finally {
       await rm(dataDir, { recursive: true, force: true });
