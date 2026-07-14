@@ -10838,13 +10838,13 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /status:blocked/);
     assert.match(text, /candidate:render-launch-agent-plist:impl:\[redacted\]:mode:\[redacted\]:runner:\[redacted\]:status:blocked:wouldExecute:false:wouldRun:false:wouldWrite:false/);
     assert.match(text, /wiringContract:execution-policy:status:ready:requiredForExecution:true:blocker:none/);
-    // V1.24 Web security boundary: non-execution-policy required contracts stay blocked
-    // with canonical missing blockers even when payload claims status:ready.
+    // V1.25 Web security boundary: runner-registry ready only under C∧R∧G∧D canonical predicate;
+    // incomplete / contradictory payload stays blocked with canonical missing codes.
     assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
     assert.doesNotMatch(text, /wiringContract:runner-registry:status:ready/);
     assert.match(text, /executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:wouldAuthorizeExecution:false:blocker:none/);
     assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:/);
-    assert.match(text, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
+    assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:runner-registry-not-ready/);
     assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
     assert.match(text, /rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing/);
     assert.match(text, /attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing/);
@@ -10895,12 +10895,416 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       assert.ok(vm.validationLines.includes('executionPolicyReady:false'));
       assert.ok(vm.validationLines.includes('executionEligible:false'));
       assert.ok(vm.validationLines.includes('operatorRecoveryReady:false'));
+      assert.ok(vm.validationLines.includes('runnerRegistryReady:false'));
       assert.doesNotMatch(vm.requiredFields.join('\n'), /policyDecision:state:authorized/);
       assert.doesNotMatch(vm.validationLines.join('\n'), /executionEligible:true/);
     }
     assert.ok(!error.messageText.includes('/Users/ah'), 'must not expose error path');
     assert.ok(!error.messageText.includes('SECRET_XYZ'), 'must not expose error token');
     assert.ok(!error.messageText.includes('launchctl'), 'must not expose error command');
+  });
+
+  function fullCanonicalRunnerRegistryReadyPayload(overrides = {}) {
+    return {
+      command: 'supervisor-lifecycle-guarded-runner-execution-gate',
+      state: 'blocked',
+      executionEligible: false,
+      wouldExecute: false,
+      blockers: ['real-guarded-runner-execution-wiring-missing'],
+      nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
+      gates: {
+        lifecyclePlanValid: true,
+        approvalRecordReady: true,
+        manifestReady: true,
+        runnerBindingsReady: true,
+        executeRequested: true,
+        executionPolicyReady: true,
+        runnerRegistryReady: true,
+        hostMutationAdapterReady: false,
+        rollbackAnchorReady: false,
+        attemptAuditReady: false,
+        operatorRecoveryReady: false,
+        executionEligible: false,
+      },
+      actionCandidates: [],
+      registryDecision: {
+        state: 'resolved',
+        registryReady: true,
+        codeOwnedResolverWired: true,
+        realHostRunnerReady: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+      },
+      policyDecision: {
+        state: 'denied',
+        authorized: false,
+        wouldAuthorizeExecution: false,
+        primaryBlocker: 'host-mutation-adapter-not-ready',
+        blockers: ['host-mutation-adapter-not-ready'],
+      },
+      runnerWiringContract: {
+        requiredContracts: [
+          {
+            id: 'execution-policy',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'execution-policy-ready',
+            requiredForExecution: true,
+          },
+          {
+            id: 'runner-registry',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'runner-registry-ready',
+            requiredForExecution: true,
+          },
+          {
+            id: 'host-mutation-adapter',
+            status: 'blocked',
+            blockerCode: 'host-mutation-adapter-missing',
+            evidenceCode: 'host-mutation-adapter-missing',
+            requiredForExecution: true,
+          },
+          {
+            id: 'rollback-anchor',
+            status: 'blocked',
+            blockerCode: 'rollback-anchor-missing',
+            evidenceCode: 'rollback-anchor-missing',
+            requiredForExecution: true,
+          },
+          {
+            id: 'attempt-audit',
+            status: 'blocked',
+            blockerCode: 'attempt-audit-missing',
+            evidenceCode: 'attempt-audit-missing',
+            requiredForExecution: true,
+          },
+          {
+            id: 'operator-recovery',
+            status: 'blocked',
+            blockerCode: 'operator-recovery-missing',
+            evidenceCode: 'operator-recovery-missing',
+            requiredForExecution: true,
+          },
+        ],
+        runnerRegistryReadiness: {
+          state: 'ready',
+          runnerRegistryReady: true,
+          codeOwnedRegistryResolverReady: true,
+          realRunnerImplementationsReady: false,
+          registryEntries: [{
+            registryKind: 'code-owned-runner-registry',
+            runnerKind: 'guarded-runner-stub',
+            state: 'ready',
+          }],
+        },
+        executionPolicyReadiness: {
+          state: 'ready',
+          executionPolicyReady: true,
+          policyEntries: [{
+            policyKind: 'fail-closed-execution-policy',
+            state: 'ready',
+            wouldAuthorizeExecution: false,
+            blockerCode: null,
+            evidenceCode: 'execution-policy-ready',
+          }],
+        },
+        hostMutationAdapterReadiness: {
+          adapterEntries: [{ adapterKind: 'disabled-host-mutation-adapter-stub' }],
+        },
+        rollbackAnchorReadiness: {
+          anchorEntries: [{ anchorKind: 'disabled-rollback-anchor-stub' }],
+        },
+        attemptAuditReadiness: {
+          auditEntries: [{ auditKind: 'disabled-attempt-audit-stub' }],
+        },
+        operatorRecoveryReadiness: {
+          recoveryEntries: [{ recoveryKind: 'disabled-operator-recovery-stub' }],
+        },
+      },
+      ...overrides,
+    };
+  }
+
+  it('W1-W3/W10: full canonical ready payload renders ready wiring/registry/validation with non-execute flags', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload(),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none/);
+    assert.match(
+      text,
+      /runnerRegistry:code-owned-runner-registry:state:ready:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:none/,
+    );
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
+    assert.ok(viewModel.validationLines.includes('executionEligible:false'));
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+    assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+    assert.match(text, /realHostRunnerReady:false/);
+    assert.match(text, /wouldExecute:false/);
+  });
+
+  it('W4: malicious / contradictory payload cannot force runner-registry ready', () => {
+    const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      gates: {
+        runnerRegistryReady: true,
+        hostMutationAdapterReady: false,
+        rollbackAnchorReady: false,
+        attemptAuditReady: false,
+        operatorRecoveryReady: false,
+        executionEligible: false,
+      },
+      runnerWiringContract: {
+        requiredContracts: [
+          {
+            id: 'execution-policy',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'execution-policy-ready',
+            requiredForExecution: true,
+          },
+          {
+            id: 'runner-registry',
+            status: 'blocked',
+            blockerCode: 'runner-registry-missing',
+            evidenceCode: 'x',
+            requiredForExecution: true,
+          },
+          {
+            id: 'host-mutation-adapter',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'rollback-anchor',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'attempt-audit',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'operator-recovery',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+        ],
+        runnerRegistryReadiness: {
+          state: 'ready',
+          runnerRegistryReady: false,
+          codeOwnedRegistryResolverReady: true,
+          realRunnerImplementationsReady: false,
+          registryEntries: [
+            {
+              runnerKind: UNSAFE_SECRET_MATERIAL,
+              wouldExecute: true,
+              wouldRun: true,
+              OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
+            },
+          ],
+        },
+        hostMutationAdapterReadiness: {
+          adapterEntries: [{ adapterKind: 'disabled-host-mutation-adapter-stub' }],
+        },
+        rollbackAnchorReadiness: {
+          anchorEntries: [{ anchorKind: 'disabled-rollback-anchor-stub' }],
+        },
+        attemptAuditReadiness: {
+          auditEntries: [{ auditKind: 'disabled-attempt-audit-stub' }],
+        },
+        operatorRecoveryReadiness: {
+          recoveryEntries: [{ recoveryKind: 'disabled-operator-recovery-stub' }],
+        },
+      },
+      registryDecision: {
+        state: 'resolved',
+        registryReady: true,
+        codeOwnedResolverWired: true,
+        realHostRunnerReady: false,
+        wouldExecute: false,
+        wouldRun: true,
+        wouldWrite: false,
+      },
+      policyDecision: {
+        state: 'authorized',
+        authorized: true,
+        wouldAuthorizeExecution: true,
+        wouldRun: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
+    assert.doesNotMatch(text, /wiringContract:runner-registry:status:ready/);
+    assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:.*blocker:runner-registry-not-ready/);
+    assert.doesNotMatch(text, /runnerRegistry:code-owned-runner-registry:state:ready/);
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:false'));
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.match(text, /wiringContract:rollback-anchor:status:blocked/);
+    assert.match(text, /wiringContract:attempt-audit:status:blocked/);
+    assert.match(text, /wiringContract:operator-recovery:status:blocked/);
+    assert.match(text, /policyDecision:state:denied/);
+    assert.doesNotMatch(text, new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  it('W5: missing registryDecision keeps canonical blocked', () => {
+    const payload = fullCanonicalRunnerRegistryReadyPayload();
+    delete payload.registryDecision;
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
+    assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:.*blocker:runner-registry-not-ready/);
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:false'));
+  });
+
+  it('W6/W7/W9: remaining contracts stay blocked; policy forced denied; lines distinguishable', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        runnerWiringContract: {
+          ...fullCanonicalRunnerRegistryReadyPayload().runnerWiringContract,
+          requiredContracts: fullCanonicalRunnerRegistryReadyPayload().runnerWiringContract.requiredContracts.map((entry) =>
+            entry.id === 'host-mutation-adapter' || entry.id === 'rollback-anchor' ||
+            entry.id === 'attempt-audit' || entry.id === 'operator-recovery'
+              ? { ...entry, status: 'ready', blockerCode: null, evidenceCode: 'fake' }
+              : entry,
+          ),
+        },
+        policyDecision: {
+          state: 'authorized',
+          authorized: true,
+          wouldAuthorizeExecution: true,
+          primaryBlocker: 'host-mutation-adapter-not-ready',
+        },
+        actionCandidates: [{
+          actionId: 'render-launch-agent-plist',
+          implementationId: 'render-plist-impl',
+          mode: 'guarded-host-action',
+          runnerKind: 'guarded-runner-stub',
+        }],
+      }),
+    );
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/);
+    assert.match(text, /wiringContract:rollback-anchor:status:blocked:requiredForExecution:true:blocker:rollback-anchor-missing/);
+    assert.match(text, /wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing/);
+    assert.match(text, /wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing/);
+    assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:host-mutation-adapter-not-ready/);
+    assert.match(text, /candidate:/);
+    assert.match(text, /wiringContract:/);
+    assert.match(text, /runnerRegistry:/);
+    assert.match(text, /executionPolicy:/);
+    assert.match(text, /policyDecision:/);
+  });
+
+  it('W11: C/R/G surface ready but D.wouldRun true blocks wiring/registry/validation', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      gates: {
+        runnerRegistryReady: true,
+        hostMutationAdapterReady: false,
+        rollbackAnchorReady: false,
+        attemptAuditReady: false,
+        operatorRecoveryReady: false,
+        executionEligible: false,
+      },
+      runnerWiringContract: {
+        requiredContracts: [
+          {
+            id: 'execution-policy',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'execution-policy-ready',
+            requiredForExecution: true,
+          },
+          {
+            id: 'runner-registry',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'runner-registry-ready',
+            requiredForExecution: true,
+          },
+          {
+            id: 'host-mutation-adapter',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'rollback-anchor',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'attempt-audit',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+          {
+            id: 'operator-recovery',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'fake',
+            requiredForExecution: true,
+          },
+        ],
+        runnerRegistryReadiness: {
+          state: 'ready',
+          runnerRegistryReady: true,
+          codeOwnedRegistryResolverReady: true,
+          realRunnerImplementationsReady: false,
+          registryEntries: [{ registryKind: 'code-owned-runner-registry' }],
+        },
+        hostMutationAdapterReadiness: {
+          adapterEntries: [{ adapterKind: 'disabled-host-mutation-adapter-stub' }],
+        },
+        rollbackAnchorReadiness: {
+          anchorEntries: [{ anchorKind: 'disabled-rollback-anchor-stub' }],
+        },
+        attemptAuditReadiness: {
+          auditEntries: [{ auditKind: 'disabled-attempt-audit-stub' }],
+        },
+        operatorRecoveryReadiness: {
+          recoveryEntries: [{ recoveryKind: 'disabled-operator-recovery-stub' }],
+        },
+      },
+      registryDecision: {
+        state: 'resolved',
+        registryReady: true,
+        codeOwnedResolverWired: true,
+        realHostRunnerReady: false,
+        wouldExecute: false,
+        wouldRun: true,
+        wouldWrite: false,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.doesNotMatch(text, /wiringContract:runner-registry:status:ready/);
+    assert.doesNotMatch(text, /runnerRegistry:code-owned-runner-registry:state:ready/);
+    assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
+    assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:.*blocker:runner-registry-not-ready/);
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:false'));
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.match(text, /wiringContract:rollback-anchor:status:blocked/);
+    assert.match(text, /wiringContract:attempt-audit:status:blocked/);
+    assert.match(text, /wiringContract:operator-recovery:status:blocked/);
+    assert.match(text, /policyDecision:state:denied/);
   });
 
   it('maps ready contract blockerCode null to UI sentinel none without throw', () => {
@@ -12564,7 +12968,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(resultText, /wouldExecute:false/);
     assert.match(resultText, /wouldRun:false/);
     assert.match(resultText, /wouldWrite:false/);
-    assert.match(resultText, /runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:wouldExecute:false:blocker:runner-registry-real-implementation-missing/);
+    assert.match(resultText, /runnerRegistry:code-owned-runner-registry:state:blocked:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:runner-registry-not-ready/);
     assert.match(resultText, /runnerRegistryReady:false/);
     assert.match(resultText, /realRunnerWiringReady:false/);
     assert.match(resultText, /executionEligible:false/);

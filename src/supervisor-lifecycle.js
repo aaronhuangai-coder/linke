@@ -809,15 +809,47 @@ const GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY = Object.freeze({
   sensitiveValuesReturned: false,
   blockerCode: ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING,
 });
-const GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY = Object.freeze({
+const RUNNER_REGISTRY_READY_EVIDENCE = 'runner-registry-ready';
+const RUNNER_REGISTRY_MAPPING_READY_EVIDENCE = 'runner-registry-mapping-ready';
+const CODE_OWNED_RUNNER_REGISTRY_KIND = 'code-owned-runner-registry';
+const RUNNER_REGISTRY_BLOCKER_CODES = Object.freeze([
+  'runner-registry-candidates-invalid',
+  'runner-registry-operation-invalid',
+  'runner-registry-action-missing',
+  'runner-registry-action-duplicate',
+  'runner-registry-action-unknown',
+  'runner-registry-implementation-mismatch',
+  'runner-registry-runner-kind-mismatch',
+  'runner-registry-mode-mismatch',
+  'runner-registry-max-attempts-invalid',
+  'runner-registry-side-effect-flag-invalid',
+]);
+const RUNNER_REGISTRY_BLOCKER_CODE_SET = new Set(RUNNER_REGISTRY_BLOCKER_CODES);
+const CODE_OWNED_ACTION_IMPLEMENTATION_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-impl',
+  'write-launch-agent-plist': 'write-plist-impl',
+  'load-launch-agent': 'load-agent-impl',
+  'unload-launch-agent': 'unload-agent-impl',
+  'remove-launch-agent-plist': 'remove-plist-impl',
+  'remove-supervisor-metadata': 'remove-metadata-impl',
+  'capture-current-state': 'capture-state-impl',
+  'restore-previous-plist': 'restore-plist-impl',
+  'restart-previous-supervisor': 'restart-supervisor-impl',
+  'start-recovery-supervisor': 'recovery-supervisor-impl',
+});
+const GUARDED_RUNNER_READY_REGISTRY_ENTRY = Object.freeze({
+  registryKind: CODE_OWNED_RUNNER_REGISTRY_KIND,
   runnerKind: GUARDED_RUNNER_KIND,
-  state: 'blocked',
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realHostRunnerReady: false,
   realImplementationReady: false,
   supportsHostMutation: false,
   wouldExecute: false,
   wouldRun: false,
   wouldWrite: false,
-  blockerCode: RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: RUNNER_REGISTRY_READY_EVIDENCE,
 });
 const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   Object.freeze({
@@ -830,11 +862,11 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: 'runner-registry',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'No code-owned guarded runner registry is wired.',
-    evidenceCode: 'runner-registry-missing',
-    blockerCode: 'runner-registry-missing',
+    evidence: 'Code-owned fail-closed guarded runner registry resolver is wired.',
+    evidenceCode: RUNNER_REGISTRY_READY_EVIDENCE,
+    blockerCode: null,
   }),
   Object.freeze({
     id: 'host-mutation-adapter',
@@ -1864,6 +1896,261 @@ export function areSupervisorLifecycleGuardedRunnerActionCandidatesReady(candida
   }
 }
 
+function buildUnresolvedRegistryDecision(operation, primaryBlocker) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-registry',
+    operation,
+    state: 'unresolved',
+    registryReady: false,
+    codeOwnedResolverWired: true,
+    realHostRunnerReady: false,
+    supportsHostMutation: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    resolvedCount: 0,
+    unresolvedCount: 0,
+    mappings: [],
+    primaryBlocker,
+    blockers: [primaryBlocker],
+    nextBlockers: [primaryBlocker],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedRegistryDecision(operation, mappings) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-registry',
+    operation,
+    state: 'resolved',
+    registryReady: true,
+    codeOwnedResolverWired: true,
+    realHostRunnerReady: false,
+    supportsHostMutation: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    resolvedCount: mappings.length,
+    unresolvedCount: 0,
+    mappings,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function sanitizeRegistryDecision(decision) {
+  const fallback = () => buildUnresolvedRegistryDecision('unknown', 'runner-registry-candidates-invalid');
+  if (!isObject(decision)) return fallback();
+  try {
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+    const state = decision.state === 'resolved' ? 'resolved' : 'unresolved';
+    const registryReady = decision.registryReady === true;
+    if ((state === 'resolved') !== registryReady) {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code === 'string' && RUNNER_REGISTRY_BLOCKER_CODE_SET.has(code)) {
+        blockers.push(code);
+      }
+    }
+
+    if (state === 'resolved') {
+      if (blockers.length !== 0 || decision.primaryBlocker !== null) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+      }
+      const mappings = Array.isArray(decision.mappings)
+        ? decision.mappings.map((row) => ({
+          actionId: typeof row?.actionId === 'string' ? row.actionId : 'unknown',
+          implementationId: typeof row?.implementationId === 'string' ? row.implementationId : 'unknown',
+          runnerKind: GUARDED_RUNNER_KIND,
+          mode: GUARDED_RUNNER_BINDING_MODE,
+          maxAttempts: Number.isInteger(row?.maxAttempts) && row.maxAttempts >= 1 && row.maxAttempts <= 3
+            ? row.maxAttempts
+            : 1,
+          mappingReady: true,
+          realHostRunnerReady: false,
+          supportsHostMutation: false,
+          wouldExecute: false,
+          wouldRun: false,
+          wouldWrite: false,
+          blockerCode: null,
+          evidenceCode: RUNNER_REGISTRY_MAPPING_READY_EVIDENCE,
+        }))
+        : [];
+      return buildResolvedRegistryDecision(operation, mappings);
+    }
+
+    const primary = typeof decision.primaryBlocker === 'string' && RUNNER_REGISTRY_BLOCKER_CODE_SET.has(decision.primaryBlocker)
+      ? decision.primaryBlocker
+      : (blockers[0] || 'runner-registry-candidates-invalid');
+    return buildUnresolvedRegistryDecision(
+      primary === 'runner-registry-operation-invalid' ? 'unknown' : operation,
+      primary,
+    );
+  } catch {
+    return fallback();
+  }
+}
+
+/**
+ * Resolve and verify sanitized guarded-runner action candidates against the
+ * code-owned runner registry mapping table.
+ *
+ * Ready resolution means only that every candidate actionId maps to the fixed
+ * implementationId / runnerKind / mode / numeric maxAttempts bounds for the
+ * given operation. It does NOT schedule, dispatch, or invoke any runner; does
+ * NOT authorize host mutation; does NOT set wouldExecute/wouldRun/wouldWrite
+ * true; does NOT imply executionEligible.
+ *
+ * Returns a deep-copied plain decision object only — never functions,
+ * command strings, paths, hosts, tokens, hashes, or raw Error objects.
+ * Invalid input, getters, traps, or mapping mismatch → fail-closed unresolved.
+ *
+ * @param {unknown} candidates
+ * @param {unknown} operation
+ * @returns {object}
+ */
+export function resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnresolvedRegistryDecision('unknown', 'runner-registry-operation-invalid');
+    }
+
+    if (!Array.isArray(candidates)) {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len)) {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+    if (len < 1) {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+      }
+      snapshots.push(snapshot);
+    }
+
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-candidates-invalid');
+      }
+    }
+
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-action-duplicate');
+      }
+      seen.add(actionId);
+    }
+
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId)) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-action-unknown');
+      }
+    }
+
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-action-missing');
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const mappings = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      const catalogImpl = CODE_OWNED_ACTION_IMPLEMENTATION_MAP[actionId];
+      if (
+        typeof snapshot.implementationId !== 'string' ||
+        !SAFE_IMPLEMENTATION_ID_PATTERN.test(snapshot.implementationId) ||
+        snapshot.implementationId !== catalogImpl
+      ) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-implementation-mismatch');
+      }
+      if (snapshot.runnerKind !== GUARDED_RUNNER_KIND) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-runner-kind-mismatch');
+      }
+      if (snapshot.mode !== GUARDED_RUNNER_BINDING_MODE) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-mode-mismatch');
+      }
+      if (!(
+        typeof snapshot.maxAttempts === 'number' &&
+        Number.isInteger(snapshot.maxAttempts) &&
+        snapshot.maxAttempts >= 1 &&
+        snapshot.maxAttempts <= 3
+      )) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-max-attempts-invalid');
+      }
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return buildUnresolvedRegistryDecision(operation, 'runner-registry-side-effect-flag-invalid');
+      }
+      mappings.push({
+        actionId,
+        implementationId: catalogImpl,
+        runnerKind: GUARDED_RUNNER_KIND,
+        mode: GUARDED_RUNNER_BINDING_MODE,
+        maxAttempts: snapshot.maxAttempts,
+        mappingReady: true,
+        realHostRunnerReady: false,
+        supportsHostMutation: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        blockerCode: null,
+        evidenceCode: RUNNER_REGISTRY_MAPPING_READY_EVIDENCE,
+      });
+    }
+
+    return buildResolvedRegistryDecision(operation, mappings);
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return buildUnresolvedRegistryDecision(
+      op === 'unknown' ? 'unknown' : op,
+      op === 'unknown' ? 'runner-registry-operation-invalid' : 'runner-registry-candidates-invalid',
+    );
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-policy-readiness',
@@ -1883,18 +2170,16 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() 
 export function buildSupervisorLifecycleGuardedRunnerRegistryReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-registry-readiness',
-    state: 'blocked',
+    state: 'ready',
     runnerRegistryDefined: true,
-    runnerRegistryReady: false,
+    runnerRegistryReady: true,
+    codeOwnedRegistryResolverReady: true,
     realRunnerImplementationsReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    registryEntries: [{ ...GUARDED_RUNNER_DISABLED_REGISTRY_ENTRY }],
-    blockers: [
-      RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [RUNNER_REGISTRY_REAL_IMPLEMENTATION_MISSING],
+    readyCount: 1,
+    blockedCount: 0,
+    registryEntries: [{ ...GUARDED_RUNNER_READY_REGISTRY_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -1981,8 +2266,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 1,
-    blockedCount: 5,
+    readyCount: 2,
+    blockedCount: 4,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -2123,13 +2408,32 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     operation,
   );
 
+  const registryDecision = sanitizeRegistryDecision(
+    resolveSupervisorLifecycleGuardedRunnerRegistry(actionCandidates, operation),
+  );
+
   const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
   const executionPolicyReady =
     executionPolicyReadiness?.executionPolicyReady === true &&
     executionPolicyReadiness?.realExecutionPolicyReady === true &&
     executionPolicyReadiness?.state === 'ready';
 
+  const runnerRegistryReadiness = runnerWiringContract.runnerRegistryReadiness;
+  const runnerRegistryReady =
+    runnerRegistryReadiness?.runnerRegistryReady === true &&
+    runnerRegistryReadiness?.codeOwnedRegistryResolverReady === true &&
+    runnerRegistryReadiness?.state === 'ready' &&
+    runnerRegistryReadiness?.realRunnerImplementationsReady === false &&
+    registryDecision?.registryReady === true &&
+    registryDecision?.state === 'resolved' &&
+    registryDecision?.codeOwnedResolverWired === true &&
+    registryDecision?.realHostRunnerReady === false &&
+    registryDecision?.wouldExecute === false &&
+    registryDecision?.wouldRun === false &&
+    registryDecision?.wouldWrite === false;
+
   // Production policy context: local primitive booleans only — never request/options objects.
+  // Ignore options.registryDecision / options.runnerRegistryReady / options.registryContext.
   const policyContext = {
     operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
     lifecyclePlanValid: lifecyclePlanValid === true,
@@ -2139,7 +2443,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executionPreviewVerified: executionPreviewVerified === true,
     executeRequested: executeRequested === true,
     actionCandidatesReady: actionCandidatesReady === true,
-    runnerRegistryReady: false,
+    runnerRegistryReady: runnerRegistryReady === true,
     hostMutationAdapterReady: false,
     rollbackAnchorReady: false,
     attemptAuditReady: false,
@@ -2163,6 +2467,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     runnerWiringContract,
     actionCandidates,
+    registryDecision,
     policyDecision,
     gates: {
       lifecyclePlanValid,
@@ -2173,7 +2478,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       executeRequested,
       actionCandidatesReady,
       executionPolicyReady,
-      runnerRegistryReady: false,
+      runnerRegistryReady: runnerRegistryReady === true,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: false,

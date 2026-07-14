@@ -16,6 +16,7 @@ import {
   buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness,
   buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
+  resolveSupervisorLifecycleGuardedRunnerRegistry,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -46,7 +47,7 @@ const EXPECTED_EXECUTION_PREVIEW_SAFETY = Object.freeze({
 });
 const EXPECTED_WIRING_CONTRACTS = Object.freeze([
   ['execution-policy', null, 'ready', 'execution-policy-ready'],
-  ['runner-registry', 'runner-registry-missing', 'blocked', 'runner-registry-missing'],
+  ['runner-registry', null, 'ready', 'runner-registry-ready'],
   ['host-mutation-adapter', 'host-mutation-adapter-missing', 'blocked', 'host-mutation-adapter-missing'],
   ['rollback-anchor', 'rollback-anchor-missing', 'blocked', 'rollback-anchor-missing'],
   ['attempt-audit', 'attempt-audit-missing', 'blocked', 'attempt-audit-missing'],
@@ -107,6 +108,7 @@ const POLICY_FACT_BLOCKERS = Object.freeze({
 });
 // Opaque synthetic strings only — no path/host/email/hash/command/credential shapes.
 const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
+const OPAQUE_UNSAFE_FIELD = 'OPAQUE_UNSAFE_FIELD';
 const OPERATION_EXPECTED_ACTION_IDS = Object.freeze({
   install: Object.freeze([
     'render-launch-agent-plist',
@@ -126,6 +128,18 @@ const OPERATION_EXPECTED_ACTION_IDS = Object.freeze({
   recover: Object.freeze([
     'start-recovery-supervisor',
   ]),
+});
+const CODE_OWNED_REGISTRY_MAPPINGS = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-impl',
+  'write-launch-agent-plist': 'write-plist-impl',
+  'load-launch-agent': 'load-agent-impl',
+  'unload-launch-agent': 'unload-agent-impl',
+  'remove-launch-agent-plist': 'remove-plist-impl',
+  'remove-supervisor-metadata': 'remove-metadata-impl',
+  'capture-current-state': 'capture-state-impl',
+  'restore-previous-plist': 'restore-plist-impl',
+  'restart-previous-supervisor': 'restart-supervisor-impl',
+  'start-recovery-supervisor': 'recovery-supervisor-impl',
 });
 
 function buildAllTruePolicyContext(operation = 'install') {
@@ -179,14 +193,18 @@ function assertPolicyDecisionInvariants(decision) {
 }
 const EXPECTED_RUNNER_REGISTRY_ENTRIES = Object.freeze([
   {
+    registryKind: 'code-owned-runner-registry',
     runnerKind: 'guarded-runner-stub',
-    state: 'blocked',
+    state: 'ready',
+    codeOwnedResolverWired: true,
+    realHostRunnerReady: false,
     realImplementationReady: false,
     supportsHostMutation: false,
     wouldExecute: false,
     wouldRun: false,
     wouldWrite: false,
-    blockerCode: 'runner-registry-real-implementation-missing',
+    blockerCode: null,
+    evidenceCode: 'runner-registry-ready',
   },
 ]);
 const EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES = Object.freeze([
@@ -400,7 +418,7 @@ function buildGate(inputs = getReadyInputs(), options = {}) {
   );
 }
 
-function assertAlwaysBlockedGate(result) {
+function assertAlwaysBlockedGate(result, { runnerRegistryReady = false } = {}) {
   assert.strictEqual(result.command, 'supervisor-lifecycle-guarded-runner-execution-gate');
   assert.strictEqual(result.operation, 'install');
   assert.strictEqual(result.state, 'blocked');
@@ -412,7 +430,7 @@ function assertAlwaysBlockedGate(result) {
   assert.strictEqual(result.gates.realRunnerWiringReady, false);
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
   assert.strictEqual(result.gates.executionPolicyReady, true);
-  assert.strictEqual(result.gates.runnerRegistryReady, false);
+  assert.strictEqual(result.gates.runnerRegistryReady, runnerRegistryReady);
   assert.strictEqual(result.gates.hostMutationAdapterReady, false);
   assert.strictEqual(result.gates.rollbackAnchorReady, false);
   assert.strictEqual(result.gates.attemptAuditReady, false);
@@ -447,8 +465,9 @@ function assertWiringContract(contract) {
   assert.strictEqual(contract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(contract.state, 'blocked');
   assert.strictEqual(contract.realRunnerWiringReady, false);
-  assert.strictEqual(contract.readyCount, 1);
-  assert.strictEqual(contract.blockedCount, 5);
+  // V1.25 aggregate：2 ready / 4 blocked（历史 1/5 已废止）
+  assert.strictEqual(contract.readyCount, 2);
+  assert.strictEqual(contract.blockedCount, 4);
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
@@ -467,7 +486,13 @@ function assertWiringContract(contract) {
   assert.strictEqual(policyContract.status, 'ready');
   assert.strictEqual(policyContract.blockerCode, null);
   assert.strictEqual(policyContract.evidenceCode, 'execution-policy-ready');
-  assert.ok(contract.requiredContracts.slice(1).every((entry) =>
+  const registryContract = contract.requiredContracts[1];
+  assert.strictEqual(registryContract.id, 'runner-registry');
+  assert.strictEqual(registryContract.status, 'ready');
+  assert.strictEqual(registryContract.blockerCode, null);
+  assert.strictEqual(registryContract.evidenceCode, 'runner-registry-ready');
+  // 后四：仅 slice(2) blocked — 绝不得 slice(1)
+  assert.ok(contract.requiredContracts.slice(2).every((entry) =>
     entry.status === 'blocked' &&
       entry.requiredForExecution === true &&
       typeof entry.blockerCode === 'string' &&
@@ -476,7 +501,14 @@ function assertWiringContract(contract) {
     contract.executionPolicyReadiness,
     buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
   );
-  assert.deepStrictEqual(contract.runnerRegistryReadiness, buildSupervisorLifecycleGuardedRunnerRegistryReadiness());
+  assert.deepStrictEqual(
+    contract.runnerRegistryReadiness,
+    buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
+  );
+  assert.strictEqual(contract.runnerRegistryReadiness.state, 'ready');
+  assert.strictEqual(contract.runnerRegistryReadiness.runnerRegistryReady, true);
+  assert.strictEqual(contract.runnerRegistryReadiness.codeOwnedRegistryResolverReady, true);
+  assert.strictEqual(contract.runnerRegistryReadiness.realRunnerImplementationsReady, false);
   assert.deepStrictEqual(
     contract.hostMutationAdapterReadiness,
     buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
@@ -493,6 +525,105 @@ function assertWiringContract(contract) {
     contract.operatorRecoveryReadiness,
     buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
   );
+}
+
+function validRegistryCandidate(actionId, maxAttempts = 1) {
+  return {
+    actionId,
+    implementationId: CODE_OWNED_REGISTRY_MAPPINGS[actionId],
+    runnerKind: 'guarded-runner-stub',
+    mode: 'guarded-host-action',
+    status: 'blocked',
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    maxAttempts,
+  };
+}
+
+function validRegistryCandidatesFor(operation) {
+  return OPERATION_EXPECTED_ACTION_IDS[operation].map((id) => validRegistryCandidate(id, 1));
+}
+
+/**
+ * assertUnresolvedExact：第三参 operation 必传，禁止默认 'unknown'。
+ */
+function assertUnresolvedExact(decision, primaryBlocker, operation) {
+  assert.strictEqual(typeof operation, 'string');
+  assert.strictEqual(typeof primaryBlocker, 'string');
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-registry');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'unresolved');
+  assert.strictEqual(decision.registryReady, false);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realHostRunnerReady, false);
+  assert.strictEqual(decision.supportsHostMutation, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.resolvedCount, 0);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.deepStrictEqual(decision.mappings, []);
+  assert.deepStrictEqual(decision.blockers, [primaryBlocker]);
+  assert.strictEqual(decision.primaryBlocker, primaryBlocker);
+  assert.deepStrictEqual(decision.nextBlockers, [primaryBlocker]);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  assert.ok(!Object.values(decision).some((v) => typeof v === 'function'));
+}
+
+function assertResolved(decision, operation, inputCandidates) {
+  const expected = OPERATION_EXPECTED_ACTION_IDS[operation];
+  assert.ok(Array.isArray(inputCandidates));
+  assert.strictEqual(inputCandidates.length, expected.length);
+  const maxAttemptsByActionId = new Map(
+    inputCandidates.map((c) => [c.actionId, c.maxAttempts]),
+  );
+  for (const actionId of expected) {
+    const maxAttempts = maxAttemptsByActionId.get(actionId);
+    assert.strictEqual(typeof maxAttempts, 'number');
+    assert.ok(Number.isInteger(maxAttempts) && maxAttempts >= 1 && maxAttempts <= 3);
+  }
+
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-registry');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'resolved');
+  assert.strictEqual(decision.registryReady, true);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realHostRunnerReady, false);
+  assert.strictEqual(decision.supportsHostMutation, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.resolvedCount, expected.length);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.strictEqual(decision.mappings.length, expected.length);
+  assert.deepStrictEqual(decision.blockers, []);
+  assert.strictEqual(decision.primaryBlocker, null);
+  assert.deepStrictEqual(decision.nextBlockers, []);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  for (let i = 0; i < expected.length; i++) {
+    const actionId = expected[i];
+    const row = decision.mappings[i];
+    const expectedMaxAttempts = maxAttemptsByActionId.get(actionId);
+    assert.strictEqual(row.actionId, actionId);
+    assert.strictEqual(row.implementationId, CODE_OWNED_REGISTRY_MAPPINGS[actionId]);
+    assert.strictEqual(row.runnerKind, 'guarded-runner-stub');
+    assert.strictEqual(row.mode, 'guarded-host-action');
+    assert.strictEqual(row.maxAttempts, expectedMaxAttempts);
+    assert.strictEqual(typeof row.maxAttempts, 'number');
+    assert.ok(Number.isInteger(row.maxAttempts) && row.maxAttempts >= 1 && row.maxAttempts <= 3);
+    assert.strictEqual(row.mappingReady, true);
+    assert.strictEqual(row.realHostRunnerReady, false);
+    assert.strictEqual(row.supportsHostMutation, false);
+    assert.strictEqual(row.wouldExecute, false);
+    assert.strictEqual(row.wouldRun, false);
+    assert.strictEqual(row.wouldWrite, false);
+    assert.strictEqual(row.blockerCode, null);
+    assert.strictEqual(row.evidenceCode, 'runner-registry-mapping-ready');
+    assert.strictEqual(Object.hasOwn(row, 'codeOwnedResolverWired'), false);
+  }
 }
 
 describe('buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness', () => {
@@ -537,48 +668,305 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness', () => 
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerRegistryReadiness', () => {
-  it('returns fixed blocked disabled runner registry readiness evidence', () => {
+  it('returns fixed ready code-owned registry readiness evidence', () => {
     const readiness = buildSupervisorLifecycleGuardedRunnerRegistryReadiness();
-
     assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-registry-readiness');
-    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.state, 'ready');
     assert.strictEqual(readiness.runnerRegistryDefined, true);
-    assert.strictEqual(readiness.runnerRegistryReady, false);
+    assert.strictEqual(readiness.runnerRegistryReady, true);
+    assert.strictEqual(readiness.codeOwnedRegistryResolverReady, true);
     assert.strictEqual(readiness.realRunnerImplementationsReady, false);
-    assert.strictEqual(readiness.readyCount, 0);
-    assert.strictEqual(readiness.blockedCount, 1);
-    assert.ok(readiness.blockers.includes('runner-registry-real-implementation-missing'));
-    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
-    assert.deepStrictEqual(readiness.nextBlockers, ['runner-registry-real-implementation-missing']);
+    assert.strictEqual(readiness.readyCount, 1);
+    assert.strictEqual(readiness.blockedCount, 0);
+    assert.deepStrictEqual(readiness.blockers, []);
+    assert.deepStrictEqual(readiness.nextBlockers, []);
     assert.deepStrictEqual(readiness.registryEntries, EXPECTED_RUNNER_REGISTRY_ENTRIES);
     assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+    assert.doesNotMatch(
+      JSON.stringify(readiness),
+      /runner-registry-real-implementation-missing|runner-registry-missing/i,
+    );
   });
 
   it('ignores all runtime-looking inputs and never leaks malicious registry material', () => {
     const baseline = buildSupervisorLifecycleGuardedRunnerRegistryReadiness();
     const maliciousInput = {
-      runnerRegistryReady: true,
+      runnerRegistryReady: false,
+      realRunnerImplementationsReady: true,
       registryEntries: [
         {
-          runnerKind: 'node /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
-          command: 'launchctl load /Users/ah/Library/LaunchAgents/linke.plist',
+          runnerKind: UNSAFE_SECRET_MATERIAL,
           wouldExecute: true,
           wouldRun: true,
           wouldWrite: true,
         },
       ],
-      config: { token: 'SECRET_XYZ' },
-      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
-      hash: 'sha256:abc',
-      path: '/Users/ah/private',
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
     };
-
-    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(maliciousInput), baseline);
+    assert.deepStrictEqual(
+      buildSupervisorLifecycleGuardedRunnerRegistryReadiness(maliciousInput),
+      baseline,
+    );
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(null), baseline);
-    assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerRegistryReadiness(), baseline);
-    assert.doesNotMatch(
-      JSON.stringify(baseline),
-      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node /i,
+    assert.doesNotMatch(JSON.stringify(baseline), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+});
+
+describe('resolveSupervisorLifecycleGuardedRunnerRegistry', () => {
+  it('R1–R4: resolves all four operations against code-owned mappings', () => {
+    for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
+      const candidates = validRegistryCandidatesFor(operation);
+      assertResolved(
+        resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, operation),
+        operation,
+        candidates,
+      );
+    }
+  });
+
+  it('R5: unknown actionId is runner-registry-action-unknown (not candidates-invalid)', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[2] = validRegistryCandidate('start-recovery-supervisor', 1);
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-action-unknown',
+      'install',
+    );
+  });
+
+  it('R6: length < |E| with subset actionIds is missing (not candidates-invalid)', () => {
+    const candidates = validRegistryCandidatesFor('install').slice(0, 2);
+    assert.strictEqual(candidates.length, 2);
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-action-missing',
+      'install',
+    );
+  });
+
+  it('R7: duplicate actionId is runner-registry-action-duplicate', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[1] = validRegistryCandidate('render-launch-agent-plist', 1);
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-action-duplicate',
+      'install',
+    );
+  });
+
+  it('R8: legal-format non-catalog implementationId is unresolved', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], implementationId: 'other-plist-impl' };
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-implementation-mismatch',
+      'install',
+    );
+  });
+
+  it('R9: wrong runnerKind is runner-kind-mismatch', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], runnerKind: 'other-stub' };
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-runner-kind-mismatch',
+      'install',
+    );
+  });
+
+  it('R10: wrong mode is mode-mismatch', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], mode: 'unguarded' };
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-mode-mismatch',
+      'install',
+    );
+  });
+
+  for (const maxAttempts of [0, 4, 1.5, '1']) {
+    it(`R11: maxAttempts=${String(maxAttempts)} is max-attempts-invalid`, () => {
+      const candidates = validRegistryCandidatesFor('install');
+      candidates[0] = { ...candidates[0], maxAttempts };
+      assertUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+        'runner-registry-max-attempts-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('R12: layered fail-closed — helper accepts [redacted], resolver rejects', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], maxAttempts: '[redacted]' };
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(candidates, 'install'),
+      true,
+    );
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-max-attempts-invalid',
+      'install',
+    );
+  });
+
+  it('R13: accessor own props is candidates-invalid', () => {
+    const base = validRegistryCandidate('render-launch-agent-plist', 1);
+    const poisoned = {};
+    for (const key of Object.keys(base)) {
+      Object.defineProperty(poisoned, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return base[key];
+        },
+      });
+    }
+    const candidates = [poisoned, ...validRegistryCandidatesFor('install').slice(1)];
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('R14: trap throw is candidates-invalid without secret leak', () => {
+    const base = validRegistryCandidate('render-launch-agent-plist', 1);
+    const trapped = new Proxy(base, {
+      getOwnPropertyDescriptor() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+    const candidates = [trapped, ...validRegistryCandidatesFor('install').slice(1)];
+    const decision = resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install');
+    assertUnresolvedExact(decision, 'runner-registry-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  for (const candidates of [null, 'not-array', 42, { length: 1 }]) {
+    it(`R15: type-confusion ${String(candidates)} is candidates-invalid`, () => {
+      assertUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+        'runner-registry-candidates-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('R16: sensitive-like unknown keys is candidates-invalid without leak', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL };
+    const decision = resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install');
+    assertUnresolvedExact(decision, 'runner-registry-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  it('R17: invalid operation is operation-invalid with decision.operation unknown', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'apply-all'),
+      'runner-registry-operation-invalid',
+      'unknown',
+    );
+  });
+
+  it('R18a: wouldRun true is side-effect-flag-invalid', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldRun: true };
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-side-effect-flag-invalid',
+      'install',
+    );
+  });
+
+  it('R18b: status ready is side-effect-flag-invalid', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], status: 'ready' };
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-side-effect-flag-invalid',
+      'install',
+    );
+  });
+
+  it('R19: input/output immutability — returned decision and subsequent resolve are isolated', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    const first = resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install');
+    assertResolved(first, 'install', candidates);
+    candidates[0] = { ...candidates[0], actionId: 'start-recovery-supervisor' };
+    first.operation = 'unknown';
+    const second = resolveSupervisorLifecycleGuardedRunnerRegistry(
+      validRegistryCandidatesFor('install'),
+      'install',
+    );
+    assertResolved(second, 'install', validRegistryCandidatesFor('install'));
+    const third = resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install');
+    assertUnresolvedExact(third, 'runner-registry-action-unknown', 'install');
+  });
+
+  it('R20: install fixture implementationIds and maxAttempts 2/1/3 remain compatible', () => {
+    const candidates = [
+      validRegistryCandidate('render-launch-agent-plist', 2),
+      validRegistryCandidate('write-launch-agent-plist', 1),
+      validRegistryCandidate('load-launch-agent', 3),
+    ];
+    assertResolved(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'install',
+      candidates,
+    );
+  });
+
+  it('R21: array Proxy container trap is candidates-invalid without secret leak', () => {
+    const raw = validRegistryCandidatesFor('install');
+    const candidates = new Proxy([...raw], {
+      get(t, p, r) {
+        if (p === 'length' || (typeof p === 'string' && /^\d+$/.test(p))) {
+          throw new Error(UNSAFE_SECRET_MATERIAL);
+        }
+        return Reflect.get(t, p, r);
+      },
+    });
+    const decision = resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install');
+    assertUnresolvedExact(decision, 'runner-registry-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  for (const { label, actionId } of [
+    { label: 'empty-string', actionId: '' },
+    { label: 'number', actionId: 1 },
+  ]) {
+    it(`R22: ${label} actionId is candidates-invalid before set checks`, () => {
+      const candidates = validRegistryCandidatesFor('install');
+      candidates[0] = { ...candidates[0], actionId };
+      assertUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+        'runner-registry-candidates-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('R23: length > |E| with foreign actionId is unknown (not candidates-invalid)', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates.push(validRegistryCandidate('start-recovery-supervisor', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-action-unknown',
+      'install',
+    );
+  });
+
+  it('R24: length > |E| with duplicate install actionId is duplicate (not candidates-invalid)', () => {
+    const candidates = validRegistryCandidatesFor('install');
+    candidates.push(validRegistryCandidate('render-launch-agent-plist', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install'),
+      'runner-registry-action-duplicate',
+      'install',
     );
   });
 });
@@ -809,10 +1197,10 @@ describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
-  it('keeps ready inputs blocked when executeRequested is false', () => {
+  it('ready install + executeRequested:false still resolves registryReady true', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: false });
 
-    assertAlwaysBlockedGate(result);
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
     assert.ok(result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.gates, {
       lifecyclePlanValid: true,
@@ -823,7 +1211,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       executeRequested: false,
       actionCandidatesReady: true,
       executionPolicyReady: true,
-      runnerRegistryReady: false,
+      runnerRegistryReady: true,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
       hostMutationAdapterReady: false,
@@ -831,6 +1219,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       attemptAuditReady: false,
       operatorRecoveryReady: false,
     });
+    assert.strictEqual(result.registryDecision.state, 'resolved');
     assertWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -869,38 +1258,30 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     ]);
   });
 
-  it('honors executeRequested gate but remains blocked without real runner wiring', () => {
+  it('production ready inputs resolve registry but still deny via remaining wiring facts', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
 
-    assertAlwaysBlockedGate(result);
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
     assert.strictEqual(result.gates.executeRequested, true);
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.gates.executionPolicyReady, true);
-    assert.strictEqual(result.gates.runnerRegistryReady, false);
+    assert.strictEqual(result.gates.runnerRegistryReady, true);
+    assert.strictEqual(result.registryDecision.state, 'resolved');
+    assert.strictEqual(result.registryDecision.registryReady, true);
+    assert.strictEqual(result.registryDecision.codeOwnedResolverWired, true);
+    assert.strictEqual(result.registryDecision.realHostRunnerReady, false);
+    assert.strictEqual(result.registryDecision.wouldExecute, false);
+    assert.strictEqual(result.registryDecision.wouldRun, false);
+    assert.strictEqual(result.registryDecision.wouldWrite, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
-    assertWiringContract(result.runnerWiringContract);
-    assert.ok(result.actionCandidates.every((entry) =>
-      entry.status === 'blocked' &&
-        entry.wouldExecute === false &&
-        entry.wouldRun === false &&
-        entry.wouldWrite === false));
-  });
-
-  it('production ready inputs with executeRequested still deny via policyDecision and keep executionEligible false', () => {
-    const result = buildGate(getReadyInputs(), { executeRequested: true });
-    assertAlwaysBlockedGate(result);
-    assert.strictEqual(result.gates.executionPolicyReady, true);
-    assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.policyDecision.state, 'denied');
-    assert.strictEqual(result.policyDecision.authorized, false);
-    assert.strictEqual(result.policyDecision.wouldAuthorizeExecution, false);
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'host-mutation-adapter-not-ready');
     assert.strictEqual(result.policyDecision.wouldRun, false);
     assert.strictEqual(result.policyDecision.wouldWrite, false);
     for (const code of [
-      'runner-registry-not-ready',
       'host-mutation-adapter-not-ready',
       'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
@@ -908,14 +1289,45 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     ]) {
       assert.ok(result.policyDecision.blockers.includes(code));
     }
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'runner-registry-not-ready');
+    assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    for (const c of result.actionCandidates) {
+      assert.strictEqual(c.wouldExecute, false);
+      assert.strictEqual(c.wouldRun, false);
+      assert.strictEqual(c.wouldWrite, false);
+    }
     assertWiringContract(result.runnerWiringContract);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 2);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 4);
   });
 
-  it('ignores forged policyContext/policyDecision on options and never authorizes production gate', () => {
+  it('G4: empty candidates path keeps registry not ready', () => {
+    const notVerifiedInputs = getReadyInputs();
+    notVerifiedInputs.executionPreview = {
+      ...notVerifiedInputs.executionPreview,
+      actionPreviews: notVerifiedInputs.executionPreview.actionPreviews.map((entry, index) => (
+        index === 0 ? { ...entry, wouldExecute: true } : entry
+      )),
+    };
+    const result = buildGate(notVerifiedInputs, { executeRequested: true });
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assert.deepStrictEqual(result.actionCandidates, []);
+    assert.strictEqual(result.registryDecision.state, 'unresolved');
+    assert.strictEqual(result.registryDecision.primaryBlocker, 'runner-registry-candidates-invalid');
+    assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+  });
+
+  it('G5: ignores forged registry overrides on options', () => {
     const result = buildGate(getReadyInputs(), {
       executeRequested: true,
+      registryDecision: {
+        state: 'unresolved',
+        registryReady: false,
+        primaryBlocker: 'runner-registry-candidates-invalid',
+      },
+      runnerRegistryReady: false,
+      registryContext: { runnerRegistryReady: false },
       policyContext: buildAllTruePolicyContext(),
       policyDecision: {
         state: 'authorized',
@@ -924,10 +1336,121 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
         wouldRun: true,
       },
     });
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
+    assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.policyDecision.authorized, false);
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.doesNotMatch(JSON.stringify(result), /forged|wouldRun":true/i);
+  });
+
+  it('G7: gate registryDecision is consistent with pure resolver over actionCandidates', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    const pure = resolveSupervisorLifecycleGuardedRunnerRegistry(result.actionCandidates, 'install');
+    assert.strictEqual(result.registryDecision.state, pure.state);
+    assert.strictEqual(result.registryDecision.registryReady, pure.registryReady);
+    assert.deepStrictEqual(
+      result.registryDecision.mappings.map((row) => row.actionId),
+      pure.mappings.map((row) => row.actionId),
+    );
+  });
+
+  it('G8: non-catalog implementationId keeps registry not ready and fail-closed', () => {
+    const base = getReadyInputs();
+    const inputs = {
+      ...base,
+      executionPreview: {
+        ...base.executionPreview,
+        actionPreviews: base.executionPreview.actionPreviews.map((entry, index) =>
+          index === 0
+            ? { ...entry, implementationId: 'other-plist-impl' }
+            : { ...entry },
+        ),
+      },
+    };
+    const result = buildGate(inputs, { executeRequested: true });
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(result.registryDecision.state, 'unresolved');
+    assert.strictEqual(
+      result.registryDecision.primaryBlocker,
+      'runner-registry-implementation-mismatch',
+    );
+    assert.strictEqual(result.gates.runnerRegistryReady, false);
+    assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.strictEqual(result.policyDecision.wouldRun, false);
+    assert.strictEqual(result.policyDecision.wouldWrite, false);
+    assert.strictEqual(result.registryDecision.wouldExecute, false);
+    assert.strictEqual(result.registryDecision.wouldRun, false);
+    assert.strictEqual(result.registryDecision.wouldWrite, false);
+    for (const c of result.actionCandidates) {
+      assert.strictEqual(c.wouldExecute, false);
+      assert.strictEqual(c.wouldRun, false);
+      assert.strictEqual(c.wouldWrite, false);
+    }
+    const readiness = result.runnerWiringContract.runnerRegistryReadiness;
+    assert.strictEqual(readiness.state, 'ready');
+    assert.strictEqual(readiness.runnerRegistryReady, true);
+    assert.strictEqual(readiness.codeOwnedRegistryResolverReady, true);
+    assert.strictEqual(readiness.realRunnerImplementationsReady, false);
+    for (const entry of readiness.registryEntries) {
+      assert.strictEqual(entry.wouldExecute, false);
+      assert.strictEqual(entry.wouldRun, false);
+      assert.strictEqual(entry.wouldWrite, false);
+    }
+  });
+
+  it('G9: redacted maxAttempts layered production gate fail-closed', () => {
+    const base = getReadyInputs();
+    const inputs = {
+      ...base,
+      executionPreview: {
+        ...base.executionPreview,
+        actionPreviews: base.executionPreview.actionPreviews.map((entry, index) =>
+          index === 0
+            ? { ...entry, maxAttempts: 99 }
+            : { ...entry },
+        ),
+      },
+    };
+    const result = buildGate(inputs, { executeRequested: true });
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(
+      areSupervisorLifecycleGuardedRunnerActionCandidatesReady(result.actionCandidates, 'install'),
+      true,
+    );
+    assert.strictEqual(result.actionCandidates[0].maxAttempts, '[redacted]');
+    assert.strictEqual(result.registryDecision.state, 'unresolved');
+    assert.strictEqual(
+      result.registryDecision.primaryBlocker,
+      'runner-registry-max-attempts-invalid',
+    );
+    assert.strictEqual(result.gates.runnerRegistryReady, false);
+    assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.strictEqual(result.policyDecision.wouldRun, false);
+    assert.strictEqual(result.policyDecision.wouldWrite, false);
+    assert.strictEqual(result.registryDecision.wouldExecute, false);
+    assert.strictEqual(result.registryDecision.wouldRun, false);
+    assert.strictEqual(result.registryDecision.wouldWrite, false);
+    for (const c of result.actionCandidates) {
+      assert.strictEqual(c.wouldExecute, false);
+      assert.strictEqual(c.wouldRun, false);
+      assert.strictEqual(c.wouldWrite, false);
+    }
+    const readiness = result.runnerWiringContract.runnerRegistryReadiness;
+    assert.strictEqual(readiness.state, 'ready');
+    assert.strictEqual(readiness.runnerRegistryReady, true);
+    assert.strictEqual(readiness.realRunnerImplementationsReady, false);
+    for (const entry of readiness.registryEntries) {
+      assert.strictEqual(entry.wouldExecute, false);
+      assert.strictEqual(entry.wouldRun, false);
+      assert.strictEqual(entry.wouldWrite, false);
+    }
   });
 
   it('blocks approval readiness that is not ready without leaking approval material', () => {
@@ -948,7 +1471,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     const result = buildGate(inputs, { executeRequested: true });
     const serialized = JSON.stringify(result);
 
-    assertAlwaysBlockedGate(result);
+    // production-derived candidates still resolve; approval readiness is independent
+    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
     assert.ok(result.blockers.includes('approval-record-gate-not-ready'));
     assert.doesNotMatch(serialized, /gate-operator|approval reason|acknowledgement|sha256:|\/Users\/ah|localhost|token|secret/i);
   });
@@ -960,7 +1484,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const invalidManifestResult = buildGate(invalidManifest, { executeRequested: true });
 
-    assertAlwaysBlockedGate(invalidManifestResult);
+    // plan+preview still valid → candidates resolve; manifest fact is independent
+    assertAlwaysBlockedGate(invalidManifestResult, { runnerRegistryReady: true });
     assert.ok(invalidManifestResult.blockers.includes('executor-manifest-readiness-invalid'));
     assert.strictEqual(invalidManifestResult.gates.manifestReady, false);
 
@@ -973,7 +1498,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const runnerResult = buildGate(runnerNotReady, { executeRequested: true });
 
-    assertAlwaysBlockedGate(runnerResult);
+    // plan+preview still valid → candidates resolve; binding readiness is independent
+    assertAlwaysBlockedGate(runnerResult, { runnerRegistryReady: true });
     assert.ok(runnerResult.blockers.includes('guarded-runner-readiness-not-ready'));
     assert.strictEqual(runnerResult.gates.runnerBindingsReady, false);
 
@@ -984,13 +1510,13 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const previewResult = buildGate(previewMismatch, { executeRequested: true });
 
-    assertAlwaysBlockedGate(previewResult);
+    assertAlwaysBlockedGate(previewResult, { runnerRegistryReady: false });
     assert.ok(previewResult.blockers.includes('execution-preview-operation-mismatch'));
     assert.strictEqual(previewResult.gates.executionPreviewVerified, false);
 
     const invalidPreview = buildGate({ ...getReadyInputs(), executionPreview: null }, { executeRequested: true });
 
-    assertAlwaysBlockedGate(invalidPreview);
+    assertAlwaysBlockedGate(invalidPreview, { runnerRegistryReady: false });
     assert.ok(invalidPreview.blockers.includes('execution-preview-invalid'));
     assert.strictEqual(invalidPreview.gates.executionPreviewVerified, false);
 
@@ -1003,7 +1529,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const notVerifiedResult = buildGate(notVerifiedInputs, { executeRequested: true });
 
-    assertAlwaysBlockedGate(notVerifiedResult);
+    assertAlwaysBlockedGate(notVerifiedResult, { runnerRegistryReady: false });
     assert.ok(notVerifiedResult.blockers.includes('execution-preview-not-verified'));
     assert.strictEqual(notVerifiedResult.gates.executionPreviewVerified, false);
     assert.deepStrictEqual(notVerifiedResult.actionCandidates, []);
@@ -1405,9 +1931,10 @@ describe('areSupervisorLifecycleGuardedRunnerActionCandidatesReady', () => {
 });
 
 describe('gates.actionCandidatesReady gate integration (empty/valid only)', () => {
-  it('G1: production valid candidates => actionCandidatesReady true but policy denied via five downstream', () => {
+  it('G1: production valid candidates => actionCandidatesReady true but policy denied via four remaining downstream', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
+    assert.strictEqual(result.gates.runnerRegistryReady, true);
     assert.strictEqual(
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
         result.actionCandidates,
@@ -1420,7 +1947,6 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     for (const code of [
-      'runner-registry-not-ready',
       'host-mutation-adapter-not-ready',
       'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
@@ -1428,6 +1954,7 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
     ]) {
       assert.ok(result.policyDecision.blockers.includes(code));
     }
+    assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
   });
 
   it('G2: empty sanitized candidates => actionCandidatesReady false + action-candidates-not-ready', () => {

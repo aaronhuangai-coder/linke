@@ -1234,22 +1234,60 @@ function sanitizeAllowlistedExecutionPolicyBlocker(value) {
 }
 
 /**
- * V1.24 Web security boundary for requiredContracts rendering:
- * - Only `execution-policy` may display ready, and only under the strict
- *   ready + blockerCode:null + evidenceCode:execution-policy-ready contract.
- * - Five downstream contracts are always blocked with canonical missing codes;
+ * V1.25 Web security boundary for requiredContracts rendering:
+ * - `execution-policy` may display ready under its strict V1.24 contract.
+ * - `runner-registry` ready only under shared C∧R∧G∧D canonical predicate
+ *   (see isCanonicalRunnerRegistryReady); otherwise fixed blocked + missing.
+ * - Four remaining contracts are always blocked with canonical missing codes;
  *   never trust payload status/blocker/evidence for them.
  * - Unknown / redacted ids stay blocked without leaking payload blocker text.
  */
 const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
-  'runner-registry': 'runner-registry-missing',
   'host-mutation-adapter': 'host-mutation-adapter-missing',
   'rollback-anchor': 'rollback-anchor-missing',
   'attempt-audit': 'attempt-audit-missing',
   'operator-recovery': 'operator-recovery-missing',
 });
 
-function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringContract) {
+/**
+ * Shared single canonical predicate for runner-registry wiring line,
+ * registry readiness line, and validationLines.runnerRegistryReady.
+ * Ready iff C ∧ R ∧ G ∧ D all hold; any missing/contradictory/side-effect
+ * drift fails closed.
+ */
+function isCanonicalRunnerRegistryReady({ C, R, G, D }) {
+  return (
+    C?.status === 'ready' &&
+    C?.blockerCode === null &&
+    C?.evidenceCode === 'runner-registry-ready' &&
+    C?.requiredForExecution === true &&
+    R?.state === 'ready' &&
+    R?.runnerRegistryReady === true &&
+    R?.codeOwnedRegistryResolverReady === true &&
+    R?.realRunnerImplementationsReady === false &&
+    G === true &&
+    D?.state === 'resolved' &&
+    D?.registryReady === true &&
+    D?.codeOwnedResolverWired === true &&
+    D?.realHostRunnerReady === false &&
+    D?.wouldExecute === false &&
+    D?.wouldRun === false &&
+    D?.wouldWrite === false
+  );
+}
+
+function resolveCanonicalRunnerRegistryReady(payload) {
+  const requiredContracts = Array.isArray(payload?.runnerWiringContract?.requiredContracts)
+    ? payload.runnerWiringContract.requiredContracts
+    : [];
+  const C = requiredContracts.find((entry) => entry && entry.id === 'runner-registry') || null;
+  const R = payload?.runnerWiringContract?.runnerRegistryReadiness || null;
+  const G = payload?.gates?.runnerRegistryReady === true;
+  const D = payload?.registryDecision || null;
+  return isCanonicalRunnerRegistryReady({ C, R, G, D });
+}
+
+function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringContract, canonicalRunnerRegistryReady = false) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
     : [];
@@ -1273,19 +1311,29 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringCo
       return 'wiringContract:execution-policy:status:blocked:requiredForExecution:true:blocker:execution-policy-missing';
     }
 
+    if (id === 'runner-registry') {
+      if (canonicalRunnerRegistryReady === true) {
+        return 'wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing';
+    }
+
     // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
     return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:unknown`;
   });
 }
 
-function buildSupervisorLifecycleGuardedRunnerRegistryLines(runnerWiringContract) {
-  const registryEntries = Array.isArray(runnerWiringContract?.runnerRegistryReadiness?.registryEntries)
-    ? runnerWiringContract.runnerRegistryReadiness.registryEntries
-    : [];
-  if (registryEntries.length < 1) return [];
+function buildSupervisorLifecycleGuardedRunnerRegistryLines(canonicalRunnerRegistryReady = false) {
+  // Always emit exactly one stable line; never copy payload would*/state/blocker text.
+  if (canonicalRunnerRegistryReady === true) {
+    return [
+      'runnerRegistry:code-owned-runner-registry:state:ready:codeOwnedResolverWired:true:' +
+        'realHostRunnerReady:false:wouldExecute:false:blocker:none',
+    ];
+  }
   return [
-    'runnerRegistry:guarded-runner-stub:state:blocked:realImplementationReady:false:' +
-      'wouldExecute:false:blocker:runner-registry-real-implementation-missing',
+    'runnerRegistry:code-owned-runner-registry:state:blocked:codeOwnedResolverWired:true:' +
+      'realHostRunnerReady:false:wouldExecute:false:blocker:runner-registry-not-ready',
   ];
 }
 
@@ -1600,10 +1648,15 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
-  const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(payload.runnerWiringContract);
+  // Single shared canonical boolean for wiring / registry / validation lines.
+  const canonicalRunnerRegistryReady = resolveCanonicalRunnerRegistryReady(payload) === true;
+  const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(
+    payload.runnerWiringContract,
+    canonicalRunnerRegistryReady,
+  );
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
-  const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(payload.runnerWiringContract);
+  const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(canonicalRunnerRegistryReady);
   const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(payload.runnerWiringContract);
   const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
   const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(payload.runnerWiringContract);
@@ -1637,7 +1690,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `runnerBindingsReady:${gates.runnerBindingsReady === true ? 'true' : 'false'}`,
       `executeRequested:${gates.executeRequested === true ? 'true' : 'false'}`,
       `executionPolicyReady:${gates.executionPolicyReady === true ? 'true' : 'false'}`,
-      'runnerRegistryReady:false',
+      `runnerRegistryReady:${canonicalRunnerRegistryReady ? 'true' : 'false'}`,
       'realRunnerWiringReady:false',
       'runnerWiringContractReady:false',
       'executionEligible:false',
