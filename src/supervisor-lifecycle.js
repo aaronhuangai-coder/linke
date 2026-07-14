@@ -780,11 +780,39 @@ const GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY = Object.freeze({
   sensitiveValuesReturned: false,
   blockerCode: OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING,
 });
-const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
-  adapterKind: DISABLED_HOST_MUTATION_ADAPTER_KIND,
-  state: 'blocked',
+const HOST_MUTATION_ADAPTER_READY_EVIDENCE = 'host-mutation-adapter-ready';
+const HOST_MUTATION_ADAPTER_MUTATION_READY_EVIDENCE = 'host-mutation-adapter-mutation-ready';
+const CODE_OWNED_HOST_MUTATION_ADAPTER_KIND = 'code-owned-host-mutation-adapter';
+const HOST_MUTATION_ADAPTER_BLOCKER_CODES = Object.freeze([
+  'host-mutation-adapter-candidates-invalid',
+  'host-mutation-adapter-operation-invalid',
+  'host-mutation-adapter-action-missing',
+  'host-mutation-adapter-action-duplicate',
+  'host-mutation-adapter-action-unknown',
+  'host-mutation-adapter-unsafe-mutation',
+]);
+const HOST_MUTATION_ADAPTER_BLOCKER_CODE_SET = new Set(HOST_MUTATION_ADAPTER_BLOCKER_CODES);
+// Identifiers only — not host executors, shell/launchctl argv, or paths.
+const CODE_OWNED_ACTION_MUTATION_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-mutation',
+  'write-launch-agent-plist': 'write-plist-mutation',
+  'load-launch-agent': 'load-agent-mutation',
+  'unload-launch-agent': 'unload-agent-mutation',
+  'remove-launch-agent-plist': 'remove-plist-mutation',
+  'remove-supervisor-metadata': 'remove-metadata-mutation',
+  'capture-current-state': 'capture-state-mutation',
+  'restore-previous-plist': 'restore-plist-mutation',
+  'restart-previous-supervisor': 'restart-supervisor-mutation',
+  'start-recovery-supervisor': 'recovery-supervisor-mutation',
+});
+const GUARDED_RUNNER_READY_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
+  adapterKind: CODE_OWNED_HOST_MUTATION_ADAPTER_KIND,
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realHostMutationImplementationReady: false,
   realImplementationReady: false,
   wouldMutateHost: false,
+  wouldExecute: false,
   wouldRun: false,
   wouldWrite: false,
   launchctlAllowed: false,
@@ -793,7 +821,8 @@ const GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY = Object.freeze({
   metadataWriteAllowed: false,
   auditWriteAllowed: false,
   rollbackAnchorWriteAllowed: false,
-  blockerCode: HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: HOST_MUTATION_ADAPTER_READY_EVIDENCE,
 });
 const GUARDED_RUNNER_DISABLED_ROLLBACK_ANCHOR_ENTRY = Object.freeze({
   anchorKind: DISABLED_ROLLBACK_ANCHOR_KIND,
@@ -870,11 +899,11 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: 'host-mutation-adapter',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'No restricted host mutation adapter is wired.',
-    evidenceCode: 'host-mutation-adapter-missing',
-    blockerCode: 'host-mutation-adapter-missing',
+    evidence: 'Code-owned fail-closed restricted host mutation adapter resolver is wired.',
+    evidenceCode: HOST_MUTATION_ADAPTER_READY_EVIDENCE,
+    blockerCode: null,
   }),
   Object.freeze({
     id: 'rollback-anchor',
@@ -2151,6 +2180,263 @@ export function resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, oper
   }
 }
 
+function buildUnresolvedAdapterDecision(operation, primaryBlocker) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-host-mutation-adapter',
+    operation,
+    state: 'unresolved',
+    adapterReady: false,
+    codeOwnedResolverWired: true,
+    realHostMutationImplementationReady: false,
+    wouldMutateHost: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    resolvedCount: 0,
+    unresolvedCount: 0,
+    mutations: [],
+    primaryBlocker,
+    blockers: [primaryBlocker],
+    nextBlockers: [primaryBlocker],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedAdapterDecision(operation, mutations) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-host-mutation-adapter',
+    operation,
+    state: 'resolved',
+    adapterReady: true,
+    codeOwnedResolverWired: true,
+    realHostMutationImplementationReady: false,
+    wouldMutateHost: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    resolvedCount: mutations.length,
+    unresolvedCount: 0,
+    mutations,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+export function sanitizeHostMutationAdapterDecision(decision) {
+  const fallback = () => buildUnresolvedAdapterDecision('unknown', 'host-mutation-adapter-candidates-invalid');
+  if (!isObject(decision)) return fallback();
+  try {
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+    const state = decision.state === 'resolved' ? 'resolved' : 'unresolved';
+    const adapterReady = decision.adapterReady === true;
+    if ((state === 'resolved') !== adapterReady) {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code === 'string' && HOST_MUTATION_ADAPTER_BLOCKER_CODE_SET.has(code)) {
+        blockers.push(code);
+      }
+    }
+
+    if (state === 'resolved') {
+      if (blockers.length !== 0 || decision.primaryBlocker !== null) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+      }
+      const mutations = Array.isArray(decision.mutations)
+        ? decision.mutations.map((row) => {
+          const actionId = typeof row?.actionId === 'string' ? row.actionId : 'unknown';
+          // Always code-owned mapping; never passthrough input mutationKind on mismatch.
+          const mappedKind = CODE_OWNED_ACTION_MUTATION_MAP[actionId];
+          return {
+            actionId,
+            mutationKind: typeof mappedKind === 'string' ? mappedKind : 'unknown',
+            mutationReady: true,
+            realHostMutationImplementationReady: false,
+            wouldMutateHost: false,
+            wouldExecute: false,
+            wouldRun: false,
+            wouldWrite: false,
+            launchctlAllowed: false,
+            filesystemWriteAllowed: false,
+            processListReadAllowed: false,
+            metadataWriteAllowed: false,
+            auditWriteAllowed: false,
+            rollbackAnchorWriteAllowed: false,
+            blockerCode: null,
+            evidenceCode: HOST_MUTATION_ADAPTER_MUTATION_READY_EVIDENCE,
+          };
+        })
+        : [];
+      return buildResolvedAdapterDecision(operation, mutations);
+    }
+
+    const primary = typeof decision.primaryBlocker === 'string' && HOST_MUTATION_ADAPTER_BLOCKER_CODE_SET.has(decision.primaryBlocker)
+      ? decision.primaryBlocker
+      : (blockers[0] || 'host-mutation-adapter-candidates-invalid');
+    return buildUnresolvedAdapterDecision(
+      primary === 'host-mutation-adapter-operation-invalid' ? 'unknown' : operation,
+      primary,
+    );
+  } catch {
+    return fallback();
+  }
+}
+
+/**
+ * Resolve and verify sanitized guarded-runner action candidates against the
+ * code-owned restricted host-mutation-adapter mapping table.
+ *
+ * Ready resolution means only that every candidate actionId maps to the fixed
+ * restricted mutationKind for the given operation. It does NOT execute
+ * launchctl/shell/filesystem/process/metadata/audit/network; does NOT set
+ * wouldMutateHost / *Allowed / wouldExecute/wouldRun/wouldWrite true; does NOT
+ * imply realHostMutationImplementationReady or executionEligible.
+ *
+ * Returns a deep-copied plain decision object only — never functions,
+ * command strings, paths, hosts, tokens, hashes, or raw Error objects.
+ * Invalid input, getters, traps, unsafe mutation flags, or set mismatch →
+ * fail-closed unresolved.
+ *
+ * @param {unknown} candidates
+ * @param {unknown} operation
+ * @returns {object}
+ */
+export function resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnresolvedAdapterDecision('unknown', 'host-mutation-adapter-operation-invalid');
+    }
+
+    if (!Array.isArray(candidates)) {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len)) {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+    if (len < 1) {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+      }
+      snapshots.push(snapshot);
+    }
+
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-candidates-invalid');
+      }
+    }
+
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-action-duplicate');
+      }
+      seen.add(actionId);
+    }
+
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId)) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-action-unknown');
+      }
+    }
+
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-action-missing');
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const mutations = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      // intentional layered fail-closed: ignore implementationId / runnerKind / mode / maxAttempts values
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return buildUnresolvedAdapterDecision(operation, 'host-mutation-adapter-unsafe-mutation');
+      }
+      const mutationKind = CODE_OWNED_ACTION_MUTATION_MAP[actionId];
+      mutations.push({
+        actionId,
+        mutationKind,
+        mutationReady: true,
+        realHostMutationImplementationReady: false,
+        wouldMutateHost: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        launchctlAllowed: false,
+        filesystemWriteAllowed: false,
+        processListReadAllowed: false,
+        metadataWriteAllowed: false,
+        auditWriteAllowed: false,
+        rollbackAnchorWriteAllowed: false,
+        blockerCode: null,
+        evidenceCode: HOST_MUTATION_ADAPTER_MUTATION_READY_EVIDENCE,
+      });
+    }
+
+    return buildResolvedAdapterDecision(operation, mutations);
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return buildUnresolvedAdapterDecision(
+      op === 'unknown' ? 'unknown' : op,
+      op === 'unknown' ? 'host-mutation-adapter-operation-invalid' : 'host-mutation-adapter-candidates-invalid',
+    );
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-policy-readiness',
@@ -2187,18 +2473,16 @@ export function buildSupervisorLifecycleGuardedRunnerRegistryReadiness() {
 export function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-host-mutation-adapter-readiness',
-    state: 'blocked',
+    state: 'ready',
     hostMutationAdapterDefined: true,
-    hostMutationAdapterReady: false,
-    realHostMutationAdapterReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    adapterEntries: [{ ...GUARDED_RUNNER_DISABLED_HOST_MUTATION_ADAPTER_ENTRY }],
-    blockers: [
-      HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING],
+    hostMutationAdapterReady: true,
+    codeOwnedAdapterResolverReady: true,
+    realHostMutationImplementationReady: false,
+    readyCount: 1,
+    blockedCount: 0,
+    adapterEntries: [{ ...GUARDED_RUNNER_READY_HOST_MUTATION_ADAPTER_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -2266,8 +2550,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 2,
-    blockedCount: 4,
+    readyCount: 3,
+    blockedCount: 3,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -2412,6 +2696,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     resolveSupervisorLifecycleGuardedRunnerRegistry(actionCandidates, operation),
   );
 
+  // Ignore options.adapterDecision / options.hostMutationAdapterReady / options.adapterContext.
+  const adapterDecision = sanitizeHostMutationAdapterDecision(
+    resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(actionCandidates, operation),
+  );
+
   const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
   const executionPolicyReady =
     executionPolicyReadiness?.executionPolicyReady === true &&
@@ -2432,8 +2721,30 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     registryDecision?.wouldRun === false &&
     registryDecision?.wouldWrite === false;
 
+  const hostMutationAdapterReadiness = runnerWiringContract.hostMutationAdapterReadiness;
+  const hostMutationAdapterReady =
+    hostMutationAdapterReadiness?.hostMutationAdapterReady === true &&
+    hostMutationAdapterReadiness?.codeOwnedAdapterResolverReady === true &&
+    hostMutationAdapterReadiness?.state === 'ready' &&
+    hostMutationAdapterReadiness?.realHostMutationImplementationReady === false &&
+    adapterDecision?.adapterReady === true &&
+    adapterDecision?.state === 'resolved' &&
+    adapterDecision?.codeOwnedResolverWired === true &&
+    adapterDecision?.realHostMutationImplementationReady === false &&
+    adapterDecision?.wouldMutateHost === false &&
+    adapterDecision?.wouldExecute === false &&
+    adapterDecision?.wouldRun === false &&
+    adapterDecision?.wouldWrite === false &&
+    adapterDecision?.launchctlAllowed === false &&
+    adapterDecision?.filesystemWriteAllowed === false &&
+    adapterDecision?.processListReadAllowed === false &&
+    adapterDecision?.metadataWriteAllowed === false &&
+    adapterDecision?.auditWriteAllowed === false &&
+    adapterDecision?.rollbackAnchorWriteAllowed === false;
+
   // Production policy context: local primitive booleans only — never request/options objects.
   // Ignore options.registryDecision / options.runnerRegistryReady / options.registryContext.
+  // Ignore options.adapterDecision / options.hostMutationAdapterReady / options.adapterContext.
   const policyContext = {
     operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
     lifecyclePlanValid: lifecyclePlanValid === true,
@@ -2444,7 +2755,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executeRequested: executeRequested === true,
     actionCandidatesReady: actionCandidatesReady === true,
     runnerRegistryReady: runnerRegistryReady === true,
-    hostMutationAdapterReady: false,
+    hostMutationAdapterReady: hostMutationAdapterReady === true,
     rollbackAnchorReady: false,
     attemptAuditReady: false,
     operatorRecoveryReady: false,
@@ -2468,6 +2779,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     runnerWiringContract,
     actionCandidates,
     registryDecision,
+    adapterDecision,
     policyDecision,
     gates: {
       lifecyclePlanValid,
@@ -2481,7 +2793,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerRegistryReady: runnerRegistryReady === true,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
-      hostMutationAdapterReady: false,
+      hostMutationAdapterReady: hostMutationAdapterReady === true,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
       operatorRecoveryReady: false,

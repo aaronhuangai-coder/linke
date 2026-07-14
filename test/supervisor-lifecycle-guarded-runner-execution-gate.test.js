@@ -16,7 +16,9 @@ import {
   buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness,
   buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
+  resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
   resolveSupervisorLifecycleGuardedRunnerRegistry,
+  sanitizeHostMutationAdapterDecision,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -48,7 +50,7 @@ const EXPECTED_EXECUTION_PREVIEW_SAFETY = Object.freeze({
 const EXPECTED_WIRING_CONTRACTS = Object.freeze([
   ['execution-policy', null, 'ready', 'execution-policy-ready'],
   ['runner-registry', null, 'ready', 'runner-registry-ready'],
-  ['host-mutation-adapter', 'host-mutation-adapter-missing', 'blocked', 'host-mutation-adapter-missing'],
+  ['host-mutation-adapter', null, 'ready', 'host-mutation-adapter-ready'],
   ['rollback-anchor', 'rollback-anchor-missing', 'blocked', 'rollback-anchor-missing'],
   ['attempt-audit', 'attempt-audit-missing', 'blocked', 'attempt-audit-missing'],
   ['operator-recovery', 'operator-recovery-missing', 'blocked', 'operator-recovery-missing'],
@@ -209,10 +211,13 @@ const EXPECTED_RUNNER_REGISTRY_ENTRIES = Object.freeze([
 ]);
 const EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES = Object.freeze([
   {
-    adapterKind: 'disabled-host-mutation-adapter-stub',
-    state: 'blocked',
+    adapterKind: 'code-owned-host-mutation-adapter',
+    state: 'ready',
+    codeOwnedResolverWired: true,
+    realHostMutationImplementationReady: false,
     realImplementationReady: false,
     wouldMutateHost: false,
+    wouldExecute: false,
     wouldRun: false,
     wouldWrite: false,
     launchctlAllowed: false,
@@ -221,9 +226,22 @@ const EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES = Object.freeze([
     metadataWriteAllowed: false,
     auditWriteAllowed: false,
     rollbackAnchorWriteAllowed: false,
-    blockerCode: 'host-mutation-adapter-real-implementation-missing',
+    blockerCode: null,
+    evidenceCode: 'host-mutation-adapter-ready',
   },
 ]);
+const CODE_OWNED_ACTION_MUTATION_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-mutation',
+  'write-launch-agent-plist': 'write-plist-mutation',
+  'load-launch-agent': 'load-agent-mutation',
+  'unload-launch-agent': 'unload-agent-mutation',
+  'remove-launch-agent-plist': 'remove-plist-mutation',
+  'remove-supervisor-metadata': 'remove-metadata-mutation',
+  'capture-current-state': 'capture-state-mutation',
+  'restore-previous-plist': 'restore-plist-mutation',
+  'restart-previous-supervisor': 'restart-supervisor-mutation',
+  'start-recovery-supervisor': 'recovery-supervisor-mutation',
+});
 const EXPECTED_ROLLBACK_ANCHOR_ENTRIES = Object.freeze([
   {
     anchorKind: 'disabled-rollback-anchor-stub',
@@ -418,7 +436,12 @@ function buildGate(inputs = getReadyInputs(), options = {}) {
   );
 }
 
-function assertAlwaysBlockedGate(result, { runnerRegistryReady = false } = {}) {
+function assertAlwaysBlockedGate(result, {
+  runnerRegistryReady,
+  hostMutationAdapterReady,
+}) {
+  assert.strictEqual(typeof runnerRegistryReady, 'boolean');
+  assert.strictEqual(typeof hostMutationAdapterReady, 'boolean');
   assert.strictEqual(result.command, 'supervisor-lifecycle-guarded-runner-execution-gate');
   assert.strictEqual(result.operation, 'install');
   assert.strictEqual(result.state, 'blocked');
@@ -431,12 +454,27 @@ function assertAlwaysBlockedGate(result, { runnerRegistryReady = false } = {}) {
   assert.strictEqual(result.gates.runnerWiringContractReady, false);
   assert.strictEqual(result.gates.executionPolicyReady, true);
   assert.strictEqual(result.gates.runnerRegistryReady, runnerRegistryReady);
-  assert.strictEqual(result.gates.hostMutationAdapterReady, false);
+  assert.strictEqual(result.gates.hostMutationAdapterReady, hostMutationAdapterReady);
   assert.strictEqual(result.gates.rollbackAnchorReady, false);
   assert.strictEqual(result.gates.attemptAuditReady, false);
   assert.strictEqual(result.gates.operatorRecoveryReady, false);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
+  assert.strictEqual(result.runnerWiringContract.readyCount, 3);
+  assert.strictEqual(result.runnerWiringContract.blockedCount, 3);
+  assert.ok(result.adapterDecision && typeof result.adapterDecision === 'object');
+  assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
+  assert.strictEqual(result.adapterDecision.wouldExecute, false);
+  assert.strictEqual(result.adapterDecision.wouldRun, false);
+  assert.strictEqual(result.adapterDecision.wouldWrite, false);
+  assert.strictEqual(result.adapterDecision.launchctlAllowed, false);
+  assert.strictEqual(result.adapterDecision.filesystemWriteAllowed, false);
+  assert.strictEqual(result.adapterDecision.processListReadAllowed, false);
+  assert.strictEqual(result.adapterDecision.metadataWriteAllowed, false);
+  assert.strictEqual(result.adapterDecision.auditWriteAllowed, false);
+  assert.strictEqual(result.adapterDecision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
+  assert.strictEqual(result.adapterDecision.codeOwnedResolverWired, true);
   assert.ok(result.policyDecision && typeof result.policyDecision === 'object');
   assert.strictEqual(result.policyDecision.state, 'denied');
   assert.strictEqual(result.policyDecision.authorized, false);
@@ -459,15 +497,21 @@ function assertAlwaysBlockedGate(result, { runnerRegistryReady = false } = {}) {
   assert.strictEqual(result.safety.restoreTriggered, false);
   assert.strictEqual(result.safety.remoteCommandExecuted, false);
   assert.strictEqual(result.safety.sensitiveValuesReturned, false);
+  const readiness = result.runnerWiringContract.hostMutationAdapterReadiness;
+  assert.strictEqual(readiness.state, 'ready');
+  assert.strictEqual(readiness.hostMutationAdapterReady, true);
+  assert.strictEqual(readiness.codeOwnedAdapterResolverReady, true);
+  assert.strictEqual(readiness.realHostMutationImplementationReady, false);
+  assert.deepStrictEqual(readiness.adapterEntries, EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES);
 }
 
 function assertWiringContract(contract) {
   assert.strictEqual(contract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(contract.state, 'blocked');
   assert.strictEqual(contract.realRunnerWiringReady, false);
-  // V1.25 aggregate：2 ready / 4 blocked（历史 1/5 已废止）
-  assert.strictEqual(contract.readyCount, 2);
-  assert.strictEqual(contract.blockedCount, 4);
+  // V1.26 aggregate：3 ready / 3 blocked
+  assert.strictEqual(contract.readyCount, 3);
+  assert.strictEqual(contract.blockedCount, 3);
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
@@ -491,8 +535,13 @@ function assertWiringContract(contract) {
   assert.strictEqual(registryContract.status, 'ready');
   assert.strictEqual(registryContract.blockerCode, null);
   assert.strictEqual(registryContract.evidenceCode, 'runner-registry-ready');
-  // 后四：仅 slice(2) blocked — 绝不得 slice(1)
-  assert.ok(contract.requiredContracts.slice(2).every((entry) =>
+  const adapterContract = contract.requiredContracts[2];
+  assert.strictEqual(adapterContract.id, 'host-mutation-adapter');
+  assert.strictEqual(adapterContract.status, 'ready');
+  assert.strictEqual(adapterContract.blockerCode, null);
+  assert.strictEqual(adapterContract.evidenceCode, 'host-mutation-adapter-ready');
+  // 后三：仅 slice(3) blocked — 绝不得 slice(2)
+  assert.ok(contract.requiredContracts.slice(3).every((entry) =>
     entry.status === 'blocked' &&
       entry.requiredForExecution === true &&
       typeof entry.blockerCode === 'string' &&
@@ -513,6 +562,14 @@ function assertWiringContract(contract) {
     contract.hostMutationAdapterReadiness,
     buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(),
   );
+  assert.strictEqual(contract.hostMutationAdapterReadiness.state, 'ready');
+  assert.strictEqual(contract.hostMutationAdapterReadiness.hostMutationAdapterReady, true);
+  assert.strictEqual(contract.hostMutationAdapterReadiness.codeOwnedAdapterResolverReady, true);
+  assert.strictEqual(contract.hostMutationAdapterReadiness.realHostMutationImplementationReady, false);
+  assert.deepStrictEqual(
+    contract.hostMutationAdapterReadiness.adapterEntries,
+    EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES,
+  );
   assert.deepStrictEqual(
     contract.rollbackAnchorReadiness,
     buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
@@ -525,6 +582,114 @@ function assertWiringContract(contract) {
     contract.operatorRecoveryReadiness,
     buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
   );
+}
+
+function validAdapterCandidate(actionId, maxAttempts = 1) {
+  return {
+    actionId,
+    implementationId: CODE_OWNED_REGISTRY_MAPPINGS[actionId],
+    runnerKind: 'guarded-runner-stub',
+    mode: 'guarded-host-action',
+    status: 'blocked',
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    maxAttempts,
+  };
+}
+
+function validAdapterCandidatesFor(operation) {
+  return OPERATION_EXPECTED_ACTION_IDS[operation].map((id) => validAdapterCandidate(id, 1));
+}
+
+/**
+ * assertAdapterUnresolvedExact：第三参 operation **必传**，禁止默认 `'unknown'`。
+ * - typeof operation === 'string' 且 decision.operation === operation（严格全等）
+ * - 合法 install/uninstall/rollback/recover 输入上的 **任意** unresolved：第三参传对应合法 operation
+ * - **仅** invalid operation（H17：非 allowlisted string + 非 string 含 undefined/null/number/boolean）传 expected output `'unknown'`
+ */
+function assertAdapterUnresolvedExact(decision, primaryBlocker, operation) {
+  assert.strictEqual(typeof operation, 'string');
+  assert.strictEqual(typeof primaryBlocker, 'string');
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-host-mutation-adapter');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'unresolved');
+  assert.strictEqual(decision.adapterReady, false);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realHostMutationImplementationReady, false);
+  assert.strictEqual(decision.wouldMutateHost, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.launchctlAllowed, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.processListReadAllowed, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.auditWriteAllowed, false);
+  assert.strictEqual(decision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.resolvedCount, 0);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.deepStrictEqual(decision.mutations, []);
+  assert.deepStrictEqual(decision.blockers, [primaryBlocker]);
+  assert.strictEqual(decision.primaryBlocker, primaryBlocker);
+  assert.deepStrictEqual(decision.nextBlockers, [primaryBlocker]);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  assert.ok(!Object.values(decision).some((v) => typeof v === 'function'));
+}
+
+/**
+ * assertAdapterResolved：与 design §1.5 mutations 行 schema 全字段一致。
+ * - 第二参 operation 决定 expected action 序
+ * - mutation row **不含** codeOwnedResolverWired
+ */
+function assertAdapterResolved(decision, operation) {
+  const expected = OPERATION_EXPECTED_ACTION_IDS[operation];
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-host-mutation-adapter');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'resolved');
+  assert.strictEqual(decision.adapterReady, true);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realHostMutationImplementationReady, false);
+  assert.strictEqual(decision.wouldMutateHost, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.launchctlAllowed, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.processListReadAllowed, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.auditWriteAllowed, false);
+  assert.strictEqual(decision.rollbackAnchorWriteAllowed, false);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.resolvedCount, expected.length);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.strictEqual(decision.mutations.length, expected.length);
+  assert.deepStrictEqual(decision.blockers, []);
+  assert.strictEqual(decision.primaryBlocker, null);
+  assert.deepStrictEqual(decision.nextBlockers, []);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  for (let i = 0; i < expected.length; i++) {
+    const actionId = expected[i];
+    const row = decision.mutations[i];
+    assert.strictEqual(row.actionId, actionId);
+    assert.strictEqual(row.mutationKind, CODE_OWNED_ACTION_MUTATION_MAP[actionId]);
+    assert.strictEqual(row.mutationReady, true);
+    assert.strictEqual(row.realHostMutationImplementationReady, false);
+    assert.strictEqual(row.wouldMutateHost, false);
+    assert.strictEqual(row.wouldExecute, false);
+    assert.strictEqual(row.wouldRun, false);
+    assert.strictEqual(row.wouldWrite, false);
+    assert.strictEqual(row.launchctlAllowed, false);
+    assert.strictEqual(row.filesystemWriteAllowed, false);
+    assert.strictEqual(row.processListReadAllowed, false);
+    assert.strictEqual(row.metadataWriteAllowed, false);
+    assert.strictEqual(row.auditWriteAllowed, false);
+    assert.strictEqual(row.rollbackAnchorWriteAllowed, false);
+    assert.strictEqual(row.blockerCode, null);
+    assert.strictEqual(row.evidenceCode, 'host-mutation-adapter-mutation-ready');
+    assert.strictEqual(Object.hasOwn(row, 'codeOwnedResolverWired'), false);
+  }
 }
 
 function validRegistryCandidate(actionId, maxAttempts = 1) {
@@ -972,47 +1137,371 @@ describe('resolveSupervisorLifecycleGuardedRunnerRegistry', () => {
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness', () => {
-  it('returns fixed blocked disabled host mutation adapter readiness evidence', () => {
+  it('buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness returns fixed ready contract', () => {
     const readiness = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness();
-
     assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-host-mutation-adapter-readiness');
-    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.state, 'ready');
     assert.strictEqual(readiness.hostMutationAdapterDefined, true);
-    assert.strictEqual(readiness.hostMutationAdapterReady, false);
-    assert.strictEqual(readiness.realHostMutationAdapterReady, false);
-    assert.strictEqual(readiness.readyCount, 0);
-    assert.strictEqual(readiness.blockedCount, 1);
-    assert.ok(readiness.blockers.includes('host-mutation-adapter-real-implementation-missing'));
-    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
-    assert.deepStrictEqual(readiness.nextBlockers, ['host-mutation-adapter-real-implementation-missing']);
+    assert.strictEqual(readiness.hostMutationAdapterReady, true);
+    assert.strictEqual(readiness.codeOwnedAdapterResolverReady, true);
+    assert.strictEqual(readiness.realHostMutationImplementationReady, false);
+    assert.strictEqual(readiness.readyCount, 1);
+    assert.strictEqual(readiness.blockedCount, 0);
     assert.deepStrictEqual(readiness.adapterEntries, EXPECTED_HOST_MUTATION_ADAPTER_ENTRIES);
+    assert.deepStrictEqual(readiness.blockers, []);
+    assert.deepStrictEqual(readiness.nextBlockers, []);
     assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
   });
 
   it('ignores all runtime-looking inputs and never leaks malicious material', () => {
     const baseline = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness();
     const maliciousInput = {
-      hostMutationAdapterReady: true,
+      hostMutationAdapterReady: false,
+      realHostMutationImplementationReady: true,
       adapterEntries: [
         {
-          adapterKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          adapterKind: OPAQUE_UNSAFE_FIELD,
           wouldMutateHost: true,
           wouldRun: true,
           wouldWrite: true,
+          OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
         },
       ],
-      config: { token: 'SECRET_XYZ' },
-      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
-      hash: 'sha256:abc',
-      path: '/Users/ah/private',
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
     };
 
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(maliciousInput), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(null), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerHostMutationAdapterReadiness(), baseline);
+    assert.doesNotMatch(JSON.stringify(baseline), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
     assert.doesNotMatch(
       JSON.stringify(baseline),
-      /\/Users\/ah|SECRET_XYZ|operator@example|do not leak|sha256:|launchctl load|node /i,
+      /disabled-host-mutation-adapter-stub|host-mutation-adapter-real-implementation-missing|host-mutation-adapter-missing/i,
+    );
+  });
+});
+
+describe('resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter', () => {
+  it('H1: install happy path resolves restricted mutations without host side effects', () => {
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+        validAdapterCandidatesFor('install'),
+        'install',
+      ),
+      'install',
+    );
+  });
+
+  it('H2: uninstall happy path resolves restricted mutations', () => {
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+        validAdapterCandidatesFor('uninstall'),
+        'uninstall',
+      ),
+      'uninstall',
+    );
+  });
+
+  it('H3: rollback happy path resolves restricted mutations', () => {
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+        validAdapterCandidatesFor('rollback'),
+        'rollback',
+      ),
+      'rollback',
+    );
+  });
+
+  it('H4: recover happy path resolves recovery-supervisor-mutation only', () => {
+    const decision = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+      validAdapterCandidatesFor('recover'),
+      'recover',
+    );
+    assertAdapterResolved(decision, 'recover');
+    assert.strictEqual(decision.mutations[0].mutationKind, 'recovery-supervisor-mutation');
+  });
+
+  it('H5: unknown action is host-mutation-adapter-action-unknown', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[2] = validAdapterCandidate('start-recovery-supervisor', 1);
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-action-unknown',
+      'install',
+    );
+  });
+
+  it('H6: length < |E| with subset actionIds is missing (not candidates-invalid)', () => {
+    const candidates = validAdapterCandidatesFor('install').slice(0, 2);
+    assert.strictEqual(candidates.length, 2);
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-action-missing',
+      'install',
+    );
+  });
+
+  it('H7: duplicate actionId is host-mutation-adapter-action-duplicate', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[1] = validAdapterCandidate('render-launch-agent-plist', 1);
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-action-duplicate',
+      'install',
+    );
+  });
+
+  it('H8: non-catalog implementationId still resolves (adapter ignores implementationId)', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], implementationId: 'other-plist-impl' };
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('H9: redacted maxAttempts still resolves (adapter ignores maxAttempts)', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], maxAttempts: '[redacted]' };
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('H10: wouldExecute true is host-mutation-adapter-unsafe-mutation', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldExecute: true };
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-unsafe-mutation',
+      'install',
+    );
+  });
+
+  it('H11: wouldRun true is host-mutation-adapter-unsafe-mutation', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldRun: true };
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-unsafe-mutation',
+      'install',
+    );
+  });
+
+  it('H12: wouldWrite true is host-mutation-adapter-unsafe-mutation', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], wouldWrite: true };
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-unsafe-mutation',
+      'install',
+    );
+  });
+
+  it('H13: status not blocked is host-mutation-adapter-unsafe-mutation', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], status: 'ready' };
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-unsafe-mutation',
+      'install',
+    );
+  });
+
+  it('H14: non-array candidates is host-mutation-adapter-candidates-invalid', () => {
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(null, 'install'),
+      'host-mutation-adapter-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('H15: empty candidates is host-mutation-adapter-candidates-invalid', () => {
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter([], 'install'),
+      'host-mutation-adapter-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('H16: missing exact key is host-mutation-adapter-candidates-invalid', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    const { mode: _mode, ...rest } = candidates[0];
+    candidates[0] = rest;
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-candidates-invalid',
+      'install',
+    );
+  });
+
+  for (const operation of ['nope', undefined, null, 0, 1, false, true]) {
+    it(`H17: invalid operation ${String(operation)} is operation-invalid with decision.operation unknown`, () => {
+      assertAdapterUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+          validAdapterCandidatesFor('install'),
+          operation,
+        ),
+        'host-mutation-adapter-operation-invalid',
+        'unknown',
+      );
+    });
+  }
+
+  it('H18: getter trap on element is host-mutation-adapter-candidates-invalid', () => {
+    const base = validAdapterCandidate('render-launch-agent-plist', 1);
+    const poisoned = {};
+    for (const key of Object.keys(base)) {
+      Object.defineProperty(poisoned, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return base[key];
+        },
+      });
+    }
+    const candidates = [poisoned, ...validAdapterCandidatesFor('install').slice(1)];
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('H19: Proxy element trap is host-mutation-adapter-candidates-invalid without secret leak', () => {
+    const base = validAdapterCandidate('render-launch-agent-plist', 1);
+    const trapped = new Proxy(base, {
+      getOwnPropertyDescriptor() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+    const candidates = [trapped, ...validAdapterCandidatesFor('install').slice(1)];
+    const decision = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install');
+    assertAdapterUnresolvedExact(decision, 'host-mutation-adapter-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  it('H20: deep-copy isolation — input/output mutations do not affect subsequent resolve', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    const first = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install');
+    assertAdapterResolved(first, 'install');
+    candidates[0] = { ...candidates[0], actionId: 'start-recovery-supervisor' };
+    first.operation = 'unknown';
+    first.mutations.push({ actionId: OPAQUE_UNSAFE_FIELD });
+    const second = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+      validAdapterCandidatesFor('install'),
+      'install',
+    );
+    assertAdapterResolved(second, 'install');
+    const third = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install');
+    assertAdapterUnresolvedExact(third, 'host-mutation-adapter-action-unknown', 'install');
+  });
+
+  it('H21: extra key is host-mutation-adapter-candidates-invalid', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates[0] = { ...candidates[0], mutationKind: 'render-plist-mutation' };
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-candidates-invalid',
+      'install',
+    );
+  });
+
+  for (const { label, actionId } of [
+    { label: 'empty-string', actionId: '' },
+    { label: 'number', actionId: 1 },
+  ]) {
+    it(`H22: ${label} actionId is candidates-invalid before set checks`, () => {
+      const candidates = validAdapterCandidatesFor('install');
+      candidates[0] = { ...candidates[0], actionId };
+      assertAdapterUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+        'host-mutation-adapter-candidates-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('H23: length > |E| with foreign actionId is unknown (not candidates-invalid)', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates.push(validAdapterCandidate('start-recovery-supervisor', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-action-unknown',
+      'install',
+    );
+  });
+
+  it('H24: length > |E| with duplicate install actionId is duplicate (not candidates-invalid)', () => {
+    const candidates = validAdapterCandidatesFor('install');
+    candidates.push(validAdapterCandidate('render-launch-agent-plist', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertAdapterUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'host-mutation-adapter-action-duplicate',
+      'install',
+    );
+  });
+
+  it('H25: sanitize remaps mutationKind mismatch to code-owned mapping (never passthrough)', () => {
+    const FOREIGN_MUTATION_KIND = 'attacker-forced-mutation-kind';
+    const resolved = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+      validAdapterCandidatesFor('install'),
+      'install',
+    );
+    assertAdapterResolved(resolved, 'install');
+
+    // Defense-in-depth: craft a resolved decision with wrong mutationKind strings.
+    const poisoned = {
+      ...resolved,
+      mutations: resolved.mutations.map((row) => ({
+        ...row,
+        mutationKind: FOREIGN_MUTATION_KIND,
+      })),
+    };
+    const sanitized = sanitizeHostMutationAdapterDecision(poisoned);
+    assertAdapterResolved(sanitized, 'install');
+    for (const row of sanitized.mutations) {
+      assert.strictEqual(row.mutationKind, CODE_OWNED_ACTION_MUTATION_MAP[row.actionId]);
+      assert.notStrictEqual(row.mutationKind, FOREIGN_MUTATION_KIND);
+    }
+    assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(FOREIGN_MUTATION_KIND, 'i'));
+
+    // Unmapped actionId → safe unknown (still no passthrough of foreign kind).
+    const unknownAction = sanitizeHostMutationAdapterDecision({
+      ...resolved,
+      mutations: [{
+        actionId: 'not-a-catalog-action',
+        mutationKind: FOREIGN_MUTATION_KIND,
+        mutationReady: true,
+        realHostMutationImplementationReady: false,
+        wouldMutateHost: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        launchctlAllowed: false,
+        filesystemWriteAllowed: false,
+        processListReadAllowed: false,
+        metadataWriteAllowed: false,
+        auditWriteAllowed: false,
+        rollbackAnchorWriteAllowed: false,
+        blockerCode: null,
+        evidenceCode: 'host-mutation-adapter-mutation-ready',
+      }],
+    });
+    assert.strictEqual(unknownAction.state, 'resolved');
+    assert.strictEqual(unknownAction.mutations[0].actionId, 'not-a-catalog-action');
+    assert.strictEqual(unknownAction.mutations[0].mutationKind, 'unknown');
+    assert.doesNotMatch(JSON.stringify(unknownAction), new RegExp(FOREIGN_MUTATION_KIND, 'i'));
+
+    // Resolver happy-path output is unchanged through sanitize (identity of kinds).
+    const resanitized = sanitizeHostMutationAdapterDecision(resolved);
+    assertAdapterResolved(resanitized, 'install');
+    assert.deepStrictEqual(
+      resanitized.mutations.map((row) => row.mutationKind),
+      resolved.mutations.map((row) => row.mutationKind),
     );
   });
 });
@@ -1197,10 +1686,13 @@ describe('buildSupervisorLifecycleGuardedRunnerWiringContract', () => {
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
-  it('ready install + executeRequested:false still resolves registryReady true', () => {
+  it('G2: ready install + executeRequested:false still resolves registry and adapter facts true', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: false });
 
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.ok(result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.gates, {
       lifecyclePlanValid: true,
@@ -1214,12 +1706,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       runnerRegistryReady: true,
       realRunnerWiringReady: false,
       runnerWiringContractReady: false,
-      hostMutationAdapterReady: false,
+      hostMutationAdapterReady: true,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
       operatorRecoveryReady: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.adapterReady, true);
     assertWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -1258,16 +1752,20 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     ]);
   });
 
-  it('production ready inputs resolve registry but still deny via remaining wiring facts', () => {
+  it('G1/G6/G7: production ready inputs resolve adapter but still deny via rollback-anchor', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
 
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
     assert.strictEqual(result.gates.executeRequested, true);
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.gates.executionPolicyReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, true);
+    assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.registryDecision.registryReady, true);
     assert.strictEqual(result.registryDecision.codeOwnedResolverWired, true);
@@ -1275,20 +1773,34 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.registryDecision.wouldExecute, false);
     assert.strictEqual(result.registryDecision.wouldRun, false);
     assert.strictEqual(result.registryDecision.wouldWrite, false);
+    assert.strictEqual(result.adapterDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.adapterReady, true);
+    assert.strictEqual(result.adapterDecision.codeOwnedResolverWired, true);
+    assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
+    assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
+    assert.strictEqual(result.adapterDecision.wouldExecute, false);
+    assert.strictEqual(result.adapterDecision.wouldRun, false);
+    assert.strictEqual(result.adapterDecision.wouldWrite, false);
+    assert.strictEqual(result.adapterDecision.launchctlAllowed, false);
+    assert.strictEqual(result.adapterDecision.filesystemWriteAllowed, false);
+    assert.strictEqual(result.adapterDecision.processListReadAllowed, false);
+    assert.strictEqual(result.adapterDecision.metadataWriteAllowed, false);
+    assert.strictEqual(result.adapterDecision.auditWriteAllowed, false);
+    assert.strictEqual(result.adapterDecision.rollbackAnchorWriteAllowed, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
     assert.strictEqual(result.policyDecision.state, 'denied');
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'host-mutation-adapter-not-ready');
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'rollback-anchor-not-ready');
     assert.strictEqual(result.policyDecision.wouldRun, false);
     assert.strictEqual(result.policyDecision.wouldWrite, false);
     for (const code of [
-      'host-mutation-adapter-not-ready',
       'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
       'operator-recovery-not-ready',
     ]) {
       assert.ok(result.policyDecision.blockers.includes(code));
     }
+    assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
@@ -1298,11 +1810,24 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       assert.strictEqual(c.wouldWrite, false);
     }
     assertWiringContract(result.runnerWiringContract);
-    assert.strictEqual(result.runnerWiringContract.readyCount, 2);
-    assert.strictEqual(result.runnerWiringContract.blockedCount, 4);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 3);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 3);
+
+    const pureRegistry = resolveSupervisorLifecycleGuardedRunnerRegistry(result.actionCandidates, 'install');
+    assert.strictEqual(result.registryDecision.state, pureRegistry.state);
+    const pureAdapter = resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(
+      result.actionCandidates,
+      'install',
+    );
+    assert.strictEqual(result.adapterDecision.state, pureAdapter.state);
+    assert.strictEqual(result.adapterDecision.adapterReady, pureAdapter.adapterReady);
+    assert.deepStrictEqual(
+      result.adapterDecision.mutations.map((row) => row.actionId),
+      pureAdapter.mutations.map((row) => row.actionId),
+    );
   });
 
-  it('G4: empty candidates path keeps registry not ready', () => {
+  it('G3: empty candidates path keeps registry and adapter not ready', () => {
     const notVerifiedInputs = getReadyInputs();
     notVerifiedInputs.executionPreview = {
       ...notVerifiedInputs.executionPreview,
@@ -1311,14 +1836,20 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       )),
     };
     const result = buildGate(notVerifiedInputs, { executeRequested: true });
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: false,
+    });
     assert.deepStrictEqual(result.actionCandidates, []);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
     assert.strictEqual(result.registryDecision.primaryBlocker, 'runner-registry-candidates-invalid');
+    assert.strictEqual(result.adapterDecision.state, 'unresolved');
+    assert.strictEqual(result.adapterDecision.primaryBlocker, 'host-mutation-adapter-candidates-invalid');
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.ok(result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
   });
 
-  it('G5: ignores forged registry overrides on options', () => {
+  it('G8: ignores forged registry/adapter overrides on options', () => {
     const result = buildGate(getReadyInputs(), {
       executeRequested: true,
       registryDecision: {
@@ -1328,6 +1859,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
       runnerRegistryReady: false,
       registryContext: { runnerRegistryReady: false },
+      adapterDecision: {
+        state: 'unresolved',
+        adapterReady: false,
+        wouldMutateHost: true,
+        launchctlAllowed: true,
+      },
+      hostMutationAdapterReady: false,
+      adapterContext: { hostMutationAdapterReady: true },
       policyContext: buildAllTruePolicyContext(),
       policyDecision: {
         state: 'authorized',
@@ -1336,26 +1875,21 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
         wouldRun: true,
       },
     });
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.strictEqual(result.registryDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
+    assert.strictEqual(result.adapterDecision.launchctlAllowed, false);
     assert.strictEqual(result.policyDecision.authorized, false);
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.doesNotMatch(JSON.stringify(result), /forged|wouldRun":true/i);
   });
 
-  it('G7: gate registryDecision is consistent with pure resolver over actionCandidates', () => {
-    const result = buildGate(getReadyInputs(), { executeRequested: true });
-    const pure = resolveSupervisorLifecycleGuardedRunnerRegistry(result.actionCandidates, 'install');
-    assert.strictEqual(result.registryDecision.state, pure.state);
-    assert.strictEqual(result.registryDecision.registryReady, pure.registryReady);
-    assert.deepStrictEqual(
-      result.registryDecision.mappings.map((row) => row.actionId),
-      pure.mappings.map((row) => row.actionId),
-    );
-  });
-
-  it('G8: non-catalog implementationId keeps registry not ready and fail-closed', () => {
+  it('G4: non-catalog implementationId keeps registry false and adapter true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -1369,7 +1903,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
     };
     const result = buildGate(inputs, { executeRequested: true });
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: true,
+    });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
     assert.strictEqual(
@@ -1377,7 +1914,11 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       'runner-registry-implementation-mismatch',
     );
     assert.strictEqual(result.gates.runnerRegistryReady, false);
+    assert.strictEqual(result.adapterDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.adapterReady, true);
+    assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
@@ -1385,24 +1926,15 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.registryDecision.wouldExecute, false);
     assert.strictEqual(result.registryDecision.wouldRun, false);
     assert.strictEqual(result.registryDecision.wouldWrite, false);
+    assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
     for (const c of result.actionCandidates) {
       assert.strictEqual(c.wouldExecute, false);
       assert.strictEqual(c.wouldRun, false);
       assert.strictEqual(c.wouldWrite, false);
     }
-    const readiness = result.runnerWiringContract.runnerRegistryReadiness;
-    assert.strictEqual(readiness.state, 'ready');
-    assert.strictEqual(readiness.runnerRegistryReady, true);
-    assert.strictEqual(readiness.codeOwnedRegistryResolverReady, true);
-    assert.strictEqual(readiness.realRunnerImplementationsReady, false);
-    for (const entry of readiness.registryEntries) {
-      assert.strictEqual(entry.wouldExecute, false);
-      assert.strictEqual(entry.wouldRun, false);
-      assert.strictEqual(entry.wouldWrite, false);
-    }
   });
 
-  it('G9: redacted maxAttempts layered production gate fail-closed', () => {
+  it('G5: redacted maxAttempts keeps registry false and adapter true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -1416,7 +1948,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
     };
     const result = buildGate(inputs, { executeRequested: true });
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: true,
+    });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(result.actionCandidates, 'install'),
@@ -1429,28 +1964,15 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       'runner-registry-max-attempts-invalid',
     );
     assert.strictEqual(result.gates.runnerRegistryReady, false);
+    assert.strictEqual(result.adapterDecision.state, 'resolved');
+    assert.strictEqual(result.adapterDecision.adapterReady, true);
+    assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
     assert.strictEqual(result.policyDecision.wouldWrite, false);
-    assert.strictEqual(result.registryDecision.wouldExecute, false);
-    assert.strictEqual(result.registryDecision.wouldRun, false);
-    assert.strictEqual(result.registryDecision.wouldWrite, false);
-    for (const c of result.actionCandidates) {
-      assert.strictEqual(c.wouldExecute, false);
-      assert.strictEqual(c.wouldRun, false);
-      assert.strictEqual(c.wouldWrite, false);
-    }
-    const readiness = result.runnerWiringContract.runnerRegistryReadiness;
-    assert.strictEqual(readiness.state, 'ready');
-    assert.strictEqual(readiness.runnerRegistryReady, true);
-    assert.strictEqual(readiness.realRunnerImplementationsReady, false);
-    for (const entry of readiness.registryEntries) {
-      assert.strictEqual(entry.wouldExecute, false);
-      assert.strictEqual(entry.wouldRun, false);
-      assert.strictEqual(entry.wouldWrite, false);
-    }
   });
 
   it('blocks approval readiness that is not ready without leaking approval material', () => {
@@ -1471,8 +1993,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     const result = buildGate(inputs, { executeRequested: true });
     const serialized = JSON.stringify(result);
 
-    // production-derived candidates still resolve; approval readiness is independent
-    assertAlwaysBlockedGate(result, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.ok(result.blockers.includes('approval-record-gate-not-ready'));
     assert.doesNotMatch(serialized, /gate-operator|approval reason|acknowledgement|sha256:|\/Users\/ah|localhost|token|secret/i);
   });
@@ -1484,8 +2008,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const invalidManifestResult = buildGate(invalidManifest, { executeRequested: true });
 
-    // plan+preview still valid → candidates resolve; manifest fact is independent
-    assertAlwaysBlockedGate(invalidManifestResult, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(invalidManifestResult, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.ok(invalidManifestResult.blockers.includes('executor-manifest-readiness-invalid'));
     assert.strictEqual(invalidManifestResult.gates.manifestReady, false);
 
@@ -1498,8 +2024,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const runnerResult = buildGate(runnerNotReady, { executeRequested: true });
 
-    // plan+preview still valid → candidates resolve; binding readiness is independent
-    assertAlwaysBlockedGate(runnerResult, { runnerRegistryReady: true });
+    assertAlwaysBlockedGate(runnerResult, {
+      runnerRegistryReady: true,
+      hostMutationAdapterReady: true,
+    });
     assert.ok(runnerResult.blockers.includes('guarded-runner-readiness-not-ready'));
     assert.strictEqual(runnerResult.gates.runnerBindingsReady, false);
 
@@ -1510,13 +2038,19 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const previewResult = buildGate(previewMismatch, { executeRequested: true });
 
-    assertAlwaysBlockedGate(previewResult, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(previewResult, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: false,
+    });
     assert.ok(previewResult.blockers.includes('execution-preview-operation-mismatch'));
     assert.strictEqual(previewResult.gates.executionPreviewVerified, false);
 
     const invalidPreview = buildGate({ ...getReadyInputs(), executionPreview: null }, { executeRequested: true });
 
-    assertAlwaysBlockedGate(invalidPreview, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(invalidPreview, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: false,
+    });
     assert.ok(invalidPreview.blockers.includes('execution-preview-invalid'));
     assert.strictEqual(invalidPreview.gates.executionPreviewVerified, false);
 
@@ -1529,7 +2063,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     };
     const notVerifiedResult = buildGate(notVerifiedInputs, { executeRequested: true });
 
-    assertAlwaysBlockedGate(notVerifiedResult, { runnerRegistryReady: false });
+    assertAlwaysBlockedGate(notVerifiedResult, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: false,
+    });
     assert.ok(notVerifiedResult.blockers.includes('execution-preview-not-verified'));
     assert.strictEqual(notVerifiedResult.gates.executionPreviewVerified, false);
     assert.deepStrictEqual(notVerifiedResult.actionCandidates, []);
@@ -1557,7 +2094,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     const result = buildGate(inputs, { executeRequested: true });
     const serialized = JSON.stringify(result.actionCandidates);
 
-    assertAlwaysBlockedGate(result);
+    assertAlwaysBlockedGate(result, {
+      runnerRegistryReady: false,
+      hostMutationAdapterReady: false,
+    });
     assert.deepStrictEqual(result.actionCandidates, [
       {
         actionId: 'render-launch-agent-plist',
@@ -1931,10 +2471,11 @@ describe('areSupervisorLifecycleGuardedRunnerActionCandidatesReady', () => {
 });
 
 describe('gates.actionCandidatesReady gate integration (empty/valid only)', () => {
-  it('G1: production valid candidates => actionCandidatesReady true but policy denied via four remaining downstream', () => {
+  it('G1: production valid candidates => actionCandidatesReady true but policy denied via three remaining downstream', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, true);
+    assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.strictEqual(
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
         result.actionCandidates,
@@ -1944,10 +2485,10 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
     );
     assert.strictEqual(result.policyDecision.state, 'denied');
     assert.strictEqual(result.policyDecision.authorized, false);
+    assert.strictEqual(result.policyDecision.primaryBlocker, 'rollback-anchor-not-ready');
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     for (const code of [
-      'host-mutation-adapter-not-ready',
       'rollback-anchor-not-ready',
       'attempt-audit-not-ready',
       'operator-recovery-not-ready',
@@ -1955,6 +2496,7 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
       assert.ok(result.policyDecision.blockers.includes(code));
     }
     assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
   });
 
   it('G2: empty sanitized candidates => actionCandidatesReady false + action-candidates-not-ready', () => {

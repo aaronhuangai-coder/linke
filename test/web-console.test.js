@@ -10845,7 +10845,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /executionPolicy:fail-closed-execution-policy:state:ready:realImplementationReady:true:wouldAuthorizeExecution:false:blocker:none/);
     assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:/);
     assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:runner-registry-not-ready/);
-    assert.match(text, /hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing/);
+    assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready/);
     assert.match(text, /rollbackAnchor:disabled-rollback-anchor-stub:state:blocked:realImplementationReady:false:wouldWriteAnchor:false:blocker:rollback-anchor-real-implementation-missing/);
     assert.match(text, /attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing/);
     assert.match(text, /operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:wouldRecover:false:blocker:operator-recovery-real-implementation-missing/);
@@ -10920,7 +10920,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         executeRequested: true,
         executionPolicyReady: true,
         runnerRegistryReady: true,
-        hostMutationAdapterReady: false,
+        hostMutationAdapterReady: true,
         rollbackAnchorReady: false,
         attemptAuditReady: false,
         operatorRecoveryReady: false,
@@ -10936,12 +10936,28 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         wouldRun: false,
         wouldWrite: false,
       },
+      adapterDecision: {
+        state: 'resolved',
+        adapterReady: true,
+        codeOwnedResolverWired: true,
+        realHostMutationImplementationReady: false,
+        wouldMutateHost: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        launchctlAllowed: false,
+        filesystemWriteAllowed: false,
+        processListReadAllowed: false,
+        metadataWriteAllowed: false,
+        auditWriteAllowed: false,
+        rollbackAnchorWriteAllowed: false,
+      },
       policyDecision: {
         state: 'denied',
         authorized: false,
         wouldAuthorizeExecution: false,
-        primaryBlocker: 'host-mutation-adapter-not-ready',
-        blockers: ['host-mutation-adapter-not-ready'],
+        primaryBlocker: 'rollback-anchor-not-ready',
+        blockers: ['rollback-anchor-not-ready'],
       },
       runnerWiringContract: {
         requiredContracts: [
@@ -10961,9 +10977,9 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           },
           {
             id: 'host-mutation-adapter',
-            status: 'blocked',
-            blockerCode: 'host-mutation-adapter-missing',
-            evidenceCode: 'host-mutation-adapter-missing',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'host-mutation-adapter-ready',
             requiredForExecution: true,
           },
           {
@@ -11011,7 +11027,17 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           }],
         },
         hostMutationAdapterReadiness: {
-          adapterEntries: [{ adapterKind: 'disabled-host-mutation-adapter-stub' }],
+          state: 'ready',
+          hostMutationAdapterReady: true,
+          codeOwnedAdapterResolverReady: true,
+          realHostMutationImplementationReady: false,
+          adapterEntries: [{
+            adapterKind: 'code-owned-host-mutation-adapter',
+            state: 'ready',
+            codeOwnedResolverWired: true,
+            realHostMutationImplementationReady: false,
+            wouldMutateHost: false,
+          }],
         },
         rollbackAnchorReadiness: {
           anchorEntries: [{ anchorKind: 'disabled-rollback-anchor-stub' }],
@@ -11027,27 +11053,283 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     };
   }
 
-  it('W1-W3/W10: full canonical ready payload renders ready wiring/registry/validation with non-execute flags', () => {
+  it('W1: full canonical ready payload renders ready wiring/registry/adapter/validation with non-execute flags', () => {
     const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
       fullCanonicalRunnerRegistryReadyPayload(),
     );
     const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
     assert.match(text, /wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none/);
+    assert.match(text, /wiringContract:host-mutation-adapter:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(
       text,
       /runnerRegistry:code-owned-runner-registry:state:ready:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:none/,
     );
+    assert.match(
+      text,
+      /hostMutationAdapter:code-owned-host-mutation-adapter:state:ready:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:none/,
+    );
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
-    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:false'));
     assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
     assert.match(text, /realHostRunnerReady:false/);
+    assert.match(text, /realHostMutationImplementationReady:false/);
+    assert.match(text, /wouldMutateHost:false/);
     assert.match(text, /wouldExecute:false/);
   });
 
-  it('W4: malicious / contradictory payload cannot force runner-registry ready', () => {
+  it('W2: missing adapterDecision blocks host-mutation-adapter wiring/adapter/validation', () => {
+    const payload = fullCanonicalRunnerRegistryReadyPayload();
+    delete payload.adapterDecision;
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/);
+    assert.match(
+      text,
+      /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready/,
+    );
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+    assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
+    assert.doesNotMatch(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:ready/);
+  });
+
+  it('W3: gates.hostMutationAdapterReady false blocks adapter canonical ready', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        gates: {
+          ...fullCanonicalRunnerRegistryReadyPayload().gates,
+          hostMutationAdapterReady: false,
+        },
+      }),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/);
+    assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:.*blocker:host-mutation-adapter-not-ready/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W4: readiness state blocked blocks adapter canonical ready', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      runnerWiringContract: {
+        ...base.runnerWiringContract,
+        hostMutationAdapterReadiness: {
+          ...base.runnerWiringContract.hostMutationAdapterReadiness,
+          state: 'blocked',
+        },
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W5: contract status blocked blocks adapter canonical ready', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const contracts = base.runnerWiringContract.requiredContracts.map((entry) =>
+      entry.id === 'host-mutation-adapter'
+        ? {
+          ...entry,
+          status: 'blocked',
+          blockerCode: 'host-mutation-adapter-missing',
+          evidenceCode: 'host-mutation-adapter-missing',
+        }
+        : entry,
+    );
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      runnerWiringContract: {
+        ...base.runnerWiringContract,
+        requiredContracts: contracts,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W6: contract ready with wrong evidenceCode blocks adapter canonical ready', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const contracts = base.runnerWiringContract.requiredContracts.map((entry) =>
+      entry.id === 'host-mutation-adapter'
+        ? { ...entry, evidenceCode: 'host-mutation-adapter-missing' }
+        : entry,
+    );
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      runnerWiringContract: {
+        ...base.runnerWiringContract,
+        requiredContracts: contracts,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W7: D.wouldMutateHost true blocks adapter wiring/adapter/validation', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      adapterDecision: {
+        ...base.adapterDecision,
+        wouldMutateHost: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing/);
+    assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:.*blocker:host-mutation-adapter-not-ready/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+    assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
+    assert.doesNotMatch(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:ready/);
+  });
+
+  it('W8: D.launchctlAllowed true blocks adapter canonical ready', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      adapterDecision: {
+        ...base.adapterDecision,
+        launchctlAllowed: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W9: malicious adapterEntries adapterKind does not leak and stays fixed blocked', () => {
+    const OPAQUE_UNSAFE_FIELD = 'OPAQUE_UNSAFE_FIELD';
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      adapterDecision: undefined,
+      gates: {
+        ...base.gates,
+        hostMutationAdapterReady: false,
+      },
+      runnerWiringContract: {
+        ...base.runnerWiringContract,
+        hostMutationAdapterReadiness: {
+          state: 'ready',
+          hostMutationAdapterReady: true,
+          codeOwnedAdapterResolverReady: true,
+          realHostMutationImplementationReady: false,
+          adapterEntries: [{
+            adapterKind: OPAQUE_UNSAFE_FIELD,
+            wouldMutateHost: true,
+          }],
+        },
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(
+      text,
+      /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready/,
+    );
+    assert.doesNotMatch(text, new RegExp(OPAQUE_UNSAFE_FIELD));
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W10: contract status ready + blocker null but missing D blocks adapter ready', () => {
+    const payload = fullCanonicalRunnerRegistryReadyPayload();
+    delete payload.adapterDecision;
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+  });
+
+  it('W11: C/A/G surface ready but D.wouldRun true blocks adapter ready', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      adapterDecision: {
+        ...base.adapterDecision,
+        wouldRun: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:host-mutation-adapter:status:blocked/);
+    assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked/);
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:false'));
+    assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
+  });
+
+  it('W12: trailing three contracts claiming ready remain fixed missing blocked', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const contracts = base.runnerWiringContract.requiredContracts.map((entry) =>
+      ['rollback-anchor', 'attempt-audit', 'operator-recovery'].includes(entry.id)
+        ? {
+          ...entry,
+          status: 'ready',
+          blockerCode: null,
+          evidenceCode: `${entry.id}-ready`,
+        }
+        : entry,
+    );
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      gates: {
+        ...base.gates,
+        rollbackAnchorReady: true,
+        attemptAuditReady: true,
+        operatorRecoveryReady: true,
+      },
+      runnerWiringContract: {
+        ...base.runnerWiringContract,
+        requiredContracts: contracts,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:rollback-anchor:status:blocked:requiredForExecution:true:blocker:rollback-anchor-missing/);
+    assert.match(text, /wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing/);
+    assert.match(text, /wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing/);
+    assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+  });
+
+  it('W13: runner-registry and adapter predicates are independent', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      gates: {
+        ...base.gates,
+        runnerRegistryReady: false,
+        hostMutationAdapterReady: true,
+      },
+      registryDecision: {
+        ...base.registryDecision,
+        state: 'unresolved',
+        registryReady: false,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing/);
+    assert.match(text, /wiringContract:host-mutation-adapter:status:ready:requiredForExecution:true:blocker:none/);
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:false'));
+    assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
+  });
+
+  it('legacy registry-only readiness still keeps non-execute flags for trailing contracts', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload(),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none/);
+    assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
+    assert.ok(viewModel.validationLines.includes('executionEligible:false'));
+    assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+  });
+
+  it('W14: malicious / contradictory payload cannot force runner-registry ready', () => {
     const UNSAFE_SECRET_MATERIAL = 'UNSAFE_SECRET_MATERIAL';
     const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
       gates: {
@@ -11421,8 +11703,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     ].join(' ');
 
     assert.ok(text.includes(
-      'hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:' +
-        'wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing'
+      'hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:' +
+        'realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready'
     ));
     assert.match(text, /hostMutationAdapterReady:false/);
     assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');

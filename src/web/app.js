@@ -1234,16 +1234,17 @@ function sanitizeAllowlistedExecutionPolicyBlocker(value) {
 }
 
 /**
- * V1.25 Web security boundary for requiredContracts rendering:
+ * V1.26 Web security boundary for requiredContracts rendering:
  * - `execution-policy` may display ready under its strict V1.24 contract.
  * - `runner-registry` ready only under shared C∧R∧G∧D canonical predicate
  *   (see isCanonicalRunnerRegistryReady); otherwise fixed blocked + missing.
- * - Four remaining contracts are always blocked with canonical missing codes;
+ * - `host-mutation-adapter` ready only under shared C∧A∧G∧D_adapter canonical
+ *   predicate (see isCanonicalHostMutationAdapterReady).
+ * - Three remaining contracts are always blocked with canonical missing codes;
  *   never trust payload status/blocker/evidence for them.
  * - Unknown / redacted ids stay blocked without leaking payload blocker text.
  */
 const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
-  'host-mutation-adapter': 'host-mutation-adapter-missing',
   'rollback-anchor': 'rollback-anchor-missing',
   'attempt-audit': 'attempt-audit-missing',
   'operator-recovery': 'operator-recovery-missing',
@@ -1287,7 +1288,56 @@ function resolveCanonicalRunnerRegistryReady(payload) {
   return isCanonicalRunnerRegistryReady({ C, R, G, D });
 }
 
-function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringContract, canonicalRunnerRegistryReady = false) {
+/**
+ * Shared single canonical predicate for host-mutation-adapter wiring line,
+ * adapter readiness line, and validationLines.hostMutationAdapterReady.
+ * Ready iff C ∧ A ∧ G ∧ D all hold; any missing/contradictory/side-effect
+ * drift (including wouldMutateHost / *Allowed true) fails closed.
+ */
+function isCanonicalHostMutationAdapterReady({ C, A, G, D }) {
+  return (
+    C?.status === 'ready' &&
+    C?.blockerCode === null &&
+    C?.evidenceCode === 'host-mutation-adapter-ready' &&
+    C?.requiredForExecution === true &&
+    A?.state === 'ready' &&
+    A?.hostMutationAdapterReady === true &&
+    A?.codeOwnedAdapterResolverReady === true &&
+    A?.realHostMutationImplementationReady === false &&
+    G === true &&
+    D?.state === 'resolved' &&
+    D?.adapterReady === true &&
+    D?.codeOwnedResolverWired === true &&
+    D?.realHostMutationImplementationReady === false &&
+    D?.wouldMutateHost === false &&
+    D?.wouldExecute === false &&
+    D?.wouldRun === false &&
+    D?.wouldWrite === false &&
+    D?.launchctlAllowed === false &&
+    D?.filesystemWriteAllowed === false &&
+    D?.processListReadAllowed === false &&
+    D?.metadataWriteAllowed === false &&
+    D?.auditWriteAllowed === false &&
+    D?.rollbackAnchorWriteAllowed === false
+  );
+}
+
+function resolveCanonicalHostMutationAdapterReady(payload) {
+  const requiredContracts = Array.isArray(payload?.runnerWiringContract?.requiredContracts)
+    ? payload.runnerWiringContract.requiredContracts
+    : [];
+  const C = requiredContracts.find((entry) => entry && entry.id === 'host-mutation-adapter') || null;
+  const A = payload?.runnerWiringContract?.hostMutationAdapterReadiness || null;
+  const G = payload?.gates?.hostMutationAdapterReady === true;
+  const D = payload?.adapterDecision || null;
+  return isCanonicalHostMutationAdapterReady({ C, A, G, D });
+}
+
+function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
+  runnerWiringContract,
+  canonicalRunnerRegistryReady = false,
+  canonicalHostMutationAdapterReady = false,
+) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
     : [];
@@ -1316,6 +1366,13 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(runnerWiringCo
         return 'wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none';
       }
       return 'wiringContract:runner-registry:status:blocked:requiredForExecution:true:blocker:runner-registry-missing';
+    }
+
+    if (id === 'host-mutation-adapter') {
+      if (canonicalHostMutationAdapterReady === true) {
+        return 'wiringContract:host-mutation-adapter:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:host-mutation-adapter:status:blocked:requiredForExecution:true:blocker:host-mutation-adapter-missing';
     }
 
     // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
@@ -1362,14 +1419,17 @@ function buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload) {
   ];
 }
 
-function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(runnerWiringContract) {
-  const adapterEntries = Array.isArray(runnerWiringContract?.hostMutationAdapterReadiness?.adapterEntries)
-    ? runnerWiringContract.hostMutationAdapterReadiness.adapterEntries
-    : [];
-  if (adapterEntries.length < 1) return [];
+function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(canonicalHostMutationAdapterReady = false) {
+  // Always emit exactly one stable line; never copy payload adapterKind/would*/blocker text.
+  if (canonicalHostMutationAdapterReady === true) {
+    return [
+      'hostMutationAdapter:code-owned-host-mutation-adapter:state:ready:codeOwnedResolverWired:true:' +
+        'realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:none',
+    ];
+  }
   return [
-    'hostMutationAdapter:disabled-host-mutation-adapter-stub:state:blocked:realImplementationReady:false:' +
-      'wouldMutateHost:false:blocker:host-mutation-adapter-real-implementation-missing',
+    'hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:' +
+      'realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready',
   ];
 }
 
@@ -1648,16 +1708,20 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
-  // Single shared canonical boolean for wiring / registry / validation lines.
+  // Single shared canonical booleans for wiring / registry / adapter / validation lines.
   const canonicalRunnerRegistryReady = resolveCanonicalRunnerRegistryReady(payload) === true;
+  const canonicalHostMutationAdapterReady = resolveCanonicalHostMutationAdapterReady(payload) === true;
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(
     payload.runnerWiringContract,
     canonicalRunnerRegistryReady,
+    canonicalHostMutationAdapterReady,
   );
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
   const runnerRegistryLines = buildSupervisorLifecycleGuardedRunnerRegistryLines(canonicalRunnerRegistryReady);
-  const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(payload.runnerWiringContract);
+  const hostMutationAdapterLines = buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(
+    canonicalHostMutationAdapterReady,
+  );
   const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(payload.runnerWiringContract);
   const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(payload.runnerWiringContract);
   const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(payload.runnerWiringContract);
@@ -1695,7 +1759,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       'runnerWiringContractReady:false',
       'executionEligible:false',
       'executorReady:false',
-      'hostMutationAdapterReady:false',
+      `hostMutationAdapterReady:${canonicalHostMutationAdapterReady ? 'true' : 'false'}`,
       'rollbackAnchorReady:false',
       'attemptAuditReady:false',
       'operatorRecoveryReady:false',
