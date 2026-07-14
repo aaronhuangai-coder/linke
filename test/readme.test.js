@@ -1038,17 +1038,17 @@ describe('README — G0a controller runtime', () => {
     );
   });
 
-  it('does not treat automated tests as real Keychain or second-Mac PASS, and keeps the real gate blocked', () => {
+  it('does not treat automated tests as real Keychain or second-Mac PASS, and keeps Gold blocked', () => {
     assertReadmeContains(
       /自动测试.*(不等于|不是|≠).*真实|automated tests?\s+(are\s+)?not\s+(real|equal)/i,
       'auto tests are not real Keychain/second Mac evidence',
     );
     assertReadmeContains(
-      /(真实\s*)?Keychain[\s\S]{0,160}(BLOCKED|blocked)|第二\s*Mac[\s\S]{0,160}(BLOCKED|blocked)|(real\s+)?Keychain[\s\S]{0,160}BLOCKED/i,
-      'real Keychain / second Mac gate blocked',
+      /G0a 真实双 Mac[\s\S]{0,120}PASS|真实双机验收已通过|g0a-real-keychain-lan-acceptance/i,
+      'real dual-Mac acceptance has sanitized PASS evidence',
     );
     assertReadmeContains(
-      /不得将 G0a 表述为 Gold 发布条件已满足|Gold 依旧 blocked|Gold remains blocked/i,
+      /不得将 G0a 表述为 Gold 发布条件已满足|Gold 依旧 blocked|Gold remains blocked|Gold[^\n]*(BLOCKED|blocked)/i,
       'explicit non-claim of G0a/Gold completion',
     );
     // Existing suite already forbids the literal phrase "Gold ready"; keep that invariant.
@@ -2392,7 +2392,7 @@ describe('README — G0a real two-Mac acceptance harness', () => {
     assertReadmeContains(/SSH alias/i, 'preconfigured SSH alias only');
     assertReadmeContains(/0600/, 'private bundle and receipt mode');
     assertReadmeContains(/test-only|测试专用/i, 'test-only harness');
-    assertReadmeContains(/Gold[^\n]*(BLOCKED|blocked)/, 'Gold remains blocked before real gates');
+    assertReadmeContains(/Gold[^\n]*(BLOCKED|blocked)/, 'Gold remains blocked despite G0a real PASS');
   });
 
   it('documents repository-relative direct node entry without secrets', () => {
@@ -2407,6 +2407,32 @@ describe('README — G0a real two-Mac acceptance harness', () => {
     assertReadmeContains(/dedicated run directory/i, 'cwd must be dedicated run directory');
     assertReadmeContains(/额外 argv 固定拒绝|exactly one fixed phase/i, 'extra argv rejection');
     assertReadmeContains(/零副作用|zero side effects/i, 'import has zero side effects');
+  });
+
+  it('locks sanitized real dual-Mac PASS evidence without Gold release claim', () => {
+    assertReadmeContains(
+      /docs\/superpowers\/reports\/2026-07-13-g0a-real-keychain-lan-acceptance\.md/,
+      'sanitized real-gate report path',
+    );
+    assertReadmeContains(/10ffad69e6a3/, 'source commit abstract id');
+    assertReadmeContains(/G0A-REAL-20260714-01/, 'abstract commandId only');
+    assertReadmeContains(/2026-07-14T07:02:50\.301Z/, 'final real acceptance UTC');
+    assertReadmeContains(/promptHandled\s*=\s*true|promptHandled=true/, 'manual Keychain UI handled');
+    assertReadmeContains(
+      /Controller\/PM[^\n]*Node major `?24`?|Node major `?24`?[^\n]*macOS major `?26`?/,
+      'Controller/PM runtime baseline majors',
+    );
+    assertReadmeContains(/device-token-invalid/, 'rotate old-token rejection code');
+    assertReadmeContains(/device-protocol-unsupported/, 'N-2 rejection code');
+    assertReadmeContains(/device-revoked/, 'post-revoke rejection code');
+    assertReadmeContains(/device-tls-fingerprint-mismatch/, 'old-pin mismatch code');
+    assertReadmeContains(/G0a 真实双机验收已通过|真实双 Mac[\s\S]{0,80}PASS/i, 'G0a real dual-Mac PASS');
+    assertReadmeContains(
+      /Gold[^\n]*(BLOCKED|blocked)|Linke Gold[^\n]*(BLOCKED|blocked)/i,
+      'Gold remains blocked for other blockers',
+    );
+    assertReadmeContains(/不得宣称完整版发布完成/, 'explicit non-claim of full release');
+    assert.doesNotMatch(readme, /Gold ready|Gold-ready/i);
   });
 
   it('does not describe automation as real hardware proof', () => {

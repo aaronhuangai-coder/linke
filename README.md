@@ -241,7 +241,9 @@ LINKE_AGENT_HOST=192.168.10.4 LINKE_RATE_LIMIT_PER_MINUTE=60 LINKE_AUDIT_MAX_EVE
 
 > **本机开发入口（不启用设备 enrollment）**：`node src/server.js` 只是 loopback 本机兼容/调试入口（默认 `127.0.0.1:3000`），**不是** production controller management，也不会启动 Agent HTTPS enrollment listener。请勿将其当作开放监听或 wildcard bind 的生产姿势；生产边界仍由 `npm start` / `node src/controller-runtime.js` 固定为 loopback 管理面 + 显式私网 Agent。若未配置 token，GET `/api/auth-status` 会显示 `enabled:false`。
 
-> **G0a 真实验收边界**：仓库内自动测试使用内存 Keychain、合成证书、临时目录与回环 adapter，**自动测试不等于真实 Keychain / 第二 Mac 验收**。真实 Keychain 与第二 Mac / 隔离端点门禁在获得用户明确授权并完成脱敏证据前保持 **BLOCKED**；当前不得将 G0a 表述为 Gold 发布条件已满足，Gold 依旧 blocked。
+> **G0a 真实验收边界**：仓库内自动测试使用内存 Keychain、合成证书、临时目录与回环 adapter，**自动测试不等于真实 Keychain / 第二 Mac 验收**。
+>
+> G0a 真实双 Mac Keychain/LAN 验收已在脱敏报告中记录为 **PASS**（见 `docs/superpowers/reports/2026-07-13-g0a-real-keychain-lan-acceptance.md`）；该 PASS 仅覆盖 G0a 真实双机边界，**不得**将 G0a 表述为 Gold 发布条件已满足，Linke Gold 因其它既有 blockers 依旧 **blocked**。
 
 > 设置 `LINKE_AUTH_TOKEN`、兼容变量 `LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。`LINKE_READ_TOKEN` 只能访问只读 API，访问 `POST /api/heartbeat`、`POST /api/backups` 或 `POST /api/restore` 会返回 `403 Forbidden` 并记录 `auth.forbidden`；`LINKE_WRITE_TOKEN` 可访问读写 API。GET `/api/auth-status` 也是只读 API，返回 `configuredScopes` 与 `writeRoutes` 等 sanitized 认证状态，不返回 token 值。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
 
@@ -1631,8 +1633,17 @@ node test/helpers/g0a-real-endpoint-runner.js <phase>
 ### Keychain UI 与 Gold
 
 - Keychain allow / deny / lock / unlock 由用户通过 macOS UI 处理；runner 只观察注册错误码与 fail-closed / recovery 结果。
-- 在全部真实门通过并生成脱敏报告之前，**Gold 保持 BLOCKED / blocked**。
 - mock 与同进程 fixture 不能替代硬件侧证据。
+
+### 真实验收结果（脱敏）
+
+- 源提交：`10ffad69e6a3`；命令标识：`G0A-REAL-20260714-01`；最终 UTC：`2026-07-14T07:02:50.301Z`。
+- Controller/PM 已验证 runtime baseline：Node major `24`、macOS major `26`（Endpoint OS/Node 未独立记录，不作事实声明）。
+- 本次含人工 Keychain 解锁处理，`promptHandled=true`。
+- 真实 gate、本机与远端 Keychain gated test，以及 start → prepare(count 3) → pre-revoke → rotate 旧 token 拒绝（`device-token-invalid`）→ current/N-1 heartbeat → N-2 严格拒绝（`device-protocol-unsupported`/426）→ revoke → post-revoke（`device-revoked`/403）→ restart → post-restart → identity replacement → 旧 pin 不匹配（`device-tls-fingerprint-mismatch`）→ reenroll → 双方 cleanup 全部 **PASS**。
+- Controller 与 Endpoint 最终 state 均为 `cleaned`；专用 cleanup 文件、目录与 Keychain items 均确认不存在；临时 SSH control connection 已关闭。
+- 脱敏证据：`docs/superpowers/reports/2026-07-13-g0a-real-keychain-lan-acceptance.md`（仅允许 sourceCommit、runtime major、commandId、阶段 PASS/注册码、UTC、promptHandled、cleanup/result 与脱敏边界；无 host/IP/URL/path/fingerprint/code/token/Keychain service-item/用户名/SSH target/原始错误）。
+- **G0a 真实双机验收已通过**；**Linke Gold 仍因 README 既有其它 blockers 保持 BLOCKED / blocked**，不得宣称完整版发布完成。
 
 ## 技术约束
 
