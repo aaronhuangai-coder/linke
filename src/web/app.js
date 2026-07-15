@@ -1244,13 +1244,11 @@ function sanitizeAllowlistedExecutionPolicyBlocker(value) {
  *   predicate (see isCanonicalRollbackAnchorReady).
  * - `attempt-audit` ready only under shared C∧A∧G∧D_audit canonical
  *   predicate (see isCanonicalAttemptAuditReady).
- * - Final operator-recovery contract is always blocked with canonical missing code;
- *   never trust payload status/blocker/evidence for it.
+ * - `operator-recovery` ready only under shared C∧A∧G∧D_recovery canonical
+ *   predicate (see isCanonicalOperatorRecoveryReady).
  * - Unknown / redacted ids stay blocked without leaking payload blocker text.
  */
-const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
-  'operator-recovery': 'operator-recovery-missing',
-});
+const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({});
 
 /**
  * Shared single canonical predicate for runner-registry wiring line,
@@ -1424,12 +1422,73 @@ function resolveCanonicalAttemptAuditReady(payload) {
   return isCanonicalAttemptAuditReady({ C, A, G, D });
 }
 
+/**
+ * Shared single canonical predicate for operator-recovery wiring line,
+ * recovery readiness line, and validationLines.operatorRecoveryReady.
+ * Ready iff C ∧ A ∧ G ∧ D all hold; any missing/contradictory/side-effect
+ * drift (including wouldRecover / wouldRestartService / *Allowed true) fails closed.
+ */
+function isCanonicalOperatorRecoveryReady({ C, A, G, D }) {
+  return (
+    C?.status === 'ready' &&
+    C?.blockerCode === null &&
+    C?.evidenceCode === 'operator-recovery-ready' &&
+    C?.requiredForExecution === true &&
+    A?.state === 'ready' &&
+    A?.operatorRecoveryReady === true &&
+    A?.codeOwnedRecoveryResolverReady === true &&
+    A?.realOperatorRecoveryImplementationReady === false &&
+    G === true &&
+    D?.state === 'resolved' &&
+    D?.recoveryReady === true &&
+    D?.codeOwnedResolverWired === true &&
+    D?.realOperatorRecoveryImplementationReady === false &&
+    D?.wouldRecover === false &&
+    D?.wouldRetry === false &&
+    D?.wouldNotifyOperator === false &&
+    D?.wouldRestartService === false &&
+    D?.wouldRestoreState === false &&
+    D?.wouldExecute === false &&
+    D?.wouldRun === false &&
+    D?.wouldWrite === false &&
+    D?.metadataWriteAllowed === false &&
+    D?.filesystemWriteAllowed === false &&
+    D?.remoteCommandAllowed === false &&
+    D?.operatorNotificationAllowed === false
+  );
+}
+
+function resolveCanonicalOperatorRecoveryReady(payload) {
+  const requiredContracts = Array.isArray(payload?.runnerWiringContract?.requiredContracts)
+    ? payload.runnerWiringContract.requiredContracts
+    : [];
+  const C = requiredContracts.find((entry) => entry && entry.id === 'operator-recovery') || null;
+  const A = payload?.runnerWiringContract?.operatorRecoveryReadiness || null;
+  const G = payload?.gates?.operatorRecoveryReady === true;
+  const D = payload?.recoveryDecision || null;
+  return isCanonicalOperatorRecoveryReady({ C, A, G, D });
+}
+
+function isCanonicalPolicyDecisionAuthorized(pd) {
+  return (
+    pd?.state === 'authorized' &&
+    pd?.authorized === true &&
+    pd?.wouldAuthorizeExecution === true &&
+    pd?.primaryBlocker === null &&
+    Array.isArray(pd?.blockers) &&
+    pd.blockers.length === 0 &&
+    pd?.wouldRun === false &&
+    pd?.wouldWrite === false
+  );
+}
+
 function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
   runnerWiringContract,
   canonicalRunnerRegistryReady = false,
   canonicalHostMutationAdapterReady = false,
   canonicalRollbackAnchorReady = false,
   canonicalAttemptAuditReady = false,
+  canonicalOperatorRecoveryReady = false,
 ) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
@@ -1482,6 +1541,13 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
       return 'wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing';
     }
 
+    if (id === 'operator-recovery') {
+      if (canonicalOperatorRecoveryReady === true) {
+        return 'wiringContract:operator-recovery:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing';
+    }
+
     // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
     return `wiringContract:${id}:status:blocked:requiredForExecution:true:blocker:unknown`;
   });
@@ -1514,15 +1580,22 @@ function buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(runnerWiringC
 }
 
 /**
- * V1.24 VERSION SECURITY BOUNDARY:
- * Always render denied on the Web production surface. Do not trust
- * payload.authorized / state / wouldAuthorizeExecution / wouldRun.
- * A future independent version may lift this only with a new trusted contract.
+ * V1.29 方案 A: two independent UI loci.
+ * - policyDecision: honest mirror of JSON pure policy (authorized or fail-closed denied)
+ * - executionSentinel: always blocked until real guarded runner wiring exists
+ * Never render authorized JSON as denied, never map null primary to unknown on authorized path,
+ * and never echo raw malicious payload strings.
  */
 function buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload) {
-  const primary = sanitizeAllowlistedExecutionPolicyBlocker(payload?.policyDecision?.primaryBlocker) || 'unknown';
+  const pd = payload?.policyDecision;
+  const policyLine = isCanonicalPolicyDecisionAuthorized(pd)
+    ? 'policyDecision:state:authorized:authorized:true:wouldAuthorizeExecution:true:primaryBlocker:none'
+    : `policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:${
+      sanitizeAllowlistedExecutionPolicyBlocker(pd?.primaryBlocker) || 'unknown'
+    }`;
   return [
-    `policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:${primary}`,
+    policyLine,
+    'executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing',
   ];
 }
 
@@ -1568,14 +1641,19 @@ function buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(canonicalAttempt
   ];
 }
 
-function buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(runnerWiringContract) {
-  const recoveryEntries = Array.isArray(runnerWiringContract?.operatorRecoveryReadiness?.recoveryEntries)
-    ? runnerWiringContract.operatorRecoveryReadiness.recoveryEntries
-    : [];
-  if (recoveryEntries.length < 1) return [];
+function buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(canonicalOperatorRecoveryReady = false) {
+  // Always emit exactly one stable line; never copy payload recoveryKind/would*/blocker text.
+  if (canonicalOperatorRecoveryReady === true) {
+    return [
+      'operatorRecovery:code-owned-operator-recovery:state:ready:codeOwnedResolverWired:true:' +
+        'realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:' +
+        'wouldRestoreState:false:blocker:none',
+    ];
+  }
   return [
-    'operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:' +
-      'wouldRecover:false:blocker:operator-recovery-real-implementation-missing',
+    'operatorRecovery:code-owned-operator-recovery:state:blocked:codeOwnedResolverWired:true:' +
+      'realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:' +
+      'wouldRestoreState:false:blocker:operator-recovery-not-ready',
   ];
 }
 
@@ -1821,17 +1899,19 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
-  // Single shared canonical booleans for wiring / registry / adapter / anchor / audit / validation lines.
+  // Single shared canonical booleans for wiring / registry / adapter / anchor / audit / recovery / validation lines.
   const canonicalRunnerRegistryReady = resolveCanonicalRunnerRegistryReady(payload) === true;
   const canonicalHostMutationAdapterReady = resolveCanonicalHostMutationAdapterReady(payload) === true;
   const canonicalRollbackAnchorReady = resolveCanonicalRollbackAnchorReady(payload) === true;
   const canonicalAttemptAuditReady = resolveCanonicalAttemptAuditReady(payload) === true;
+  const canonicalOperatorRecoveryReady = resolveCanonicalOperatorRecoveryReady(payload) === true;
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(
     payload.runnerWiringContract,
     canonicalRunnerRegistryReady,
     canonicalHostMutationAdapterReady,
     canonicalRollbackAnchorReady,
     canonicalAttemptAuditReady,
+    canonicalOperatorRecoveryReady,
   );
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
@@ -1843,7 +1923,9 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
     canonicalRollbackAnchorReady,
   );
   const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(canonicalAttemptAuditReady);
-  const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(payload.runnerWiringContract);
+  const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(
+    canonicalOperatorRecoveryReady,
+  );
 
   return {
     statusKey: 'blocked',
@@ -1881,7 +1963,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `hostMutationAdapterReady:${canonicalHostMutationAdapterReady ? 'true' : 'false'}`,
       `rollbackAnchorReady:${canonicalRollbackAnchorReady ? 'true' : 'false'}`,
       `attemptAuditReady:${canonicalAttemptAuditReady ? 'true' : 'false'}`,
-      'operatorRecoveryReady:false',
+      `operatorRecoveryReady:${canonicalOperatorRecoveryReady ? 'true' : 'false'}`,
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
     messageText: 'Guarded runner execution gate completed; execution remains blocked and fail-closed.',

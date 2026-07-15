@@ -20,9 +20,11 @@ import {
   resolveSupervisorLifecycleGuardedRunnerRegistry,
   resolveSupervisorLifecycleGuardedRunnerRollbackAnchor,
   resolveSupervisorLifecycleGuardedRunnerAttemptAudit,
+  resolveSupervisorLifecycleGuardedRunnerOperatorRecovery,
   sanitizeHostMutationAdapterDecision,
   sanitizeRollbackAnchorDecision,
   sanitizeAttemptAuditDecision,
+  sanitizeOperatorRecoveryDecision,
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
@@ -57,7 +59,7 @@ const EXPECTED_WIRING_CONTRACTS = Object.freeze([
   ['host-mutation-adapter', null, 'ready', 'host-mutation-adapter-ready'],
   ['rollback-anchor', null, 'ready', 'rollback-anchor-ready'],
   ['attempt-audit', null, 'ready', 'attempt-audit-ready'],
-  ['operator-recovery', 'operator-recovery-missing', 'blocked', 'operator-recovery-missing'],
+  ['operator-recovery', null, 'ready', 'operator-recovery-ready'],
 ]);
 const EXPECTED_EXECUTION_POLICY_ENTRIES = Object.freeze([
   {
@@ -311,25 +313,38 @@ const CODE_OWNED_ACTION_AUDIT_MAP = Object.freeze({
 });
 const EXPECTED_OPERATOR_RECOVERY_ENTRIES = Object.freeze([
   {
-    recoveryKind: 'disabled-operator-recovery-stub',
-    state: 'blocked',
-    realImplementationReady: false,
-    failureRecoveryReady: false,
-    retryLimitReady: false,
-    operatorRunbookReady: false,
+    recoveryKind: 'code-owned-operator-recovery',
+    state: 'ready',
+    codeOwnedResolverWired: true,
+    realOperatorRecoveryImplementationReady: false,
     wouldRecover: false,
     wouldRetry: false,
     wouldNotifyOperator: false,
+    wouldRestartService: false,
+    wouldRestoreState: false,
+    wouldExecute: false,
     wouldRun: false,
     wouldWrite: false,
     metadataWriteAllowed: false,
     filesystemWriteAllowed: false,
     remoteCommandAllowed: false,
     operatorNotificationAllowed: false,
-    sensitiveValuesReturned: false,
-    blockerCode: 'operator-recovery-real-implementation-missing',
+    blockerCode: null,
+    evidenceCode: 'operator-recovery-ready',
   },
 ]);
+const CODE_OWNED_ACTION_RECOVERY_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-operator-recovery',
+  'write-launch-agent-plist': 'write-plist-operator-recovery',
+  'load-launch-agent': 'load-agent-operator-recovery',
+  'unload-launch-agent': 'unload-agent-operator-recovery',
+  'remove-launch-agent-plist': 'remove-plist-operator-recovery',
+  'remove-supervisor-metadata': 'remove-metadata-operator-recovery',
+  'capture-current-state': 'capture-state-operator-recovery',
+  'restore-previous-plist': 'restore-plist-operator-recovery',
+  'restart-previous-supervisor': 'restart-supervisor-operator-recovery',
+  'start-recovery-supervisor': 'recovery-supervisor-operator-recovery',
+});
 
 function validApprovalFor(plan) {
   return {
@@ -476,11 +491,13 @@ function assertAlwaysBlockedGate(result, {
   hostMutationAdapterReady,
   rollbackAnchorReady,
   attemptAuditReady,
+  operatorRecoveryReady,
 }) {
   assert.strictEqual(typeof runnerRegistryReady, 'boolean');
   assert.strictEqual(typeof hostMutationAdapterReady, 'boolean');
   assert.strictEqual(typeof rollbackAnchorReady, 'boolean');
   assert.strictEqual(typeof attemptAuditReady, 'boolean');
+  assert.strictEqual(typeof operatorRecoveryReady, 'boolean');
   assert.strictEqual(result.command, 'supervisor-lifecycle-guarded-runner-execution-gate');
   assert.strictEqual(result.operation, 'install');
   assert.strictEqual(result.state, 'blocked');
@@ -496,11 +513,14 @@ function assertAlwaysBlockedGate(result, {
   assert.strictEqual(result.gates.hostMutationAdapterReady, hostMutationAdapterReady);
   assert.strictEqual(result.gates.rollbackAnchorReady, rollbackAnchorReady);
   assert.strictEqual(result.gates.attemptAuditReady, attemptAuditReady);
-  assert.strictEqual(result.gates.operatorRecoveryReady, false);
+  assert.strictEqual(result.gates.operatorRecoveryReady, operatorRecoveryReady);
   assert.strictEqual(result.realRunnerWiringReady, false);
   assert.strictEqual(result.executorReady, false);
-  assert.strictEqual(result.runnerWiringContract.readyCount, 5);
-  assert.strictEqual(result.runnerWiringContract.blockedCount, 1);
+  assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+  assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
+  assert.strictEqual(result.runnerWiringContract.state, 'blocked');
+  assert.strictEqual(result.runnerWiringContract.realRunnerWiringReady, false);
+  assert.ok(result.runnerWiringContract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.ok(result.adapterDecision && typeof result.adapterDecision === 'object');
   assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
   assert.strictEqual(result.adapterDecision.wouldExecute, false);
@@ -539,10 +559,22 @@ function assertAlwaysBlockedGate(result, {
   assert.strictEqual(result.auditDecision.metadataWriteAllowed, false);
   assert.strictEqual(result.auditDecision.filesystemWriteAllowed, false);
   assert.strictEqual(result.auditDecision.immutableAuditReady, false);
+  assert.ok(result.recoveryDecision && typeof result.recoveryDecision === 'object');
+  assert.strictEqual(result.recoveryDecision.codeOwnedResolverWired, true);
+  assert.strictEqual(result.recoveryDecision.realOperatorRecoveryImplementationReady, false);
+  assert.strictEqual(result.recoveryDecision.wouldRecover, false);
+  assert.strictEqual(result.recoveryDecision.wouldRetry, false);
+  assert.strictEqual(result.recoveryDecision.wouldNotifyOperator, false);
+  assert.strictEqual(result.recoveryDecision.wouldRestartService, false);
+  assert.strictEqual(result.recoveryDecision.wouldRestoreState, false);
+  assert.strictEqual(result.recoveryDecision.wouldExecute, false);
+  assert.strictEqual(result.recoveryDecision.wouldRun, false);
+  assert.strictEqual(result.recoveryDecision.wouldWrite, false);
+  assert.strictEqual(result.recoveryDecision.metadataWriteAllowed, false);
+  assert.strictEqual(result.recoveryDecision.filesystemWriteAllowed, false);
+  assert.strictEqual(result.recoveryDecision.remoteCommandAllowed, false);
+  assert.strictEqual(result.recoveryDecision.operatorNotificationAllowed, false);
   assert.ok(result.policyDecision && typeof result.policyDecision === 'object');
-  assert.strictEqual(result.policyDecision.state, 'denied');
-  assert.strictEqual(result.policyDecision.authorized, false);
-  assert.strictEqual(result.policyDecision.wouldAuthorizeExecution, false);
   assert.strictEqual(result.policyDecision.wouldRun, false);
   assert.strictEqual(result.policyDecision.wouldWrite, false);
   assert.strictEqual(result.safety.readOnly, true);
@@ -579,9 +611,9 @@ function assertWiringContract(contract) {
   assert.strictEqual(contract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(contract.state, 'blocked');
   assert.strictEqual(contract.realRunnerWiringReady, false);
-  // V1.28 aggregate：5 ready / 1 blocked
-  assert.strictEqual(contract.readyCount, 5);
-  assert.strictEqual(contract.blockedCount, 1);
+  // V1.29 aggregate：6 ready / 0 blocked；aggregate 仍 blocked（真实 wiring 缺失）
+  assert.strictEqual(contract.readyCount, 6);
+  assert.strictEqual(contract.blockedCount, 0);
   assert.deepStrictEqual(contract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(contract.blockers.includes('real-guarded-runner-execution-wiring-missing'));
   assert.deepStrictEqual(contract.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
@@ -620,12 +652,15 @@ function assertWiringContract(contract) {
   assert.strictEqual(auditContract.status, 'ready');
   assert.strictEqual(auditContract.blockerCode, null);
   assert.strictEqual(auditContract.evidenceCode, 'attempt-audit-ready');
-  // 最后一项：仅 slice(5) blocked — 绝不得 slice(4)
-  assert.ok(contract.requiredContracts.slice(5).every((entry) =>
-    entry.status === 'blocked' &&
+  const recoveryContract = contract.requiredContracts[5];
+  assert.strictEqual(recoveryContract.id, 'operator-recovery');
+  assert.strictEqual(recoveryContract.status, 'ready');
+  assert.strictEqual(recoveryContract.blockerCode, null);
+  assert.strictEqual(recoveryContract.evidenceCode, 'operator-recovery-ready');
+  assert.ok(contract.requiredContracts.every((entry) =>
+    entry.status === 'ready' &&
       entry.requiredForExecution === true &&
-      typeof entry.blockerCode === 'string' &&
-      entry.blockerCode.length > 0));
+      entry.blockerCode === null));
   assert.deepStrictEqual(
     contract.executionPolicyReadiness,
     buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
@@ -998,6 +1033,110 @@ function validRegistryCandidatesFor(operation) {
 /**
  * assertUnresolvedExact：第三参 operation 必传，禁止默认 'unknown'。
  */
+
+function validRecoveryCandidate(actionId, maxAttempts = 1) {
+  return {
+    actionId,
+    implementationId: CODE_OWNED_REGISTRY_MAPPINGS[actionId],
+    runnerKind: 'guarded-runner-stub',
+    mode: 'guarded-host-action',
+    status: 'blocked',
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    maxAttempts,
+  };
+}
+
+function validRecoveryCandidatesFor(operation) {
+  return OPERATION_EXPECTED_ACTION_IDS[operation].map((id) => validRecoveryCandidate(id, 1));
+}
+
+/**
+ * assertRecoveryUnresolvedExact：第三参 operation **必传**，禁止默认 `'unknown'`。
+ */
+function assertRecoveryUnresolvedExact(decision, primaryBlocker, operation) {
+  assert.strictEqual(typeof operation, 'string');
+  assert.strictEqual(typeof primaryBlocker, 'string');
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-operator-recovery');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'unresolved');
+  assert.strictEqual(decision.recoveryReady, false);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realOperatorRecoveryImplementationReady, false);
+  assert.strictEqual(decision.wouldRecover, false);
+  assert.strictEqual(decision.wouldRetry, false);
+  assert.strictEqual(decision.wouldNotifyOperator, false);
+  assert.strictEqual(decision.wouldRestartService, false);
+  assert.strictEqual(decision.wouldRestoreState, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.remoteCommandAllowed, false);
+  assert.strictEqual(decision.operatorNotificationAllowed, false);
+  assert.strictEqual(decision.resolvedCount, 0);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.deepStrictEqual(decision.recoveries, []);
+  assert.deepStrictEqual(decision.blockers, [primaryBlocker]);
+  assert.strictEqual(decision.primaryBlocker, primaryBlocker);
+  assert.deepStrictEqual(decision.nextBlockers, [primaryBlocker]);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+}
+
+function assertRecoveryResolved(decision, operation) {
+  const expected = OPERATION_EXPECTED_ACTION_IDS[operation];
+  assert.strictEqual(decision.command, 'supervisor-lifecycle-guarded-runner-operator-recovery');
+  assert.strictEqual(decision.operation, operation);
+  assert.strictEqual(decision.state, 'resolved');
+  assert.strictEqual(decision.recoveryReady, true);
+  assert.strictEqual(decision.codeOwnedResolverWired, true);
+  assert.strictEqual(decision.realOperatorRecoveryImplementationReady, false);
+  assert.strictEqual(decision.wouldRecover, false);
+  assert.strictEqual(decision.wouldRetry, false);
+  assert.strictEqual(decision.wouldNotifyOperator, false);
+  assert.strictEqual(decision.wouldRestartService, false);
+  assert.strictEqual(decision.wouldRestoreState, false);
+  assert.strictEqual(decision.wouldExecute, false);
+  assert.strictEqual(decision.wouldRun, false);
+  assert.strictEqual(decision.wouldWrite, false);
+  assert.strictEqual(decision.metadataWriteAllowed, false);
+  assert.strictEqual(decision.filesystemWriteAllowed, false);
+  assert.strictEqual(decision.remoteCommandAllowed, false);
+  assert.strictEqual(decision.operatorNotificationAllowed, false);
+  assert.strictEqual(decision.resolvedCount, expected.length);
+  assert.strictEqual(decision.unresolvedCount, 0);
+  assert.strictEqual(decision.primaryBlocker, null);
+  assert.deepStrictEqual(decision.blockers, []);
+  assert.deepStrictEqual(decision.nextBlockers, []);
+  assert.strictEqual(decision.sensitiveValuesReturned, false);
+  assert.strictEqual(decision.recoveries.length, expected.length);
+  assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  for (let i = 0; i < expected.length; i += 1) {
+    const row = decision.recoveries[i];
+    assert.strictEqual(row.actionId, expected[i]);
+    assert.strictEqual(row.recoveryKind, CODE_OWNED_ACTION_RECOVERY_MAP[expected[i]]);
+    assert.strictEqual(row.recoveryReady, true);
+    assert.strictEqual(row.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(row.wouldRecover, false);
+    assert.strictEqual(row.wouldRetry, false);
+    assert.strictEqual(row.wouldNotifyOperator, false);
+    assert.strictEqual(row.wouldRestartService, false);
+    assert.strictEqual(row.wouldRestoreState, false);
+    assert.strictEqual(row.wouldExecute, false);
+    assert.strictEqual(row.wouldRun, false);
+    assert.strictEqual(row.wouldWrite, false);
+    assert.strictEqual(row.metadataWriteAllowed, false);
+    assert.strictEqual(row.filesystemWriteAllowed, false);
+    assert.strictEqual(row.remoteCommandAllowed, false);
+    assert.strictEqual(row.operatorNotificationAllowed, false);
+    assert.strictEqual(row.blockerCode, null);
+    assert.strictEqual(row.evidenceCode, 'operator-recovery-plan-ready');
+    assert.strictEqual(Object.hasOwn(row, 'codeOwnedResolverWired'), false);
+  }
+}
+
 function assertUnresolvedExact(decision, primaryBlocker, operation) {
   assert.strictEqual(typeof operation, 'string');
   assert.strictEqual(typeof primaryBlocker, 'string');
@@ -2542,6 +2681,408 @@ describe('resolveSupervisorLifecycleGuardedRunnerAttemptAudit', () => {
   });
 });
 
+
+describe('resolveSupervisorLifecycleGuardedRunnerOperatorRecovery', () => {
+  it('T1: install happy path resolves restricted recoveries without side effects', () => {
+    assertRecoveryResolved(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+        validRecoveryCandidatesFor('install'),
+        'install',
+      ),
+      'install',
+    );
+  });
+
+  it('T2: uninstall / rollback / recover happy paths resolve restricted recoveries', () => {
+    for (const operation of ['uninstall', 'rollback', 'recover']) {
+      assertRecoveryResolved(
+        resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+          validRecoveryCandidatesFor(operation),
+          operation,
+        ),
+        operation,
+      );
+    }
+  });
+
+  it('T3: OPERATION_EXPECTED_ACTION_IDS matches buildLifecycleActions via apply plan actions', () => {
+    for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
+      assert.deepStrictEqual(
+        OPERATION_EXPECTED_ACTION_IDS[operation],
+        buildSupervisorLifecycleApplyPlan({}, { operation }).actions.map((a) => a.id),
+      );
+    }
+  });
+
+  for (const operation of ['nope', undefined, null, 0, 1, false, true]) {
+    it(`T4: invalid operation ${String(operation)} is operation-invalid with decision.operation unknown`, () => {
+      assertRecoveryUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+          validRecoveryCandidatesFor('install'),
+          operation,
+        ),
+        'operator-recovery-operation-invalid',
+        'unknown',
+      );
+    });
+  }
+
+  it('T5: non-array / null candidates is operator-recovery-candidates-invalid', () => {
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(null, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery({ length: 1 }, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('T6: empty array is operator-recovery-candidates-invalid', () => {
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery([], 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('T7: install subset len=2 (valid shape) is operator-recovery-action-missing', () => {
+    const candidates = validRecoveryCandidatesFor('install').slice(0, 2);
+    assert.strictEqual(candidates.length, 2);
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-action-missing',
+      'install',
+    );
+  });
+
+  it('T8: install + foreign start-recovery-supervisor (len 4 no dup) is action-unknown', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates.push(validRecoveryCandidate('start-recovery-supervisor', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-action-unknown',
+      'install',
+    );
+  });
+
+  it('T9: install + duplicate render (len 4) is action-duplicate', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates.push(validRecoveryCandidate('render-launch-agent-plist', 1));
+    assert.strictEqual(candidates.length, 4);
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-action-duplicate',
+      'install',
+    );
+  });
+
+  for (const { label, actionId } of [
+    { label: 'empty-string', actionId: '' },
+    { label: 'number', actionId: 1 },
+    { label: 'object', actionId: {} },
+  ]) {
+    it(`T10: snapshot actionId ${label} is candidates-invalid only`, () => {
+      const candidates = validRecoveryCandidatesFor('install');
+      candidates[0] = { ...candidates[0], actionId };
+      assertRecoveryUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+        'operator-recovery-candidates-invalid',
+        'install',
+      );
+    });
+  }
+
+  it('T11: extra key / missing key / prototype pollution key is candidates-invalid', () => {
+    const extra = validRecoveryCandidatesFor('install');
+    extra[0] = { ...extra[0], recoveryKind: 'render-plist-operator-recovery' };
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(extra, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+    const missing = validRecoveryCandidatesFor('install');
+    const { mode: _mode, ...rest } = missing[0];
+    missing[0] = rest;
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(missing, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+    const polluted = validRecoveryCandidatesFor('install');
+    polluted[0] = { ...polluted[0], __proto__: { polluted: true } };
+    // exact-key snapshot rejects extra enumerable own keys if present; also plain assign may not add __proto__ own key
+    const withProtoKey = validRecoveryCandidatesFor('install');
+    withProtoKey[0] = Object.assign(Object.create(null), withProtoKey[0], { ['__proto__']: { x: 1 } });
+    // if Object.assign with __proto__ string key creates own key, reject; otherwise skip soft
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+        (() => {
+          const c = validRecoveryCandidatesFor('install');
+          c[0] = { ...c[0], constructor: Object };
+          return c;
+        })(),
+        'install',
+      ),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('T12: getter / accessor property is candidates-invalid', () => {
+    const base = validRecoveryCandidate('render-launch-agent-plist', 1);
+    const poisoned = {};
+    for (const key of Object.keys(base)) {
+      Object.defineProperty(poisoned, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return base[key];
+        },
+      });
+    }
+    const candidates = [poisoned, ...validRecoveryCandidatesFor('install').slice(1)];
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('T13: Proxy trap throw on ownKeys is candidates-invalid without secret leak', () => {
+    const base = validRecoveryCandidate('render-launch-agent-plist', 1);
+    const trapped = new Proxy(base, {
+      ownKeys() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+    const candidates = [trapped, ...validRecoveryCandidatesFor('install').slice(1)];
+    const decision = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install');
+    assertRecoveryUnresolvedExact(decision, 'operator-recovery-candidates-invalid', 'install');
+    assert.doesNotMatch(JSON.stringify(decision), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+
+  it('T14: status !== blocked is operator-recovery-unsafe-recovery', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], status: 'ready' };
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-unsafe-recovery',
+      'install',
+    );
+  });
+
+  it('T15: wouldExecute/wouldRun/wouldWrite true is unsafe-recovery', () => {
+    for (const flag of ['wouldExecute', 'wouldRun', 'wouldWrite']) {
+      const candidates = validRecoveryCandidatesFor('install');
+      candidates[0] = { ...candidates[0], [flag]: true };
+      assertRecoveryUnresolvedExact(
+        resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+        'operator-recovery-unsafe-recovery',
+        'install',
+      );
+    }
+  });
+
+  it('T16: non-catalog implementationId still resolved (recovery ignores implementationId)', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], implementationId: 'other-plist-impl' };
+    assertRecoveryResolved(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('T17: maxAttempts [redacted] still resolved (recovery ignores maxAttempts)', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], maxAttempts: '[redacted]' };
+    assertRecoveryResolved(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'install',
+    );
+  });
+
+  it('T18: duplicate before unsafe when both present', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates[1] = validRecoveryCandidate('render-launch-agent-plist', 1);
+    candidates[0] = { ...candidates[0], wouldExecute: true };
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-action-duplicate',
+      'install',
+    );
+  });
+
+  it('T19: post-call input mutation does not change decision', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    const first = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install');
+    assertRecoveryResolved(first, 'install');
+    const snapshot = JSON.stringify(first);
+    candidates[0] = { ...candidates[0], actionId: 'start-recovery-supervisor' };
+    assert.strictEqual(JSON.stringify(first), snapshot);
+  });
+
+  it('T20: returned decision mutation does not pollute next call', () => {
+    const first = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assertRecoveryResolved(first, 'install');
+    first.operation = 'unknown';
+    first.recoveries.push({ actionId: OPAQUE_UNSAFE_FIELD });
+    first.wouldRecover = true;
+    const second = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assertRecoveryResolved(second, 'install');
+    assert.strictEqual(second.wouldRecover, false);
+  });
+
+  it('T21/T22: readiness builder fixed ready + ignores args covered in readiness describe', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
+    assert.strictEqual(readiness.state, 'ready');
+    assert.deepStrictEqual(readiness.recoveryEntries, EXPECTED_OPERATOR_RECOVERY_ENTRIES);
+  });
+
+  it('T23: old keys absent on readiness and entry', () => {
+    const readiness = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
+    assert.strictEqual(Object.hasOwn(readiness, 'realOperatorRecoveryReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness.recoveryEntries[0], 'realImplementationReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness.recoveryEntries[0], 'sensitiveValuesReturned'), false);
+    assert.strictEqual(Object.hasOwn(readiness.recoveryEntries[0], 'failureRecoveryReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness.recoveryEntries[0], 'retryLimitReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness.recoveryEntries[0], 'operatorRunbookReady'), false);
+  });
+
+  it('T24/T25: wiring contract fixture 6/0 ready contracts with aggregate still blocked', () => {
+    const contract = buildSupervisorLifecycleGuardedRunnerWiringContract();
+    assertWiringContract(contract);
+    assert.strictEqual(contract.operatorRecoveryReadiness.state, 'ready');
+    assert.strictEqual(contract.operatorRecoveryReadiness.realOperatorRecoveryImplementationReady, false);
+  });
+
+  it('T26: recoveryKind outputs are allowlisted; input recoveryKind key invalidates candidates', () => {
+    const OPERATOR_RECOVERY_KIND_ALLOWLIST = Object.freeze([
+      'render-plist-operator-recovery',
+      'write-plist-operator-recovery',
+      'load-agent-operator-recovery',
+      'unload-agent-operator-recovery',
+      'remove-plist-operator-recovery',
+      'remove-metadata-operator-recovery',
+      'capture-state-operator-recovery',
+      'restore-plist-operator-recovery',
+      'restart-supervisor-operator-recovery',
+      'recovery-supervisor-operator-recovery',
+    ]);
+    const decision = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assertRecoveryResolved(decision, 'install');
+    for (const row of decision.recoveries) {
+      assert.ok(Object.values(CODE_OWNED_ACTION_RECOVERY_MAP).includes(row.recoveryKind));
+      assert.ok(
+        OPERATOR_RECOVERY_KIND_ALLOWLIST.includes(row.recoveryKind),
+        `recoveryKind ${row.recoveryKind} must be ∈ OPERATOR_RECOVERY_KIND_ALLOWLIST`,
+      );
+    }
+    // Map values must be an exact set-equal subset of the allowlist (code-owned consistency).
+    const mapValues = [...new Set(Object.values(CODE_OWNED_ACTION_RECOVERY_MAP))].sort();
+    const allowlistSorted = [...OPERATOR_RECOVERY_KIND_ALLOWLIST].sort();
+    assert.deepStrictEqual(mapValues, allowlistSorted);
+    const candidates = validRecoveryCandidatesFor('install');
+    candidates[0] = { ...candidates[0], recoveryKind: 'render-plist-operator-recovery' };
+    assertRecoveryUnresolvedExact(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'operator-recovery-candidates-invalid',
+      'install',
+    );
+  });
+
+  it('T27: layered — valid candidates resolve registry/adapter/anchor/audit/recovery independently', () => {
+    const candidates = validRecoveryCandidatesFor('install');
+    assertRecoveryResolved(
+      resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, 'install'),
+      'install',
+    );
+    assertAuditResolved(
+      resolveSupervisorLifecycleGuardedRunnerAttemptAudit(candidates, 'install'),
+      'install',
+    );
+    assertAnchorResolved(
+      resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(candidates, 'install'),
+      'install',
+    );
+    assertAdapterResolved(
+      resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter(candidates, 'install'),
+      'install',
+    );
+    assert.strictEqual(
+      resolveSupervisorLifecycleGuardedRunnerRegistry(candidates, 'install').state,
+      'resolved',
+    );
+  });
+
+  it('T28: safety deepStrictEqual executionPreviewSafety shape', () => {
+    const decision = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assert.deepStrictEqual(decision.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+
+  it('sanitize remaps recoveryKind mismatch to code-owned mapping (never passthrough)', () => {
+    const FOREIGN_RECOVERY_KIND = 'attacker-forced-recovery-kind';
+    const resolved = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assertRecoveryResolved(resolved, 'install');
+    const poisoned = {
+      ...resolved,
+      recoveries: resolved.recoveries.map((row) => ({
+        ...row,
+        recoveryKind: FOREIGN_RECOVERY_KIND,
+      })),
+    };
+    const sanitized = sanitizeOperatorRecoveryDecision(poisoned);
+    assertRecoveryResolved(sanitized, 'install');
+    for (const row of sanitized.recoveries) {
+      assert.strictEqual(row.recoveryKind, CODE_OWNED_ACTION_RECOVERY_MAP[row.actionId]);
+      assert.notStrictEqual(row.recoveryKind, FOREIGN_RECOVERY_KIND);
+    }
+    assert.doesNotMatch(JSON.stringify(sanitized), new RegExp(FOREIGN_RECOVERY_KIND, 'i'));
+  });
+
+  it('sanitize fail-closes when recovery row actionId has no allowlisted code-owned mapping', () => {
+    const resolved = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      validRecoveryCandidatesFor('install'),
+      'install',
+    );
+    assertRecoveryResolved(resolved, 'install');
+    const unmapped = {
+      ...resolved,
+      recoveries: [
+        {
+          ...resolved.recoveries[0],
+          actionId: 'not-a-lifecycle-action',
+          recoveryKind: 'render-plist-operator-recovery',
+        },
+      ],
+    };
+    const sanitized = sanitizeOperatorRecoveryDecision(unmapped);
+    assert.strictEqual(sanitized.state, 'unresolved');
+    assert.strictEqual(sanitized.recoveryReady, false);
+    assert.strictEqual(sanitized.primaryBlocker, 'operator-recovery-candidates-invalid');
+    assert.deepStrictEqual(sanitized.recoveries, []);
+    assert.doesNotMatch(JSON.stringify(sanitized), /not-a-lifecycle-action/);
+  });
+});
+
 describe('buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness', () => {
   it('OPERATION_EXPECTED_ACTION_IDS matches buildLifecycleActions via apply plan actions', () => {
     for (const operation of ['install', 'uninstall', 'rollback', 'recover']) {
@@ -2611,49 +3152,67 @@ describe('buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness', () => {
 });
 
 describe('buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness', () => {
-  it('returns fixed blocked disabled operator recovery readiness evidence', () => {
+  it('returns fixed ready pure data operator-recovery evidence', () => {
     const readiness = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
 
     assert.strictEqual(readiness.command, 'supervisor-lifecycle-guarded-runner-operator-recovery-readiness');
-    assert.strictEqual(readiness.state, 'blocked');
+    assert.strictEqual(readiness.state, 'ready');
     assert.strictEqual(readiness.operatorRecoveryDefined, true);
-    assert.strictEqual(readiness.operatorRecoveryReady, false);
-    assert.strictEqual(readiness.realOperatorRecoveryReady, false);
-    assert.strictEqual(readiness.readyCount, 0);
-    assert.strictEqual(readiness.blockedCount, 1);
-    assert.ok(readiness.blockers.includes('operator-recovery-real-implementation-missing'));
-    assert.ok(readiness.blockers.includes('real-guarded-runner-execution-wiring-missing'));
-    assert.deepStrictEqual(readiness.nextBlockers, ['operator-recovery-real-implementation-missing']);
+    assert.strictEqual(readiness.operatorRecoveryReady, true);
+    assert.strictEqual(readiness.codeOwnedRecoveryResolverReady, true);
+    assert.strictEqual(readiness.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(readiness.readyCount, 1);
+    assert.strictEqual(readiness.blockedCount, 0);
+    assert.deepStrictEqual(readiness.blockers, []);
+    assert.deepStrictEqual(readiness.nextBlockers, []);
     assert.deepStrictEqual(readiness.recoveryEntries, EXPECTED_OPERATOR_RECOVERY_ENTRIES);
     assert.deepStrictEqual(readiness.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+    assert.strictEqual(Object.hasOwn(readiness, 'realOperatorRecoveryReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'realImplementationReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'sensitiveValuesReturned'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'failureRecoveryReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'retryLimitReady'), false);
+    assert.strictEqual(Object.hasOwn(readiness, 'operatorRunbookReady'), false);
+    const entry = readiness.recoveryEntries[0];
+    assert.strictEqual(Object.hasOwn(entry, 'realImplementationReady'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'sensitiveValuesReturned'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'failureRecoveryReady'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'retryLimitReady'), false);
+    assert.strictEqual(Object.hasOwn(entry, 'operatorRunbookReady'), false);
+    assert.strictEqual(entry.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(entry.wouldRecover, false);
+    assert.strictEqual(entry.wouldRestartService, false);
+    assert.strictEqual(entry.wouldRestoreState, false);
   });
 
   it('ignores all runtime-looking inputs and never leaks malicious recovery material', () => {
     const baseline = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness();
     const maliciousInput = {
-      operatorRecoveryReady: true,
+      operatorRecoveryReady: false,
+      realOperatorRecoveryImplementationReady: true,
       recoveryEntries: [
         {
-          recoveryKind: 'launchctl /Users/ah/.ssh/id_rsa token=SECRET_XYZ',
+          recoveryKind: UNSAFE_SECRET_MATERIAL,
           wouldRecover: true,
           wouldRetry: true,
+          wouldRestartService: true,
+          wouldRestoreState: true,
           wouldRun: true,
           wouldWrite: true,
+          OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
         },
       ],
-      config: { token: 'SECRET_XYZ' },
-      approval: { approvedBy: 'operator@example.invalid', reason: 'do not leak' },
-      hash: 'sha256:abc',
-      path: '/Users/ah/private',
+      OPAQUE_UNSAFE_FIELD: UNSAFE_SECRET_MATERIAL,
     };
 
     assert.strictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness.length, 0);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(maliciousInput), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(null), baseline);
     assert.deepStrictEqual(buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(), baseline);
+    assert.doesNotMatch(JSON.stringify(baseline), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
     assert.doesNotMatch(
       JSON.stringify(baseline),
-      /\/Users\/ah|localhost|SECRET_XYZ|\btoken\b|\bsecret\b|Authorization|operator@example|do not leak|sha256:|launchctl \/|launchctl load|node |curl/i,
+      /disabled-operator-recovery-stub|operator-recovery-real-implementation-missing/i,
     );
   });
 });
@@ -2706,6 +3265,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.ok(result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.gates, {
@@ -2723,7 +3283,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
-      operatorRecoveryReady: false,
+      operatorRecoveryReady: true,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -2732,6 +3292,10 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.anchorDecision.anchorReady, true);
     assert.strictEqual(result.auditDecision.state, 'resolved');
     assert.strictEqual(result.auditDecision.auditReady, true);
+    assert.strictEqual(result.recoveryDecision.state, 'resolved');
+    assert.strictEqual(result.recoveryDecision.recoveryReady, true);
+    assert.ok(result.policyDecision.blockers.includes('execute-request-missing'));
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assertWiringContract(result.runnerWiringContract);
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -2770,7 +3334,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     ]);
   });
 
-  it('G1/G6/G7: production ready inputs resolve registry/adapter/anchor/audit but still deny via operator-recovery', () => {
+  it('G1/G6/G7: production ready inputs resolve all pure contracts; policy authorized; execution still blocked by real wiring', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
 
     assertAlwaysBlockedGate(result, {
@@ -2778,6 +3342,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+      operatorRecoveryReady: true,
     });
     assert.ok(!result.blockers.includes('execute-request-missing'));
     assert.deepStrictEqual(result.blockers, ['real-guarded-runner-execution-wiring-missing']);
@@ -2788,6 +3353,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.strictEqual(result.gates.attemptAuditReady, true);
+    assert.strictEqual(result.gates.operatorRecoveryReady, true);
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.registryDecision.registryReady, true);
     assert.strictEqual(result.registryDecision.codeOwnedResolverWired, true);
@@ -2822,13 +3388,23 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.auditDecision.wouldPersistAudit, false);
     assert.strictEqual(result.auditDecision.wouldWriteLog, false);
     assert.strictEqual(result.auditDecision.wouldWriteAudit, false);
+    assert.strictEqual(result.recoveryDecision.state, 'resolved');
+    assert.strictEqual(result.recoveryDecision.recoveryReady, true);
+    assert.strictEqual(result.recoveryDecision.codeOwnedResolverWired, true);
+    assert.strictEqual(result.recoveryDecision.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(result.recoveryDecision.wouldRecover, false);
+    assert.strictEqual(result.recoveryDecision.wouldRestartService, false);
+    assert.strictEqual(result.recoveryDecision.wouldRestoreState, false);
     assert.strictEqual(result.gates.realRunnerWiringReady, false);
     assert.strictEqual(result.gates.runnerWiringContractReady, false);
-    assert.strictEqual(result.policyDecision.state, 'denied');
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'operator-recovery-not-ready');
+    assert.strictEqual(result.policyDecision.state, 'authorized');
+    assert.strictEqual(result.policyDecision.authorized, true);
+    assert.strictEqual(result.policyDecision.wouldAuthorizeExecution, true);
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
+    assert.deepStrictEqual(result.policyDecision.blockers, []);
     assert.strictEqual(result.policyDecision.wouldRun, false);
     assert.strictEqual(result.policyDecision.wouldWrite, false);
-    assert.ok(result.policyDecision.blockers.includes('operator-recovery-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('attempt-audit-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
@@ -2841,8 +3417,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       assert.strictEqual(c.wouldWrite, false);
     }
     assertWiringContract(result.runnerWiringContract);
-    assert.strictEqual(result.runnerWiringContract.readyCount, 5);
-    assert.strictEqual(result.runnerWiringContract.blockedCount, 1);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
 
     const pureRegistry = resolveSupervisorLifecycleGuardedRunnerRegistry(result.actionCandidates, 'install');
     assert.strictEqual(result.registryDecision.state, pureRegistry.state);
@@ -2876,9 +3452,19 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       result.auditDecision.audits.map((row) => row.actionId),
       pureAudit.audits.map((row) => row.actionId),
     );
+    const pureRecovery = resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(
+      result.actionCandidates,
+      'install',
+    );
+    assert.strictEqual(result.recoveryDecision.state, pureRecovery.state);
+    assert.strictEqual(result.recoveryDecision.recoveryReady, pureRecovery.recoveryReady);
+    assert.deepStrictEqual(
+      result.recoveryDecision.recoveries.map((row) => row.actionId),
+      pureRecovery.recoveries.map((row) => row.actionId),
+    );
   });
 
-  it('G3: empty candidates path keeps registry/adapter/anchor/audit not ready', () => {
+  it('G3: empty candidates path keeps registry/adapter/anchor/audit/recovery not ready', () => {
     const notVerifiedInputs = getReadyInputs();
     notVerifiedInputs.executionPreview = {
       ...notVerifiedInputs.executionPreview,
@@ -2892,6 +3478,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+    operatorRecoveryReady: false,
     });
     assert.deepStrictEqual(result.actionCandidates, []);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
@@ -2902,13 +3489,16 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.anchorDecision.primaryBlocker, 'rollback-anchor-candidates-invalid');
     assert.strictEqual(result.auditDecision.state, 'unresolved');
     assert.strictEqual(result.auditDecision.primaryBlocker, 'attempt-audit-candidates-invalid');
+    assert.strictEqual(result.recoveryDecision.state, 'unresolved');
+    assert.strictEqual(result.recoveryDecision.primaryBlocker, 'operator-recovery-candidates-invalid');
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.ok(result.policyDecision.blockers.includes('attempt-audit-not-ready'));
+    assert.ok(result.policyDecision.blockers.includes('operator-recovery-not-ready'));
   });
 
-  it('G6/G8: ignores forged registry/adapter/anchor/audit overrides on options', () => {
+  it('G6/G8: ignores forged registry/adapter/anchor/audit/recovery overrides on options', () => {
     const result = buildGate(getReadyInputs(), {
       executeRequested: true,
       registryDecision: {
@@ -2942,6 +3532,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       },
       attemptAuditReady: false,
       auditContext: { attemptAuditReady: true },
+      recoveryDecision: {
+        state: 'unresolved',
+        recoveryReady: false,
+        wouldRecover: true,
+        wouldRestartService: true,
+      },
+      operatorRecoveryReady: false,
+      recoveryContext: { operatorRecoveryReady: true },
       policyContext: buildAllTruePolicyContext(),
       policyDecision: {
         state: 'authorized',
@@ -2955,6 +3553,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+      operatorRecoveryReady: true,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -2966,14 +3565,18 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.auditDecision.state, 'resolved');
     assert.strictEqual(result.auditDecision.wouldPersistAudit, false);
     assert.strictEqual(result.auditDecision.wouldWriteLog, false);
-    assert.strictEqual(result.policyDecision.authorized, false);
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'operator-recovery-not-ready');
+    assert.strictEqual(result.recoveryDecision.state, 'resolved');
+    assert.strictEqual(result.recoveryDecision.wouldRecover, false);
+    assert.strictEqual(result.recoveryDecision.wouldRestartService, false);
+    assert.strictEqual(result.policyDecision.authorized, true);
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.doesNotMatch(JSON.stringify(result), /forged|wouldRun":true/i);
   });
 
-  it('G4: non-catalog implementationId keeps registry false and adapter/anchor/audit true', () => {
+  it('G4: non-catalog implementationId keeps registry false and adapter/anchor/audit/recovery true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -2992,6 +3595,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.registryDecision.state, 'unresolved');
@@ -3009,10 +3613,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.auditDecision.state, 'resolved');
     assert.strictEqual(result.auditDecision.auditReady, true);
     assert.strictEqual(result.gates.attemptAuditReady, true);
+    assert.strictEqual(result.recoveryDecision.state, 'resolved');
+    assert.strictEqual(result.recoveryDecision.recoveryReady, true);
+    assert.strictEqual(result.gates.operatorRecoveryReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('attempt-audit-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
@@ -3023,6 +3631,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.adapterDecision.wouldMutateHost, false);
     assert.strictEqual(result.anchorDecision.wouldWriteAnchor, false);
     assert.strictEqual(result.auditDecision.wouldPersistAudit, false);
+    assert.strictEqual(result.recoveryDecision.wouldRecover, false);
     for (const c of result.actionCandidates) {
       assert.strictEqual(c.wouldExecute, false);
       assert.strictEqual(c.wouldRun, false);
@@ -3030,7 +3639,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     }
   });
 
-  it('G5: redacted maxAttempts keeps registry false and adapter/anchor/audit true', () => {
+  it('G5: redacted maxAttempts keeps registry false and adapter/anchor/audit/recovery true', () => {
     const base = getReadyInputs();
     const inputs = {
       ...base,
@@ -3049,6 +3658,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(
@@ -3070,10 +3680,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
     assert.strictEqual(result.auditDecision.state, 'resolved');
     assert.strictEqual(result.auditDecision.auditReady, true);
     assert.strictEqual(result.gates.attemptAuditReady, true);
+    assert.strictEqual(result.recoveryDecision.state, 'resolved');
+    assert.strictEqual(result.recoveryDecision.recoveryReady, true);
+    assert.strictEqual(result.gates.operatorRecoveryReady, true);
     assert.ok(result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('attempt-audit-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
     assert.strictEqual(result.policyDecision.wouldRun, false);
@@ -3103,6 +3717,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.ok(result.blockers.includes('approval-record-gate-not-ready'));
     assert.doesNotMatch(serialized, /gate-operator|approval reason|acknowledgement|sha256:|\/Users\/ah|localhost|token|secret/i);
@@ -3120,6 +3735,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.ok(invalidManifestResult.blockers.includes('executor-manifest-readiness-invalid'));
     assert.strictEqual(invalidManifestResult.gates.manifestReady, false);
@@ -3138,6 +3754,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: true,
       rollbackAnchorReady: true,
       attemptAuditReady: true,
+    operatorRecoveryReady: true,
     });
     assert.ok(runnerResult.blockers.includes('guarded-runner-readiness-not-ready'));
     assert.strictEqual(runnerResult.gates.runnerBindingsReady, false);
@@ -3154,6 +3771,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+    operatorRecoveryReady: false,
     });
     assert.ok(previewResult.blockers.includes('execution-preview-operation-mismatch'));
     assert.strictEqual(previewResult.gates.executionPreviewVerified, false);
@@ -3165,6 +3783,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+    operatorRecoveryReady: false,
     });
     assert.ok(invalidPreview.blockers.includes('execution-preview-invalid'));
     assert.strictEqual(invalidPreview.gates.executionPreviewVerified, false);
@@ -3183,6 +3802,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+    operatorRecoveryReady: false,
     });
     assert.ok(notVerifiedResult.blockers.includes('execution-preview-not-verified'));
     assert.strictEqual(notVerifiedResult.gates.executionPreviewVerified, false);
@@ -3216,6 +3836,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       hostMutationAdapterReady: false,
       rollbackAnchorReady: false,
       attemptAuditReady: false,
+    operatorRecoveryReady: false,
     });
     assert.deepStrictEqual(result.actionCandidates, [
       {
@@ -3590,13 +4211,14 @@ describe('areSupervisorLifecycleGuardedRunnerActionCandidatesReady', () => {
 });
 
 describe('gates.actionCandidatesReady gate integration (empty/valid only)', () => {
-  it('G1: production valid candidates => actionCandidatesReady true but policy denied via final downstream', () => {
+  it('G1: production valid candidates => actionCandidatesReady true and policy authorized; execution still blocked', () => {
     const result = buildGate(getReadyInputs(), { executeRequested: true });
     assert.strictEqual(result.gates.actionCandidatesReady, true);
     assert.strictEqual(result.gates.runnerRegistryReady, true);
     assert.strictEqual(result.gates.hostMutationAdapterReady, true);
     assert.strictEqual(result.gates.rollbackAnchorReady, true);
     assert.strictEqual(result.gates.attemptAuditReady, true);
+    assert.strictEqual(result.gates.operatorRecoveryReady, true);
     assert.strictEqual(
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(
         result.actionCandidates,
@@ -3604,16 +4226,17 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
       ),
       true,
     );
-    assert.strictEqual(result.policyDecision.state, 'denied');
-    assert.strictEqual(result.policyDecision.authorized, false);
-    assert.strictEqual(result.policyDecision.primaryBlocker, 'operator-recovery-not-ready');
+    assert.strictEqual(result.policyDecision.state, 'authorized');
+    assert.strictEqual(result.policyDecision.authorized, true);
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
     assert.strictEqual(result.executionEligible, false);
     assert.strictEqual(result.wouldExecute, false);
-    assert.ok(result.policyDecision.blockers.includes('operator-recovery-not-ready'));
+    assert.ok(!result.policyDecision.blockers.includes('operator-recovery-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('attempt-audit-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('runner-registry-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
     assert.ok(!result.policyDecision.blockers.includes('rollback-anchor-not-ready'));
+    assert.deepStrictEqual(result.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   });
 
   it('G2: empty sanitized candidates => actionCandidatesReady false + action-candidates-not-ready', () => {

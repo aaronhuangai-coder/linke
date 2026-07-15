@@ -13,8 +13,8 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.28 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.28');
+  it('LINKE_RELEASE_VERSION is the V1.29 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.29');
   });
 
   it('README title matches LINKE_RELEASE_VERSION', async () => {

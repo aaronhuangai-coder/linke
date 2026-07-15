@@ -10848,7 +10848,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready/);
     assert.match(text, /rollbackAnchor:code-owned-rollback-anchor:state:blocked:codeOwnedResolverWired:true:realRollbackAnchorImplementationReady:false:wouldWriteAnchor:false:wouldRestore:false:blocker:rollback-anchor-not-ready/);
     assert.match(text, /attemptAudit:code-owned-attempt-audit:state:blocked:codeOwnedResolverWired:true:realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:attempt-audit-not-ready/);
-    assert.match(text, /operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:wouldRecover:false:blocker:operator-recovery-real-implementation-missing/);
+    assert.match(text, /operatorRecovery:code-owned-operator-recovery:state:blocked:codeOwnedResolverWired:true:realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:wouldRestoreState:false:blocker:operator-recovery-not-ready/);
     assert.match(text, /executionPolicyReady:true/);
     assert.match(text, /hostMutationAdapterReady:false/);
     assert.match(text, /rollbackAnchorReady:false/);
@@ -10905,6 +10905,8 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
   });
 
   function fullCanonicalRunnerRegistryReadyPayload(overrides = {}) {
+    // V1.29 full canonical C∧A∧G∧D ready path: six pure contracts ready, policy authorized,
+    // operator-recovery ready — aggregate still blocked on real-guarded-runner-execution-wiring-missing.
     return {
       command: 'supervisor-lifecycle-guarded-runner-execution-gate',
       state: 'blocked',
@@ -10923,8 +10925,10 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         hostMutationAdapterReady: true,
         rollbackAnchorReady: true,
         attemptAuditReady: true,
-        operatorRecoveryReady: false,
+        operatorRecoveryReady: true,
         executionEligible: false,
+        realRunnerWiringReady: false,
+        runnerWiringContractReady: false,
       },
       actionCandidates: [],
       registryDecision: {
@@ -10983,14 +10987,40 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         filesystemWriteAllowed: false,
         immutableAuditReady: false,
       },
+      recoveryDecision: {
+        state: 'resolved',
+        recoveryReady: true,
+        codeOwnedResolverWired: true,
+        realOperatorRecoveryImplementationReady: false,
+        wouldRecover: false,
+        wouldRetry: false,
+        wouldNotifyOperator: false,
+        wouldRestartService: false,
+        wouldRestoreState: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        metadataWriteAllowed: false,
+        filesystemWriteAllowed: false,
+        remoteCommandAllowed: false,
+        operatorNotificationAllowed: false,
+      },
       policyDecision: {
-        state: 'denied',
-        authorized: false,
-        wouldAuthorizeExecution: false,
-        primaryBlocker: 'operator-recovery-not-ready',
-        blockers: ['operator-recovery-not-ready'],
+        state: 'authorized',
+        authorized: true,
+        wouldAuthorizeExecution: true,
+        primaryBlocker: null,
+        blockers: [],
+        wouldRun: false,
+        wouldWrite: false,
       },
       runnerWiringContract: {
+        state: 'blocked',
+        realRunnerWiringReady: false,
+        readyCount: 6,
+        blockedCount: 0,
+        blockers: ['real-guarded-runner-execution-wiring-missing'],
+        nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
         requiredContracts: [
           {
             id: 'execution-policy',
@@ -11029,9 +11059,9 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           },
           {
             id: 'operator-recovery',
-            status: 'blocked',
-            blockerCode: 'operator-recovery-missing',
-            evidenceCode: 'operator-recovery-missing',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'operator-recovery-ready',
             requiredForExecution: true,
           },
         ],
@@ -11101,18 +11131,38 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           }],
         },
         operatorRecoveryReadiness: {
-          recoveryEntries: [{ recoveryKind: 'disabled-operator-recovery-stub' }],
+          state: 'ready',
+          operatorRecoveryReady: true,
+          codeOwnedRecoveryResolverReady: true,
+          realOperatorRecoveryImplementationReady: false,
+          recoveryEntries: [{
+            recoveryKind: 'code-owned-operator-recovery',
+            state: 'ready',
+            codeOwnedResolverWired: true,
+            realOperatorRecoveryImplementationReady: false,
+            wouldRecover: false,
+            wouldRestartService: false,
+            wouldRestoreState: false,
+          }],
         },
       },
       ...overrides,
     };
   }
 
-  it('W1: full canonical ready payload renders ready wiring/registry/adapter/anchor/validation with non-execute flags', () => {
-    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
-      fullCanonicalRunnerRegistryReadyPayload(),
-    );
-    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+  it('W1: full canonical ready payload renders ready wiring/registry/adapter/anchor/audit/recovery + authorized policy + blocked sentinel', () => {
+    const payload = fullCanonicalRunnerRegistryReadyPayload();
+    // wiring 6/0 pure contracts ready; aggregate still blocked on real wiring-missing
+    assert.strictEqual(payload.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(payload.runnerWiringContract.blockedCount, 0);
+    assert.strictEqual(payload.runnerWiringContract.state, 'blocked');
+    assert.deepStrictEqual(payload.runnerWiringContract.blockers, ['real-guarded-runner-execution-wiring-missing']);
+    assert.strictEqual(payload.executionEligible, false);
+    assert.strictEqual(payload.policyDecision.state, 'authorized');
+    assert.strictEqual(payload.policyDecision.primaryBlocker, null);
+
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines, ...viewModel.blockers].join('\n');
     assert.match(text, /wiringContract:runner-registry:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(text, /wiringContract:host-mutation-adapter:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(text, /wiringContract:rollback-anchor:status:ready:requiredForExecution:true:blocker:none/);
@@ -11133,21 +11183,199 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       text,
       /attemptAudit:code-owned-attempt-audit:state:ready:codeOwnedResolverWired:true:realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:none/,
     );
+    // V1.29 operator-recovery C∧A∧G∧D ready exact lines
+    assert.match(text, /wiringContract:operator-recovery:status:ready:requiredForExecution:true:blocker:none/);
+    assert.match(
+      text,
+      /operatorRecovery:code-owned-operator-recovery:state:ready:codeOwnedResolverWired:true:realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:wouldRestoreState:false:blocker:none/,
+    );
+    // policy truth locus: authorized + primaryBlocker:none (null → none)
+    assert.match(
+      text,
+      /^policyDecision:state:authorized:authorized:true:wouldAuthorizeExecution:true:primaryBlocker:none$/m,
+    );
+    // execution eligibility locus: always blocked on real wiring-missing
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+    assert.match(text, /real-guarded-runner-execution-wiring-missing/);
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
-    assert.match(text, /primaryBlocker:operator-recovery-not-ready/);
-    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:true'));
+    assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
+    assert.ok(viewModel.validationLines.includes('runnerWiringContractReady:false'));
+    assert.doesNotMatch(text, /primaryBlocker:operator-recovery-not-ready/);
+    assert.doesNotMatch(text, /wiringContract:operator-recovery:status:blocked/);
+    assert.doesNotMatch(text, /operatorRecovery:code-owned-operator-recovery:state:blocked/);
     assert.match(text, /realHostRunnerReady:false/);
     assert.match(text, /realHostMutationImplementationReady:false/);
     assert.match(text, /realRollbackAnchorImplementationReady:false/);
+    assert.match(text, /realOperatorRecoveryImplementationReady:false/);
     assert.match(text, /wouldMutateHost:false/);
     assert.match(text, /wouldWriteAnchor:false/);
     assert.match(text, /wouldRestore:false/);
     assert.match(text, /wouldExecute:false/);
-    assert.match(text, /primaryBlocker:operator-recovery-not-ready/);
+    assert.match(text, /wouldRecover:false/);
+    // requiredFields contains exactly one policyDecision line and one executionSentinel line
+    const policyLines = viewModel.requiredFields.filter((line) => line.startsWith('policyDecision:'));
+    const sentinelLines = viewModel.requiredFields.filter((line) => line.startsWith('executionSentinel:'));
+    assert.strictEqual(policyLines.length, 1);
+    assert.strictEqual(sentinelLines.length, 1);
+  });
+
+  it('policy W2: denied allowlisted primary renders denied + blocked executionSentinel', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        policyDecision: {
+          state: 'denied',
+          authorized: false,
+          wouldAuthorizeExecution: false,
+          primaryBlocker: 'execute-request-missing',
+          blockers: ['execute-request-missing'],
+          wouldRun: false,
+          wouldWrite: false,
+        },
+      }),
+    );
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(
+      text,
+      /^policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:execute-request-missing$/m,
+    );
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+    assert.doesNotMatch(text, /policyDecision:state:authorized/);
+  });
+
+  it('policy W3: non-allowlist primary renders denied + unknown; no echo', () => {
+    const OPAQUE = 'OPAQUE_UNSAFE_PRIMARY_BLOCKER';
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        policyDecision: {
+          state: 'denied',
+          authorized: false,
+          wouldAuthorizeExecution: false,
+          primaryBlocker: OPAQUE,
+          blockers: [OPAQUE],
+          wouldRun: false,
+          wouldWrite: false,
+        },
+      }),
+    );
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(
+      text,
+      /^policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:unknown$/m,
+    );
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+    assert.doesNotMatch(text, new RegExp(OPAQUE));
+  });
+
+  it('policy W4: authorized drift (wouldRun true) fail-closed denied + blocked sentinel', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        policyDecision: {
+          state: 'authorized',
+          authorized: true,
+          wouldAuthorizeExecution: true,
+          primaryBlocker: null,
+          blockers: [],
+          wouldRun: true,
+          wouldWrite: false,
+        },
+      }),
+    );
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(text, /policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:/);
+    assert.doesNotMatch(text, /policyDecision:state:authorized/);
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+  });
+
+  it('policy W5: secret primaryBlocker not echoed; denied + unknown', () => {
+    const SECRET = 'UNSAFE_SECRET_MATERIAL';
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        policyDecision: {
+          state: 'denied',
+          authorized: false,
+          wouldAuthorizeExecution: false,
+          primaryBlocker: SECRET,
+          blockers: [SECRET],
+          wouldRun: false,
+          wouldWrite: false,
+        },
+      }),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(
+      text,
+      /^policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:unknown$/m,
+    );
+    assert.doesNotMatch(text, new RegExp(SECRET, 'i'));
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+  });
+
+  it('policy W6: missing policyDecision fail-closed denied + unknown + blocked sentinel', () => {
+    const payload = fullCanonicalRunnerRegistryReadyPayload();
+    delete payload.policyDecision;
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+    const text = viewModel.requiredFields.join('\n');
+    assert.match(
+      text,
+      /^policyDecision:state:denied:authorized:false:wouldAuthorizeExecution:false:primaryBlocker:unknown$/m,
+    );
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+  });
+
+  it('policy W7: requiredFields always has exactly one policyDecision and one executionSentinel', () => {
+    const cases = [
+      fullCanonicalRunnerRegistryReadyPayload(),
+      fullCanonicalRunnerRegistryReadyPayload({
+        policyDecision: {
+          state: 'denied',
+          authorized: false,
+          wouldAuthorizeExecution: false,
+          primaryBlocker: 'execute-request-missing',
+          blockers: ['execute-request-missing'],
+          wouldRun: false,
+          wouldWrite: false,
+        },
+      }),
+      (() => {
+        const p = fullCanonicalRunnerRegistryReadyPayload();
+        delete p.policyDecision;
+        return p;
+      })(),
+    ];
+    for (const payload of cases) {
+      const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
+      const policyLines = viewModel.requiredFields.filter((line) => line.startsWith('policyDecision:'));
+      const sentinelLines = viewModel.requiredFields.filter((line) => line.startsWith('executionSentinel:'));
+      assert.strictEqual(policyLines.length, 1, 'exactly one policyDecision line');
+      assert.strictEqual(sentinelLines.length, 1, 'exactly one executionSentinel line');
+      assert.match(
+        sentinelLines[0],
+        /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/,
+      );
+    }
   });
 
   it('W2: missing adapterDecision blocks host-mutation-adapter wiring/adapter/validation', () => {
@@ -11330,37 +11558,47 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
   });
 
-  it('W12: final operator-recovery claiming ready remains fixed missing blocked; audit/anchor stay independent', () => {
+  it('W12: C/A/G surface ready without D.recoveryDecision stays operator-recovery blocked; audit/anchor independent', () => {
     const base = fullCanonicalRunnerRegistryReadyPayload();
-    const contracts = base.runnerWiringContract.requiredContracts.map((entry) =>
-      entry.id === 'operator-recovery'
-        ? {
-          ...entry,
-          status: 'ready',
-          blockerCode: null,
-          evidenceCode: 'operator-recovery-ready',
-        }
-        : entry,
-    );
-    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
-      ...base,
-      gates: {
-        ...base.gates,
-        operatorRecoveryReady: true,
-      },
-      runnerWiringContract: {
-        ...base.runnerWiringContract,
-        requiredContracts: contracts,
-      },
-    });
+    // Strip D — C∧A∧G alone must not force operator-recovery ready (canonical C∧A∧G∧D)
+    const payload = { ...base };
+    delete payload.recoveryDecision;
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payload);
     const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
-    // attempt-audit/rollback-anchor remain canonically ready; payload cannot force operator-recovery ready
+    // attempt-audit/rollback-anchor remain canonically ready; missing D fail-closes recovery
     assert.match(text, /wiringContract:rollback-anchor:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(text, /wiringContract:attempt-audit:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(text, /wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing/);
+    assert.match(
+      text,
+      /operatorRecovery:code-owned-operator-recovery:state:blocked:codeOwnedResolverWired:true:realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:wouldRestoreState:false:blocker:operator-recovery-not-ready/,
+    );
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
     assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+  });
+
+  it('W12e: C/A/G ready + D.wouldRecover true blocks operator-recovery wiring/recovery/validation', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      recoveryDecision: {
+        ...base.recoveryDecision,
+        wouldRecover: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing/);
+    assert.match(
+      text,
+      /operatorRecovery:code-owned-operator-recovery:state:blocked:codeOwnedResolverWired:true:realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:wouldRestoreState:false:blocker:operator-recovery-not-ready/,
+    );
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+    assert.doesNotMatch(text, /wiringContract:operator-recovery:status:ready/);
+    assert.doesNotMatch(text, /operatorRecovery:code-owned-operator-recovery:state:ready/);
+    // authorized policy still independent of recovery side-effect drift when policyDecision unchanged
+    assert.match(text, /policyDecision:state:authorized:authorized:true:wouldAuthorizeExecution:true:primaryBlocker:none/);
+    assert.match(text, /executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing/);
   });
 
   it('W12d: C/A/G ready + D.wouldPersistAudit true blocks audit wiring/audit/validation', () => {
@@ -11471,7 +11709,10 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
     assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
-    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+    assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:true'));
+    assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
+    assert.ok(viewModel.validationLines.includes('runnerWiringContractReady:false'));
+    assert.match(text, /executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing/);
   });
 
   it('W14: malicious / contradictory payload cannot force runner-registry ready', () => {
@@ -12213,8 +12454,9 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     ].join(' ');
 
     assert.ok(text.includes(
-      'operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:' +
-        'wouldRecover:false:blocker:operator-recovery-real-implementation-missing'
+      'operatorRecovery:code-owned-operator-recovery:state:blocked:codeOwnedResolverWired:true:' +
+        'realOperatorRecoveryImplementationReady:false:wouldRecover:false:wouldRestartService:false:' +
+        'wouldRestoreState:false:blocker:operator-recovery-not-ready'
     ));
     assert.match(text, /operatorRecoveryReady:false/);
     assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');

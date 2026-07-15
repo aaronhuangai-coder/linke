@@ -98,8 +98,8 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('attempt-audit-ready'));
   assert.ok(evidence.includes('realAttemptAuditImplementationReady:false'));
   assert.ok(evidence.includes('auditDecision'));
-  assert.ok(evidence.includes('readyCount:5'));
-  assert.ok(evidence.includes('blockedCount:1'));
+  assert.ok(evidence.includes('readyCount:6'));
+  assert.ok(evidence.includes('blockedCount:0'));
   assert.ok(!evidence.includes('rollback-anchor-real-implementation-missing'));
   assert.ok(!evidence.includes('rollbackAnchorReadiness.state:blocked'));
   assert.ok(!evidence.includes('runner-registry-real-implementation-missing'));
@@ -112,19 +112,22 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(!evidence.includes('attemptAuditReadiness.state:blocked'));
   assert.ok(!evidence.includes('attempt-audit-real-implementation-missing'));
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness'));
-  assert.ok(evidence.includes('operatorRecoveryReadiness.state:blocked'));
-  assert.ok(evidence.includes('operatorRecoveryReady:false'));
-  assert.ok(evidence.includes('operator-recovery-real-implementation-missing'));
+  assert.ok(evidence.includes('operatorRecoveryReadiness.state:ready'));
+  assert.ok(evidence.includes('operatorRecoveryReady:true'));
+  assert.ok(evidence.includes('realOperatorRecoveryImplementationReady:false'));
+  assert.ok(evidence.includes('resolveSupervisorLifecycleGuardedRunnerOperatorRecovery'));
+  assert.ok(evidence.includes('operator-recovery-ready'));
+  assert.ok(evidence.includes('real-guarded-runner-execution-wiring-missing'));
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.28', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.28');
+  it('expects LINKE_RELEASE_VERSION to be V1.29', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.29');
   });
 
-  it('expects report.version to be V1.28', () => {
+  it('expects report.version to be V1.29', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.28');
+    assert.strictEqual(report.version, 'V1.29');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -359,9 +362,11 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.29'));
+    assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerOperatorRecovery'));
+    assert.ok(automationItem.nextStep.includes('real guarded runner'));
     assert.ok(automationItem.nextStep.includes('V1.28'));
     assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerAttemptAudit'));
-    assert.ok(automationItem.nextStep.includes('operator-recovery'));
     assert.ok(automationItem.nextStep.includes('V1.27'));
     assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerRollbackAnchor'));
     assert.ok(automationItem.nextStep.includes('attempt-audit'));

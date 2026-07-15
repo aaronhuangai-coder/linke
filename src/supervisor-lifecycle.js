@@ -656,8 +656,6 @@ const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter
 const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
 const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub';
 const DISABLED_ROLLBACK_ANCHOR_KIND = 'disabled-rollback-anchor-stub';
-const OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING = 'operator-recovery-real-implementation-missing';
-const DISABLED_OPERATOR_RECOVERY_KIND = 'disabled-operator-recovery-stub';
 const FAIL_CLOSED_EXECUTION_POLICY_KIND = 'fail-closed-execution-policy';
 const EXECUTION_POLICY_READY_EVIDENCE = 'execution-policy-ready';
 const EXECUTION_POLICY_CONTEXT_INVALID = 'execution-policy-context-invalid';
@@ -801,24 +799,64 @@ const GUARDED_RUNNER_READY_ATTEMPT_AUDIT_ENTRY = Object.freeze({
   blockerCode: null,
   evidenceCode: ATTEMPT_AUDIT_READY_EVIDENCE,
 });
-const GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY = Object.freeze({
-  recoveryKind: DISABLED_OPERATOR_RECOVERY_KIND,
-  state: 'blocked',
-  realImplementationReady: false,
-  failureRecoveryReady: false,
-  retryLimitReady: false,
-  operatorRunbookReady: false,
+const OPERATOR_RECOVERY_READY_EVIDENCE = 'operator-recovery-ready';
+const OPERATOR_RECOVERY_PLAN_READY_EVIDENCE = 'operator-recovery-plan-ready';
+const CODE_OWNED_OPERATOR_RECOVERY_KIND = 'code-owned-operator-recovery';
+const OPERATOR_RECOVERY_BLOCKER_CODES = Object.freeze([
+  'operator-recovery-candidates-invalid',
+  'operator-recovery-operation-invalid',
+  'operator-recovery-action-missing',
+  'operator-recovery-action-duplicate',
+  'operator-recovery-action-unknown',
+  'operator-recovery-unsafe-recovery',
+]);
+const OPERATOR_RECOVERY_BLOCKER_CODE_SET = new Set(OPERATOR_RECOVERY_BLOCKER_CODES);
+// Identifiers only — pure data plan labels; not runbooks, notification payloads, retry handles, or shell/launchctl argv.
+const CODE_OWNED_ACTION_RECOVERY_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-operator-recovery',
+  'write-launch-agent-plist': 'write-plist-operator-recovery',
+  'load-launch-agent': 'load-agent-operator-recovery',
+  'unload-launch-agent': 'unload-agent-operator-recovery',
+  'remove-launch-agent-plist': 'remove-plist-operator-recovery',
+  'remove-supervisor-metadata': 'remove-metadata-operator-recovery',
+  'capture-current-state': 'capture-state-operator-recovery',
+  'restore-previous-plist': 'restore-plist-operator-recovery',
+  'restart-previous-supervisor': 'restart-supervisor-operator-recovery',
+  'start-recovery-supervisor': 'recovery-supervisor-operator-recovery',
+});
+const OPERATOR_RECOVERY_KIND_ALLOWLIST = Object.freeze([
+  'render-plist-operator-recovery',
+  'write-plist-operator-recovery',
+  'load-agent-operator-recovery',
+  'unload-agent-operator-recovery',
+  'remove-plist-operator-recovery',
+  'remove-metadata-operator-recovery',
+  'capture-state-operator-recovery',
+  'restore-plist-operator-recovery',
+  'restart-supervisor-operator-recovery',
+  'recovery-supervisor-operator-recovery',
+]);
+// Code-owned mapping consistency: every resolved recoveryKind must be ∈ allowlist.
+const OPERATOR_RECOVERY_KIND_ALLOWLIST_SET = new Set(OPERATOR_RECOVERY_KIND_ALLOWLIST);
+const GUARDED_RUNNER_READY_OPERATOR_RECOVERY_ENTRY = Object.freeze({
+  recoveryKind: CODE_OWNED_OPERATOR_RECOVERY_KIND,
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realOperatorRecoveryImplementationReady: false,
   wouldRecover: false,
   wouldRetry: false,
   wouldNotifyOperator: false,
+  wouldRestartService: false,
+  wouldRestoreState: false,
+  wouldExecute: false,
   wouldRun: false,
   wouldWrite: false,
   metadataWriteAllowed: false,
   filesystemWriteAllowed: false,
   remoteCommandAllowed: false,
   operatorNotificationAllowed: false,
-  sensitiveValuesReturned: false,
-  blockerCode: OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: OPERATOR_RECOVERY_READY_EVIDENCE,
 });
 const HOST_MUTATION_ADAPTER_READY_EVIDENCE = 'host-mutation-adapter-ready';
 const HOST_MUTATION_ADAPTER_MUTATION_READY_EVIDENCE = 'host-mutation-adapter-mutation-ready';
@@ -1003,11 +1041,11 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: 'operator-recovery',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'No failure recovery, retry limit, and operator runbook is wired.',
-    evidenceCode: 'operator-recovery-missing',
-    blockerCode: 'operator-recovery-missing',
+    evidence: 'Code-owned fail-closed restricted operator-recovery pure data plan resolver is wired.',
+    evidenceCode: OPERATOR_RECOVERY_READY_EVIDENCE,
+    blockerCode: null,
   }),
 ]);
 const RUNNER_BINDING_ALLOWED_KEYS = new Set([
@@ -3120,21 +3158,300 @@ export function buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness() {
   };
 }
 
+function buildUnresolvedOperatorRecoveryDecision(operation, primaryBlocker) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-operator-recovery',
+    operation,
+    state: 'unresolved',
+    recoveryReady: false,
+    codeOwnedResolverWired: true,
+    realOperatorRecoveryImplementationReady: false,
+    wouldRecover: false,
+    wouldRetry: false,
+    wouldNotifyOperator: false,
+    wouldRestartService: false,
+    wouldRestoreState: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    metadataWriteAllowed: false,
+    filesystemWriteAllowed: false,
+    remoteCommandAllowed: false,
+    operatorNotificationAllowed: false,
+    resolvedCount: 0,
+    unresolvedCount: 0,
+    recoveries: [],
+    primaryBlocker,
+    blockers: [primaryBlocker],
+    nextBlockers: [primaryBlocker],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedOperatorRecoveryDecision(operation, recoveries) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-operator-recovery',
+    operation,
+    state: 'resolved',
+    recoveryReady: true,
+    codeOwnedResolverWired: true,
+    realOperatorRecoveryImplementationReady: false,
+    wouldRecover: false,
+    wouldRetry: false,
+    wouldNotifyOperator: false,
+    wouldRestartService: false,
+    wouldRestoreState: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    metadataWriteAllowed: false,
+    filesystemWriteAllowed: false,
+    remoteCommandAllowed: false,
+    operatorNotificationAllowed: false,
+    resolvedCount: recoveries.length,
+    unresolvedCount: 0,
+    recoveries,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+export function sanitizeOperatorRecoveryDecision(decision) {
+  const fallback = () => buildUnresolvedOperatorRecoveryDecision('unknown', 'operator-recovery-candidates-invalid');
+  if (!isObject(decision)) return fallback();
+  try {
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+    const state = decision.state === 'resolved' ? 'resolved' : 'unresolved';
+    const recoveryReady = decision.recoveryReady === true;
+    if ((state === 'resolved') !== recoveryReady) {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code === 'string' && OPERATOR_RECOVERY_BLOCKER_CODE_SET.has(code)) {
+        blockers.push(code);
+      }
+    }
+
+    if (state === 'resolved') {
+      if (blockers.length !== 0 || decision.primaryBlocker !== null) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+      }
+      const recoveries = [];
+      if (Array.isArray(decision.recoveries)) {
+        for (const row of decision.recoveries) {
+          const actionId = typeof row?.actionId === 'string' ? row.actionId : 'unknown';
+          // Always code-owned mapping; never passthrough input recoveryKind on mismatch.
+          // Fail-closed if mapped kind is missing or outside OPERATOR_RECOVERY_KIND_ALLOWLIST.
+          const mappedKind = CODE_OWNED_ACTION_RECOVERY_MAP[actionId];
+          if (typeof mappedKind !== 'string' || !OPERATOR_RECOVERY_KIND_ALLOWLIST_SET.has(mappedKind)) {
+            return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+          }
+          recoveries.push({
+            actionId,
+            recoveryKind: mappedKind,
+            recoveryReady: true,
+            realOperatorRecoveryImplementationReady: false,
+            wouldRecover: false,
+            wouldRetry: false,
+            wouldNotifyOperator: false,
+            wouldRestartService: false,
+            wouldRestoreState: false,
+            wouldExecute: false,
+            wouldRun: false,
+            wouldWrite: false,
+            metadataWriteAllowed: false,
+            filesystemWriteAllowed: false,
+            remoteCommandAllowed: false,
+            operatorNotificationAllowed: false,
+            blockerCode: null,
+            evidenceCode: OPERATOR_RECOVERY_PLAN_READY_EVIDENCE,
+          });
+        }
+      }
+      return buildResolvedOperatorRecoveryDecision(operation, recoveries);
+    }
+
+    const primary = typeof decision.primaryBlocker === 'string' && OPERATOR_RECOVERY_BLOCKER_CODE_SET.has(decision.primaryBlocker)
+      ? decision.primaryBlocker
+      : (blockers[0] || 'operator-recovery-candidates-invalid');
+    return buildUnresolvedOperatorRecoveryDecision(
+      primary === 'operator-recovery-operation-invalid' ? 'unknown' : operation,
+      primary,
+    );
+  } catch {
+    return fallback();
+  }
+}
+
+/**
+ * Resolve and verify sanitized guarded-runner action candidates against the
+ * code-owned restricted operator-recovery mapping table (pure data plan only).
+ *
+ * Ready resolution means only that every candidate actionId maps to the fixed
+ * restricted recoveryKind for the given operation. It does NOT recover hosts,
+ * restart services, restore state, schedule retries, notify operators, execute
+ * runbooks, launchctl/shell/process/network/fs; does NOT set wouldRecover /
+ * wouldRetry / wouldNotifyOperator / wouldRestartService / wouldRestoreState /
+ * *Allowed / wouldExecute/wouldRun/wouldWrite true; does NOT imply
+ * realOperatorRecoveryImplementationReady, realHostMutationImplementationReady,
+ * realRollbackAnchorImplementationReady, realAttemptAuditImplementationReady,
+ * realRunnerWiringReady, runnerWiringContractReady, or executionEligible.
+ *
+ * Returns a deep-copied plain decision object only — never functions,
+ * command strings, paths, hosts, tokens, hashes, or raw Error objects.
+ * Invalid input, getters, traps, unsafe mutation flags, or set mismatch →
+ * fail-closed unresolved.
+ *
+ * @param {unknown} candidates
+ * @param {unknown} operation
+ * @returns {object}
+ */
+export function resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnresolvedOperatorRecoveryDecision('unknown', 'operator-recovery-operation-invalid');
+    }
+
+    if (!Array.isArray(candidates)) {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len)) {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+    if (len < 1) {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+      }
+      snapshots.push(snapshot);
+    }
+
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+      }
+    }
+
+    // Authority: buildLifecycleActions only — never a second drift-able action list.
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-action-duplicate');
+      }
+      seen.add(actionId);
+    }
+
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId)) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-action-unknown');
+      }
+    }
+
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-action-missing');
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const recoveries = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      // intentional layered fail-closed: ignore implementationId / runnerKind / mode / maxAttempts values;
+      // do not read mutationKind / anchorKind / auditKind / registryDecision / adapterDecision /
+      // anchorDecision / auditDecision.
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-unsafe-recovery');
+      }
+      const recoveryKind = CODE_OWNED_ACTION_RECOVERY_MAP[actionId];
+      // Mapping-table integrity: every resolved recoveryKind must be code-owned allowlisted.
+      if (typeof recoveryKind !== 'string' || !OPERATOR_RECOVERY_KIND_ALLOWLIST_SET.has(recoveryKind)) {
+        return buildUnresolvedOperatorRecoveryDecision(operation, 'operator-recovery-candidates-invalid');
+      }
+      recoveries.push({
+        actionId,
+        recoveryKind,
+        recoveryReady: true,
+        realOperatorRecoveryImplementationReady: false,
+        wouldRecover: false,
+        wouldRetry: false,
+        wouldNotifyOperator: false,
+        wouldRestartService: false,
+        wouldRestoreState: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        metadataWriteAllowed: false,
+        filesystemWriteAllowed: false,
+        remoteCommandAllowed: false,
+        operatorNotificationAllowed: false,
+        blockerCode: null,
+        evidenceCode: OPERATOR_RECOVERY_PLAN_READY_EVIDENCE,
+      });
+    }
+
+    return buildResolvedOperatorRecoveryDecision(operation, recoveries);
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return buildUnresolvedOperatorRecoveryDecision(
+      op === 'unknown' ? 'unknown' : op,
+      op === 'unknown' ? 'operator-recovery-operation-invalid' : 'operator-recovery-candidates-invalid',
+    );
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-operator-recovery-readiness',
-    state: 'blocked',
+    state: 'ready',
     operatorRecoveryDefined: true,
-    operatorRecoveryReady: false,
-    realOperatorRecoveryReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    recoveryEntries: [{ ...GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY }],
-    blockers: [
-      OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING],
+    operatorRecoveryReady: true,
+    codeOwnedRecoveryResolverReady: true,
+    realOperatorRecoveryImplementationReady: false,
+    readyCount: 1,
+    blockedCount: 0,
+    recoveryEntries: [{ ...GUARDED_RUNNER_READY_OPERATOR_RECOVERY_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -3145,8 +3462,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 5,
-    blockedCount: 1,
+    readyCount: 6,
+    blockedCount: 0,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -3306,6 +3623,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     resolveSupervisorLifecycleGuardedRunnerAttemptAudit(actionCandidates, operation),
   );
 
+  // Ignore options.recoveryDecision / options.operatorRecoveryReady / options.recoveryContext.
+  const recoveryDecision = sanitizeOperatorRecoveryDecision(
+    resolveSupervisorLifecycleGuardedRunnerOperatorRecovery(actionCandidates, operation),
+  );
+
   const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
   const executionPolicyReady =
     executionPolicyReadiness?.executionPolicyReady === true &&
@@ -3388,11 +3710,35 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     auditDecision?.filesystemWriteAllowed === false &&
     auditDecision?.immutableAuditReady === false;
 
+  const operatorRecoveryReadiness = runnerWiringContract.operatorRecoveryReadiness;
+  const operatorRecoveryReady =
+    operatorRecoveryReadiness?.operatorRecoveryReady === true &&
+    operatorRecoveryReadiness?.codeOwnedRecoveryResolverReady === true &&
+    operatorRecoveryReadiness?.state === 'ready' &&
+    operatorRecoveryReadiness?.realOperatorRecoveryImplementationReady === false &&
+    recoveryDecision?.recoveryReady === true &&
+    recoveryDecision?.state === 'resolved' &&
+    recoveryDecision?.codeOwnedResolverWired === true &&
+    recoveryDecision?.realOperatorRecoveryImplementationReady === false &&
+    recoveryDecision?.wouldRecover === false &&
+    recoveryDecision?.wouldRetry === false &&
+    recoveryDecision?.wouldNotifyOperator === false &&
+    recoveryDecision?.wouldRestartService === false &&
+    recoveryDecision?.wouldRestoreState === false &&
+    recoveryDecision?.wouldExecute === false &&
+    recoveryDecision?.wouldRun === false &&
+    recoveryDecision?.wouldWrite === false &&
+    recoveryDecision?.metadataWriteAllowed === false &&
+    recoveryDecision?.filesystemWriteAllowed === false &&
+    recoveryDecision?.remoteCommandAllowed === false &&
+    recoveryDecision?.operatorNotificationAllowed === false;
+
   // Production policy context: local primitive booleans only — never request/options objects.
   // Ignore options.registryDecision / options.runnerRegistryReady / options.registryContext.
   // Ignore options.adapterDecision / options.hostMutationAdapterReady / options.adapterContext.
   // Ignore options.anchorDecision / options.rollbackAnchorReady / options.anchorContext.
   // Ignore options.auditDecision / options.attemptAuditReady / options.auditContext.
+  // Ignore options.recoveryDecision / options.operatorRecoveryReady / options.recoveryContext.
   const policyContext = {
     operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
     lifecyclePlanValid: lifecyclePlanValid === true,
@@ -3406,7 +3752,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     hostMutationAdapterReady: hostMutationAdapterReady === true,
     rollbackAnchorReady: rollbackAnchorReady === true,
     attemptAuditReady: attemptAuditReady === true,
-    operatorRecoveryReady: false,
+    operatorRecoveryReady: operatorRecoveryReady === true,
   };
 
   const policyDecision = sanitizePolicyDecision(
@@ -3430,6 +3776,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     adapterDecision,
     anchorDecision,
     auditDecision,
+    recoveryDecision,
     policyDecision,
     gates: {
       lifecyclePlanValid,
@@ -3446,7 +3793,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       hostMutationAdapterReady: hostMutationAdapterReady === true,
       rollbackAnchorReady: rollbackAnchorReady === true,
       attemptAuditReady: attemptAuditReady === true,
-      operatorRecoveryReady: false,
+      operatorRecoveryReady: operatorRecoveryReady === true,
     },
     safety: executionPreviewSafety(),
   };

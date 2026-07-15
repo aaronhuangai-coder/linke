@@ -1868,10 +1868,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.28 Supervisor lifecycle attempt audit', () => {
-  it('title and badge claim V1.28 as current', () => {
-    assertReadmeContains(/# Linke V1\.28/, 'README title should mention V1.28');
-    assertReadmeContains(/\*\*当前版本：V1\.28\*\*/, 'README badge should mention V1.28');
+describe('README — V1.29 Supervisor lifecycle operator recovery', () => {
+  it('title and badge claim V1.29 as current', () => {
+    assertReadmeContains(/# Linke V1\.29/, 'README title should mention V1.29');
+    assertReadmeContains(/\*\*当前版本：V1\.29\*\*/, 'README badge should mention V1.29');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.28\*\*.*当前版本/m, 'README badge must not still claim V1.28 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.28$/m, 'README title must not still claim V1.28 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.27\*\*.*当前版本/m, 'README badge must not still claim V1.27 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.27$/m, 'README title must not still claim V1.27 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.26\*\*.*当前版本/m, 'README badge must not still claim V1.26 as current');
@@ -1914,8 +1916,9 @@ describe('README — V1.28 Supervisor lifecycle attempt audit', () => {
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('version table marks V1.28 current and keeps V1.27/V1.26/V1.25/V1.24/V1.23/V1.22/V1.21/V1.20/V1.19/V1.18/V1.17/V1.16/V1.15/V1.14/V1.13/V1.12/V1.11/V1.10/V1.09 historical', () => {
-    assertReadmeContains(/\| V1\.28 \| 当前版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerAttemptAudit[^|]*attemptAuditReadiness\.state:ready[^|]*attemptAuditReady:true[^|]*codeOwnedAuditResolverReady:true[^|]*realAttemptAuditImplementationReady:false[^|]*readyCount:5[^|]*blockedCount:1[^|]*auditDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.28 should be current attempt audit milestone');
+  it('version table marks V1.29 current and keeps V1.28/V1.27/V1.26/V1.25/V1.24/V1.23/V1.22/V1.21/V1.20/V1.19/V1.18/V1.17/V1.16/V1.15/V1.14/V1.13/V1.12/V1.11/V1.10/V1.09 historical', () => {
+    assertReadmeContains(/\| V1\.29 \| 当前版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerOperatorRecovery[^|]*operatorRecoveryReadiness\.state:ready[^|]*operatorRecoveryReady:true[^|]*codeOwnedRecoveryResolverReady:true[^|]*realOperatorRecoveryImplementationReady:false[^|]*readyCount:6[^|]*blockedCount:0[^|]*recoveryDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.29 should be current operator recovery milestone');
+    assertReadmeContains(/\| V1\.28 \| 历史版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerAttemptAudit[^|]*attemptAuditReadiness\.state:ready[^|]*attemptAuditReady:true[^|]*codeOwnedAuditResolverReady:true[^|]*realAttemptAuditImplementationReady:false[^|]*readyCount:5[^|]*blockedCount:1[^|]*auditDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.28 should become historical attempt audit milestone');
     assertReadmeContains(/\| V1\.27 \| 历史版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerRollbackAnchor[^|]*rollbackAnchorReadiness\.state:ready[^|]*rollbackAnchorReady:true[^|]*codeOwnedAnchorResolverReady:true[^|]*realRollbackAnchorImplementationReady:false[^|]*readyCount:4[^|]*blockedCount:2[^|]*anchorDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.27 should become historical rollback anchor milestone');
     assertReadmeContains(/\| V1\.26 \| 历史版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter[^|]*hostMutationAdapterReadiness\.state:ready[^|]*hostMutationAdapterReady:true[^|]*codeOwnedAdapterResolverReady:true[^|]*realHostMutationImplementationReady:false[^|]*readyCount:3[^|]*blockedCount:3[^|]*adapterDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.26 should become historical host mutation adapter milestone');
     assertReadmeContains(/\| V1\.25 \| 历史版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerRegistry[^|]*runnerRegistryReadiness\.state:ready[^|]*runnerRegistryReady:true[^|]*codeOwnedRegistryResolverReady:true[^|]*realRunnerImplementationsReady:false[^|]*readyCount:2[^|]*blockedCount:4[^|]*registryDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.25 should become historical real runner registry milestone');
