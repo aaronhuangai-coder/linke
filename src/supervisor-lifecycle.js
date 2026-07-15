@@ -4144,6 +4144,1000 @@ function buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview)
     .filter(Boolean);
 }
 
+
+// ── V1.31 Capability injection + dry-run / execute single-gate boundary ─
+// Execute architecture: 单闸 immediate hard-deny + 无 real handler（非双闸）。
+// V1.32+ registers real-side-effect handlers and re-validates full execute formula pre-dispatch.
+
+const CAPABILITY_KIND_ALLOWLIST = Object.freeze([
+  'render', 'write', 'reload', 'status', 'rollback', 'audit', 'notify',
+]);
+const CAPABILITY_KIND_ALLOWLIST_SET = new Set(CAPABILITY_KIND_ALLOWLIST);
+const CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render',
+  'write-launch-agent-plist': 'write',
+  'load-launch-agent': 'reload',
+  'unload-launch-agent': 'reload',
+  'remove-launch-agent-plist': 'write',
+  'remove-supervisor-metadata': 'write',
+  'capture-current-state': 'status',
+  'restore-previous-plist': 'rollback',
+  'restart-previous-supervisor': 'reload',
+  'start-recovery-supervisor': 'reload',
+});
+const CAPABILITY_INVOKE_REQUEST_KEYS = Object.freeze([
+  'capabilityKind',
+  'actionId',
+  'operation',
+  'mode',
+  'idempotencyKey',
+  'attemptRef',
+  'anchorRef',
+]);
+const CAPABILITY_DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const CAPABILITY_AUDIT_SEQUENCE = Object.freeze([
+  'authorize',
+  'mode-check',
+  'registry-lookup',
+  'anchor-plan',
+  'invoke',
+  'receipt',
+  'audit-plan',
+  'notify-plan',
+]);
+const CAPABILITY_OUTCOME_CODES = Object.freeze([
+  'capability-dry-run-completed',
+  'capability-dry-run-validation-failed',
+  'capability-execute-hard-denied',
+  'capability-execute-prerequisites-incomplete',
+  'capability-mode-invalid',
+  'capability-kind-unknown',
+  'capability-action-unmapped',
+  'capability-caller-injection-rejected',
+  'capability-timeout-simulated',
+  'capability-partial-failure-simulated',
+  'capability-rollback-planned-only',
+]);
+const CAPABILITY_BLOCKER_CODES = Object.freeze([
+  'capability-injection-input-invalid',
+  'capability-kind-unknown',
+  'capability-action-unmapped',
+  'capability-action-duplicate',
+  'capability-operation-invalid',
+  'capability-mode-invalid',
+  'capability-registry-incomplete',
+  'capability-handler-class-invalid',
+  'capability-caller-injection-rejected',
+  'capability-execute-hard-denied',
+  'capability-execute-prerequisites-incomplete',
+  'capability-idempotency-key-missing',
+  'capability-idempotency-key-invalid',
+  'capability-timeout',
+  'capability-partial-failure',
+  'capability-rollback-failed',
+  'capability-audit-sequence-invalid',
+  'capability-redaction-failed',
+]);
+const CAPABILITY_BLOCKER_CODE_SET = new Set(CAPABILITY_BLOCKER_CODES);
+const CAPABILITY_INJECTION_READY_EVIDENCE = 'capability-injection-ready';
+const CAPABILITY_INJECTION_PLAN_READY_EVIDENCE = 'capability-injection-plan-ready';
+const CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE = 'capability-dry-run-descriptor-ready';
+const CAPABILITY_INJECTION_READINESS_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection-readiness';
+const CAPABILITY_INJECTION_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection';
+const CAPABILITY_RECEIPT_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-receipt';
+const CAPABILITY_MODE_AUTH_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-mode-authorization';
+const CAPABILITY_CROSS_CUTTING_KINDS = new Set(['audit', 'notify']);
+
+const CAPABILITY_KIND_ACTION_IDS = Object.freeze({
+  render: Object.freeze(['render-launch-agent-plist']),
+  write: Object.freeze([
+    'write-launch-agent-plist',
+    'remove-launch-agent-plist',
+    'remove-supervisor-metadata',
+  ]),
+  reload: Object.freeze([
+    'load-launch-agent',
+    'unload-launch-agent',
+    'restart-previous-supervisor',
+    'start-recovery-supervisor',
+  ]),
+  status: Object.freeze(['capture-current-state']),
+  rollback: Object.freeze(['restore-previous-plist']),
+  audit: Object.freeze(Object.keys(CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)),
+  notify: Object.freeze(Object.keys(CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)),
+});
+
+const GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY = Object.freeze({
+  injectionKind: 'code-owned-capability-injection',
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  dryRunCapabilityRegistryReady: true,
+  executeCapabilityRegistryReady: false,
+  realCapabilityImplementationsReady: false,
+  realRunnerWiringReady: false,
+  wouldExecute: false,
+  wouldRun: false,
+  wouldWrite: false,
+  hostSideEffectOccurred: false,
+  launchctlAllowed: false,
+  filesystemWriteAllowed: false,
+  processListReadAllowed: false,
+  networkAllowed: false,
+  blockerCode: null,
+  evidenceCode: CAPABILITY_INJECTION_READY_EVIDENCE,
+});
+
+/** Module-private registry: capabilityKind -> { descriptor, handler }. Not exported. */
+const dryRunCapabilityRegistry = new Map();
+
+function capabilityContainsFunction(value, seen = new WeakSet()) {
+  if (typeof value === 'function') return true;
+  if (value === null || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (capabilityContainsFunction(item, seen)) return true;
+    }
+    return false;
+  }
+  let keys;
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    return true;
+  }
+  for (const key of keys) {
+    let next;
+    try {
+      next = value[key];
+    } catch {
+      return true;
+    }
+    if (capabilityContainsFunction(next, seen)) return true;
+  }
+  return false;
+}
+
+/**
+ * Public return deep copy: structuredClone of validated plain graph only.
+ * Function presence → fail-closed (throws). No Object.assign/spread/JSON round-trip.
+ */
+function capabilityPublicDeepCopy(value) {
+  if (capabilityContainsFunction(value)) {
+    throw new Error('capability-public-return-function');
+  }
+  return structuredClone(value);
+}
+
+function buildCapabilityDescriptor(kind) {
+  const actionIds = CAPABILITY_KIND_ACTION_IDS[kind];
+  return {
+    capabilityKind: kind,
+    capabilityId: `dry-run-${kind}`,
+    implementationClass: 'dry-run-non-side-effect',
+    sideEffectClass: 'none',
+    supportsModes: ['dry-run'],
+    actionIds: [...actionIds],
+    realImplementationReady: false,
+    wouldMutateHost: false,
+    wouldPersistAudit: false,
+    wouldNotifyExternal: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    evidenceCode: CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE,
+    blockerCode: null,
+  };
+}
+
+function resolveDryRunPlannedAction(capabilityKind, actionId, operation) {
+  if (!CAPABILITY_KIND_ALLOWLIST_SET.has(capabilityKind)) return null;
+  if (typeof actionId !== 'string' || !(actionId in CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)) {
+    return null;
+  }
+  if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) return null;
+
+  // action must belong to operation's lifecycle set
+  const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+  if (!expectedIds.includes(actionId)) return null;
+
+  if (capabilityKind === 'audit') return 'audit-plan';
+  if (capabilityKind === 'notify') return 'notify-plan';
+
+  const primary = CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP[actionId];
+  if (primary !== capabilityKind) return null;
+
+  if (capabilityKind === 'render') {
+    if (actionId === 'render-launch-agent-plist') return 'render-plist';
+    return null;
+  }
+  if (capabilityKind === 'write') {
+    if (actionId === 'write-launch-agent-plist') return 'write-create-update';
+    if (actionId === 'remove-launch-agent-plist' || actionId === 'remove-supervisor-metadata') {
+      return 'remove-delete';
+    }
+    return null;
+  }
+  if (capabilityKind === 'reload') {
+    if (actionId === 'load-launch-agent') return 'load';
+    if (actionId === 'unload-launch-agent') return 'unload';
+    if (actionId === 'restart-previous-supervisor') return 'restart';
+    if (actionId === 'start-recovery-supervisor') return 'start';
+    return null;
+  }
+  if (capabilityKind === 'status') {
+    if (actionId === 'capture-current-state') return 'capture-state';
+    return null;
+  }
+  if (capabilityKind === 'rollback') {
+    if (actionId === 'restore-previous-plist') return 'restore-plist';
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Dry-run non-side-effect handler factory.
+ * Registered per capabilityKind (7 handlers); dispatches by operation+actionId.
+ * Never calls launchctl/fs/process/network/audit persist/notify.
+ */
+function createDryRunCapabilityHandler(capabilityKind) {
+  return function dryRunCapabilityHandler(request) {
+    const plannedAction = resolveDryRunPlannedAction(
+      capabilityKind,
+      request.actionId,
+      request.operation,
+    );
+    if (!plannedAction) {
+      return {
+        ok: false,
+        blocker: 'capability-action-unmapped',
+        plannedAction: null,
+      };
+    }
+    return {
+      ok: true,
+      plannedAction,
+      capabilityId: `dry-run-${capabilityKind}`,
+    };
+  };
+}
+
+/**
+ * Module-private. Registers only dry-run-non-side-effect descriptors+handlers
+ * from code-owned tables. Not exported. Not callable from request/CLI/Web.
+ */
+function trustedBootstrapCapabilityRegistry() {
+  dryRunCapabilityRegistry.clear();
+  for (const kind of CAPABILITY_KIND_ALLOWLIST) {
+    const descriptor = buildCapabilityDescriptor(kind);
+    if (descriptor.implementationClass !== 'dry-run-non-side-effect') {
+      throw new Error('capability-handler-class-invalid');
+    }
+    if (
+      !Array.isArray(descriptor.supportsModes) ||
+      descriptor.supportsModes.length !== 1 ||
+      descriptor.supportsModes[0] !== 'dry-run'
+    ) {
+      throw new Error('capability-handler-class-invalid');
+    }
+    if (
+      descriptor.realImplementationReady !== false ||
+      descriptor.wouldMutateHost !== false ||
+      descriptor.wouldExecute !== false ||
+      descriptor.wouldRun !== false ||
+      descriptor.wouldWrite !== false ||
+      descriptor.launchctlAllowed !== false ||
+      descriptor.filesystemWriteAllowed !== false ||
+      descriptor.networkAllowed !== false
+    ) {
+      throw new Error('capability-handler-class-invalid');
+    }
+    dryRunCapabilityRegistry.set(kind, {
+      descriptor,
+      handler: createDryRunCapabilityHandler(kind),
+    });
+  }
+  // Every primary map kind must have a handler.
+  for (const kind of Object.values(CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)) {
+    if (!dryRunCapabilityRegistry.has(kind)) {
+      throw new Error('capability-registry-incomplete');
+    }
+  }
+  if (dryRunCapabilityRegistry.size !== CAPABILITY_KIND_ALLOWLIST.length) {
+    throw new Error('capability-registry-incomplete');
+  }
+}
+
+trustedBootstrapCapabilityRegistry();
+
+function isDryRunCapabilityRegistryReady() {
+  if (dryRunCapabilityRegistry.size !== CAPABILITY_KIND_ALLOWLIST.length) return false;
+  for (const kind of CAPABILITY_KIND_ALLOWLIST) {
+    const entry = dryRunCapabilityRegistry.get(kind);
+    if (!entry) return false;
+    const d = entry.descriptor;
+    if (!d || d.implementationClass !== 'dry-run-non-side-effect') return false;
+    if (!Array.isArray(d.supportsModes) || d.supportsModes[0] !== 'dry-run') return false;
+    if (d.realImplementationReady !== false) return false;
+    if (typeof entry.handler !== 'function') return false;
+  }
+  return true;
+}
+
+function buildCapabilityInjectionReadinessObject() {
+  return {
+    command: CAPABILITY_INJECTION_READINESS_COMMAND,
+    state: 'ready',
+    pureCapabilityInjectionReady: true,
+    codeOwnedCapabilityFactoryReady: true,
+    dryRunCapabilityRegistryReady: isDryRunCapabilityRegistryReady() === true,
+    executeCapabilityRegistryReady: false,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    executeCapabilityAuthorized: false,
+    readyCount: 1,
+    blockedCount: 0,
+    entries: [{ ...GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY }],
+    capabilityKinds: [...CAPABILITY_KIND_ALLOWLIST],
+    blockers: [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+/**
+ * Fixed readiness: pure capability injection contract + dry-run registry evidence.
+ * Not a policy fact; not real wiring. §4.5 loci do not exist / false.
+ */
+export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness() {
+  try {
+    const ready = buildCapabilityInjectionReadinessObject();
+    if (ready.dryRunCapabilityRegistryReady !== true) {
+      ready.state = 'blocked';
+      ready.pureCapabilityInjectionReady = false;
+      ready.dryRunCapabilityRegistryReady = false;
+      ready.readyCount = 0;
+      ready.blockedCount = 1;
+      ready.blockers = ['capability-registry-incomplete'];
+      ready.entries = [{
+        ...GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY,
+        state: 'blocked',
+        dryRunCapabilityRegistryReady: false,
+        blockerCode: 'capability-registry-incomplete',
+        evidenceCode: null,
+      }];
+    }
+    return capabilityPublicDeepCopy(ready);
+  } catch {
+    return capabilityPublicDeepCopy({
+      command: CAPABILITY_INJECTION_READINESS_COMMAND,
+      state: 'blocked',
+      pureCapabilityInjectionReady: false,
+      codeOwnedCapabilityFactoryReady: false,
+      dryRunCapabilityRegistryReady: false,
+      executeCapabilityRegistryReady: false,
+      realCapabilityImplementationsReady: false,
+      realRunnerWiringReady: false,
+      executeCapabilityAuthorized: false,
+      readyCount: 0,
+      blockedCount: 1,
+      entries: [],
+      capabilityKinds: [...CAPABILITY_KIND_ALLOWLIST],
+      blockers: ['capability-registry-incomplete'],
+      nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+      safety: executionPreviewSafety(),
+    });
+  }
+}
+
+function buildUnresolvedCapabilityInjectionDecision(operation, primaryBlocker) {
+  const blocker = CAPABILITY_BLOCKER_CODE_SET.has(primaryBlocker)
+    ? primaryBlocker
+    : 'capability-injection-input-invalid';
+  return {
+    command: CAPABILITY_INJECTION_COMMAND,
+    state: 'unresolved',
+    operation,
+    capabilityInjectionReady: false,
+    dryRunCapabilityRegistryReady: isDryRunCapabilityRegistryReady() === true,
+    executeCapabilityAuthorized: false,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    hostSideEffectOccurred: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    codeOwnedResolverWired: true,
+    mappings: [],
+    evidenceCode: null,
+    primaryBlocker: blocker,
+    blockers: [blocker],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedCapabilityInjectionDecision(operation, mappings) {
+  return {
+    command: CAPABILITY_INJECTION_COMMAND,
+    state: 'resolved',
+    operation,
+    capabilityInjectionReady: true,
+    dryRunCapabilityRegistryReady: true,
+    executeCapabilityAuthorized: false,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    hostSideEffectOccurred: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    codeOwnedResolverWired: true,
+    mappings,
+    evidenceCode: CAPABILITY_INJECTION_PLAN_READY_EVIDENCE,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+/**
+ * Resolve capability injection plan for candidates+operation.
+ * Does NOT invoke handlers; does NOT authorize execute; does NOT elevate real wiring.
+ */
+export function resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision('unknown', 'capability-operation-invalid'),
+      );
+    }
+    if (!isDryRunCapabilityRegistryReady()) {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-registry-incomplete'),
+      );
+    }
+    if (!Array.isArray(candidates)) {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+      );
+    }
+
+    // Force ownKeys/getOwnPropertyDescriptor surfaces so Proxy traps fail closed.
+    try {
+      Reflect.ownKeys(candidates);
+    } catch {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+      );
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+      );
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len) || len < 1) {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+      );
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return capabilityPublicDeepCopy(
+        buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+      );
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+        );
+      }
+      snapshots.push(snapshot);
+    }
+
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-action-duplicate'),
+        );
+      }
+      seen.add(actionId);
+    }
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId) || !(actionId in CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-action-unmapped'),
+        );
+      }
+    }
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+        );
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const mappings = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-injection-input-invalid'),
+        );
+      }
+      const primaryCapabilityKind = CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP[actionId];
+      const entry = dryRunCapabilityRegistry.get(primaryCapabilityKind);
+      if (!entry) {
+        return capabilityPublicDeepCopy(
+          buildUnresolvedCapabilityInjectionDecision(operation, 'capability-registry-incomplete'),
+        );
+      }
+      mappings.push({
+        actionId,
+        primaryCapabilityKind,
+        capabilityId: entry.descriptor.capabilityId,
+        implementationClass: 'dry-run-non-side-effect',
+        supportsModes: ['dry-run'],
+        wouldExecute: false,
+        hostSideEffectOccurred: false,
+      });
+    }
+
+    return capabilityPublicDeepCopy(
+      buildResolvedCapabilityInjectionDecision(operation, mappings),
+    );
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return capabilityPublicDeepCopy(
+      buildUnresolvedCapabilityInjectionDecision(
+        op === 'unknown' ? 'unknown' : op,
+        op === 'unknown' ? 'capability-operation-invalid' : 'capability-injection-input-invalid',
+      ),
+    );
+  }
+}
+
+/**
+ * Exact whitelist extraction for capability invoke request (§2.7).
+ * Object.hasOwn + data descriptor; reject dangerous/symbol/extra/accessor keys.
+ * No Object.assign / spread / JSON round-trip.
+ */
+function snapshotCapabilityInvokeRequest(request) {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(request);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_INVOKE_REQUEST_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of CAPABILITY_INVOKE_REQUEST_KEYS) {
+    if (!Object.hasOwn(request, key)) return null;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(request, key);
+    } catch {
+      return null;
+    }
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value')
+    ) {
+      return null;
+    }
+    // Reject function values at extraction time (caller injection).
+    if (typeof desc.value === 'function') return null;
+    snapshot[key] = desc.value;
+  }
+  return snapshot;
+}
+
+function buildCapabilityReceiptBase(fields) {
+  return {
+    command: CAPABILITY_RECEIPT_COMMAND,
+    receiptKind: fields.receiptKind,
+    state: fields.state,
+    mode: fields.mode,
+    capabilityKind: fields.capabilityKind,
+    capabilityId: fields.capabilityId,
+    actionId: fields.actionId,
+    operation: fields.operation,
+    // V1.31 production path fixed null; never echo raw key; no vague sentinel string.
+    idempotencyKeyFingerprint: null,
+    outcomeCode: fields.outcomeCode,
+    errorClass: fields.errorClass,
+    partial: false,
+    timedOut: false,
+    rolledBack: false,
+    hostSideEffectOccurred: false,
+    wouldMutateHost: false,
+    wouldPersistAudit: false,
+    wouldNotifyExternal: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    plannedAction: fields.plannedAction === undefined ? null : fields.plannedAction,
+    auditSequence: [...CAPABILITY_AUDIT_SEQUENCE],
+    redaction: {
+      secretsRedacted: true,
+      pathsRedacted: true,
+      hostsRedacted: true,
+    },
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    executeCapabilityAuthorized: false,
+    evidenceCode: fields.evidenceCode,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: [...fields.blockers],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildCapabilityErrorReceipt(fields) {
+  return buildCapabilityReceiptBase({
+    receiptKind: fields.receiptKind || 'capability-dry-run-receipt',
+    state: fields.state || 'error',
+    mode: fields.mode || 'dry-run',
+    capabilityKind: fields.capabilityKind || 'unknown',
+    capabilityId: fields.capabilityId || null,
+    actionId: fields.actionId || 'unknown',
+    operation: fields.operation || 'unknown',
+    outcomeCode: fields.outcomeCode,
+    errorClass: fields.errorClass || 'validation',
+    plannedAction: null,
+    evidenceCode: null,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: [fields.primaryBlocker],
+  });
+}
+
+function buildCapabilityModeAuthorization(fields) {
+  return {
+    command: CAPABILITY_MODE_AUTH_COMMAND,
+    state: fields.state,
+    mode: fields.mode,
+    dryRunCapabilityAuthorized: fields.dryRunCapabilityAuthorized === true,
+    executeCapabilityAuthorized: false,
+    hostSideEffectOccurred: false,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.primaryBlocker ? [fields.primaryBlocker] : [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function validateCapabilityRequestSemantics(snapshot) {
+  if (snapshot.mode !== 'dry-run' && snapshot.mode !== 'execute') {
+    return { ok: false, blocker: 'capability-mode-invalid', errorClass: 'validation' };
+  }
+  if (typeof snapshot.capabilityKind !== 'string' || !CAPABILITY_KIND_ALLOWLIST_SET.has(snapshot.capabilityKind)) {
+    return { ok: false, blocker: 'capability-kind-unknown', errorClass: 'validation' };
+  }
+  if (typeof snapshot.actionId !== 'string' || !(snapshot.actionId in CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)) {
+    return { ok: false, blocker: 'capability-action-unmapped', errorClass: 'validation' };
+  }
+  if (typeof snapshot.operation !== 'string' || !ALLOWED_OPERATIONS.has(snapshot.operation)) {
+    return { ok: false, blocker: 'capability-operation-invalid', errorClass: 'validation' };
+  }
+  if (!(snapshot.idempotencyKey === null || typeof snapshot.idempotencyKey === 'string')) {
+    return { ok: false, blocker: 'capability-idempotency-key-invalid', errorClass: 'validation' };
+  }
+  if (!(snapshot.attemptRef === null || typeof snapshot.attemptRef === 'string')) {
+    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
+  }
+  if (!(snapshot.anchorRef === null || typeof snapshot.anchorRef === 'string')) {
+    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
+  }
+
+  // Primary kinds must map-consistently; cross-cutting audit/notify accept any mapped actionId.
+  if (!CAPABILITY_CROSS_CUTTING_KINDS.has(snapshot.capabilityKind)) {
+    const primary = CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP[snapshot.actionId];
+    if (primary !== snapshot.capabilityKind) {
+      return { ok: false, blocker: 'capability-action-unmapped', errorClass: 'validation' };
+    }
+  }
+
+  if (!isDryRunCapabilityRegistryReady()) {
+    return { ok: false, blocker: 'capability-registry-incomplete', errorClass: 'internal' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Authorize mode. Default dry-run path may be ready; execute is hard-denied in V1.31.
+ * Returns plain authorization decision (no handlers).
+ */
+export function authorizeSupervisorLifecycleGuardedRunnerCapabilityMode(request) {
+  try {
+    const snapshot = snapshotCapabilityInvokeRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildCapabilityModeAuthorization({
+        state: 'denied',
+        mode: 'unknown',
+        dryRunCapabilityAuthorized: false,
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+    const validated = validateCapabilityRequestSemantics(snapshot);
+    if (!validated.ok) {
+      return capabilityPublicDeepCopy(buildCapabilityModeAuthorization({
+        state: 'denied',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        dryRunCapabilityAuthorized: false,
+        primaryBlocker: validated.blocker,
+      }));
+    }
+    if (snapshot.mode === 'execute') {
+      // V1.31 单闸: execute never authorized; no real handler path.
+      return capabilityPublicDeepCopy(buildCapabilityModeAuthorization({
+        state: 'denied',
+        mode: 'execute',
+        dryRunCapabilityAuthorized: false,
+        primaryBlocker: 'capability-execute-hard-denied',
+      }));
+    }
+
+    // dry-run authorization formula (spec §4.2)
+    const entry = dryRunCapabilityRegistry.get(snapshot.capabilityKind);
+    const planned = resolveDryRunPlannedAction(
+      snapshot.capabilityKind,
+      snapshot.actionId,
+      snapshot.operation,
+    );
+    const dryRunAuthorized =
+      snapshot.mode === 'dry-run' &&
+      entry &&
+      entry.descriptor.implementationClass === 'dry-run-non-side-effect' &&
+      entry.descriptor.supportsModes.includes('dry-run') &&
+      entry.descriptor.realImplementationReady === false &&
+      planned !== null;
+
+    return capabilityPublicDeepCopy(buildCapabilityModeAuthorization({
+      state: dryRunAuthorized ? 'authorized' : 'denied',
+      mode: 'dry-run',
+      dryRunCapabilityAuthorized: dryRunAuthorized === true,
+      primaryBlocker: dryRunAuthorized ? null : 'capability-action-unmapped',
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildCapabilityModeAuthorization({
+      state: 'denied',
+      mode: 'unknown',
+      dryRunCapabilityAuthorized: false,
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+/**
+ * Invoke dry-run capability only. Execute mode → 单闸 immediate hard-deny receipt.
+ * Never performs host side effects. Never returns functions.
+ * Never dispatches any handler on execute path.
+ */
+export function invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(request) {
+  try {
+    const snapshot = snapshotCapabilityInvokeRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-dry-run-receipt',
+        state: 'denied',
+        mode: 'dry-run',
+        outcomeCode: 'capability-caller-injection-rejected',
+        errorClass: 'authorization',
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+
+    const validated = validateCapabilityRequestSemantics(snapshot);
+    if (!validated.ok) {
+      const isMode = validated.blocker === 'capability-mode-invalid';
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: snapshot.mode === 'execute'
+          ? 'capability-execute-denied-receipt'
+          : 'capability-dry-run-receipt',
+        state: validated.blocker === 'capability-execute-hard-denied' ? 'denied' : (
+          validated.blocker.startsWith('capability-') &&
+          (validated.blocker.includes('denied') || validated.blocker.includes('rejected'))
+            ? 'denied'
+            : 'error'
+        ),
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'dry-run',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: isMode
+          ? 'capability-mode-invalid'
+          : (
+            validated.blocker === 'capability-action-unmapped'
+              ? 'capability-action-unmapped'
+              : (
+                validated.blocker === 'capability-kind-unknown'
+                  ? 'capability-kind-unknown'
+                  : 'capability-dry-run-validation-failed'
+              )
+          ),
+        errorClass: validated.errorClass || 'validation',
+        primaryBlocker: validated.blocker,
+      }));
+    }
+
+    // V1.31 = 单闸 immediate hard-deny + 无 real handler 架构保证
+    // if (mode === 'execute') → denied receipt immediately; 不得调用任何 handler
+    if (snapshot.mode === 'execute') {
+      const missingKey = snapshot.idempotencyKey === null || snapshot.idempotencyKey === '';
+      const primary = missingKey
+        ? 'capability-execute-prerequisites-incomplete'
+        : 'capability-execute-hard-denied';
+      const outcome = missingKey
+        ? 'capability-execute-prerequisites-incomplete'
+        : 'capability-execute-hard-denied';
+      return capabilityPublicDeepCopy(buildCapabilityReceiptBase({
+        receiptKind: 'capability-execute-denied-receipt',
+        state: 'denied',
+        mode: 'execute',
+        capabilityKind: snapshot.capabilityKind,
+        capabilityId: null,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: outcome,
+        errorClass: 'authorization',
+        plannedAction: null,
+        evidenceCode: null,
+        primaryBlocker: primary,
+        blockers: [primary],
+      }));
+    }
+
+    // dry-run path: lookup private handler; dispatch by operation+actionId inside handler
+    const entry = dryRunCapabilityRegistry.get(snapshot.capabilityKind);
+    if (
+      !entry ||
+      entry.descriptor.implementationClass !== 'dry-run-non-side-effect' ||
+      !entry.descriptor.supportsModes.includes('dry-run') ||
+      entry.descriptor.realImplementationReady !== false
+    ) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        state: 'error',
+        mode: 'dry-run',
+        capabilityKind: snapshot.capabilityKind,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-dry-run-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-registry-incomplete',
+      }));
+    }
+
+    const handlerResult = entry.handler(snapshot);
+    if (!handlerResult || handlerResult.ok !== true) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        state: 'error',
+        mode: 'dry-run',
+        capabilityKind: snapshot.capabilityKind,
+        capabilityId: entry.descriptor.capabilityId,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-action-unmapped',
+        errorClass: 'validation',
+        primaryBlocker: handlerResult?.blocker || 'capability-action-unmapped',
+      }));
+    }
+
+    const outcomeCode = snapshot.capabilityKind === 'rollback'
+      ? 'capability-rollback-planned-only'
+      : 'capability-dry-run-completed';
+
+    return capabilityPublicDeepCopy(buildCapabilityReceiptBase({
+      receiptKind: 'capability-dry-run-receipt',
+      state: 'completed',
+      mode: 'dry-run',
+      capabilityKind: snapshot.capabilityKind,
+      capabilityId: handlerResult.capabilityId,
+      actionId: snapshot.actionId,
+      operation: snapshot.operation,
+      outcomeCode,
+      errorClass: null,
+      plannedAction: handlerResult.plannedAction,
+      evidenceCode: CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE,
+      primaryBlocker: null,
+      blockers: [],
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+      state: 'error',
+      mode: 'dry-run',
+      outcomeCode: 'capability-dry-run-validation-failed',
+      errorClass: 'internal',
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+function deriveCapabilityInjectionReady(capabilityInjectionReadiness, capabilityInjectionDecision) {
+  return (
+    capabilityInjectionReadiness?.state === 'ready' &&
+    capabilityInjectionReadiness?.pureCapabilityInjectionReady === true &&
+    capabilityInjectionReadiness?.codeOwnedCapabilityFactoryReady === true &&
+    capabilityInjectionReadiness?.dryRunCapabilityRegistryReady === true &&
+    capabilityInjectionReadiness?.realCapabilityImplementationsReady === false &&
+    capabilityInjectionReadiness?.executeCapabilityRegistryReady === false &&
+    capabilityInjectionDecision?.state === 'resolved' &&
+    capabilityInjectionDecision?.capabilityInjectionReady === true &&
+    capabilityInjectionDecision?.dryRunCapabilityRegistryReady === true &&
+    capabilityInjectionDecision?.executeCapabilityAuthorized === false &&
+    capabilityInjectionDecision?.realCapabilityImplementationsReady === false &&
+    capabilityInjectionDecision?.wouldExecute === false &&
+    capabilityInjectionDecision?.wouldRun === false &&
+    capabilityInjectionDecision?.wouldWrite === false &&
+    capabilityInjectionDecision?.hostSideEffectOccurred === false &&
+    capabilityInjectionDecision?.realRunnerWiringReady === false &&
+    capabilityInjectionDecision?.runnerWiringContractReady === false &&
+    capabilityInjectionDecision?.executionEligible === false
+  );
+}
+
 export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
   plan,
   applyReadiness,
@@ -4445,6 +5439,25 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     wiringPlanSeal?.wouldRun === false &&
     wiringPlanSeal?.wouldWrite === false;
 
+  // Ignore options.capabilityInjectionDecision / options.capabilityReceipt /
+  // options.capabilityInjectionReady / options.handlers / options.capabilities /
+  // any realCapability* override. Production-derived only.
+  const capabilityInjectionReadiness =
+    buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+  const capabilityInjectionDecision =
+    resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(actionCandidates, operation);
+  const capabilityInjectionReady = deriveCapabilityInjectionReady(
+    capabilityInjectionReadiness,
+    capabilityInjectionDecision,
+  );
+  const dryRunCapabilityRegistryReady =
+    capabilityInjectionReadiness?.dryRunCapabilityRegistryReady === true &&
+    capabilityInjectionDecision?.dryRunCapabilityRegistryReady === true;
+
+  // Gate attaches decision + readiness only (invoke remains pure unit-tested).
+  // Optional receipt summary omitted to avoid secretsRedacted vocabulary colliding
+  // with existing full-JSON sensitive-scan tests; pure invokeDryRun covers receipts.
+
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
     operation,
@@ -4466,6 +5479,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     policyDecision,
     wiringPlan,
     wiringPlanSeal,
+    capabilityInjectionDecision,
+    capabilityInjectionReadiness,
     gates: {
       lifecyclePlanValid,
       approvalRecordReady,
@@ -4483,6 +5498,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       attemptAuditReady: attemptAuditReady === true,
       operatorRecoveryReady: operatorRecoveryReady === true,
       pureWiringOrchestratorPlanReady: pureWiringOrchestratorPlanReady === true,
+      capabilityInjectionReady: capabilityInjectionReady === true,
+      dryRunCapabilityRegistryReady: dryRunCapabilityRegistryReady === true,
     },
     safety: executionPreviewSafety(),
   };

@@ -1681,6 +1681,62 @@ function buildSupervisorLifecycleGuardedRunnerWiringPlanSealLines(canonicalWirin
   ];
 }
 
+/**
+ * V1.31 capability injection fixed lines (shall). Dry-run registry ready surface only;
+ * executeReady always false; never elevates realRunnerWiringReady / executionEligible.
+ * Fail-closed fixed lines; never echo raw malicious payload text.
+ */
+function isCanonicalCapabilityInjectionReady(payload) {
+  const decision = payload?.capabilityInjectionDecision || null;
+  const gates = payload?.gates || null;
+  return (
+    gates?.capabilityInjectionReady === true &&
+    gates?.dryRunCapabilityRegistryReady === true &&
+    decision?.state === 'resolved' &&
+    decision?.capabilityInjectionReady === true &&
+    decision?.dryRunCapabilityRegistryReady === true &&
+    decision?.executeCapabilityAuthorized === false &&
+    decision?.realCapabilityImplementationsReady === false &&
+    decision?.realRunnerWiringReady === false &&
+    decision?.runnerWiringContractReady === false &&
+    decision?.executionEligible === false &&
+    decision?.hostSideEffectOccurred === false &&
+    decision?.wouldExecute === false &&
+    decision?.wouldRun === false &&
+    decision?.wouldWrite === false
+  );
+}
+
+function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionLines(canonicalReady = false) {
+  if (canonicalReady === true) {
+    return [
+      'capabilityInjection:state:resolved:dryRunReady:true:executeReady:false:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [
+    'capabilityInjection:state:unresolved:dryRunReady:false:executeReady:false:realRunnerWiringReady:false:blocker:capability-injection-not-ready',
+  ];
+}
+
+function buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload) {
+  const receipt = payload?.capabilityReceipt;
+  if (
+    receipt &&
+    typeof receipt === 'object' &&
+    receipt.receiptKind === 'capability-dry-run-receipt' &&
+    receipt.state === 'completed' &&
+    receipt.hostSideEffectOccurred === false &&
+    receipt.realRunnerWiringReady === false &&
+    receipt.executionEligible === false &&
+    receipt.executeCapabilityAuthorized === false
+  ) {
+    return [
+      'capabilityReceipt:kind:dry-run:state:completed:hostSideEffectOccurred:false:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [];
+}
+
 function buildSupervisorLifecycleGuardedRunnerHostMutationAdapterLines(canonicalHostMutationAdapterReady = false) {
   // Always emit exactly one stable line; never copy payload adapterKind/would*/blocker text.
   if (canonicalHostMutationAdapterReady === true) {
@@ -1929,6 +1985,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'attemptAuditReady:false',
         'operatorRecoveryReady:false',
         'pureWiringOrchestratorPlanReady:false',
+        'capabilityInjectionReady:false',
+        'dryRunCapabilityRegistryReady:false',
+        'executeCapabilityAuthorized:false',
+        'realCapabilityImplementationsReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: 'Guarded runner execution gate 检查失败: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(errorMessage),
@@ -1964,6 +2024,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'attemptAuditReady:false',
         'operatorRecoveryReady:false',
         'pureWiringOrchestratorPlanReady:false',
+        'capabilityInjectionReady:false',
+        'dryRunCapabilityRegistryReady:false',
+        'executeCapabilityAuthorized:false',
+        'realCapabilityImplementationsReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: '点击手动 POST /api/supervisor-lifecycle-guarded-runner-execution-gate 获取 guarded runner execution gate',
@@ -2017,6 +2081,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const wiringPlanSealLines = buildSupervisorLifecycleGuardedRunnerWiringPlanSealLines(
     canonicalWiringPlanSealReady,
   );
+  const canonicalCapabilityInjectionReady = isCanonicalCapabilityInjectionReady(payload) === true;
+  const capabilityInjectionLines = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionLines(
+    canonicalCapabilityInjectionReady,
+  );
+  const capabilityReceiptLines = buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload);
 
   return {
     statusKey: 'blocked',
@@ -2039,6 +2108,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...operatorRecoveryLines,
       ...wiringPlanLines,
       ...wiringPlanSealLines,
+      ...capabilityInjectionLines,
+      ...capabilityReceiptLines,
     ],
     recordLines: [],
     validationLines: [
@@ -2058,6 +2129,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `attemptAuditReady:${canonicalAttemptAuditReady ? 'true' : 'false'}`,
       `operatorRecoveryReady:${canonicalOperatorRecoveryReady ? 'true' : 'false'}`,
       `pureWiringOrchestratorPlanReady:${canonicalPureWiringOrchestratorPlanReady ? 'true' : 'false'}`,
+      `capabilityInjectionReady:${canonicalCapabilityInjectionReady ? 'true' : 'false'}`,
+      `dryRunCapabilityRegistryReady:${gates.dryRunCapabilityRegistryReady === true ? 'true' : 'false'}`,
+      'executeCapabilityAuthorized:false',
+      'realCapabilityImplementationsReady:false',
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
     messageText: 'Guarded runner execution gate completed; execution remains blocked and fail-closed.',

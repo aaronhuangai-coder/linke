@@ -260,6 +260,15 @@ function assertBlockedGate(report, { runnerRegistryReady, hostMutationAdapterRea
   assert.strictEqual(report.gates.attemptAuditReady, attemptAuditReady);
   assert.strictEqual(report.gates.operatorRecoveryReady, operatorRecoveryReady);
   assert.strictEqual(typeof report.gates.pureWiringOrchestratorPlanReady, 'boolean');
+  assert.strictEqual(typeof report.gates.capabilityInjectionReady, 'boolean');
+  assert.strictEqual(typeof report.gates.dryRunCapabilityRegistryReady, 'boolean');
+  assert.ok(report.capabilityInjectionDecision && typeof report.capabilityInjectionDecision === 'object');
+  assert.ok(report.capabilityInjectionDecision.state === 'resolved' || report.capabilityInjectionDecision.state === 'unresolved');
+  assert.strictEqual(report.capabilityInjectionDecision.executeCapabilityAuthorized, false);
+  assert.strictEqual(report.capabilityInjectionDecision.realCapabilityImplementationsReady, false);
+  assert.strictEqual(report.capabilityInjectionDecision.hostSideEffectOccurred, false);
+  assert.strictEqual(report.capabilityInjectionDecision.realRunnerWiringReady, false);
+  assert.strictEqual(report.capabilityInjectionDecision.executionEligible, false);
   assert.strictEqual(report.realRunnerWiringReady, false);
   assert.deepStrictEqual(report.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.ok(report.blockers.includes('real-guarded-runner-execution-wiring-missing'));

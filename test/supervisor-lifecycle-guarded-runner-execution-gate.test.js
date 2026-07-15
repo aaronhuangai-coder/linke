@@ -18,6 +18,10 @@ import {
   buildSupervisorLifecycleGuardedRunnerRealWiringPlan,
   buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal,
   buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness,
+  buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness,
+  resolveSupervisorLifecycleGuardedRunnerCapabilityInjection,
+  authorizeSupervisorLifecycleGuardedRunnerCapabilityMode,
+  invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
   resolveSupervisorLifecycleGuardedRunnerRegistry,
@@ -3287,6 +3291,8 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       attemptAuditReady: true,
       operatorRecoveryReady: true,
       pureWiringOrchestratorPlanReady: false,
+      capabilityInjectionReady: true,
+      dryRunCapabilityRegistryReady: true,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -4740,5 +4746,488 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate V1.30 wiring plan/s
     assert.strictEqual(result.runnerWiringContract.state, 'blocked');
     assert.ok(result.runnerWiringContract.blockers.includes(REAL_WIRING_MISSING));
     assert.deepStrictEqual(result.runnerWiringContract.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+});
+
+
+// ── V1.31 Capability injection + dry-run/execute boundary ─────────────
+const CAPABILITY_KINDS = Object.freeze([
+  'render', 'write', 'reload', 'status', 'rollback', 'audit', 'notify',
+]);
+const CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render',
+  'write-launch-agent-plist': 'write',
+  'load-launch-agent': 'reload',
+  'unload-launch-agent': 'reload',
+  'remove-launch-agent-plist': 'write',
+  'remove-supervisor-metadata': 'write',
+  'capture-current-state': 'status',
+  'restore-previous-plist': 'rollback',
+  'restart-previous-supervisor': 'reload',
+  'start-recovery-supervisor': 'reload',
+});
+const EXPECTED_CAPABILITY_ENTRY = Object.freeze({
+  injectionKind: 'code-owned-capability-injection',
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  dryRunCapabilityRegistryReady: true,
+  executeCapabilityRegistryReady: false,
+  realCapabilityImplementationsReady: false,
+  realRunnerWiringReady: false,
+  wouldExecute: false,
+  wouldRun: false,
+  wouldWrite: false,
+  hostSideEffectOccurred: false,
+  launchctlAllowed: false,
+  filesystemWriteAllowed: false,
+  processListReadAllowed: false,
+  networkAllowed: false,
+  blockerCode: null,
+  evidenceCode: 'capability-injection-ready',
+});
+const CAPABILITY_AUDIT_SEQUENCE = Object.freeze([
+  'authorize', 'mode-check', 'registry-lookup', 'anchor-plan',
+  'invoke', 'receipt', 'audit-plan', 'notify-plan',
+]);
+
+function buildInstallCapabilityCandidates() {
+  return buildGate(getReadyInputs(), { executeRequested: true }).actionCandidates.map((c) => ({ ...c }));
+}
+
+function buildCapabilityRequest(overrides = {}) {
+  return {
+    capabilityKind: 'render',
+    actionId: 'render-launch-agent-plist',
+    operation: 'install',
+    mode: 'dry-run',
+    idempotencyKey: null,
+    attemptRef: null,
+    anchorRef: null,
+    ...overrides,
+  };
+}
+
+function assertCapabilitySideEffectFalse(obj) {
+  assert.strictEqual(obj.realRunnerWiringReady, false);
+  assert.strictEqual(obj.runnerWiringContractReady, false);
+  assert.strictEqual(obj.executionEligible, false);
+  assert.strictEqual(obj.executeCapabilityAuthorized, false);
+  assert.strictEqual(obj.hostSideEffectOccurred, false);
+  assert.strictEqual(obj.wouldExecute, false);
+  assert.strictEqual(obj.wouldRun, false);
+  assert.strictEqual(obj.wouldWrite, false);
+  assert.deepStrictEqual(obj.nextBlockers, [REAL_WIRING_MISSING]);
+}
+
+function assertReceiptBase(receipt) {
+  assert.strictEqual(receipt.command, 'supervisor-lifecycle-guarded-runner-capability-receipt');
+  assert.strictEqual(receipt.sealReady, undefined);
+  assert.notStrictEqual(receipt.command, 'supervisor-lifecycle-guarded-runner-real-wiring-plan-seal');
+  assert.ok(['completed', 'denied', 'error'].includes(receipt.state));
+  assert.notStrictEqual(receipt.state, 'partial');
+  assert.notStrictEqual(receipt.state, 'timeout');
+  assert.notStrictEqual(receipt.state, 'rolled-back');
+  assert.strictEqual(receipt.idempotencyKeyFingerprint, null);
+  assert.strictEqual(receipt.wouldMutateHost, false);
+  assert.strictEqual(receipt.wouldPersistAudit, false);
+  assert.strictEqual(receipt.wouldNotifyExternal, false);
+  assert.strictEqual(receipt.partial, false);
+  assert.strictEqual(receipt.timedOut, false);
+  assert.strictEqual(receipt.rolledBack, false);
+  assert.strictEqual(receipt.realCapabilityImplementationsReady, false);
+  assert.strictEqual(receipt.redaction.secretsRedacted, true);
+  assert.strictEqual(receipt.redaction.pathsRedacted, true);
+  assert.strictEqual(receipt.redaction.hostsRedacted, true);
+  assert.deepStrictEqual(receipt.auditSequence, [...CAPABILITY_AUDIT_SEQUENCE]);
+  assertCapabilitySideEffectFalse(receipt);
+  assert.strictEqual(typeof receipt.handler, 'undefined');
+  assert.strictEqual(typeof receipt.fn, 'undefined');
+  assert.doesNotMatch(JSON.stringify(receipt), /function|launchctl |UNSAFE_SECRET/i);
+}
+
+describe('V1.31 buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness', () => {
+  it('T1: fixed ready readiness is pure capability contract only', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r.command, 'supervisor-lifecycle-guarded-runner-capability-injection-readiness');
+    assert.strictEqual(r.state, 'ready');
+    assert.strictEqual(r.pureCapabilityInjectionReady, true);
+    assert.strictEqual(r.codeOwnedCapabilityFactoryReady, true);
+    assert.strictEqual(r.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(r.executeCapabilityRegistryReady, false);
+    assert.strictEqual(r.realCapabilityImplementationsReady, false);
+    assert.strictEqual(r.realRunnerWiringReady, false);
+    assert.strictEqual(r.executeCapabilityAuthorized, false);
+    assert.strictEqual(r.readyCount, 1);
+    assert.strictEqual(r.blockedCount, 0);
+    assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
+    assert.deepStrictEqual(r.entries, [EXPECTED_CAPABILITY_ENTRY]);
+    assert.deepStrictEqual(r.blockers, []);
+    assert.deepStrictEqual(r.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+    // deep copy isolation
+    r.entries[0].wouldExecute = true;
+    const r2 = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r2.entries[0].wouldExecute, false);
+  });
+});
+
+describe('V1.31 resolveSupervisorLifecycleGuardedRunnerCapabilityInjection', () => {
+  it('T2: install candidates resolve with dry-run mappings only', () => {
+    const d = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(
+      buildInstallCapabilityCandidates(),
+      'install',
+    );
+    assert.strictEqual(d.command, 'supervisor-lifecycle-guarded-runner-capability-injection');
+    assert.strictEqual(d.state, 'resolved');
+    assert.strictEqual(d.capabilityInjectionReady, true);
+    assert.strictEqual(d.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(d.executeCapabilityAuthorized, false);
+    assert.strictEqual(d.realCapabilityImplementationsReady, false);
+    assert.strictEqual(d.realRunnerWiringReady, false);
+    assert.strictEqual(d.runnerWiringContractReady, false);
+    assert.strictEqual(d.executionEligible, false);
+    assert.strictEqual(d.hostSideEffectOccurred, false);
+    assert.strictEqual(d.wouldExecute, false);
+    assert.strictEqual(d.wouldRun, false);
+    assert.strictEqual(d.wouldWrite, false);
+    assert.strictEqual(d.codeOwnedResolverWired, true);
+    assert.strictEqual(d.evidenceCode, 'capability-injection-plan-ready');
+    assert.strictEqual(d.primaryBlocker, null);
+    assert.deepStrictEqual(d.blockers, []);
+    assert.deepStrictEqual(d.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(d.handler, undefined);
+    assert.strictEqual(d.commandString, undefined);
+    assert.ok(Array.isArray(d.mappings) && d.mappings.length === 3);
+    const expectedKinds = ['render', 'write', 'reload'];
+    for (let i = 0; i < d.mappings.length; i++) {
+      const row = d.mappings[i];
+      assert.strictEqual(row.primaryCapabilityKind, expectedKinds[i]);
+      assert.strictEqual(row.implementationClass, 'dry-run-non-side-effect');
+      assert.deepStrictEqual(row.supportsModes, ['dry-run']);
+      assert.strictEqual(row.wouldExecute, false);
+      assert.strictEqual(row.hostSideEffectOccurred, false);
+      assert.strictEqual(row.handler, undefined);
+      assert.strictEqual(row.command, undefined);
+      assert.strictEqual(row.path, undefined);
+      assert.ok(String(row.capabilityId).startsWith('dry-run-'));
+    }
+    // JSON serializable
+    assert.doesNotThrow(() => JSON.stringify(d));
+  });
+
+  it('T3: empty/invalid candidates and operation fail closed', () => {
+    const empty = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection([], 'install');
+    assert.strictEqual(empty.state, 'unresolved');
+    assert.strictEqual(empty.capabilityInjectionReady, false);
+    assert.ok(typeof empty.primaryBlocker === 'string');
+    assertCapabilitySideEffectFalse(empty);
+
+    const badOp = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(
+      buildInstallCapabilityCandidates(),
+      'nope',
+    );
+    assert.strictEqual(badOp.state, 'unresolved');
+    assert.strictEqual(badOp.primaryBlocker, 'capability-operation-invalid');
+    assert.strictEqual(badOp.operation, 'unknown');
+
+    const unknownAction = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection([
+      {
+        actionId: 'not-a-real-action',
+        implementationId: 'x',
+        runnerKind: 'guarded-runner-stub',
+        mode: 'preview-only',
+        status: 'blocked',
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        maxAttempts: 1,
+      },
+    ], 'install');
+    assert.strictEqual(unknownAction.state, 'unresolved');
+    assert.ok(
+      unknownAction.primaryBlocker === 'capability-action-unmapped' ||
+      unknownAction.primaryBlocker === 'capability-injection-input-invalid',
+    );
+  });
+
+  it('T4: prototype pollution / symbol / accessor / extra keys fail closed', () => {
+    const base = buildInstallCapabilityCandidates();
+    const withProto = base.slice();
+    // candidate with __proto__ key rejected via snapshot
+    const poisonedCandidate = {
+      actionId: 'render-launch-agent-plist',
+      implementationId: 'render-plist-impl',
+      runnerKind: 'guarded-runner-stub',
+      mode: 'preview-only',
+      status: 'blocked',
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      maxAttempts: 1,
+    };
+    Object.defineProperty(poisonedCandidate, '__proto__', {
+      value: { polluted: true },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    // extra own key
+    const extra = { ...base[0], extra: true };
+    const d1 = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection([extra, ...base.slice(1)], 'install');
+    assert.strictEqual(d1.state, 'unresolved');
+
+    const withSymbol = {
+      actionId: base[0].actionId,
+      implementationId: base[0].implementationId,
+      runnerKind: base[0].runnerKind,
+      mode: base[0].mode,
+      status: base[0].status,
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      maxAttempts: base[0].maxAttempts,
+    };
+    Object.defineProperty(withSymbol, Symbol('cap-x'), { value: 1, enumerable: true, configurable: true });
+    assert.ok(Reflect.ownKeys(withSymbol).some((k) => typeof k === 'symbol'));
+    const d2 = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection([withSymbol, ...base.slice(1)], 'install');
+    assert.strictEqual(d2.state, 'unresolved', 'symbol key must fail closed');
+
+    const withGetter = {};
+    for (const key of Object.keys(base[0])) {
+      Object.defineProperty(withGetter, key, {
+        enumerable: true,
+        configurable: true,
+        get() { return base[0][key]; },
+      });
+    }
+    const d3 = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection([withGetter, ...base.slice(1)], 'install');
+    assert.strictEqual(d3.state, 'unresolved');
+
+    const proxy = new Proxy(base, {
+      ownKeys() { throw new Error(UNSAFE_SECRET_MATERIAL); },
+    });
+    const d4 = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(proxy, 'install');
+    assert.strictEqual(d4.state, 'unresolved');
+    assert.doesNotMatch(JSON.stringify(d4), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+  });
+});
+
+describe('V1.31 authorize + invokeDryRun capability boundary', () => {
+  it('T5: dry-run authorize + invoke completed for all 7 kinds', () => {
+    const samples = [
+      { capabilityKind: 'render', actionId: 'render-launch-agent-plist', operation: 'install', plannedAction: 'render-plist' },
+      { capabilityKind: 'write', actionId: 'write-launch-agent-plist', operation: 'install', plannedAction: 'write-create-update' },
+      { capabilityKind: 'reload', actionId: 'load-launch-agent', operation: 'install', plannedAction: 'load' },
+      { capabilityKind: 'status', actionId: 'capture-current-state', operation: 'rollback', plannedAction: 'capture-state' },
+      { capabilityKind: 'rollback', actionId: 'restore-previous-plist', operation: 'rollback', plannedAction: 'restore-plist' },
+      { capabilityKind: 'audit', actionId: 'render-launch-agent-plist', operation: 'install', plannedAction: 'audit-plan' },
+      { capabilityKind: 'notify', actionId: 'start-recovery-supervisor', operation: 'recover', plannedAction: 'notify-plan' },
+    ];
+    for (const sample of samples) {
+      const req = buildCapabilityRequest({
+        capabilityKind: sample.capabilityKind,
+        actionId: sample.actionId,
+        operation: sample.operation,
+      });
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityMode(req);
+      assert.strictEqual(auth.executeCapabilityAuthorized, false);
+      assert.strictEqual(auth.hostSideEffectOccurred, false);
+      assert.strictEqual(auth.dryRunCapabilityAuthorized, true);
+      assert.strictEqual(auth.realCapabilityImplementationsReady, false);
+
+      const receipt = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(req);
+      assertReceiptBase(receipt);
+      assert.strictEqual(receipt.receiptKind, 'capability-dry-run-receipt');
+      assert.strictEqual(receipt.state, 'completed');
+      assert.strictEqual(receipt.mode, 'dry-run');
+      assert.strictEqual(receipt.capabilityKind, sample.capabilityKind);
+      assert.strictEqual(receipt.actionId, sample.actionId);
+      assert.strictEqual(receipt.operation, sample.operation);
+      assert.strictEqual(receipt.plannedAction, sample.plannedAction);
+      if (sample.capabilityKind === 'rollback') {
+        assert.strictEqual(receipt.outcomeCode, 'capability-rollback-planned-only');
+      } else {
+        assert.strictEqual(receipt.outcomeCode, 'capability-dry-run-completed');
+      }
+    }
+  });
+
+  it('T6: write/reload actionId dispatch branches are distinct', () => {
+    const writeRc = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      capabilityKind: 'write', actionId: 'write-launch-agent-plist', operation: 'install',
+    }));
+    const removeRc = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      capabilityKind: 'write', actionId: 'remove-launch-agent-plist', operation: 'uninstall',
+    }));
+    const removeMetaRc = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      capabilityKind: 'write', actionId: 'remove-supervisor-metadata', operation: 'uninstall',
+    }));
+    assert.strictEqual(writeRc.state, 'completed');
+    assert.strictEqual(removeRc.state, 'completed');
+    assert.strictEqual(removeMetaRc.state, 'completed');
+    assert.strictEqual(writeRc.plannedAction, 'write-create-update');
+    assert.strictEqual(removeRc.plannedAction, 'remove-delete');
+    assert.strictEqual(removeMetaRc.plannedAction, 'remove-delete');
+    assert.notStrictEqual(writeRc.plannedAction, removeRc.plannedAction);
+
+    const reloadCases = [
+      ['load-launch-agent', 'install', 'load'],
+      ['unload-launch-agent', 'uninstall', 'unload'],
+      ['restart-previous-supervisor', 'rollback', 'restart'],
+      ['start-recovery-supervisor', 'recover', 'start'],
+    ];
+    const planned = new Set();
+    for (const [actionId, operation, expected] of reloadCases) {
+      const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+        capabilityKind: 'reload', actionId, operation,
+      }));
+      assert.strictEqual(rc.state, 'completed');
+      assert.strictEqual(rc.hostSideEffectOccurred, false);
+      assert.strictEqual(rc.plannedAction, expected);
+      planned.add(rc.plannedAction);
+    }
+    assert.strictEqual(planned.size, 4);
+  });
+
+  it('T7: execute is single-gate immediate hard-deny and never dispatches handler', () => {
+    const denied = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      mode: 'execute',
+      idempotencyKey: 'opaque-key-1',
+    }));
+    assertReceiptBase(denied);
+    assert.strictEqual(denied.receiptKind, 'capability-execute-denied-receipt');
+    assert.strictEqual(denied.state, 'denied');
+    assert.strictEqual(denied.mode, 'execute');
+    assert.ok(
+      denied.primaryBlocker === 'capability-execute-hard-denied' ||
+      denied.primaryBlocker === 'capability-execute-prerequisites-incomplete' ||
+      denied.outcomeCode === 'capability-execute-hard-denied' ||
+      denied.outcomeCode === 'capability-execute-prerequisites-incomplete',
+    );
+    assert.strictEqual(denied.executeCapabilityAuthorized, false);
+    assert.strictEqual(denied.plannedAction, null);
+  });
+
+  it('T8: caller injection / invalid mode / kind mismatch fail closed', () => {
+    const poisoned = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'render',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+      mode: 'dry-run',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+      handler: () => {},
+      command: 'launchctl load',
+      path: '/tmp/x',
+    });
+    assert.notStrictEqual(poisoned.state, 'completed');
+    assert.strictEqual(poisoned.hostSideEffectOccurred, false);
+    assert.ok(
+      poisoned.primaryBlocker === 'capability-caller-injection-rejected' ||
+      poisoned.outcomeCode === 'capability-caller-injection-rejected' ||
+      poisoned.primaryBlocker === 'capability-injection-input-invalid',
+    );
+    assert.doesNotMatch(JSON.stringify(poisoned), /launchctl load|\/tmp\/x/);
+
+    const badMode = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      mode: 'explode',
+    }));
+    assert.notStrictEqual(badMode.state, 'completed');
+    assert.ok(
+      badMode.primaryBlocker === 'capability-mode-invalid' ||
+      badMode.outcomeCode === 'capability-mode-invalid',
+    );
+
+    const mismatch = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      capabilityKind: 'write',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+    }));
+    assert.notStrictEqual(mismatch.state, 'completed');
+    assert.ok(
+      mismatch.primaryBlocker === 'capability-action-unmapped' ||
+      mismatch.outcomeCode === 'capability-action-unmapped' ||
+      mismatch.primaryBlocker === 'capability-kind-unknown',
+    );
+
+    const missingKey = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest({
+      mode: 'execute',
+      idempotencyKey: null,
+    }));
+    assert.strictEqual(missingKey.state, 'denied');
+    assert.strictEqual(missingKey.idempotencyKeyFingerprint, null);
+  });
+
+  it('T9: public return deep copy isolation; no function leakage', () => {
+    const receipt = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest());
+    assert.strictEqual(receipt.state, 'completed');
+    receipt.state = 'tampered';
+    receipt.auditSequence.push('evil');
+    const again = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest());
+    assert.strictEqual(again.state, 'completed');
+    assert.deepStrictEqual(again.auditSequence, [...CAPABILITY_AUDIT_SEQUENCE]);
+    assert.doesNotThrow(() => JSON.stringify(again));
+  });
+});
+
+describe('V1.31 buildSupervisorLifecycleGuardedRunnerExecutionGate capability injection', () => {
+  it('T10: production ready path exposes capabilityInjectionReady while wiring still blocked', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(result.gates.capabilityInjectionReady, true);
+    assert.strictEqual(result.gates.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(result.capabilityInjectionDecision.state, 'resolved');
+    assert.strictEqual(result.capabilityInjectionDecision.executeCapabilityAuthorized, false);
+    assert.strictEqual(result.capabilityInjectionDecision.realCapabilityImplementationsReady, false);
+    assert.strictEqual(result.capabilityInjectionDecision.hostSideEffectOccurred, false);
+    assert.strictEqual(result.capabilityInjectionDecision.capabilityInjectionReady, true);
+    // V1.30 surface preserved
+    assert.strictEqual(result.gates.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(result.wiringPlan.mode, 'plan-only');
+    assert.strictEqual(result.wiringPlanSeal.state, 'seal-ready');
+    assert.strictEqual(result.wiringPlanSeal.sealReady, true);
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.strictEqual(result.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.runnerWiringContractReady, false);
+    assert.deepStrictEqual(result.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.ok(result.blockers.includes(REAL_WIRING_MISSING));
+    assert.strictEqual(result.policyDecision.state, 'authorized');
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
+    assert.strictEqual(Object.hasOwn(result.policyDecision, 'capabilityInjectionReady'), false);
+    assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
+    assert.strictEqual(result.anchorDecision.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(result.auditDecision.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(result.recoveryDecision.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
+    assert.strictEqual(result.runnerWiringContract.state, 'blocked');
+    if (result.capabilityReceipt) {
+      assert.strictEqual(result.capabilityReceipt.receiptKind, 'capability-dry-run-receipt');
+      assert.strictEqual(result.capabilityReceipt.hostSideEffectOccurred, false);
+      assert.strictEqual(result.capabilityReceipt.sealReady, undefined);
+    }
+  });
+
+  it('T11: options capability overrides/handlers ignored', () => {
+    const poisoned = buildGate(getReadyInputs(), {
+      executeRequested: true,
+      capabilityInjectionDecision: { state: 'resolved', executeCapabilityAuthorized: true },
+      capabilityReceipt: { state: 'completed', mode: 'execute', hostSideEffectOccurred: true },
+      handlers: { render: () => {} },
+      capabilities: [{ capabilityKind: 'render', handler: () => {} }],
+      realCapabilityImplementationsReady: true,
+      realRunnerWiringReady: true,
+      runnerWiringContractReady: true,
+      executionEligible: true,
+    });
+    assert.strictEqual(poisoned.realRunnerWiringReady, false);
+    assert.strictEqual(poisoned.executionEligible, false);
+    assert.strictEqual(poisoned.gates.runnerWiringContractReady, false);
+    assert.strictEqual(poisoned.capabilityInjectionDecision.executeCapabilityAuthorized, false);
+    assert.strictEqual(poisoned.capabilityInjectionDecision.hostSideEffectOccurred, false);
+    assert.strictEqual(poisoned.gates.capabilityInjectionReady, true);
+    assert.deepStrictEqual(poisoned.nextBlockers, [REAL_WIRING_MISSING]);
   });
 });
