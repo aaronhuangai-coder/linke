@@ -10905,8 +10905,15 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
   });
 
   function fullCanonicalRunnerRegistryReadyPayload(overrides = {}) {
-    // V1.29 full canonical C∧A∧G∧D ready path: six pure contracts ready, policy authorized,
-    // operator-recovery ready — aggregate still blocked on real-guarded-runner-execution-wiring-missing.
+    // V1.30 full canonical ready path: six pure contracts ready + pure wiring plan/seal,
+    // policy authorized — aggregate still blocked on real-guarded-runner-execution-wiring-missing.
+    const {
+      gates: gateOverrides,
+      wiringPlan: wiringPlanOverrides,
+      wiringPlanSeal: wiringPlanSealOverrides,
+      runnerWiringContract: runnerWiringContractOverrides,
+      ...topLevelOverrides
+    } = overrides;
     return {
       command: 'supervisor-lifecycle-guarded-runner-execution-gate',
       state: 'blocked',
@@ -10926,9 +10933,46 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         rollbackAnchorReady: true,
         attemptAuditReady: true,
         operatorRecoveryReady: true,
+        pureWiringOrchestratorPlanReady: true,
         executionEligible: false,
         realRunnerWiringReady: false,
         runnerWiringContractReady: false,
+        ...(gateOverrides || {}),
+      },
+      wiringPlan: {
+        state: 'planned',
+        planReady: true,
+        pureWiringOrchestratorPlanReady: true,
+        mode: 'plan-only',
+        evidenceCode: 'real-wiring-orchestrator-plan-ready',
+        primaryBlocker: null,
+        realRunnerWiringReady: false,
+        runnerWiringContractReady: false,
+        executionEligible: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        launchctlAllowed: false,
+        filesystemWriteAllowed: false,
+        processListReadAllowed: false,
+        networkAllowed: false,
+        ...(wiringPlanOverrides || {}),
+      },
+      wiringPlanSeal: {
+        state: 'seal-ready',
+        sealReady: true,
+        pureWiringOrchestratorPlanReady: true,
+        evidenceCode: 'real-wiring-orchestrator-plan-seal-ready',
+        primaryBlocker: null,
+        realRunnerWiringReady: false,
+        runnerWiringContractReady: false,
+        executionEligible: false,
+        wouldPersistAudit: false,
+        wouldWriteLog: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        ...(wiringPlanSealOverrides || {}),
       },
       actionCandidates: [],
       registryDecision: {
@@ -11145,8 +11189,16 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
             wouldRestoreState: false,
           }],
         },
+        realWiringOrchestratorReadiness: {
+          state: 'ready',
+          pureWiringOrchestratorPlanReady: true,
+          codeOwnedWiringOrchestratorReady: true,
+          realRunnerWiringReady: false,
+          ...(runnerWiringContractOverrides?.realWiringOrchestratorReadiness || {}),
+        },
+        ...(runnerWiringContractOverrides || {}),
       },
-      ...overrides,
+      ...topLevelOverrides,
     };
   }
 
@@ -11199,6 +11251,15 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       text,
       /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
     );
+    // V1.30 shall: wiringPlan / wiringPlanSeal fixed lines (plan-only; not execution receipt)
+    assert.match(
+      text,
+      /^wiringPlan:state:planned:planReady:true:realRunnerWiringReady:false:mode:plan-only:blocker:none$/m,
+    );
+    assert.match(
+      text,
+      /^wiringPlanSeal:state:seal-ready:sealReady:true:realRunnerWiringReady:false:blocker:none$/m,
+    );
     assert.match(text, /real-guarded-runner-execution-wiring-missing/);
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
@@ -11206,6 +11267,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:true'));
+    assert.ok(viewModel.validationLines.includes('pureWiringOrchestratorPlanReady:true'));
     assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
     assert.ok(viewModel.validationLines.includes('runnerWiringContractReady:false'));
     assert.doesNotMatch(text, /primaryBlocker:operator-recovery-not-ready/);
@@ -11220,12 +11282,76 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /wouldRestore:false/);
     assert.match(text, /wouldExecute:false/);
     assert.match(text, /wouldRecover:false/);
-    // requiredFields contains exactly one policyDecision line and one executionSentinel line
+    // requiredFields contains exactly one policyDecision / executionSentinel / wiringPlan / wiringPlanSeal
     const policyLines = viewModel.requiredFields.filter((line) => line.startsWith('policyDecision:'));
     const sentinelLines = viewModel.requiredFields.filter((line) => line.startsWith('executionSentinel:'));
+    const wiringPlanLines = viewModel.requiredFields.filter((line) => line.startsWith('wiringPlan:'));
+    const wiringPlanSealLines = viewModel.requiredFields.filter((line) => line.startsWith('wiringPlanSeal:'));
     assert.strictEqual(policyLines.length, 1);
     assert.strictEqual(sentinelLines.length, 1);
+    assert.strictEqual(wiringPlanLines.length, 1);
+    assert.strictEqual(wiringPlanSealLines.length, 1);
   });
+
+  it('V1.30 W-plan: malicious wiringPlan payload never elevates real wiring or echoes secrets', () => {
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        wiringPlan: {
+          state: 'planned',
+          planReady: true,
+          pureWiringOrchestratorPlanReady: true,
+          mode: 'plan-only',
+          evidenceCode: 'real-wiring-orchestrator-plan-ready',
+          primaryBlocker: null,
+          realRunnerWiringReady: true,
+          runnerWiringContractReady: true,
+          executionEligible: true,
+          wouldExecute: true,
+          wouldRun: true,
+          wouldWrite: true,
+          launchctlAllowed: true,
+          filesystemWriteAllowed: true,
+          processListReadAllowed: true,
+          networkAllowed: true,
+          secret: 'UNSAFE_SECRET_MATERIAL',
+        },
+        wiringPlanSeal: {
+          state: 'seal-ready',
+          sealReady: true,
+          pureWiringOrchestratorPlanReady: true,
+          evidenceCode: 'real-wiring-orchestrator-plan-seal-ready',
+          primaryBlocker: null,
+          realRunnerWiringReady: true,
+          wouldPersistAudit: true,
+          wouldWriteLog: true,
+          secret: 'UNSAFE_SECRET_MATERIAL',
+        },
+        gates: {
+          pureWiringOrchestratorPlanReady: true,
+          realRunnerWiringReady: true,
+          executionEligible: true,
+        },
+      }),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(
+      text,
+      /^wiringPlan:state:unplanned:planReady:false:realRunnerWiringReady:false:mode:plan-only:blocker:real-wiring-plan-not-ready$/m,
+    );
+    assert.match(
+      text,
+      /^wiringPlanSeal:state:seal-blocked:sealReady:false:realRunnerWiringReady:false:blocker:real-wiring-plan-seal-not-ready$/m,
+    );
+    assert.match(
+      text,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+    assert.ok(viewModel.validationLines.includes('pureWiringOrchestratorPlanReady:false'));
+    assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
+    assert.ok(viewModel.validationLines.includes('executionEligible:false'));
+    assert.doesNotMatch(text, /UNSAFE_SECRET_MATERIAL|executionEligible:true|realRunnerWiringReady:true/);
+  });
+
 
   it('policy W2: denied allowlisted primary renders denied + blocked executionSentinel', () => {
     const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(

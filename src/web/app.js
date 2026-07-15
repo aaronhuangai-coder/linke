@@ -1580,7 +1580,7 @@ function buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(runnerWiringC
 }
 
 /**
- * V1.29 方案 A: two independent UI loci.
+ * V1.29/V1.30 方案 A: two independent UI loci.
  * - policyDecision: honest mirror of JSON pure policy (authorized or fail-closed denied)
  * - executionSentinel: always blocked until real guarded runner wiring exists
  * Never render authorized JSON as denied, never map null primary to unknown on authorized path,
@@ -1596,6 +1596,88 @@ function buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload) {
   return [
     policyLine,
     'executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing',
+  ];
+}
+
+/**
+ * V1.30 pure wiring plan/seal lines (shall). Plan-only seal is NOT execution receipt /
+ * NOT persisted audit / NOT side-effect evidence. Never elevates realRunnerWiringReady.
+ * Fail-closed fixed lines; never echo raw malicious payload text.
+ */
+function isCanonicalWiringPlanReady(plan) {
+  return (
+    plan?.state === 'planned' &&
+    plan?.planReady === true &&
+    plan?.pureWiringOrchestratorPlanReady === true &&
+    plan?.mode === 'plan-only' &&
+    plan?.evidenceCode === 'real-wiring-orchestrator-plan-ready' &&
+    plan?.primaryBlocker === null &&
+    plan?.realRunnerWiringReady === false &&
+    plan?.runnerWiringContractReady === false &&
+    plan?.executionEligible === false &&
+    plan?.wouldExecute === false &&
+    plan?.wouldRun === false &&
+    plan?.wouldWrite === false &&
+    plan?.launchctlAllowed === false &&
+    plan?.filesystemWriteAllowed === false &&
+    plan?.processListReadAllowed === false &&
+    plan?.networkAllowed === false
+  );
+}
+
+function isCanonicalWiringPlanSealReady(seal) {
+  return (
+    seal?.state === 'seal-ready' &&
+    seal?.sealReady === true &&
+    seal?.pureWiringOrchestratorPlanReady === true &&
+    seal?.evidenceCode === 'real-wiring-orchestrator-plan-seal-ready' &&
+    seal?.primaryBlocker === null &&
+    seal?.realRunnerWiringReady === false &&
+    seal?.runnerWiringContractReady === false &&
+    seal?.executionEligible === false &&
+    seal?.wouldPersistAudit === false &&
+    seal?.wouldWriteLog === false &&
+    seal?.wouldExecute === false &&
+    seal?.wouldRun === false &&
+    seal?.wouldWrite === false
+  );
+}
+
+function isCanonicalPureWiringOrchestratorPlanReady(payload) {
+  const G = payload?.gates?.pureWiringOrchestratorPlanReady === true;
+  const plan = payload?.wiringPlan || null;
+  const seal = payload?.wiringPlanSeal || null;
+  const readiness = payload?.runnerWiringContract?.realWiringOrchestratorReadiness || null;
+  return (
+    G === true &&
+    readiness?.state === 'ready' &&
+    readiness?.pureWiringOrchestratorPlanReady === true &&
+    readiness?.codeOwnedWiringOrchestratorReady === true &&
+    readiness?.realRunnerWiringReady === false &&
+    isCanonicalWiringPlanReady(plan) &&
+    isCanonicalWiringPlanSealReady(seal)
+  );
+}
+
+function buildSupervisorLifecycleGuardedRunnerWiringPlanLines(canonicalWiringPlanReady = false) {
+  if (canonicalWiringPlanReady === true) {
+    return [
+      'wiringPlan:state:planned:planReady:true:realRunnerWiringReady:false:mode:plan-only:blocker:none',
+    ];
+  }
+  return [
+    'wiringPlan:state:unplanned:planReady:false:realRunnerWiringReady:false:mode:plan-only:blocker:real-wiring-plan-not-ready',
+  ];
+}
+
+function buildSupervisorLifecycleGuardedRunnerWiringPlanSealLines(canonicalWiringPlanSealReady = false) {
+  if (canonicalWiringPlanSealReady === true) {
+    return [
+      'wiringPlanSeal:state:seal-ready:sealReady:true:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [
+    'wiringPlanSeal:state:seal-blocked:sealReady:false:realRunnerWiringReady:false:blocker:real-wiring-plan-seal-not-ready',
   ];
 }
 
@@ -1846,6 +1928,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'rollbackAnchorReady:false',
         'attemptAuditReady:false',
         'operatorRecoveryReady:false',
+        'pureWiringOrchestratorPlanReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: 'Guarded runner execution gate 检查失败: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(errorMessage),
@@ -1880,6 +1963,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'rollbackAnchorReady:false',
         'attemptAuditReady:false',
         'operatorRecoveryReady:false',
+        'pureWiringOrchestratorPlanReady:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: '点击手动 POST /api/supervisor-lifecycle-guarded-runner-execution-gate 获取 guarded runner execution gate',
@@ -1926,6 +2010,13 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(
     canonicalOperatorRecoveryReady,
   );
+  const canonicalWiringPlanReady = isCanonicalWiringPlanReady(payload?.wiringPlan) === true;
+  const canonicalWiringPlanSealReady = isCanonicalWiringPlanSealReady(payload?.wiringPlanSeal) === true;
+  const canonicalPureWiringOrchestratorPlanReady = isCanonicalPureWiringOrchestratorPlanReady(payload) === true;
+  const wiringPlanLines = buildSupervisorLifecycleGuardedRunnerWiringPlanLines(canonicalWiringPlanReady);
+  const wiringPlanSealLines = buildSupervisorLifecycleGuardedRunnerWiringPlanSealLines(
+    canonicalWiringPlanSealReady,
+  );
 
   return {
     statusKey: 'blocked',
@@ -1946,6 +2037,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...rollbackAnchorLines,
       ...attemptAuditLines,
       ...operatorRecoveryLines,
+      ...wiringPlanLines,
+      ...wiringPlanSealLines,
     ],
     recordLines: [],
     validationLines: [
@@ -1964,6 +2057,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `rollbackAnchorReady:${canonicalRollbackAnchorReady ? 'true' : 'false'}`,
       `attemptAuditReady:${canonicalAttemptAuditReady ? 'true' : 'false'}`,
       `operatorRecoveryReady:${canonicalOperatorRecoveryReady ? 'true' : 'false'}`,
+      `pureWiringOrchestratorPlanReady:${canonicalPureWiringOrchestratorPlanReady ? 'true' : 'false'}`,
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
     messageText: 'Guarded runner execution gate completed; execution remains blocked and fail-closed.',

@@ -117,17 +117,23 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
   assert.ok(evidence.includes('realOperatorRecoveryImplementationReady:false'));
   assert.ok(evidence.includes('resolveSupervisorLifecycleGuardedRunnerOperatorRecovery'));
   assert.ok(evidence.includes('operator-recovery-ready'));
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlan'));
+  assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal'));
+  assert.ok(evidence.includes('pureWiringOrchestratorPlanReady'));
+  assert.ok(evidence.includes('wiringPlan.state:planned'));
+  assert.ok(evidence.includes('wiringPlanSeal.state:seal-ready'));
+  assert.ok(evidence.includes('mode:plan-only'));
   assert.ok(evidence.includes('real-guarded-runner-execution-wiring-missing'));
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.29', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.29');
+  it('expects LINKE_RELEASE_VERSION to be V1.30', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.30');
   });
 
-  it('expects report.version to be V1.29', () => {
+  it('expects report.version to be V1.30', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.29');
+    assert.strictEqual(report.version, 'V1.30');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -362,6 +368,16 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.30'));
+    assert.ok(automationItem.nextStep.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlan'));
+    assert.ok(automationItem.nextStep.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal'));
+    assert.ok(automationItem.nextStep.includes('pureWiringOrchestratorPlanReady'));
+    assert.ok(automationItem.nextStep.includes('wiringPlan.state:planned'));
+    assert.ok(automationItem.nextStep.includes('wiringPlanSeal.state:seal-ready'));
+    assert.ok(automationItem.nextStep.includes('mode:plan-only'));
+    assert.ok(automationItem.nextStep.includes('capability injection'));
+    assert.ok(automationItem.nextStep.includes('realRunnerWiringReady:false'));
+    assert.ok(automationItem.nextStep.includes('Gold remains blocked'));
     assert.ok(automationItem.nextStep.includes('V1.29'));
     assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerOperatorRecovery'));
     assert.ok(automationItem.nextStep.includes('real guarded runner'));
@@ -581,6 +597,9 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));
+    assert.ok(hardeningItem.nextStep.includes('V1.30'));
+    assert.ok(hardeningItem.nextStep.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlan'));
+    assert.ok(hardeningItem.nextStep.includes('capability injection'));
     assert.ok(hardeningItem.nextStep.includes('V1.28'));
     assert.ok(hardeningItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerAttemptAudit'));
     assert.ok(hardeningItem.nextStep.includes('operator-recovery'));

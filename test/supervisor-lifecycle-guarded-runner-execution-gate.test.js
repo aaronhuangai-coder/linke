@@ -15,6 +15,9 @@ import {
   buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness,
   buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness,
   buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness,
+  buildSupervisorLifecycleGuardedRunnerRealWiringPlan,
+  buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal,
+  buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
   resolveSupervisorLifecycleGuardedRunnerRegistry,
@@ -149,7 +152,6 @@ const CODE_OWNED_REGISTRY_MAPPINGS = Object.freeze({
   'restart-previous-supervisor': 'restart-supervisor-impl',
   'start-recovery-supervisor': 'recovery-supervisor-impl',
 });
-
 function buildAllTruePolicyContext(operation = 'install') {
   return {
     operation,
@@ -3284,6 +3286,7 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       rollbackAnchorReady: true,
       attemptAuditReady: true,
       operatorRecoveryReady: true,
+      pureWiringOrchestratorPlanReady: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -4256,5 +4259,486 @@ describe('gates.actionCandidatesReady gate integration (empty/valid only)', () =
       areSupervisorLifecycleGuardedRunnerActionCandidatesReady(result.actionCandidates, result.operation),
       false,
     );
+  });
+});
+
+const REAL_WIRING_MISSING = 'real-guarded-runner-execution-wiring-missing';
+const EXPECTED_ORCHESTRATOR_ENTRY = Object.freeze({
+  orchestratorKind: 'code-owned-real-wiring-orchestrator',
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realRunnerWiringReady: false,
+  wouldExecute: false,
+  wouldRun: false,
+  wouldWrite: false,
+  launchctlAllowed: false,
+  filesystemWriteAllowed: false,
+  processListReadAllowed: false,
+  networkAllowed: false,
+  blockerCode: null,
+  evidenceCode: 'real-wiring-orchestrator-plan-ready',
+});
+
+function buildValidWiringPlanInputFromGate(options = { executeRequested: true }) {
+  const result = buildGate(getReadyInputs(), options);
+  return {
+    operation: result.operation,
+    actionCandidates: result.actionCandidates.map((c) => ({ ...c })),
+    policyDecision: { ...result.policyDecision, blockers: [...result.policyDecision.blockers], nextBlockers: [...result.policyDecision.nextBlockers] },
+    registryDecision: { ...result.registryDecision },
+    adapterDecision: { ...result.adapterDecision },
+    anchorDecision: { ...result.anchorDecision },
+    auditDecision: { ...result.auditDecision },
+    recoveryDecision: { ...result.recoveryDecision },
+    lifecyclePlanValid: result.gates.lifecyclePlanValid === true,
+    approvalRecordReady: result.gates.approvalRecordReady === true,
+    manifestReady: result.gates.manifestReady === true,
+    runnerBindingsReady: result.gates.runnerBindingsReady === true,
+    executionPreviewVerified: result.gates.executionPreviewVerified === true,
+    executeRequested: result.gates.executeRequested === true,
+    actionCandidatesReady: result.gates.actionCandidatesReady === true,
+    executionPolicyReady: result.gates.executionPolicyReady === true,
+    runnerRegistryReady: result.gates.runnerRegistryReady === true,
+    hostMutationAdapterReady: result.gates.hostMutationAdapterReady === true,
+    rollbackAnchorReady: result.gates.rollbackAnchorReady === true,
+    attemptAuditReady: result.gates.attemptAuditReady === true,
+    operatorRecoveryReady: result.gates.operatorRecoveryReady === true,
+  };
+}
+
+function assertPlanSideEffectFalse(plan) {
+  assert.strictEqual(plan.realRunnerWiringReady, false);
+  assert.strictEqual(plan.runnerWiringContractReady, false);
+  assert.strictEqual(plan.executionEligible, false);
+  assert.strictEqual(plan.mode, 'plan-only');
+  assert.strictEqual(plan.wouldExecute, false);
+  assert.strictEqual(plan.wouldRun, false);
+  assert.strictEqual(plan.wouldWrite, false);
+  assert.strictEqual(plan.launchctlAllowed, false);
+  assert.strictEqual(plan.filesystemWriteAllowed, false);
+  assert.strictEqual(plan.processListReadAllowed, false);
+  assert.strictEqual(plan.networkAllowed, false);
+  assert.deepStrictEqual(plan.nextBlockers, [REAL_WIRING_MISSING]);
+  assert.deepStrictEqual(plan.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+}
+
+function assertSealSideEffectFalse(seal) {
+  assert.strictEqual(seal.realRunnerWiringReady, false);
+  assert.strictEqual(seal.runnerWiringContractReady, false);
+  assert.strictEqual(seal.executionEligible, false);
+  assert.strictEqual(seal.wouldPersistAudit, false);
+  assert.strictEqual(seal.wouldWriteLog, false);
+  assert.strictEqual(seal.wouldExecute, false);
+  assert.strictEqual(seal.wouldRun, false);
+  assert.strictEqual(seal.wouldWrite, false);
+  assert.deepStrictEqual(seal.nextBlockers, [REAL_WIRING_MISSING]);
+  assert.deepStrictEqual(seal.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+}
+
+describe('buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness', () => {
+  it('T7: fixed ready orchestrator readiness is pure plan fact only', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness();
+    assert.strictEqual(r.command, 'supervisor-lifecycle-guarded-runner-real-wiring-orchestrator-readiness');
+    assert.strictEqual(r.state, 'ready');
+    assert.strictEqual(r.realWiringOrchestratorDefined, true);
+    assert.strictEqual(r.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(r.codeOwnedWiringOrchestratorReady, true);
+    assert.strictEqual(r.realRunnerWiringReady, false);
+    assert.strictEqual(r.readyCount, 1);
+    assert.strictEqual(r.blockedCount, 0);
+    assert.deepStrictEqual(r.blockers, []);
+    assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.deepStrictEqual(r.entries, [EXPECTED_ORCHESTRATOR_ENTRY]);
+    assert.strictEqual(r.entries[0].realRunnerWiringReady, false);
+    assert.strictEqual(r.entries[0].wouldExecute, false);
+    assert.strictEqual(r.entries[0].wouldRun, false);
+    assert.strictEqual(r.entries[0].wouldWrite, false);
+    assert.strictEqual(r.entries[0].launchctlAllowed, false);
+    assert.strictEqual(r.entries[0].filesystemWriteAllowed, false);
+    assert.strictEqual(r.entries[0].processListReadAllowed, false);
+    assert.strictEqual(r.entries[0].networkAllowed, false);
+    assert.strictEqual(r.entries[0].evidenceCode, 'real-wiring-orchestrator-plan-ready');
+    assert.deepStrictEqual(r.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+});
+
+describe('buildSupervisorLifecycleGuardedRunnerRealWiringPlan', () => {
+  it('T1: production-shaped input plans without elevating real wiring', () => {
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(buildValidWiringPlanInputFromGate());
+    assert.strictEqual(plan.command, 'supervisor-lifecycle-guarded-runner-real-wiring-plan');
+    assert.strictEqual(plan.state, 'planned');
+    assert.strictEqual(plan.planReady, true);
+    assert.strictEqual(plan.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(plan.operation, 'install');
+    assert.strictEqual(plan.evidenceCode, 'real-wiring-orchestrator-plan-ready');
+    assert.strictEqual(plan.primaryBlocker, null);
+    assert.deepStrictEqual(plan.blockers, []);
+    assertPlanSideEffectFalse(plan);
+    assert.ok(Array.isArray(plan.steps) && plan.steps.length > 0);
+    for (const step of plan.steps) {
+      assert.strictEqual(step.wouldExecute, false);
+      assert.strictEqual(step.wouldRun, false);
+      assert.strictEqual(step.wouldWrite, false);
+      assert.equal(typeof step.actionId, 'string');
+      assert.equal(typeof step.implementationId, 'string');
+      assert.strictEqual(step.registryRef, 'registry-mapping-ready');
+      assert.strictEqual(step.mutationRef, 'host-mutation-adapter-mutation-ready');
+      assert.strictEqual(step.anchorRef, 'rollback-anchor-plan-ready');
+      assert.strictEqual(step.auditRef, 'attempt-audit-plan-ready');
+      assert.strictEqual(step.recoveryRef, 'operator-recovery-plan-ready');
+      assert.strictEqual(step.command, undefined);
+      assert.strictEqual(step.path, undefined);
+      assert.strictEqual(step.url, undefined);
+    }
+  });
+
+  it('T2a: incomplete structure facts is structure-facts-incomplete', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.executeRequested = false;
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.state, 'unplanned');
+    assert.strictEqual(plan.planReady, false);
+    assert.strictEqual(plan.pureWiringOrchestratorPlanReady, false);
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-structure-facts-incomplete');
+    assert.deepStrictEqual(plan.blockers, ['real-wiring-plan-structure-facts-incomplete']);
+    assert.deepStrictEqual(plan.steps, []);
+    assertPlanSideEffectFalse(plan);
+  });
+
+  it('T2b: empty candidates is candidates-not-ready', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.actionCandidates = [];
+    input.actionCandidatesReady = true;
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.state, 'unplanned');
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-candidates-not-ready');
+  });
+
+  it('T2c: unauthorized policy is policy-not-authorized', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.policyDecision = {
+      ...input.policyDecision,
+      state: 'denied',
+      authorized: false,
+      wouldAuthorizeExecution: false,
+      primaryBlocker: 'execute-request-missing',
+      blockers: ['execute-request-missing'],
+      nextBlockers: ['execute-request-missing'],
+    };
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.state, 'unplanned');
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-policy-not-authorized');
+  });
+
+  it('T2d: unresolved registry is registry-not-resolved', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.registryDecision = {
+      ...input.registryDecision,
+      state: 'unresolved',
+      registryReady: false,
+      primaryBlocker: 'runner-registry-candidates-invalid',
+      blockers: ['runner-registry-candidates-invalid'],
+      nextBlockers: ['runner-registry-candidates-invalid'],
+      mappings: [],
+    };
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-registry-not-resolved');
+  });
+
+  it('T2e: unresolved adapter/anchor/audit/recovery map to corresponding blockers', () => {
+    const cases = [
+      ['adapterDecision', 'adapterReady', 'real-wiring-plan-adapter-not-resolved'],
+      ['anchorDecision', 'anchorReady', 'real-wiring-plan-anchor-not-resolved'],
+      ['auditDecision', 'auditReady', 'real-wiring-plan-audit-not-resolved'],
+      ['recoveryDecision', 'recoveryReady', 'real-wiring-plan-recovery-not-resolved'],
+    ];
+    for (const [key, readyKey, blocker] of cases) {
+      const input = buildValidWiringPlanInputFromGate();
+      input[key] = {
+        ...input[key],
+        state: 'unresolved',
+        [readyKey]: false,
+        primaryBlocker: 'x',
+        blockers: ['x'],
+      };
+      const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+      assert.strictEqual(plan.primaryBlocker, blocker, key);
+    }
+  });
+
+  it('T3: side-effect flag true on decision is side-effect-flag-invalid', () => {
+    const flags = [
+      ['adapterDecision', 'wouldMutateHost'],
+      ['adapterDecision', 'launchctlAllowed'],
+      ['anchorDecision', 'wouldWriteAnchor'],
+      ['auditDecision', 'wouldPersistAudit'],
+      ['recoveryDecision', 'wouldRecover'],
+      ['policyDecision', 'wouldRun'],
+      ['registryDecision', 'wouldExecute'],
+    ];
+    for (const [decisionKey, flag] of flags) {
+      const input = buildValidWiringPlanInputFromGate();
+      input[decisionKey] = { ...input[decisionKey], [flag]: true };
+      const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+      assert.strictEqual(plan.state, 'unplanned', `${decisionKey}.${flag}`);
+      assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-side-effect-flag-invalid', `${decisionKey}.${flag}`);
+    }
+  });
+
+  it('T4a: extra key is input-invalid', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.extra = true;
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-input-invalid');
+  });
+
+  it('T4b: invalid operation is operation-invalid', () => {
+    const input = buildValidWiringPlanInputFromGate();
+    input.operation = 'nope';
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input);
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-operation-invalid');
+    assert.strictEqual(plan.operation, 'unknown');
+  });
+
+  it('T4c: Proxy / getter input is input-invalid without secret leak', () => {
+    const base = buildValidWiringPlanInputFromGate();
+    const trapped = new Proxy(base, {
+      ownKeys() {
+        throw new Error(UNSAFE_SECRET_MATERIAL);
+      },
+    });
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(trapped);
+    assert.strictEqual(plan.primaryBlocker, 'real-wiring-plan-input-invalid');
+    assert.doesNotMatch(JSON.stringify(plan), new RegExp(UNSAFE_SECRET_MATERIAL, 'i'));
+
+    const withGetter = {};
+    for (const key of Object.keys(base)) {
+      Object.defineProperty(withGetter, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return base[key];
+        },
+      });
+    }
+    const getterPlan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(withGetter);
+    assert.strictEqual(getterPlan.primaryBlocker, 'real-wiring-plan-input-invalid');
+  });
+});
+
+describe('buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal', () => {
+  it('T5: planned plan seals as plan-only seal-ready without elevating real wiring', () => {
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(buildValidWiringPlanInputFromGate());
+    const seal = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal(plan);
+    assert.strictEqual(seal.command, 'supervisor-lifecycle-guarded-runner-real-wiring-plan-seal');
+    assert.strictEqual(seal.state, 'seal-ready');
+    assert.strictEqual(seal.sealReady, true);
+    assert.strictEqual(seal.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(seal.evidenceCode, 'real-wiring-orchestrator-plan-seal-ready');
+    assert.strictEqual(seal.primaryBlocker, null);
+    assert.deepStrictEqual(seal.blockers, []);
+    assert.strictEqual(seal.stepCount, plan.steps.length);
+    assertSealSideEffectFalse(seal);
+  });
+
+  it('T6: unplanned plan is seal-blocked', () => {
+    const plan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan({
+      ...buildValidWiringPlanInputFromGate(),
+      executeRequested: false,
+    });
+    assert.strictEqual(plan.state, 'unplanned');
+    const seal = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal(plan);
+    assert.strictEqual(seal.state, 'seal-blocked');
+    assert.strictEqual(seal.sealReady, false);
+    assert.strictEqual(seal.pureWiringOrchestratorPlanReady, false);
+    assert.strictEqual(seal.primaryBlocker, 'real-wiring-plan-seal-plan-invalid');
+    assertSealSideEffectFalse(seal);
+  });
+
+  it('T6b: nextBlockers drift is seal-blocked (exact wiring-missing required)', () => {
+    const planned = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(buildValidWiringPlanInputFromGate());
+    assert.strictEqual(planned.state, 'planned');
+    const cases = [
+      [],
+      ['execute-request-missing'],
+      [REAL_WIRING_MISSING, 'extra-blocker'],
+      [REAL_WIRING_MISSING, REAL_WIRING_MISSING],
+      null,
+      undefined,
+      REAL_WIRING_MISSING,
+    ];
+    for (const nextBlockers of cases) {
+      const seal = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal({
+        ...planned,
+        steps: planned.steps.map((s) => ({ ...s })),
+        blockers: [...planned.blockers],
+        nextBlockers,
+        safety: { ...planned.safety },
+      });
+      assert.strictEqual(seal.state, 'seal-blocked', `nextBlockers=${JSON.stringify(nextBlockers)}`);
+      assert.strictEqual(seal.sealReady, false, `nextBlockers=${JSON.stringify(nextBlockers)}`);
+      assert.strictEqual(seal.primaryBlocker, 'real-wiring-plan-seal-plan-invalid', `nextBlockers=${JSON.stringify(nextBlockers)}`);
+      assertSealSideEffectFalse(seal);
+    }
+    // Honest exact nextBlockers still seals ready.
+    const honest = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal({
+      ...planned,
+      steps: planned.steps.map((s) => ({ ...s })),
+      blockers: [...planned.blockers],
+      nextBlockers: [REAL_WIRING_MISSING],
+      safety: { ...planned.safety },
+    });
+    assert.strictEqual(honest.state, 'seal-ready');
+    assert.strictEqual(honest.sealReady, true);
+  });
+
+  it('T6c: safety drift is seal-blocked (exact executionPreviewSafety schema required)', () => {
+    const planned = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(buildValidWiringPlanInputFromGate());
+    assert.strictEqual(planned.state, 'planned');
+    const baseSafety = { ...planned.safety };
+    const cases = [
+      { ...baseSafety, hostMutation: true },
+      { ...baseSafety, launchctlCalled: true },
+      { ...baseSafety, filesystemWritten: true },
+      { ...baseSafety, processListRead: true },
+      { ...baseSafety, remoteCommandExecuted: true },
+      { ...baseSafety, dryRun: false },
+      { ...baseSafety, readOnly: false },
+      { ...baseSafety, extraFlag: false },
+      (() => {
+        const missing = { ...baseSafety };
+        delete missing.hostMutation;
+        return missing;
+      })(),
+      null,
+      undefined,
+      [],
+      'not-an-object',
+    ];
+    for (let i = 0; i < cases.length; i++) {
+      const safety = cases[i];
+      const seal = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal({
+        ...planned,
+        steps: planned.steps.map((s) => ({ ...s })),
+        blockers: [...planned.blockers],
+        nextBlockers: [REAL_WIRING_MISSING],
+        safety,
+      });
+      assert.strictEqual(seal.state, 'seal-blocked', `safety case #${i}`);
+      assert.strictEqual(seal.sealReady, false, `safety case #${i}`);
+      assert.strictEqual(seal.primaryBlocker, 'real-wiring-plan-seal-plan-invalid', `safety case #${i}`);
+      assertSealSideEffectFalse(seal);
+    }
+    // Honest exact safety still seals ready.
+    const honest = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal({
+      ...planned,
+      steps: planned.steps.map((s) => ({ ...s })),
+      blockers: [...planned.blockers],
+      nextBlockers: [REAL_WIRING_MISSING],
+      safety: { ...baseSafety },
+    });
+    assert.strictEqual(honest.state, 'seal-ready');
+    assert.strictEqual(honest.sealReady, true);
+    assert.deepStrictEqual(honest.safety, EXPECTED_EXECUTION_PREVIEW_SAFETY);
+  });
+});
+
+describe('buildSupervisorLifecycleGuardedRunnerExecutionGate V1.30 wiring plan/seal', () => {
+  it('T8: production ready + executeRequested attaches planned seal and pure plan fact true', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(result.gates.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(result.wiringPlan.state, 'planned');
+    assert.strictEqual(result.wiringPlan.planReady, true);
+    assert.strictEqual(result.wiringPlan.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(result.wiringPlan.mode, 'plan-only');
+    assert.strictEqual(result.wiringPlan.evidenceCode, 'real-wiring-orchestrator-plan-ready');
+    assert.strictEqual(result.wiringPlan.realRunnerWiringReady, false);
+    assert.strictEqual(result.wiringPlan.runnerWiringContractReady, false);
+    assert.strictEqual(result.wiringPlan.executionEligible, false);
+    assert.strictEqual(result.wiringPlan.wouldExecute, false);
+    assert.strictEqual(result.wiringPlan.wouldRun, false);
+    assert.strictEqual(result.wiringPlan.wouldWrite, false);
+    assert.strictEqual(result.wiringPlan.launchctlAllowed, false);
+    assert.strictEqual(result.wiringPlan.filesystemWriteAllowed, false);
+    assert.strictEqual(result.wiringPlan.processListReadAllowed, false);
+    assert.strictEqual(result.wiringPlan.networkAllowed, false);
+    assert.strictEqual(result.wiringPlanSeal.state, 'seal-ready');
+    assert.strictEqual(result.wiringPlanSeal.sealReady, true);
+    assert.strictEqual(result.wiringPlanSeal.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(result.wiringPlanSeal.evidenceCode, 'real-wiring-orchestrator-plan-seal-ready');
+    assert.strictEqual(result.wiringPlanSeal.realRunnerWiringReady, false);
+    assert.strictEqual(result.wiringPlanSeal.runnerWiringContractReady, false);
+    assert.strictEqual(result.wiringPlanSeal.executionEligible, false);
+    assert.strictEqual(result.wiringPlanSeal.wouldPersistAudit, false);
+    assert.strictEqual(result.wiringPlanSeal.wouldWriteLog, false);
+    assert.strictEqual(result.wiringPlanSeal.wouldExecute, false);
+    assert.strictEqual(result.wiringPlanSeal.wouldRun, false);
+    assert.strictEqual(result.wiringPlanSeal.wouldWrite, false);
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.strictEqual(result.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.runnerWiringContractReady, false);
+    assert.deepStrictEqual(result.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.ok(result.blockers.includes(REAL_WIRING_MISSING));
+    assert.strictEqual(result.policyDecision.state, 'authorized');
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
+    assert.strictEqual(Object.hasOwn(result.policyDecision, 'pureWiringOrchestratorPlanReady'), false);
+    assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
+    assert.strictEqual(result.anchorDecision.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(result.auditDecision.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(result.recoveryDecision.realOperatorRecoveryImplementationReady, false);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
+    assert.strictEqual(result.runnerWiringContract.state, 'blocked');
+    assert.strictEqual(result.runnerWiringContract.realRunnerWiringReady, false);
+    assert.ok(result.runnerWiringContract.realWiringOrchestratorReadiness);
+    assert.strictEqual(result.runnerWiringContract.realWiringOrchestratorReadiness.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(result.runnerWiringContract.realWiringOrchestratorReadiness.realRunnerWiringReady, false);
+  });
+
+  it('T9: executeRequested false keeps pure plan fact false and policy execute-request-missing', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: false });
+    assert.strictEqual(result.gates.pureWiringOrchestratorPlanReady, false);
+    assert.strictEqual(result.wiringPlan.state, 'unplanned');
+    assert.strictEqual(result.wiringPlanSeal.state, 'seal-blocked');
+    assert.strictEqual(result.executionEligible, false);
+    assert.ok(
+      result.policyDecision.blockers.includes('execute-request-missing') ||
+      result.policyDecision.primaryBlocker === 'execute-request-missing',
+    );
+    assert.deepStrictEqual(result.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+
+  it('T10: options override for wiringPlan/seal/ready facts is ignored', () => {
+    const poisoned = buildGate(getReadyInputs(), {
+      executeRequested: true,
+      wiringPlan: { state: 'planned', planReady: true, realRunnerWiringReady: true },
+      wiringPlanSeal: { state: 'seal-ready', sealReady: true, realRunnerWiringReady: true },
+      pureWiringOrchestratorPlanReady: true,
+      realRunnerWiringReady: true,
+      runnerWiringContractReady: true,
+      executionEligible: true,
+    });
+    assert.strictEqual(poisoned.realRunnerWiringReady, false);
+    assert.strictEqual(poisoned.executionEligible, false);
+    assert.strictEqual(poisoned.gates.runnerWiringContractReady, false);
+    assert.strictEqual(poisoned.gates.realRunnerWiringReady, false);
+    assert.strictEqual(poisoned.wiringPlan.realRunnerWiringReady, false);
+    assert.strictEqual(poisoned.wiringPlanSeal.realRunnerWiringReady, false);
+    assert.notStrictEqual(poisoned.wiringPlan, poisoned.options?.wiringPlan);
+    assert.deepStrictEqual(poisoned.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(poisoned.gates.pureWiringOrchestratorPlanReady, true);
+    assert.strictEqual(poisoned.wiringPlan.state, 'planned');
+    assert.strictEqual(poisoned.wiringPlanSeal.state, 'seal-ready');
+  });
+
+  it('T11: wiring aggregate remains 6/0 blocked with wiring-missing', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
+    assert.strictEqual(result.runnerWiringContract.state, 'blocked');
+    assert.ok(result.runnerWiringContract.blockers.includes(REAL_WIRING_MISSING));
+    assert.deepStrictEqual(result.runnerWiringContract.nextBlockers, [REAL_WIRING_MISSING]);
   });
 });

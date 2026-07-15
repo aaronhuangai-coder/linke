@@ -3456,6 +3456,627 @@ export function buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness()
   };
 }
 
+const REAL_WIRING_ORCHESTRATOR_PLAN_READY_EVIDENCE = 'real-wiring-orchestrator-plan-ready';
+const REAL_WIRING_ORCHESTRATOR_PLAN_SEAL_READY_EVIDENCE = 'real-wiring-orchestrator-plan-seal-ready';
+const REAL_WIRING_ORCHESTRATOR_KIND = 'code-owned-real-wiring-orchestrator';
+const REAL_WIRING_PLAN_COMMAND = 'supervisor-lifecycle-guarded-runner-real-wiring-plan';
+const REAL_WIRING_PLAN_SEAL_COMMAND = 'supervisor-lifecycle-guarded-runner-real-wiring-plan-seal';
+const REAL_WIRING_ORCHESTRATOR_READINESS_COMMAND = 'supervisor-lifecycle-guarded-runner-real-wiring-orchestrator-readiness';
+const REAL_WIRING_PLAN_STRUCTURE_FACT_KEYS = Object.freeze([
+  'lifecyclePlanValid',
+  'approvalRecordReady',
+  'manifestReady',
+  'runnerBindingsReady',
+  'executionPreviewVerified',
+  'executeRequested',
+  'actionCandidatesReady',
+  'executionPolicyReady',
+  'runnerRegistryReady',
+  'hostMutationAdapterReady',
+  'rollbackAnchorReady',
+  'attemptAuditReady',
+  'operatorRecoveryReady',
+]);
+const REAL_WIRING_PLAN_INPUT_KEYS = Object.freeze([
+  'operation',
+  'actionCandidates',
+  'policyDecision',
+  'registryDecision',
+  'adapterDecision',
+  'anchorDecision',
+  'auditDecision',
+  'recoveryDecision',
+  ...REAL_WIRING_PLAN_STRUCTURE_FACT_KEYS,
+]);
+const REAL_WIRING_PLAN_BLOCKER_CODES = Object.freeze([
+  'real-wiring-plan-input-invalid',
+  'real-wiring-plan-operation-invalid',
+  'real-wiring-plan-candidates-not-ready',
+  'real-wiring-plan-policy-not-authorized',
+  'real-wiring-plan-registry-not-resolved',
+  'real-wiring-plan-adapter-not-resolved',
+  'real-wiring-plan-anchor-not-resolved',
+  'real-wiring-plan-audit-not-resolved',
+  'real-wiring-plan-recovery-not-resolved',
+  'real-wiring-plan-structure-facts-incomplete',
+  'real-wiring-plan-side-effect-flag-invalid',
+  'real-wiring-plan-seal-plan-invalid',
+]);
+const REAL_WIRING_PLAN_BLOCKER_CODE_SET = new Set(REAL_WIRING_PLAN_BLOCKER_CODES);
+const GUARDED_RUNNER_READY_REAL_WIRING_ORCHESTRATOR_ENTRY = Object.freeze({
+  orchestratorKind: REAL_WIRING_ORCHESTRATOR_KIND,
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realRunnerWiringReady: false,
+  wouldExecute: false,
+  wouldRun: false,
+  wouldWrite: false,
+  launchctlAllowed: false,
+  filesystemWriteAllowed: false,
+  processListReadAllowed: false,
+  networkAllowed: false,
+  blockerCode: null,
+  evidenceCode: REAL_WIRING_ORCHESTRATOR_PLAN_READY_EVIDENCE,
+});
+
+function buildRealWiringPlanBase(fields) {
+  return {
+    command: REAL_WIRING_PLAN_COMMAND,
+    state: fields.state,
+    operation: fields.operation,
+    planReady: fields.planReady,
+    pureWiringOrchestratorPlanReady: fields.pureWiringOrchestratorPlanReady,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    mode: 'plan-only',
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    steps: Array.isArray(fields.steps) ? fields.steps.map((step) => ({ ...step })) : [],
+    evidenceCode: fields.evidenceCode,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: [...fields.blockers],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildUnplannedRealWiringPlan(operation, primaryBlocker) {
+  const blocker = REAL_WIRING_PLAN_BLOCKER_CODE_SET.has(primaryBlocker)
+    ? primaryBlocker
+    : 'real-wiring-plan-input-invalid';
+  return buildRealWiringPlanBase({
+    state: 'unplanned',
+    operation,
+    planReady: false,
+    pureWiringOrchestratorPlanReady: false,
+    steps: [],
+    evidenceCode: null,
+    primaryBlocker: blocker,
+    blockers: [blocker],
+  });
+}
+
+function buildPlannedRealWiringPlan(operation, steps) {
+  return buildRealWiringPlanBase({
+    state: 'planned',
+    operation,
+    planReady: true,
+    pureWiringOrchestratorPlanReady: true,
+    steps,
+    evidenceCode: REAL_WIRING_ORCHESTRATOR_PLAN_READY_EVIDENCE,
+    primaryBlocker: null,
+    blockers: [],
+  });
+}
+
+function buildRealWiringPlanSealBase(fields) {
+  return {
+    command: REAL_WIRING_PLAN_SEAL_COMMAND,
+    state: fields.state,
+    sealReady: fields.sealReady,
+    pureWiringOrchestratorPlanReady: fields.pureWiringOrchestratorPlanReady,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    wouldPersistAudit: false,
+    wouldWriteLog: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    stepCount: fields.stepCount,
+    evidenceCode: fields.evidenceCode,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: [...fields.blockers],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildBlockedRealWiringPlanSeal(primaryBlocker = 'real-wiring-plan-seal-plan-invalid') {
+  const blocker = REAL_WIRING_PLAN_BLOCKER_CODE_SET.has(primaryBlocker)
+    ? primaryBlocker
+    : 'real-wiring-plan-seal-plan-invalid';
+  return buildRealWiringPlanSealBase({
+    state: 'seal-blocked',
+    sealReady: false,
+    pureWiringOrchestratorPlanReady: false,
+    stepCount: 0,
+    evidenceCode: null,
+    primaryBlocker: blocker,
+    blockers: [blocker],
+  });
+}
+
+function buildReadyRealWiringPlanSeal(stepCount) {
+  return buildRealWiringPlanSealBase({
+    state: 'seal-ready',
+    sealReady: true,
+    pureWiringOrchestratorPlanReady: true,
+    stepCount,
+    evidenceCode: REAL_WIRING_ORCHESTRATOR_PLAN_SEAL_READY_EVIDENCE,
+    primaryBlocker: null,
+    blockers: [],
+  });
+}
+
+function snapshotExactKeyPlainWiringPlanInput(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null;
+  const proto = Object.getPrototypeOf(input);
+  if (proto !== Object.prototype && proto !== null) return null;
+
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(input);
+  } catch {
+    return null;
+  }
+
+  const expected = new Set(REAL_WIRING_PLAN_INPUT_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (typeof key !== 'string' || !expected.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of REAL_WIRING_PLAN_INPUT_KEYS) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(input, key);
+    } catch {
+      return null;
+    }
+    if (!desc || desc.get !== undefined || desc.set !== undefined || !Object.prototype.hasOwnProperty.call(desc, 'value')) {
+      return null;
+    }
+    snapshot[key] = desc.value;
+  }
+  return snapshot;
+}
+
+function decisionSideEffectFlagsInvalid(decision, flags) {
+  if (!isObject(decision)) return true;
+  for (const flag of flags) {
+    if (decision[flag] !== false) return true;
+  }
+  return false;
+}
+
+/**
+ * Exact gate/plan nextBlockers: single wiring-missing code only.
+ * Malicious empty/extra/wrong codes fail closed at seal boundary.
+ */
+function isExactRealWiringMissingNextBlockers(nextBlockers) {
+  return Array.isArray(nextBlockers)
+    && nextBlockers.length === 1
+    && nextBlockers[0] === REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING;
+}
+
+/**
+ * Exact executionPreviewSafety() schema: known keys only, exact values.
+ * Drift (true flags, missing/extra keys, non-object) fails closed at seal.
+ */
+function isExactExecutionPreviewSafety(safety) {
+  if (!isObject(safety)) return false;
+  const expected = executionPreviewSafety();
+  const expectedKeys = Object.keys(expected);
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(safety);
+  } catch {
+    return false;
+  }
+  if (ownKeys.length !== expectedKeys.length) return false;
+  for (const key of ownKeys) {
+    if (typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(expected, key)) {
+      return false;
+    }
+  }
+  for (const key of expectedKeys) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(safety, key);
+    } catch {
+      return false;
+    }
+    if (!desc || desc.get !== undefined || desc.set !== undefined || !Object.prototype.hasOwnProperty.call(desc, 'value')) {
+      return false;
+    }
+    if (desc.value !== expected[key]) return false;
+  }
+  return true;
+}
+
+function isAuthorizedPolicyDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'authorized') return false;
+  if (decision.authorized !== true) return false;
+  if (decision.wouldAuthorizeExecution !== true) return false;
+  if (decision.primaryBlocker !== null) return false;
+  if (!Array.isArray(decision.blockers) || decision.blockers.length !== 0) return false;
+  return !decisionSideEffectFlagsInvalid(decision, [
+    'wouldRun',
+    'wouldWrite',
+    'allowLifecycleApply',
+    'allowHostMutation',
+    'allowLaunchctl',
+    'allowFilesystemWrite',
+    'allowMetadataWrite',
+    'allowAuditWrite',
+    'allowRollbackAnchorWrite',
+    'allowNasConnection',
+    'allowBackupRestore',
+    'allowRemoteCommand',
+  ]);
+}
+
+function isResolvedRegistryDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'resolved' || decision.registryReady !== true) return false;
+  if (decision.codeOwnedResolverWired !== true) return false;
+  if (decision.realHostRunnerReady !== false) return false;
+  return !decisionSideEffectFlagsInvalid(decision, ['wouldExecute', 'wouldRun', 'wouldWrite']);
+}
+
+function isResolvedAdapterDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'resolved' || decision.adapterReady !== true) return false;
+  if (decision.codeOwnedResolverWired !== true) return false;
+  if (decision.realHostMutationImplementationReady !== false) return false;
+  return !decisionSideEffectFlagsInvalid(decision, [
+    'wouldMutateHost',
+    'wouldExecute',
+    'wouldRun',
+    'wouldWrite',
+    'launchctlAllowed',
+    'filesystemWriteAllowed',
+    'processListReadAllowed',
+    'metadataWriteAllowed',
+    'auditWriteAllowed',
+    'rollbackAnchorWriteAllowed',
+  ]);
+}
+
+function isResolvedAnchorDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'resolved' || decision.anchorReady !== true) return false;
+  if (decision.codeOwnedResolverWired !== true) return false;
+  if (decision.realRollbackAnchorImplementationReady !== false) return false;
+  return !decisionSideEffectFlagsInvalid(decision, [
+    'wouldWriteAnchor',
+    'wouldRestore',
+    'wouldExecute',
+    'wouldRun',
+    'wouldWrite',
+    'filesystemWriteAllowed',
+    'metadataWriteAllowed',
+    'rollbackAnchorWriteAllowed',
+    'rollbackRestoreAllowed',
+  ]);
+}
+
+function isResolvedAuditDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'resolved' || decision.auditReady !== true) return false;
+  if (decision.codeOwnedResolverWired !== true) return false;
+  if (decision.realAttemptAuditImplementationReady !== false) return false;
+  return !decisionSideEffectFlagsInvalid(decision, [
+    'wouldPersistAudit',
+    'wouldWriteLog',
+    'wouldWriteAudit',
+    'wouldExecute',
+    'wouldRun',
+    'wouldWrite',
+    'auditWriteAllowed',
+    'metadataWriteAllowed',
+    'filesystemWriteAllowed',
+    'immutableAuditReady',
+  ]);
+}
+
+function isResolvedRecoveryDecisionForWiringPlan(decision) {
+  if (!isObject(decision)) return false;
+  if (decision.state !== 'resolved' || decision.recoveryReady !== true) return false;
+  if (decision.codeOwnedResolverWired !== true) return false;
+  if (decision.realOperatorRecoveryImplementationReady !== false) return false;
+  return !decisionSideEffectFlagsInvalid(decision, [
+    'wouldRecover',
+    'wouldRetry',
+    'wouldNotifyOperator',
+    'wouldRestartService',
+    'wouldRestoreState',
+    'wouldExecute',
+    'wouldRun',
+    'wouldWrite',
+    'metadataWriteAllowed',
+    'filesystemWriteAllowed',
+    'remoteCommandAllowed',
+    'operatorNotificationAllowed',
+  ]);
+}
+
+function buildWiringPlanStepsFromCandidates(candidates) {
+  const steps = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    const actionId = typeof candidate?.actionId === 'string' ? candidate.actionId : null;
+    const implementationId = typeof candidate?.implementationId === 'string'
+      ? candidate.implementationId
+      : null;
+    if (!actionId || !implementationId) return null;
+    steps.push({
+      actionId,
+      implementationId,
+      registryRef: 'registry-mapping-ready',
+      mutationRef: 'host-mutation-adapter-mutation-ready',
+      anchorRef: 'rollback-anchor-plan-ready',
+      auditRef: 'attempt-audit-plan-ready',
+      recoveryRef: 'operator-recovery-plan-ready',
+      order: i + 1,
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+    });
+  }
+  return steps;
+}
+
+/**
+ * Build a pure, code-owned, fail-closed real guarded-runner wiring plan
+ * from production-derived sanitized decisions and gate structure facts.
+ *
+ * Ready plan means only that the six pure contracts + structure facts
+ * compose into a deterministic orchestrator plan object. It does NOT
+ * schedule/dispatch runners; does NOT call launchctl/shell/fs/process/
+ * network; does NOT set realRunnerWiringReady, runnerWiringContractReady,
+ * executionEligible, any real*ImplementationReady, or any would* / *Allowed
+ * side-effect flags true.
+ *
+ * Returns a deep-copied plain object only — never functions, command
+ * strings, paths, hosts, tokens, hashes, or raw Error objects.
+ *
+ * @param {unknown} input
+ * @returns {object}
+ */
+export function buildSupervisorLifecycleGuardedRunnerRealWiringPlan(input) {
+  try {
+    const snapshot = snapshotExactKeyPlainWiringPlanInput(input);
+    if (!snapshot) {
+      return buildUnplannedRealWiringPlan('unknown', 'real-wiring-plan-input-invalid');
+    }
+
+    const operation = snapshot.operation;
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnplannedRealWiringPlan('unknown', 'real-wiring-plan-operation-invalid');
+    }
+
+    if (!areSupervisorLifecycleGuardedRunnerActionCandidatesReady(snapshot.actionCandidates, operation)) {
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-candidates-not-ready');
+    }
+
+    for (const key of REAL_WIRING_PLAN_STRUCTURE_FACT_KEYS) {
+      if (snapshot[key] !== true) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-structure-facts-incomplete');
+      }
+    }
+
+    // Intentional defense boundary: per-decision explicit side-effect checks stay
+    // duplicated (not abstracted into a shared loop). Each decision's true-flag
+    // list is an independent fail-closed surface so helper drift cannot silently
+    // reclassify side-effect elevation as a softer "not-resolved" blocker.
+    if (!isAuthorizedPolicyDecisionForWiringPlan(snapshot.policyDecision)) {
+      if (decisionSideEffectFlagsInvalid(snapshot.policyDecision, ['wouldRun', 'wouldWrite']) ||
+          (isObject(snapshot.policyDecision) && (
+            snapshot.policyDecision.allowLifecycleApply === true ||
+            snapshot.policyDecision.allowHostMutation === true ||
+            snapshot.policyDecision.allowLaunchctl === true ||
+            snapshot.policyDecision.allowFilesystemWrite === true ||
+            snapshot.policyDecision.allowMetadataWrite === true ||
+            snapshot.policyDecision.allowAuditWrite === true ||
+            snapshot.policyDecision.allowRollbackAnchorWrite === true ||
+            snapshot.policyDecision.allowNasConnection === true ||
+            snapshot.policyDecision.allowBackupRestore === true ||
+            snapshot.policyDecision.allowRemoteCommand === true
+          ))) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-policy-not-authorized');
+    }
+
+    // Intentional defense boundary: registry side-effect / real-ready elevation
+    // checked explicitly (not shared abstraction).
+    if (!isResolvedRegistryDecisionForWiringPlan(snapshot.registryDecision)) {
+      if (decisionSideEffectFlagsInvalid(snapshot.registryDecision, ['wouldExecute', 'wouldRun', 'wouldWrite']) ||
+          (isObject(snapshot.registryDecision) && snapshot.registryDecision.realHostRunnerReady === true)) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-registry-not-resolved');
+    }
+
+    // Intentional defense boundary: adapter side-effect / real-ready elevation
+    // checked explicitly (not shared abstraction).
+    if (!isResolvedAdapterDecisionForWiringPlan(snapshot.adapterDecision)) {
+      if (isObject(snapshot.adapterDecision) && (
+        snapshot.adapterDecision.wouldMutateHost === true ||
+        snapshot.adapterDecision.wouldExecute === true ||
+        snapshot.adapterDecision.wouldRun === true ||
+        snapshot.adapterDecision.wouldWrite === true ||
+        snapshot.adapterDecision.launchctlAllowed === true ||
+        snapshot.adapterDecision.filesystemWriteAllowed === true ||
+        snapshot.adapterDecision.processListReadAllowed === true ||
+        snapshot.adapterDecision.metadataWriteAllowed === true ||
+        snapshot.adapterDecision.auditWriteAllowed === true ||
+        snapshot.adapterDecision.rollbackAnchorWriteAllowed === true ||
+        snapshot.adapterDecision.realHostMutationImplementationReady === true
+      )) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-adapter-not-resolved');
+    }
+
+    // Intentional defense boundary: anchor side-effect / real-ready elevation
+    // checked explicitly (not shared abstraction).
+    if (!isResolvedAnchorDecisionForWiringPlan(snapshot.anchorDecision)) {
+      if (isObject(snapshot.anchorDecision) && (
+        snapshot.anchorDecision.wouldWriteAnchor === true ||
+        snapshot.anchorDecision.wouldRestore === true ||
+        snapshot.anchorDecision.wouldExecute === true ||
+        snapshot.anchorDecision.wouldRun === true ||
+        snapshot.anchorDecision.wouldWrite === true ||
+        snapshot.anchorDecision.filesystemWriteAllowed === true ||
+        snapshot.anchorDecision.metadataWriteAllowed === true ||
+        snapshot.anchorDecision.rollbackAnchorWriteAllowed === true ||
+        snapshot.anchorDecision.rollbackRestoreAllowed === true ||
+        snapshot.anchorDecision.realRollbackAnchorImplementationReady === true
+      )) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-anchor-not-resolved');
+    }
+
+    // Intentional defense boundary: audit side-effect / real-ready elevation
+    // checked explicitly (not shared abstraction).
+    if (!isResolvedAuditDecisionForWiringPlan(snapshot.auditDecision)) {
+      if (isObject(snapshot.auditDecision) && (
+        snapshot.auditDecision.wouldPersistAudit === true ||
+        snapshot.auditDecision.wouldWriteLog === true ||
+        snapshot.auditDecision.wouldWriteAudit === true ||
+        snapshot.auditDecision.wouldExecute === true ||
+        snapshot.auditDecision.wouldRun === true ||
+        snapshot.auditDecision.wouldWrite === true ||
+        snapshot.auditDecision.auditWriteAllowed === true ||
+        snapshot.auditDecision.metadataWriteAllowed === true ||
+        snapshot.auditDecision.filesystemWriteAllowed === true ||
+        snapshot.auditDecision.immutableAuditReady === true ||
+        snapshot.auditDecision.realAttemptAuditImplementationReady === true
+      )) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-audit-not-resolved');
+    }
+
+    // Intentional defense boundary: recovery side-effect / real-ready elevation
+    // checked explicitly (not shared abstraction).
+    if (!isResolvedRecoveryDecisionForWiringPlan(snapshot.recoveryDecision)) {
+      if (isObject(snapshot.recoveryDecision) && (
+        snapshot.recoveryDecision.wouldRecover === true ||
+        snapshot.recoveryDecision.wouldRetry === true ||
+        snapshot.recoveryDecision.wouldNotifyOperator === true ||
+        snapshot.recoveryDecision.wouldRestartService === true ||
+        snapshot.recoveryDecision.wouldRestoreState === true ||
+        snapshot.recoveryDecision.wouldExecute === true ||
+        snapshot.recoveryDecision.wouldRun === true ||
+        snapshot.recoveryDecision.wouldWrite === true ||
+        snapshot.recoveryDecision.metadataWriteAllowed === true ||
+        snapshot.recoveryDecision.filesystemWriteAllowed === true ||
+        snapshot.recoveryDecision.remoteCommandAllowed === true ||
+        snapshot.recoveryDecision.operatorNotificationAllowed === true ||
+        snapshot.recoveryDecision.realOperatorRecoveryImplementationReady === true
+      )) {
+        return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-side-effect-flag-invalid');
+      }
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-recovery-not-resolved');
+    }
+
+    const steps = buildWiringPlanStepsFromCandidates(snapshot.actionCandidates);
+    if (!steps || steps.length < 1) {
+      return buildUnplannedRealWiringPlan(operation, 'real-wiring-plan-candidates-not-ready');
+    }
+    return buildPlannedRealWiringPlan(operation, steps);
+  } catch {
+    return buildUnplannedRealWiringPlan('unknown', 'real-wiring-plan-input-invalid');
+  }
+}
+
+/**
+ * Build a pure, code-owned wiring plan seal for a real-wiring plan.
+ * Plan seal is a deterministic, in-memory, plan-only seal object.
+ * NOT an execution receipt; NOT persisted audit; NOT side-effect evidence.
+ * Does NOT persist audit, write logs, dispatch runners, or imply
+ * realAttemptAuditImplementationReady / realRunnerWiringReady.
+ *
+ * @param {unknown} plan
+ * @returns {object}
+ */
+export function buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal(plan) {
+  try {
+    if (!isObject(plan)) {
+      return buildBlockedRealWiringPlanSeal('real-wiring-plan-seal-plan-invalid');
+    }
+    // Seal validates plan honesty: nextBlockers must stay exact wiring-missing,
+    // and safety must match executionPreviewSafety() exact false-flag schema.
+    // Malicious/drifted nextBlockers or safety → seal-blocked (not seal-ready).
+    if (
+      plan.state !== 'planned' ||
+      plan.planReady !== true ||
+      plan.pureWiringOrchestratorPlanReady !== true ||
+      plan.mode !== 'plan-only' ||
+      plan.evidenceCode !== REAL_WIRING_ORCHESTRATOR_PLAN_READY_EVIDENCE ||
+      plan.primaryBlocker !== null ||
+      plan.realRunnerWiringReady !== false ||
+      plan.runnerWiringContractReady !== false ||
+      plan.executionEligible !== false ||
+      plan.wouldExecute !== false ||
+      plan.wouldRun !== false ||
+      plan.wouldWrite !== false ||
+      plan.launchctlAllowed !== false ||
+      plan.filesystemWriteAllowed !== false ||
+      plan.processListReadAllowed !== false ||
+      plan.networkAllowed !== false ||
+      !Array.isArray(plan.steps) ||
+      !isExactRealWiringMissingNextBlockers(plan.nextBlockers) ||
+      !isExactExecutionPreviewSafety(plan.safety)
+    ) {
+      return buildBlockedRealWiringPlanSeal('real-wiring-plan-seal-plan-invalid');
+    }
+    return buildReadyRealWiringPlanSeal(plan.steps.length);
+  } catch {
+    return buildBlockedRealWiringPlanSeal('real-wiring-plan-seal-plan-invalid');
+  }
+}
+
+export function buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness() {
+  return {
+    command: REAL_WIRING_ORCHESTRATOR_READINESS_COMMAND,
+    state: 'ready',
+    realWiringOrchestratorDefined: true,
+    pureWiringOrchestratorPlanReady: true,
+    codeOwnedWiringOrchestratorReady: true,
+    realRunnerWiringReady: false,
+    readyCount: 1,
+    blockedCount: 0,
+    entries: [{ ...GUARDED_RUNNER_READY_REAL_WIRING_ORCHESTRATOR_ENTRY }],
+    blockers: [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
 export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPreview) {
   const requiredContracts = GUARDED_RUNNER_WIRING_CONTRACTS.map((contract) => ({ ...contract }));
   return {
@@ -3471,6 +4092,7 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     rollbackAnchorReadiness: buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness(),
     attemptAuditReadiness: buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness(),
     operatorRecoveryReadiness: buildSupervisorLifecycleGuardedRunnerOperatorRecoveryReadiness(),
+    realWiringOrchestratorReadiness: buildSupervisorLifecycleGuardedRunnerRealWiringOrchestratorReadiness(),
     blockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     safety: executionPreviewSafety(),
@@ -3759,6 +4381,70 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy(policyContext),
   );
 
+  // Ignore options.wiringPlan / options.wiringPlanSeal / options.pureWiringOrchestratorPlanReady /
+  // options.realRunnerWiringReady / options.runnerWiringContractReady / options.executionEligible.
+  // Build plan input only from production-derived local decisions + structure booleans.
+  const wiringPlanInput = {
+    operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
+    actionCandidates,
+    policyDecision,
+    registryDecision,
+    adapterDecision,
+    anchorDecision,
+    auditDecision,
+    recoveryDecision,
+    lifecyclePlanValid: lifecyclePlanValid === true,
+    approvalRecordReady: approvalRecordReady === true,
+    manifestReady: manifestReady === true,
+    runnerBindingsReady: runnerBindingsReady === true,
+    executionPreviewVerified: executionPreviewVerified === true,
+    executeRequested: executeRequested === true,
+    actionCandidatesReady: actionCandidatesReady === true,
+    executionPolicyReady: executionPolicyReady === true,
+    runnerRegistryReady: runnerRegistryReady === true,
+    hostMutationAdapterReady: hostMutationAdapterReady === true,
+    rollbackAnchorReady: rollbackAnchorReady === true,
+    attemptAuditReady: attemptAuditReady === true,
+    operatorRecoveryReady: operatorRecoveryReady === true,
+  };
+  const wiringPlan = buildSupervisorLifecycleGuardedRunnerRealWiringPlan(wiringPlanInput);
+  const wiringPlanSeal = buildSupervisorLifecycleGuardedRunnerRealWiringPlanSeal(wiringPlan);
+  const orchestratorReadiness = runnerWiringContract.realWiringOrchestratorReadiness;
+  const pureWiringOrchestratorPlanReady =
+    orchestratorReadiness?.state === 'ready' &&
+    orchestratorReadiness?.pureWiringOrchestratorPlanReady === true &&
+    orchestratorReadiness?.codeOwnedWiringOrchestratorReady === true &&
+    orchestratorReadiness?.realRunnerWiringReady === false &&
+    wiringPlan?.state === 'planned' &&
+    wiringPlan?.planReady === true &&
+    wiringPlan?.pureWiringOrchestratorPlanReady === true &&
+    wiringPlan?.mode === 'plan-only' &&
+    wiringPlan?.evidenceCode === REAL_WIRING_ORCHESTRATOR_PLAN_READY_EVIDENCE &&
+    wiringPlan?.primaryBlocker === null &&
+    wiringPlan?.realRunnerWiringReady === false &&
+    wiringPlan?.runnerWiringContractReady === false &&
+    wiringPlan?.executionEligible === false &&
+    wiringPlan?.wouldExecute === false &&
+    wiringPlan?.wouldRun === false &&
+    wiringPlan?.wouldWrite === false &&
+    wiringPlan?.launchctlAllowed === false &&
+    wiringPlan?.filesystemWriteAllowed === false &&
+    wiringPlan?.processListReadAllowed === false &&
+    wiringPlan?.networkAllowed === false &&
+    wiringPlanSeal?.state === 'seal-ready' &&
+    wiringPlanSeal?.sealReady === true &&
+    wiringPlanSeal?.pureWiringOrchestratorPlanReady === true &&
+    wiringPlanSeal?.evidenceCode === REAL_WIRING_ORCHESTRATOR_PLAN_SEAL_READY_EVIDENCE &&
+    wiringPlanSeal?.primaryBlocker === null &&
+    wiringPlanSeal?.realRunnerWiringReady === false &&
+    wiringPlanSeal?.runnerWiringContractReady === false &&
+    wiringPlanSeal?.executionEligible === false &&
+    wiringPlanSeal?.wouldPersistAudit === false &&
+    wiringPlanSeal?.wouldWriteLog === false &&
+    wiringPlanSeal?.wouldExecute === false &&
+    wiringPlanSeal?.wouldRun === false &&
+    wiringPlanSeal?.wouldWrite === false;
+
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
     operation,
@@ -3778,6 +4464,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     auditDecision,
     recoveryDecision,
     policyDecision,
+    wiringPlan,
+    wiringPlanSeal,
     gates: {
       lifecyclePlanValid,
       approvalRecordReady,
@@ -3794,6 +4482,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       rollbackAnchorReady: rollbackAnchorReady === true,
       attemptAuditReady: attemptAuditReady === true,
       operatorRecoveryReady: operatorRecoveryReady === true,
+      pureWiringOrchestratorPlanReady: pureWiringOrchestratorPlanReady === true,
     },
     safety: executionPreviewSafety(),
   };
