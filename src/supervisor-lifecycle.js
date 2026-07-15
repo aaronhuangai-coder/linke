@@ -656,8 +656,6 @@ const HOST_MUTATION_ADAPTER_REAL_IMPLEMENTATION_MISSING = 'host-mutation-adapter
 const ROLLBACK_ANCHOR_REAL_IMPLEMENTATION_MISSING = 'rollback-anchor-real-implementation-missing';
 const DISABLED_HOST_MUTATION_ADAPTER_KIND = 'disabled-host-mutation-adapter-stub';
 const DISABLED_ROLLBACK_ANCHOR_KIND = 'disabled-rollback-anchor-stub';
-const ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING = 'attempt-audit-real-implementation-missing';
-const DISABLED_ATTEMPT_AUDIT_KIND = 'disabled-attempt-audit-stub';
 const OPERATOR_RECOVERY_REAL_IMPLEMENTATION_MISSING = 'operator-recovery-real-implementation-missing';
 const DISABLED_OPERATOR_RECOVERY_KIND = 'disabled-operator-recovery-stub';
 const FAIL_CLOSED_EXECUTION_POLICY_KIND = 'fail-closed-execution-policy';
@@ -747,19 +745,61 @@ const GUARDED_RUNNER_READY_EXECUTION_POLICY_ENTRY = Object.freeze({
   blockerCode: null,
   evidenceCode: EXECUTION_POLICY_READY_EVIDENCE,
 });
-const GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY = Object.freeze({
-  auditKind: DISABLED_ATTEMPT_AUDIT_KIND,
-  state: 'blocked',
-  realImplementationReady: false,
+const ATTEMPT_AUDIT_READY_EVIDENCE = 'attempt-audit-ready';
+const ATTEMPT_AUDIT_PLAN_READY_EVIDENCE = 'attempt-audit-plan-ready';
+const CODE_OWNED_ATTEMPT_AUDIT_KIND = 'code-owned-attempt-audit';
+const ATTEMPT_AUDIT_BLOCKER_CODES = Object.freeze([
+  'attempt-audit-candidates-invalid',
+  'attempt-audit-operation-invalid',
+  'attempt-audit-action-missing',
+  'attempt-audit-action-duplicate',
+  'attempt-audit-action-unknown',
+  'attempt-audit-unsafe-audit',
+]);
+const ATTEMPT_AUDIT_BLOCKER_CODE_SET = new Set(ATTEMPT_AUDIT_BLOCKER_CODES);
+// Identifiers only — pure data plan labels; not audit files, JSONL events, writers, or shell/launchctl argv.
+// plannedAuditSurface is internal metadata only and must never appear in decision output.
+const CODE_OWNED_ACTION_AUDIT_MAP = Object.freeze({
+  'render-launch-agent-plist': 'render-plist-attempt-audit',
+  'write-launch-agent-plist': 'write-plist-attempt-audit',
+  'load-launch-agent': 'load-agent-attempt-audit',
+  'unload-launch-agent': 'unload-agent-attempt-audit',
+  'remove-launch-agent-plist': 'remove-plist-attempt-audit',
+  'remove-supervisor-metadata': 'remove-metadata-attempt-audit',
+  'capture-current-state': 'capture-state-attempt-audit',
+  'restore-previous-plist': 'restore-plist-attempt-audit',
+  'restart-previous-supervisor': 'restart-supervisor-attempt-audit',
+  'start-recovery-supervisor': 'recovery-supervisor-attempt-audit',
+});
+const ATTEMPT_AUDIT_KIND_ALLOWLIST = Object.freeze([
+  'render-plist-attempt-audit',
+  'write-plist-attempt-audit',
+  'load-agent-attempt-audit',
+  'unload-agent-attempt-audit',
+  'remove-plist-attempt-audit',
+  'remove-metadata-attempt-audit',
+  'capture-state-attempt-audit',
+  'restore-plist-attempt-audit',
+  'restart-supervisor-attempt-audit',
+  'recovery-supervisor-attempt-audit',
+]);
+const GUARDED_RUNNER_READY_ATTEMPT_AUDIT_ENTRY = Object.freeze({
+  auditKind: CODE_OWNED_ATTEMPT_AUDIT_KIND,
+  state: 'ready',
+  codeOwnedResolverWired: true,
+  realAttemptAuditImplementationReady: false,
+  wouldPersistAudit: false,
+  wouldWriteLog: false,
   wouldWriteAudit: false,
+  wouldExecute: false,
   wouldRun: false,
   wouldWrite: false,
   auditWriteAllowed: false,
   metadataWriteAllowed: false,
   filesystemWriteAllowed: false,
   immutableAuditReady: false,
-  sensitiveValuesReturned: false,
-  blockerCode: ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING,
+  blockerCode: null,
+  evidenceCode: ATTEMPT_AUDIT_READY_EVIDENCE,
 });
 const GUARDED_RUNNER_DISABLED_OPERATOR_RECOVERY_ENTRY = Object.freeze({
   recoveryKind: DISABLED_OPERATOR_RECOVERY_KIND,
@@ -955,11 +995,11 @@ const GUARDED_RUNNER_WIRING_CONTRACTS = Object.freeze([
   }),
   Object.freeze({
     id: 'attempt-audit',
-    status: 'blocked',
+    status: 'ready',
     requiredForExecution: true,
-    evidence: 'No immutable real execution attempt audit strategy is wired.',
-    evidenceCode: 'attempt-audit-missing',
-    blockerCode: 'attempt-audit-missing',
+    evidence: 'Code-owned fail-closed restricted attempt-audit pure data plan resolver is wired.',
+    evidenceCode: ATTEMPT_AUDIT_READY_EVIDENCE,
+    blockerCode: null,
   }),
   Object.freeze({
     id: 'operator-recovery',
@@ -2801,21 +2841,281 @@ export function buildSupervisorLifecycleGuardedRunnerRollbackAnchorReadiness() {
   };
 }
 
+function buildUnresolvedAttemptAuditDecision(operation, primaryBlocker) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-attempt-audit',
+    operation,
+    state: 'unresolved',
+    auditReady: false,
+    codeOwnedResolverWired: true,
+    realAttemptAuditImplementationReady: false,
+    wouldPersistAudit: false,
+    wouldWriteLog: false,
+    wouldWriteAudit: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    auditWriteAllowed: false,
+    metadataWriteAllowed: false,
+    filesystemWriteAllowed: false,
+    immutableAuditReady: false,
+    resolvedCount: 0,
+    unresolvedCount: 0,
+    audits: [],
+    primaryBlocker,
+    blockers: [primaryBlocker],
+    nextBlockers: [primaryBlocker],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildResolvedAttemptAuditDecision(operation, audits) {
+  return {
+    command: 'supervisor-lifecycle-guarded-runner-attempt-audit',
+    operation,
+    state: 'resolved',
+    auditReady: true,
+    codeOwnedResolverWired: true,
+    realAttemptAuditImplementationReady: false,
+    wouldPersistAudit: false,
+    wouldWriteLog: false,
+    wouldWriteAudit: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    auditWriteAllowed: false,
+    metadataWriteAllowed: false,
+    filesystemWriteAllowed: false,
+    immutableAuditReady: false,
+    resolvedCount: audits.length,
+    unresolvedCount: 0,
+    audits,
+    primaryBlocker: null,
+    blockers: [],
+    nextBlockers: [],
+    sensitiveValuesReturned: false,
+    safety: executionPreviewSafety(),
+  };
+}
+
+export function sanitizeAttemptAuditDecision(decision) {
+  const fallback = () => buildUnresolvedAttemptAuditDecision('unknown', 'attempt-audit-candidates-invalid');
+  if (!isObject(decision)) return fallback();
+  try {
+    const operation = typeof decision.operation === 'string' && ALLOWED_OPERATIONS.has(decision.operation)
+      ? decision.operation
+      : 'unknown';
+    const state = decision.state === 'resolved' ? 'resolved' : 'unresolved';
+    const auditReady = decision.auditReady === true;
+    if ((state === 'resolved') !== auditReady) {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+
+    const rawBlockers = Array.isArray(decision.blockers) ? decision.blockers : [];
+    const blockers = [];
+    for (const code of rawBlockers) {
+      if (typeof code === 'string' && ATTEMPT_AUDIT_BLOCKER_CODE_SET.has(code)) {
+        blockers.push(code);
+      }
+    }
+
+    if (state === 'resolved') {
+      if (blockers.length !== 0 || decision.primaryBlocker !== null) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+      }
+      const audits = Array.isArray(decision.audits)
+        ? decision.audits.map((row) => {
+          const actionId = typeof row?.actionId === 'string' ? row.actionId : 'unknown';
+          // Always code-owned mapping; never passthrough input auditKind on mismatch.
+          const mappedKind = CODE_OWNED_ACTION_AUDIT_MAP[actionId];
+          return {
+            actionId,
+            auditKind: typeof mappedKind === 'string' ? mappedKind : 'unknown',
+            auditReady: true,
+            realAttemptAuditImplementationReady: false,
+            wouldPersistAudit: false,
+            wouldWriteLog: false,
+            wouldWriteAudit: false,
+            wouldExecute: false,
+            wouldRun: false,
+            wouldWrite: false,
+            auditWriteAllowed: false,
+            metadataWriteAllowed: false,
+            filesystemWriteAllowed: false,
+            immutableAuditReady: false,
+            blockerCode: null,
+            evidenceCode: ATTEMPT_AUDIT_PLAN_READY_EVIDENCE,
+          };
+        })
+        : [];
+      return buildResolvedAttemptAuditDecision(operation, audits);
+    }
+
+    const primary = typeof decision.primaryBlocker === 'string' && ATTEMPT_AUDIT_BLOCKER_CODE_SET.has(decision.primaryBlocker)
+      ? decision.primaryBlocker
+      : (blockers[0] || 'attempt-audit-candidates-invalid');
+    return buildUnresolvedAttemptAuditDecision(
+      primary === 'attempt-audit-operation-invalid' ? 'unknown' : operation,
+      primary,
+    );
+  } catch {
+    return fallback();
+  }
+}
+
+/**
+ * Resolve and verify sanitized guarded-runner action candidates against the
+ * code-owned restricted attempt-audit mapping table (pure data plan only).
+ *
+ * Ready resolution means only that every candidate actionId maps to the fixed
+ * restricted auditKind for the given operation. It does NOT persist audit
+ * events, write logs/filesystem/metadata, call appendAuditEvent, execute
+ * launchctl/shell/process/network; does NOT set wouldPersistAudit /
+ * wouldWriteLog / wouldWriteAudit / *Allowed / immutableAuditReady /
+ * wouldExecute/wouldRun/wouldWrite true; does NOT imply
+ * realAttemptAuditImplementationReady, realHostMutationImplementationReady,
+ * realRollbackAnchorImplementationReady, or executionEligible.
+ *
+ * Returns a deep-copied plain decision object only — never functions,
+ * command strings, paths, hosts, tokens, hashes, or raw Error objects.
+ * Invalid input, getters, traps, unsafe mutation flags, or set mismatch →
+ * fail-closed unresolved.
+ *
+ * @param {unknown} candidates
+ * @param {unknown} operation
+ * @returns {object}
+ */
+export function resolveSupervisorLifecycleGuardedRunnerAttemptAudit(candidates, operation) {
+  try {
+    if (typeof operation !== 'string' || !ALLOWED_OPERATIONS.has(operation)) {
+      return buildUnresolvedAttemptAuditDecision('unknown', 'attempt-audit-operation-invalid');
+    }
+
+    if (!Array.isArray(candidates)) {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+
+    let len;
+    try {
+      len = candidates.length;
+    } catch {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+    if (!Number.isInteger(len) || len < 0 || !Number.isFinite(len)) {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+    if (len < 1) {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+
+    const elements = [];
+    try {
+      for (let i = 0; i < len; i++) {
+        elements.push(candidates[i]);
+      }
+    } catch {
+      return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+    }
+
+    const snapshots = [];
+    for (const element of elements) {
+      const snapshot = snapshotPlainCandidate(element);
+      if (!snapshot) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+      }
+      snapshots.push(snapshot);
+    }
+
+    for (const snapshot of snapshots) {
+      if (typeof snapshot.actionId !== 'string' || snapshot.actionId.length < 1) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-candidates-invalid');
+      }
+    }
+
+    // Authority: buildLifecycleActions only — never a second drift-able action list.
+    const expectedIds = buildLifecycleActions(operation).map((action) => action.id);
+    const expectedSet = new Set(expectedIds);
+    const actionIds = snapshots.map((snapshot) => snapshot.actionId);
+
+    const seen = new Set();
+    for (const actionId of actionIds) {
+      if (seen.has(actionId)) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-action-duplicate');
+      }
+      seen.add(actionId);
+    }
+
+    for (const actionId of actionIds) {
+      if (!expectedSet.has(actionId)) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-action-unknown');
+      }
+    }
+
+    for (const expectedId of expectedIds) {
+      if (!seen.has(expectedId)) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-action-missing');
+      }
+    }
+
+    const byActionId = new Map(snapshots.map((snapshot) => [snapshot.actionId, snapshot]));
+    const audits = [];
+    for (const actionId of expectedIds) {
+      const snapshot = byActionId.get(actionId);
+      // intentional layered fail-closed: ignore implementationId / runnerKind / mode / maxAttempts values;
+      // do not read mutationKind / anchorKind / registryDecision / adapterDecision / anchorDecision.
+      if (
+        snapshot.status !== 'blocked' ||
+        snapshot.wouldExecute !== false ||
+        snapshot.wouldRun !== false ||
+        snapshot.wouldWrite !== false
+      ) {
+        return buildUnresolvedAttemptAuditDecision(operation, 'attempt-audit-unsafe-audit');
+      }
+      const auditKind = CODE_OWNED_ACTION_AUDIT_MAP[actionId];
+      audits.push({
+        actionId,
+        auditKind,
+        auditReady: true,
+        realAttemptAuditImplementationReady: false,
+        wouldPersistAudit: false,
+        wouldWriteLog: false,
+        wouldWriteAudit: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        auditWriteAllowed: false,
+        metadataWriteAllowed: false,
+        filesystemWriteAllowed: false,
+        immutableAuditReady: false,
+        blockerCode: null,
+        evidenceCode: ATTEMPT_AUDIT_PLAN_READY_EVIDENCE,
+      });
+    }
+
+    return buildResolvedAttemptAuditDecision(operation, audits);
+  } catch {
+    const op = typeof operation === 'string' && ALLOWED_OPERATIONS.has(operation) ? operation : 'unknown';
+    return buildUnresolvedAttemptAuditDecision(
+      op === 'unknown' ? 'unknown' : op,
+      op === 'unknown' ? 'attempt-audit-operation-invalid' : 'attempt-audit-candidates-invalid',
+    );
+  }
+}
+
 export function buildSupervisorLifecycleGuardedRunnerAttemptAuditReadiness() {
   return {
     command: 'supervisor-lifecycle-guarded-runner-attempt-audit-readiness',
-    state: 'blocked',
+    state: 'ready',
     attemptAuditDefined: true,
-    attemptAuditReady: false,
-    realAttemptAuditReady: false,
-    readyCount: 0,
-    blockedCount: 1,
-    auditEntries: [{ ...GUARDED_RUNNER_DISABLED_ATTEMPT_AUDIT_ENTRY }],
-    blockers: [
-      ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING,
-      REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING,
-    ],
-    nextBlockers: [ATTEMPT_AUDIT_REAL_IMPLEMENTATION_MISSING],
+    attemptAuditReady: true,
+    codeOwnedAuditResolverReady: true,
+    realAttemptAuditImplementationReady: false,
+    readyCount: 1,
+    blockedCount: 0,
+    auditEntries: [{ ...GUARDED_RUNNER_READY_ATTEMPT_AUDIT_ENTRY }],
+    blockers: [],
+    nextBlockers: [],
     safety: executionPreviewSafety(),
   };
 }
@@ -2845,8 +3145,8 @@ export function buildSupervisorLifecycleGuardedRunnerWiringContract(executionPre
     command: 'supervisor-lifecycle-guarded-runner-wiring-contract',
     state: 'blocked',
     realRunnerWiringReady: false,
-    readyCount: 4,
-    blockedCount: 2,
+    readyCount: 5,
+    blockedCount: 1,
     requiredContracts,
     executionPolicyReadiness: buildSupervisorLifecycleGuardedRunnerExecutionPolicyReadiness(),
     runnerRegistryReadiness: buildSupervisorLifecycleGuardedRunnerRegistryReadiness(),
@@ -3001,6 +3301,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     resolveSupervisorLifecycleGuardedRunnerRollbackAnchor(actionCandidates, operation),
   );
 
+  // Ignore options.auditDecision / options.attemptAuditReady / options.auditContext.
+  const auditDecision = sanitizeAttemptAuditDecision(
+    resolveSupervisorLifecycleGuardedRunnerAttemptAudit(actionCandidates, operation),
+  );
+
   const executionPolicyReadiness = runnerWiringContract.executionPolicyReadiness;
   const executionPolicyReady =
     executionPolicyReadiness?.executionPolicyReady === true &&
@@ -3062,10 +3367,32 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     anchorDecision?.rollbackAnchorWriteAllowed === false &&
     anchorDecision?.rollbackRestoreAllowed === false;
 
+  const attemptAuditReadiness = runnerWiringContract.attemptAuditReadiness;
+  const attemptAuditReady =
+    attemptAuditReadiness?.attemptAuditReady === true &&
+    attemptAuditReadiness?.codeOwnedAuditResolverReady === true &&
+    attemptAuditReadiness?.state === 'ready' &&
+    attemptAuditReadiness?.realAttemptAuditImplementationReady === false &&
+    auditDecision?.auditReady === true &&
+    auditDecision?.state === 'resolved' &&
+    auditDecision?.codeOwnedResolverWired === true &&
+    auditDecision?.realAttemptAuditImplementationReady === false &&
+    auditDecision?.wouldPersistAudit === false &&
+    auditDecision?.wouldWriteLog === false &&
+    auditDecision?.wouldWriteAudit === false &&
+    auditDecision?.wouldExecute === false &&
+    auditDecision?.wouldRun === false &&
+    auditDecision?.wouldWrite === false &&
+    auditDecision?.auditWriteAllowed === false &&
+    auditDecision?.metadataWriteAllowed === false &&
+    auditDecision?.filesystemWriteAllowed === false &&
+    auditDecision?.immutableAuditReady === false;
+
   // Production policy context: local primitive booleans only — never request/options objects.
   // Ignore options.registryDecision / options.runnerRegistryReady / options.registryContext.
   // Ignore options.adapterDecision / options.hostMutationAdapterReady / options.adapterContext.
   // Ignore options.anchorDecision / options.rollbackAnchorReady / options.anchorContext.
+  // Ignore options.auditDecision / options.attemptAuditReady / options.auditContext.
   const policyContext = {
     operation: ALLOWED_OPERATIONS.has(operation) ? operation : 'invalid',
     lifecyclePlanValid: lifecyclePlanValid === true,
@@ -3078,7 +3405,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     runnerRegistryReady: runnerRegistryReady === true,
     hostMutationAdapterReady: hostMutationAdapterReady === true,
     rollbackAnchorReady: rollbackAnchorReady === true,
-    attemptAuditReady: false,
+    attemptAuditReady: attemptAuditReady === true,
     operatorRecoveryReady: false,
   };
 
@@ -3102,6 +3429,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     registryDecision,
     adapterDecision,
     anchorDecision,
+    auditDecision,
     policyDecision,
     gates: {
       lifecyclePlanValid,
@@ -3117,7 +3445,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       runnerWiringContractReady: false,
       hostMutationAdapterReady: hostMutationAdapterReady === true,
       rollbackAnchorReady: rollbackAnchorReady === true,
-      attemptAuditReady: false,
+      attemptAuditReady: attemptAuditReady === true,
       operatorRecoveryReady: false,
     },
     safety: executionPreviewSafety(),

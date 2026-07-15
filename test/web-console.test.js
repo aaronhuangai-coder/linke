@@ -10847,7 +10847,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /runnerRegistry:code-owned-runner-registry:state:blocked:codeOwnedResolverWired:true:realHostRunnerReady:false:wouldExecute:false:blocker:runner-registry-not-ready/);
     assert.match(text, /hostMutationAdapter:code-owned-host-mutation-adapter:state:blocked:codeOwnedResolverWired:true:realHostMutationImplementationReady:false:wouldMutateHost:false:blocker:host-mutation-adapter-not-ready/);
     assert.match(text, /rollbackAnchor:code-owned-rollback-anchor:state:blocked:codeOwnedResolverWired:true:realRollbackAnchorImplementationReady:false:wouldWriteAnchor:false:wouldRestore:false:blocker:rollback-anchor-not-ready/);
-    assert.match(text, /attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing/);
+    assert.match(text, /attemptAudit:code-owned-attempt-audit:state:blocked:codeOwnedResolverWired:true:realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:attempt-audit-not-ready/);
     assert.match(text, /operatorRecovery:disabled-operator-recovery-stub:state:blocked:realImplementationReady:false:wouldRecover:false:blocker:operator-recovery-real-implementation-missing/);
     assert.match(text, /executionPolicyReady:true/);
     assert.match(text, /hostMutationAdapterReady:false/);
@@ -10922,7 +10922,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         runnerRegistryReady: true,
         hostMutationAdapterReady: true,
         rollbackAnchorReady: true,
-        attemptAuditReady: false,
+        attemptAuditReady: true,
         operatorRecoveryReady: false,
         executionEligible: false,
       },
@@ -10967,12 +10967,28 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         rollbackAnchorWriteAllowed: false,
         rollbackRestoreAllowed: false,
       },
+      auditDecision: {
+        state: 'resolved',
+        auditReady: true,
+        codeOwnedResolverWired: true,
+        realAttemptAuditImplementationReady: false,
+        wouldPersistAudit: false,
+        wouldWriteLog: false,
+        wouldWriteAudit: false,
+        wouldExecute: false,
+        wouldRun: false,
+        wouldWrite: false,
+        auditWriteAllowed: false,
+        metadataWriteAllowed: false,
+        filesystemWriteAllowed: false,
+        immutableAuditReady: false,
+      },
       policyDecision: {
         state: 'denied',
         authorized: false,
         wouldAuthorizeExecution: false,
-        primaryBlocker: 'attempt-audit-not-ready',
-        blockers: ['attempt-audit-not-ready', 'operator-recovery-not-ready'],
+        primaryBlocker: 'operator-recovery-not-ready',
+        blockers: ['operator-recovery-not-ready'],
       },
       runnerWiringContract: {
         requiredContracts: [
@@ -11006,9 +11022,9 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           },
           {
             id: 'attempt-audit',
-            status: 'blocked',
-            blockerCode: 'attempt-audit-missing',
-            evidenceCode: 'attempt-audit-missing',
+            status: 'ready',
+            blockerCode: null,
+            evidenceCode: 'attempt-audit-ready',
             requiredForExecution: true,
           },
           {
@@ -11069,7 +11085,20 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
           }],
         },
         attemptAuditReadiness: {
-          auditEntries: [{ auditKind: 'disabled-attempt-audit-stub' }],
+          state: 'ready',
+          attemptAuditReady: true,
+          codeOwnedAuditResolverReady: true,
+          realAttemptAuditImplementationReady: false,
+          auditEntries: [{
+            auditKind: 'code-owned-attempt-audit',
+            state: 'ready',
+            codeOwnedResolverWired: true,
+            realAttemptAuditImplementationReady: false,
+            wouldPersistAudit: false,
+            wouldWriteLog: false,
+            wouldWriteAudit: false,
+            immutableAuditReady: false,
+          }],
         },
         operatorRecoveryReadiness: {
           recoveryEntries: [{ recoveryKind: 'disabled-operator-recovery-stub' }],
@@ -11099,11 +11128,17 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       text,
       /rollbackAnchor:code-owned-rollback-anchor:state:ready:codeOwnedResolverWired:true:realRollbackAnchorImplementationReady:false:wouldWriteAnchor:false:wouldRestore:false:blocker:none/,
     );
+    assert.match(text, /wiringContract:attempt-audit:status:ready:requiredForExecution:true:blocker:none/);
+    assert.match(
+      text,
+      /attemptAudit:code-owned-attempt-audit:state:ready:codeOwnedResolverWired:true:realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:none/,
+    );
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
-    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
+    assert.match(text, /primaryBlocker:operator-recovery-not-ready/);
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
     assert.match(text, /realHostRunnerReady:false/);
     assert.match(text, /realHostMutationImplementationReady:false/);
@@ -11112,7 +11147,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.match(text, /wouldWriteAnchor:false/);
     assert.match(text, /wouldRestore:false/);
     assert.match(text, /wouldExecute:false/);
-    assert.match(text, /primaryBlocker:attempt-audit-not-ready/);
+    assert.match(text, /primaryBlocker:operator-recovery-not-ready/);
   });
 
   it('W2: missing adapterDecision blocks host-mutation-adapter wiring/adapter/validation', () => {
@@ -11295,15 +11330,15 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.doesNotMatch(text, /wiringContract:host-mutation-adapter:status:ready/);
   });
 
-  it('W12: trailing two contracts claiming ready remain fixed missing blocked; anchor stays independent', () => {
+  it('W12: final operator-recovery claiming ready remains fixed missing blocked; audit/anchor stay independent', () => {
     const base = fullCanonicalRunnerRegistryReadyPayload();
     const contracts = base.runnerWiringContract.requiredContracts.map((entry) =>
-      ['attempt-audit', 'operator-recovery'].includes(entry.id)
+      entry.id === 'operator-recovery'
         ? {
           ...entry,
           status: 'ready',
           blockerCode: null,
-          evidenceCode: `${entry.id}-ready`,
+          evidenceCode: 'operator-recovery-ready',
         }
         : entry,
     );
@@ -11311,7 +11346,6 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       ...base,
       gates: {
         ...base.gates,
-        attemptAuditReady: true,
         operatorRecoveryReady: true,
       },
       runnerWiringContract: {
@@ -11320,13 +11354,33 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       },
     });
     const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
-    // rollback-anchor remains canonically ready via C∧A∧G∧D; payload cannot force attempt-audit/operator-recovery ready
+    // attempt-audit/rollback-anchor remain canonically ready; payload cannot force operator-recovery ready
     assert.match(text, /wiringContract:rollback-anchor:status:ready:requiredForExecution:true:blocker:none/);
-    assert.match(text, /wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing/);
+    assert.match(text, /wiringContract:attempt-audit:status:ready:requiredForExecution:true:blocker:none/);
     assert.match(text, /wiringContract:operator-recovery:status:blocked:requiredForExecution:true:blocker:operator-recovery-missing/);
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
-    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
+  });
+
+  it('W12d: C/A/G ready + D.wouldPersistAudit true blocks audit wiring/audit/validation', () => {
+    const base = fullCanonicalRunnerRegistryReadyPayload();
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel({
+      ...base,
+      auditDecision: {
+        ...base.auditDecision,
+        wouldPersistAudit: true,
+      },
+    });
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    assert.match(text, /wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing/);
+    assert.match(
+      text,
+      /attemptAudit:code-owned-attempt-audit:state:blocked:codeOwnedResolverWired:true:realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:attempt-audit-not-ready/,
+    );
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.doesNotMatch(text, /wiringContract:attempt-audit:status:ready/);
+    assert.doesNotMatch(text, /attemptAudit:code-owned-attempt-audit:state:ready/);
   });
 
   it('W12b: C/A/G ready + D.wouldWriteAnchor true blocks anchor wiring/anchor/validation', () => {
@@ -11416,7 +11470,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.ok(viewModel.validationLines.includes('rollbackAnchorReady:true'));
-    assert.ok(viewModel.validationLines.includes('attemptAuditReady:false'));
+    assert.ok(viewModel.validationLines.includes('attemptAuditReady:true'));
     assert.ok(viewModel.validationLines.includes('operatorRecoveryReady:false'));
   });
 
@@ -12087,10 +12141,11 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     ].join(' ');
 
     assert.ok(text.includes(
-      'attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:' +
-        'wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing'
+      'attemptAudit:code-owned-attempt-audit:state:blocked:codeOwnedResolverWired:true:' +
+        'realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:attempt-audit-not-ready'
     ));
     assert.match(text, /attemptAuditReady:false/);
+    assert.doesNotMatch(text, /disabled-attempt-audit-stub/);
     assert.ok(!text.includes('/Users/ah'), 'must not expose path in malicious payload');
     assert.ok(!text.includes('SECRET_XYZ'), 'must not expose token in malicious payload');
     assert.ok(!text.includes('launchctl'), 'must not expose launchctl in malicious payload');

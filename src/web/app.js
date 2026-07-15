@@ -1242,12 +1242,13 @@ function sanitizeAllowlistedExecutionPolicyBlocker(value) {
  *   predicate (see isCanonicalHostMutationAdapterReady).
  * - `rollback-anchor` ready only under shared C∧A∧G∧D_anchor canonical
  *   predicate (see isCanonicalRollbackAnchorReady).
- * - Two remaining contracts are always blocked with canonical missing codes;
- *   never trust payload status/blocker/evidence for them.
+ * - `attempt-audit` ready only under shared C∧A∧G∧D_audit canonical
+ *   predicate (see isCanonicalAttemptAuditReady).
+ * - Final operator-recovery contract is always blocked with canonical missing code;
+ *   never trust payload status/blocker/evidence for it.
  * - Unknown / redacted ids stay blocked without leaking payload blocker text.
  */
 const WIRING_CONTRACT_CANONICAL_MISSING_BLOCKERS = Object.freeze({
-  'attempt-audit': 'attempt-audit-missing',
   'operator-recovery': 'operator-recovery-missing',
 });
 
@@ -1378,11 +1379,57 @@ function resolveCanonicalRollbackAnchorReady(payload) {
   return isCanonicalRollbackAnchorReady({ C, A, G, D });
 }
 
+/**
+ * Shared single canonical predicate for attempt-audit wiring line,
+ * audit readiness line, and validationLines.attemptAuditReady.
+ * Ready iff C ∧ A ∧ G ∧ D all hold; any missing/contradictory/side-effect
+ * drift (including wouldPersistAudit / wouldWriteLog / *Allowed true) fails closed.
+ */
+function isCanonicalAttemptAuditReady({ C, A, G, D }) {
+  return (
+    C?.status === 'ready' &&
+    C?.blockerCode === null &&
+    C?.evidenceCode === 'attempt-audit-ready' &&
+    C?.requiredForExecution === true &&
+    A?.state === 'ready' &&
+    A?.attemptAuditReady === true &&
+    A?.codeOwnedAuditResolverReady === true &&
+    A?.realAttemptAuditImplementationReady === false &&
+    G === true &&
+    D?.state === 'resolved' &&
+    D?.auditReady === true &&
+    D?.codeOwnedResolverWired === true &&
+    D?.realAttemptAuditImplementationReady === false &&
+    D?.wouldPersistAudit === false &&
+    D?.wouldWriteLog === false &&
+    D?.wouldWriteAudit === false &&
+    D?.wouldExecute === false &&
+    D?.wouldRun === false &&
+    D?.wouldWrite === false &&
+    D?.auditWriteAllowed === false &&
+    D?.metadataWriteAllowed === false &&
+    D?.filesystemWriteAllowed === false &&
+    D?.immutableAuditReady === false
+  );
+}
+
+function resolveCanonicalAttemptAuditReady(payload) {
+  const requiredContracts = Array.isArray(payload?.runnerWiringContract?.requiredContracts)
+    ? payload.runnerWiringContract.requiredContracts
+    : [];
+  const C = requiredContracts.find((entry) => entry && entry.id === 'attempt-audit') || null;
+  const A = payload?.runnerWiringContract?.attemptAuditReadiness || null;
+  const G = payload?.gates?.attemptAuditReady === true;
+  const D = payload?.auditDecision || null;
+  return isCanonicalAttemptAuditReady({ C, A, G, D });
+}
+
 function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
   runnerWiringContract,
   canonicalRunnerRegistryReady = false,
   canonicalHostMutationAdapterReady = false,
   canonicalRollbackAnchorReady = false,
+  canonicalAttemptAuditReady = false,
 ) {
   const requiredContracts = Array.isArray(runnerWiringContract?.requiredContracts)
     ? runnerWiringContract.requiredContracts
@@ -1426,6 +1473,13 @@ function buildSupervisorLifecycleGuardedRunnerWiringContractLines(
         return 'wiringContract:rollback-anchor:status:ready:requiredForExecution:true:blocker:none';
       }
       return 'wiringContract:rollback-anchor:status:blocked:requiredForExecution:true:blocker:rollback-anchor-missing';
+    }
+
+    if (id === 'attempt-audit') {
+      if (canonicalAttemptAuditReady === true) {
+        return 'wiringContract:attempt-audit:status:ready:requiredForExecution:true:blocker:none';
+      }
+      return 'wiringContract:attempt-audit:status:blocked:requiredForExecution:true:blocker:attempt-audit-missing';
     }
 
     // Unknown / duplicate-unknown / redacted ids: never ready, never leak payload blockers.
@@ -1500,14 +1554,17 @@ function buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(canonicalRollb
   ];
 }
 
-function buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(runnerWiringContract) {
-  const auditEntries = Array.isArray(runnerWiringContract?.attemptAuditReadiness?.auditEntries)
-    ? runnerWiringContract.attemptAuditReadiness.auditEntries
-    : [];
-  if (auditEntries.length < 1) return [];
+function buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(canonicalAttemptAuditReady = false) {
+  // Always emit exactly one stable line; never copy payload auditKind/would*/blocker text.
+  if (canonicalAttemptAuditReady === true) {
+    return [
+      'attemptAudit:code-owned-attempt-audit:state:ready:codeOwnedResolverWired:true:' +
+        'realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:none',
+    ];
+  }
   return [
-    'attemptAudit:disabled-attempt-audit-stub:state:blocked:realImplementationReady:false:' +
-      'wouldWriteAudit:false:blocker:attempt-audit-real-implementation-missing',
+    'attemptAudit:code-owned-attempt-audit:state:blocked:codeOwnedResolverWired:true:' +
+      'realAttemptAuditImplementationReady:false:wouldPersistAudit:false:wouldWriteLog:false:blocker:attempt-audit-not-ready',
   ];
 }
 
@@ -1764,15 +1821,17 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const blockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.blockers);
   const nextBlockers = sanitizeSupervisorLifecycleGuardedRunnerReadinessList(payload.nextBlockers).map((blocker) => `next:${blocker}`);
   const executeRequestedText = gates.executeRequested === true ? ' / executeRequested:true' : '';
-  // Single shared canonical booleans for wiring / registry / adapter / anchor / validation lines.
+  // Single shared canonical booleans for wiring / registry / adapter / anchor / audit / validation lines.
   const canonicalRunnerRegistryReady = resolveCanonicalRunnerRegistryReady(payload) === true;
   const canonicalHostMutationAdapterReady = resolveCanonicalHostMutationAdapterReady(payload) === true;
   const canonicalRollbackAnchorReady = resolveCanonicalRollbackAnchorReady(payload) === true;
+  const canonicalAttemptAuditReady = resolveCanonicalAttemptAuditReady(payload) === true;
   const wiringContractLines = buildSupervisorLifecycleGuardedRunnerWiringContractLines(
     payload.runnerWiringContract,
     canonicalRunnerRegistryReady,
     canonicalHostMutationAdapterReady,
     canonicalRollbackAnchorReady,
+    canonicalAttemptAuditReady,
   );
   const executionPolicyLines = buildSupervisorLifecycleGuardedRunnerExecutionPolicyLines(payload.runnerWiringContract);
   const policyDecisionLines = buildSupervisorLifecycleGuardedRunnerPolicyDecisionLines(payload);
@@ -1783,7 +1842,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const rollbackAnchorLines = buildSupervisorLifecycleGuardedRunnerRollbackAnchorLines(
     canonicalRollbackAnchorReady,
   );
-  const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(payload.runnerWiringContract);
+  const attemptAuditLines = buildSupervisorLifecycleGuardedRunnerAttemptAuditLines(canonicalAttemptAuditReady);
   const operatorRecoveryLines = buildSupervisorLifecycleGuardedRunnerOperatorRecoveryLines(payload.runnerWiringContract);
 
   return {
@@ -1821,7 +1880,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       'executorReady:false',
       `hostMutationAdapterReady:${canonicalHostMutationAdapterReady ? 'true' : 'false'}`,
       `rollbackAnchorReady:${canonicalRollbackAnchorReady ? 'true' : 'false'}`,
-      'attemptAuditReady:false',
+      `attemptAuditReady:${canonicalAttemptAuditReady ? 'true' : 'false'}`,
       'operatorRecoveryReady:false',
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),

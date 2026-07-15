@@ -221,10 +221,11 @@ const EXPECTED_ROLLBACK_ANCHOR_ENTRIES = Object.freeze([
  * 共用 blocked-gate 不变量。gates.runnerRegistryReady / hostMutationAdapterReady 随场景变化，必须显式传入。
  * 不得在此断言 registryDecision/adapterDecision state 或 policyDecision.primaryBlocker。
  */
-function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAdapterReady, rollbackAnchorReady }) {
+function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAdapterReady, rollbackAnchorReady, attemptAuditReady }) {
   assert.strictEqual(typeof runnerRegistryReady, 'boolean');
   assert.strictEqual(typeof hostMutationAdapterReady, 'boolean');
   assert.strictEqual(typeof rollbackAnchorReady, 'boolean');
+  assert.strictEqual(typeof attemptAuditReady, 'boolean');
 
   assert.strictEqual(body.command, 'supervisor-lifecycle-guarded-runner-execution-gate');
   assert.strictEqual(body.operation, 'install');
@@ -239,7 +240,7 @@ function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAda
   assert.strictEqual(body.gates.runnerRegistryReady, runnerRegistryReady);
   assert.strictEqual(body.gates.hostMutationAdapterReady, hostMutationAdapterReady);
   assert.strictEqual(body.gates.rollbackAnchorReady, rollbackAnchorReady);
-  assert.strictEqual(body.gates.attemptAuditReady, false);
+  assert.strictEqual(body.gates.attemptAuditReady, attemptAuditReady);
   assert.strictEqual(body.gates.operatorRecoveryReady, false);
   assert.strictEqual(body.realRunnerWiringReady, false);
   assert.deepStrictEqual(body.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
@@ -247,8 +248,8 @@ function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAda
   assert.strictEqual(body.runnerWiringContract.command, 'supervisor-lifecycle-guarded-runner-wiring-contract');
   assert.strictEqual(body.runnerWiringContract.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.realRunnerWiringReady, false);
-  assert.strictEqual(body.runnerWiringContract.readyCount, 4);
-  assert.strictEqual(body.runnerWiringContract.blockedCount, 2);
+  assert.strictEqual(body.runnerWiringContract.readyCount, 5);
+  assert.strictEqual(body.runnerWiringContract.blockedCount, 1);
   assert.deepStrictEqual(body.runnerWiringContract.nextBlockers, ['real-guarded-runner-execution-wiring-missing']);
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.state, 'ready');
   assert.strictEqual(body.runnerWiringContract.executionPolicyReadiness.executionPolicyReady, true);
@@ -277,7 +278,13 @@ function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAda
   assert.strictEqual(body.runnerWiringContract.requiredContracts[3].status, 'ready');
   assert.strictEqual(body.runnerWiringContract.requiredContracts[3].blockerCode, null);
   assert.strictEqual(body.runnerWiringContract.requiredContracts[3].evidenceCode, 'rollback-anchor-ready');
-  assert.ok(body.runnerWiringContract.requiredContracts.slice(4).every((entry) =>
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[4].id, 'attempt-audit');
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[4].status, 'ready');
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[4].blockerCode, null);
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[4].evidenceCode, 'attempt-audit-ready');
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[5].id, 'operator-recovery');
+  assert.strictEqual(body.runnerWiringContract.requiredContracts[5].status, 'blocked');
+  assert.ok(body.runnerWiringContract.requiredContracts.slice(5).every((entry) =>
     entry.status === 'blocked' && entry.requiredForExecution === true));
   assert.strictEqual(body.policyDecision.state, 'denied');
   assert.strictEqual(body.policyDecision.authorized, false);
@@ -325,11 +332,27 @@ function assertBlockedExecutionGate(body, { runnerRegistryReady, hostMutationAda
   assert.strictEqual(body.anchorDecision.realRollbackAnchorImplementationReady, false);
   assert.strictEqual(body.anchorDecision.wouldWriteAnchor, false);
   assert.strictEqual(body.anchorDecision.wouldRestore, false);
-  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.state, 'blocked');
-  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.attemptAuditReady, false);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.state, 'ready');
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.attemptAuditReady, true);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.codeOwnedAuditResolverReady, true);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.realAttemptAuditImplementationReady, false);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].auditKind, 'code-owned-attempt-audit');
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].state, 'ready');
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].codeOwnedResolverWired, true);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].realAttemptAuditImplementationReady, false);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldPersistAudit, false);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldWriteLog, false);
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldWriteAudit, false);
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldRun, false);
   assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].wouldWrite, false);
+  assert.strictEqual(body.runnerWiringContract.attemptAuditReadiness.auditEntries[0].immutableAuditReady, false);
+  assert.ok(body.auditDecision && typeof body.auditDecision === 'object');
+  assert.strictEqual(body.auditDecision.codeOwnedResolverWired, true);
+  assert.strictEqual(body.auditDecision.realAttemptAuditImplementationReady, false);
+  assert.strictEqual(body.auditDecision.wouldPersistAudit, false);
+  assert.strictEqual(body.auditDecision.wouldWriteLog, false);
+  assert.strictEqual(body.auditDecision.wouldWriteAudit, false);
+  assert.strictEqual(body.auditDecision.immutableAuditReady, false);
   assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.state, 'blocked');
   assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.operatorRecoveryReady, false);
   assert.strictEqual(body.runnerWiringContract.operatorRecoveryReadiness.recoveryEntries[0].wouldRecover, false);
@@ -376,7 +399,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true, attemptAuditReady: true });
         assert.ok(body.blockers.includes('approval-record-gate-not-ready'));
         assert.ok(body.blockers.includes('execute-request-missing'));
         assert.strictEqual(body.gates.approvalRecordReady, false);
@@ -417,7 +440,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true, attemptAuditReady: true });
         assert.ok(!body.blockers.includes('execute-request-missing'));
         assert.deepStrictEqual(body.blockers, ['real-guarded-runner-execution-wiring-missing']);
         assert.strictEqual(body.gates.approvalRecordReady, true);
@@ -432,15 +455,14 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         assert.strictEqual(body.registryDecision.wouldExecute, false);
         assert.strictEqual(body.registryDecision.wouldRun, false);
         assert.strictEqual(body.registryDecision.wouldWrite, false);
-        assert.strictEqual(body.policyDecision.primaryBlocker, 'attempt-audit-not-ready');
+        assert.strictEqual(body.policyDecision.primaryBlocker, 'operator-recovery-not-ready');
         assert.ok(!body.policyDecision.blockers.includes('runner-registry-not-ready'));
         assert.ok(!body.policyDecision.blockers.includes('host-mutation-adapter-not-ready'));
-        for (const code of [
-          'attempt-audit-not-ready',
-          'operator-recovery-not-ready',
-        ]) {
-          assert.ok(body.policyDecision.blockers.includes(code));
-        }
+        assert.ok(!body.policyDecision.blockers.includes('rollback-anchor-not-ready'));
+        assert.ok(!body.policyDecision.blockers.includes('attempt-audit-not-ready'));
+        assert.ok(body.policyDecision.blockers.includes('operator-recovery-not-ready'));
+        assert.strictEqual(body.auditDecision.state, 'resolved');
+        assert.strictEqual(body.auditDecision.auditReady, true);
         assert.strictEqual(body.adapterDecision.state, 'resolved');
         assert.strictEqual(body.adapterDecision.adapterReady, true);
         assert.strictEqual(body.safety.lifecycleApplied, false);
@@ -497,7 +519,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true, attemptAuditReady: true });
         assert.strictEqual(body.policyDecision.authorized, false);
         assert.strictEqual(body.executionEligible, false);
         assert.strictEqual(body.wouldExecute, false);
@@ -521,7 +543,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         }, { Authorization: 'Bearer read-token' });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true, attemptAuditReady: true });
       });
     } finally {
       await rm(dataDir, { recursive: true, force: true });
@@ -539,7 +561,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: false, hostMutationAdapterReady: false, rollbackAnchorReady: false });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: false, hostMutationAdapterReady: false, rollbackAnchorReady: false , attemptAuditReady: false });
         assert.strictEqual(body.gates.runnerBindingsReady, false);
         assert.ok(body.blockers.includes('guarded-runner-readiness-not-ready'));
         assert.strictEqual(body.actionCandidates.length, 0);
@@ -685,7 +707,7 @@ describe('Supervisor lifecycle guarded runner execution gate API', () => {
         });
 
         assert.strictEqual(res.status, 200);
-        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true });
+        assertBlockedExecutionGate(body, { runnerRegistryReady: true, hostMutationAdapterReady: true, rollbackAnchorReady: true, attemptAuditReady: true });
         assert.ok(body.blockers.includes('approval-record-gate-not-ready'));
         assert.strictEqual(body.gates.approvalRecordReady, false);
         assert.strictEqual(body.gates.runnerBindingsReady, true);
