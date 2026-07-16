@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import { resolve, sep } from 'node:path';
+import { constants as fsConstants } from 'node:fs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import { join as pathJoin, resolve, sep } from 'node:path';
+import { types as utilTypes } from 'node:util';
 
 const APPROVAL_MAX_WINDOW_MS = 60 * 60 * 1000;
 const ALLOWED_OPERATIONS = new Set(['install', 'uninstall', 'rollback', 'recover']);
@@ -4147,13 +4151,20 @@ function buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview)
 
 // ── V1.31 Capability injection + dry-run / execute single-gate boundary ─
 // V1.32: first real implementation = render only (real-proof). Execute remains hard-deny.
+// V1.33: second real implementation = status observational metadata (real-proof, async).
 // Execute architecture: 单闸 immediate hard-deny + 不 dispatch real handler（完整公式仍 false）。
 // real = 真实产物非stub，与 host side effect 正交
 // Mode formula:
 //   dry-run: implementationClass=dry-run-non-side-effect, supportsModes=['dry-run']
 //   real render: implementationClass=real-implementation, sideEffectClass=none,
 //                supportsModes=['real-proof'], hostSideEffectOccurred=false always
-//   executeCapabilityAuthorized = FULL multi-fact conjunction → V1.32 STILL always false
+//   real status: implementationClass=real-implementation, sideEffectClass=observational-read,
+//                supportsModes=['real-proof'] (NOT execute)
+//                real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+//                真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
+//                （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
+//                observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
+//   executeCapabilityAuthorized = FULL multi-fact conjunction → V1.33 STILL always false
 
 const CAPABILITY_KIND_ALLOWLIST = Object.freeze([
   'render', 'write', 'reload', 'status', 'rollback', 'audit', 'notify',
@@ -4192,6 +4203,33 @@ const CAPABILITY_REAL_RENDER_PROOF_REQUEST_KEYS = Object.freeze([
   'renderInput',
 ]);
 const CAPABILITY_RENDER_INPUT_KEYS = Object.freeze(['label', 'scheduleSeconds', 'programToken']);
+// V1.33 real-status proof request: nested statusInput snapshotted independently.
+const CAPABILITY_REAL_STATUS_PROOF_REQUEST_KEYS = Object.freeze([
+  'capabilityKind',
+  'actionId',
+  'operation',
+  'mode',
+  'idempotencyKey',
+  'attemptRef',
+  'anchorRef',
+  'statusInput',
+]);
+const CAPABILITY_STATUS_INPUT_KEYS = Object.freeze(['targetToken']);
+// Forbidden I/O injection keys on status proof request (top or nested).
+const CAPABILITY_STATUS_IO_INJECTION_KEYS = Object.freeze([
+  'path',
+  'home',
+  'homedir',
+  'cwd',
+  'reader',
+  'fs',
+  'timeoutMs',
+  'command',
+  'argv',
+  'env',
+  'uid',
+  'plist',
+]);
 const CAPABILITY_DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CAPABILITY_AUDIT_SEQUENCE = Object.freeze([
   'authorize',
@@ -4218,6 +4256,11 @@ const CAPABILITY_OUTCOME_CODES = Object.freeze([
   'capability-real-render-completed',
   'capability-real-render-validation-failed',
   'capability-real-render-redaction-failed',
+  'capability-real-status-completed',
+  'capability-real-status-validation-failed',
+  'capability-real-status-observation-failed',
+  'capability-real-status-timeout',
+  'capability-real-status-redaction-failed',
 ]);
 const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-injection-input-invalid',
@@ -4240,12 +4283,17 @@ const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-redaction-failed',
   'capability-real-render-validation-failed',
   'capability-real-render-redaction-failed',
+  'capability-real-status-validation-failed',
+  'capability-real-status-observation-failed',
+  'capability-real-status-timeout',
+  'capability-real-status-redaction-failed',
 ]);
 const CAPABILITY_BLOCKER_CODE_SET = new Set(CAPABILITY_BLOCKER_CODES);
 const CAPABILITY_INJECTION_READY_EVIDENCE = 'capability-injection-ready';
 const CAPABILITY_INJECTION_PLAN_READY_EVIDENCE = 'capability-injection-plan-ready';
 const CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE = 'capability-dry-run-descriptor-ready';
 const CAPABILITY_REAL_RENDER_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-render-implementation-ready';
+const CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-status-implementation-ready';
 const CAPABILITY_INJECTION_READINESS_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection-readiness';
 const CAPABILITY_INJECTION_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection';
 const CAPABILITY_RECEIPT_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-receipt';
@@ -4270,6 +4318,43 @@ const REAL_RENDER_STRUCTURE_FINGERPRINT = createHash('sha256')
     'utf8',
   )
   .digest('hex');
+// V1.33 real-status constants (observational metadata only; no content read).
+// real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+// 真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
+// （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
+// observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
+const REAL_STATUS_CAPABILITY_ID = 'real-status';
+const REAL_STATUS_SIDE_EFFECT_CLASS = 'observational-read';
+const REAL_STATUS_TARGET_TOKENS = Object.freeze(['linke-launch-agent-default']);
+const REAL_STATUS_TARGET_TOKEN_SET = new Set(REAL_STATUS_TARGET_TOKENS);
+const REAL_STATUS_TARGET_BASENAME_BY_TOKEN = Object.freeze({
+  'linke-launch-agent-default': 'com.linke.agent.default.plist',
+});
+const REAL_STATUS_MAX_METADATA_SIZE_BYTES = 65536;
+const REAL_STATUS_OBSERVE_DEADLINE_MS = 250;
+const REAL_STATUS_MAX_IN_FLIGHT = 2;
+const REAL_STATUS_PRESENCE_ENUM = Object.freeze([
+  'present',
+  'absent',
+  'unreadable',
+  'unexpected-type',
+  'oversize',
+  'symlink-blocked',
+  'observation-error',
+]);
+const REAL_STATUS_READABILITY_ENUM = Object.freeze([
+  'readable',
+  'unreadable',
+  'not-applicable',
+  'unknown',
+]);
+const REAL_STATUS_SIZE_CLASS_ENUM = Object.freeze([
+  'empty',
+  'small',
+  'medium',
+  'oversize',
+  'unknown',
+]);
 const EXECUTE_FORMULA_MISSING_PREREQUISITE_CODES = Object.freeze([
   'realCapabilityImplementationsReady',
   'executeCapabilityRegistryReady',
@@ -4325,9 +4410,51 @@ const GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY = Object.freeze({
 
 /** Module-private dual-track registries. Not exported. Never accept caller injection. */
 const dryRunCapabilityRegistry = new Map();
-// realCapabilityRegistry: V1.32 only 'render' with real-implementation / real-proof.
+// realCapabilityRegistry: V1.33 = 'render' + 'status' (7 dry-run + 2 real).
 // real=真实产物非stub，与host side effect正交
+// real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+// 真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
+// （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
+// observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
 const realCapabilityRegistry = new Map();
+// Module-private status host reader binding. Production binds default async metadata reader.
+// TEST ONLY hook may swap; production bootstrap never calls the test hook.
+let realStatusHostReaderOverrideForTest = null;
+// @internal TEST ONLY fs-ops seam: inject lstat/open/stat/close/deadlineMs only.
+// Never injects path/home/cwd/request/HTTP/CLI/Web. Production bootstrap never calls the setter.
+let realStatusFsOpsOverrideForTest = null;
+let realStatusInFlightCount = 0;
+const realStatusInFlightByToken = new Map();
+
+/**
+ * Resolve active fs-ops for observational reader.
+ * Production: node:fs/promises + FileHandle.stat/close + fixed deadline.
+ * TEST ONLY override may replace lstat/open/stat/close/deadlineMs only.
+ */
+function getRealStatusFsOps() {
+  const o = realStatusFsOpsOverrideForTest;
+  // Non-null TEST override is already exact-validated: use four functions directly,
+  // never fall back per-key to production fs (avoids partial seam leaking real IO).
+  if (o !== null) {
+    return {
+      lstat: (p) => o.lstat(p),
+      open: (p, flags) => o.open(p, flags),
+      stat: (fh) => o.stat(fh),
+      close: (fh) => o.close(fh),
+      deadlineMs:
+        typeof o.deadlineMs === 'number' && Number.isFinite(o.deadlineMs) && o.deadlineMs > 0
+          ? o.deadlineMs
+          : REAL_STATUS_OBSERVE_DEADLINE_MS,
+    };
+  }
+  return {
+    lstat: (p) => fs.lstat(p),
+    open: (p, flags) => fs.open(p, flags),
+    stat: async (fh) => fh.stat(),
+    close: async (fh) => fh.close(),
+    deadlineMs: REAL_STATUS_OBSERVE_DEADLINE_MS,
+  };
+}
 
 function capabilityContainsFunction(value, seen = new WeakSet()) {
   if (typeof value === 'function') return true;
@@ -4639,12 +4766,91 @@ function createRealRenderCapabilityHandler() {
   };
 }
 
+function buildRealStatusCapabilityDescriptor() {
+  // real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+  // 真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
+  // （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
+  // observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
+  return {
+    capabilityKind: 'status',
+    capabilityId: REAL_STATUS_CAPABILITY_ID,
+    implementationClass: REAL_IMPLEMENTATION_CLASS,
+    sideEffectClass: REAL_STATUS_SIDE_EFFECT_CLASS,
+    supportsModes: ['real-proof'],
+    actionIds: ['capture-current-state'],
+    realImplementationReady: true,
+    wouldMutateHost: false,
+    wouldPersistAudit: false,
+    wouldNotifyExternal: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    hostObservationAllowed: true,
+    contentReadAllowed: false,
+    evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+    blockerCode: null,
+  };
+}
+
+/**
+ * Real status handler: observational metadata only via bound host reader.
+ * Never reads content; never mutates host; never elevates execute/wiring/Gold.
+ */
+function createRealStatusCapabilityHandler(reader) {
+  return async function realStatusCapabilityHandler(statusInputSnapshot) {
+    if (!reader || typeof reader.observe !== 'function') {
+      return {
+        ok: false,
+        blocker: 'capability-real-status-observation-failed',
+        plannedAction: null,
+        statusResult: null,
+        hostObservationOccurred: false,
+        observationStarted: false,
+      };
+    }
+    let raw;
+    try {
+      raw = await reader.observe(statusInputSnapshot.targetToken);
+    } catch {
+      // Reader was invoked — treat as observation started (fixed error, no leak).
+      return {
+        ok: false,
+        blocker: 'capability-real-status-observation-failed',
+        plannedAction: 'capture-state',
+        statusResult: null,
+        observationStarted: true,
+        hostObservationOccurred: true,
+      };
+    }
+    // Truthful observation flag: only explicit observationStarted===true counts.
+    // Fake readers may set true/false; default must NOT claim real host observation.
+    const observationStarted = raw != null && typeof raw === 'object' && raw.observationStarted === true;
+    return {
+      ok: true,
+      plannedAction: 'capture-state',
+      capabilityId: REAL_STATUS_CAPABILITY_ID,
+      observationRaw: raw,
+      observationStarted,
+      hostObservationOccurred: observationStarted,
+    };
+  };
+}
+
 /**
  * Module-private dual-track bootstrap:
  * - dry-run: all 7 kinds (V1.31 unchanged)
- * - real: only render with real-implementation / real-proof
+ * - real: render (V1.32) + status observational metadata (V1.33)
  * real=真实产物非stub，与host side effect正交
+ * real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
  * Not exported. Not callable from request/CLI/Web.
+ * Production bootstrap binds default async metadata reader and NEVER calls ForTest hooks.
  */
 function trustedBootstrapCapabilityRegistry() {
   dryRunCapabilityRegistry.clear();
@@ -4688,7 +4894,7 @@ function trustedBootstrapCapabilityRegistry() {
     throw new Error('capability-registry-incomplete');
   }
 
-  // V1.32: register only real-render (not status/write/reload/...)
+  // V1.32: real-render
   const realDescriptor = buildRealRenderCapabilityDescriptor();
   if (realDescriptor.implementationClass !== REAL_IMPLEMENTATION_CLASS) {
     throw new Error('capability-handler-class-invalid');
@@ -4732,11 +4938,70 @@ function trustedBootstrapCapabilityRegistry() {
     descriptor: realDescriptor,
     handler: createRealRenderCapabilityHandler(),
   });
-  if (realCapabilityRegistry.size !== 1) {
+
+  // V1.33: real-status (observational metadata). Production binds default reader.
+  // NEVER call setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest here.
+  const statusDescriptor = buildRealStatusCapabilityDescriptor();
+  if (statusDescriptor.implementationClass !== REAL_IMPLEMENTATION_CLASS) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (statusDescriptor.sideEffectClass !== REAL_STATUS_SIDE_EFFECT_CLASS) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(statusDescriptor.supportsModes) ||
+    statusDescriptor.supportsModes.length !== 1 ||
+    statusDescriptor.supportsModes[0] !== 'real-proof'
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (statusDescriptor.realImplementationReady !== true) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (statusDescriptor.hostObservationAllowed !== true) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (statusDescriptor.contentReadAllowed !== false) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    statusDescriptor.wouldMutateHost !== false ||
+    statusDescriptor.wouldExecute !== false ||
+    statusDescriptor.wouldRun !== false ||
+    statusDescriptor.wouldWrite !== false ||
+    statusDescriptor.launchctlAllowed !== false ||
+    statusDescriptor.filesystemWriteAllowed !== false ||
+    statusDescriptor.processListReadAllowed !== false ||
+    statusDescriptor.networkAllowed !== false ||
+    statusDescriptor.metadataWriteAllowed !== false ||
+    statusDescriptor.auditWriteAllowed !== false ||
+    statusDescriptor.rollbackAnchorWriteAllowed !== false
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(statusDescriptor.actionIds) ||
+    statusDescriptor.actionIds.length !== 1 ||
+    statusDescriptor.actionIds[0] !== 'capture-current-state'
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  const productionReader = createDefaultRealStatusHostReader();
+  realCapabilityRegistry.set('status', {
+    descriptor: statusDescriptor,
+    handler: createRealStatusCapabilityHandler(productionReader),
+  });
+
+  if (realCapabilityRegistry.size !== 2) {
     throw new Error('capability-registry-incomplete');
   }
-  if (realCapabilityRegistry.has('status') || realCapabilityRegistry.has('write') || realCapabilityRegistry.has('reload')) {
+  if (!realCapabilityRegistry.has('render') || !realCapabilityRegistry.has('status')) {
     throw new Error('capability-registry-incomplete');
+  }
+  for (const forbidden of ['write', 'reload', 'rollback', 'audit', 'notify']) {
+    if (realCapabilityRegistry.has(forbidden)) {
+      throw new Error('capability-registry-incomplete');
+    }
   }
 }
 
@@ -4757,7 +5022,9 @@ function isDryRunCapabilityRegistryReady() {
 }
 
 function isRealRenderCapabilityRegistryReady() {
-  if (realCapabilityRegistry.size !== 1) return false;
+  // Per-kind local readiness: render entry quality only.
+  // V1.33 dual real registry size is 2 (render + status); mutation kinds forbidden.
+  if (realCapabilityRegistry.size < 1 || realCapabilityRegistry.size > 2) return false;
   const entry = realCapabilityRegistry.get('render');
   if (!entry || typeof entry.handler !== 'function') return false;
   const d = entry.descriptor;
@@ -4770,33 +5037,98 @@ function isRealRenderCapabilityRegistryReady() {
   if (d.wouldMutateHost !== false || d.launchctlAllowed !== false || d.filesystemWriteAllowed !== false) {
     return false;
   }
-  // Only render may be registered as real in V1.32.
+  // Only render + status may be registered as real in V1.33.
   for (const kind of CAPABILITY_KIND_ALLOWLIST) {
-    if (kind === 'render') continue;
+    if (kind === 'render' || kind === 'status') continue;
     if (realCapabilityRegistry.has(kind)) return false;
+  }
+  if (realCapabilityRegistry.size === 2 && !realCapabilityRegistry.has('status')) return false;
+  return true;
+}
+
+/**
+ * Per-kind local readiness for real-status (independent from render probe).
+ * realCapabilityImplementationsReady remains a separate global independent fact (false).
+ */
+function isRealStatusCapabilityRegistryReady() {
+  if (realCapabilityRegistry.size !== 2) return false;
+  if (!realCapabilityRegistry.has('render') || !realCapabilityRegistry.has('status')) return false;
+  for (const kind of CAPABILITY_KIND_ALLOWLIST) {
+    if (kind === 'render' || kind === 'status') continue;
+    if (realCapabilityRegistry.has(kind)) return false;
+  }
+  const entry = realCapabilityRegistry.get('status');
+  if (!entry || typeof entry.handler !== 'function') return false;
+  const d = entry.descriptor;
+  if (!d) return false;
+  if (d.capabilityId !== REAL_STATUS_CAPABILITY_ID) return false;
+  if (d.implementationClass !== REAL_IMPLEMENTATION_CLASS) return false;
+  if (d.sideEffectClass !== REAL_STATUS_SIDE_EFFECT_CLASS) return false;
+  if (!Array.isArray(d.supportsModes) || d.supportsModes[0] !== 'real-proof') return false;
+  if (d.realImplementationReady !== true) return false;
+  if (d.hostObservationAllowed !== true) return false;
+  if (d.contentReadAllowed !== false) return false;
+  if (
+    d.wouldMutateHost !== false ||
+    d.launchctlAllowed !== false ||
+    d.filesystemWriteAllowed !== false ||
+    d.processListReadAllowed !== false ||
+    d.networkAllowed !== false
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(d.actionIds) ||
+    d.actionIds.length !== 1 ||
+    d.actionIds[0] !== 'capture-current-state'
+  ) {
+    return false;
   }
   return true;
 }
 
-function buildRealImplementationEntrySummary() {
-  const entry = realCapabilityRegistry.get('render');
-  if (!entry) return null;
-  const d = entry.descriptor;
-  return {
-    capabilityKind: 'render',
-    capabilityId: d.capabilityId,
-    implementationClass: d.implementationClass,
-    sideEffectClass: d.sideEffectClass,
-    supportsModes: [...d.supportsModes],
-    realImplementationReady: d.realImplementationReady === true,
-    hostSideEffectOccurred: false,
-    evidenceCode: d.evidenceCode,
-  };
+function buildRealImplementationEntrySummaries() {
+  const out = [];
+  const renderEntry = realCapabilityRegistry.get('render');
+  if (renderEntry) {
+    const d = renderEntry.descriptor;
+    out.push({
+      capabilityKind: 'render',
+      capabilityId: d.capabilityId,
+      implementationClass: d.implementationClass,
+      sideEffectClass: d.sideEffectClass,
+      supportsModes: [...d.supportsModes],
+      realImplementationReady: d.realImplementationReady === true,
+      hostSideEffectOccurred: false,
+      evidenceCode: d.evidenceCode,
+    });
+  }
+  const statusEntry = realCapabilityRegistry.get('status');
+  if (statusEntry) {
+    const d = statusEntry.descriptor;
+    out.push({
+      capabilityKind: 'status',
+      capabilityId: d.capabilityId,
+      implementationClass: d.implementationClass,
+      sideEffectClass: d.sideEffectClass,
+      supportsModes: [...d.supportsModes],
+      realImplementationReady: d.realImplementationReady === true,
+      contentReadAllowed: d.contentReadAllowed === true,
+      hostObservationAllowed: d.hostObservationAllowed === true,
+      // Non-live readiness summary: observation/sideEffect not performed here.
+      hostObservationOccurred: false,
+      hostSideEffectOccurred: false,
+      hostMutationOccurred: false,
+      evidenceCode: d.evidenceCode,
+    });
+  }
+  return out;
 }
 
 function buildCapabilityInjectionReadinessObject() {
   const realRenderReady = isRealRenderCapabilityRegistryReady() === true;
-  const realEntry = buildRealImplementationEntrySummary();
+  const realStatusReady = isRealStatusCapabilityRegistryReady() === true;
+  const realEntries = buildRealImplementationEntrySummaries();
   return {
     command: CAPABILITY_INJECTION_READINESS_COMMAND,
     state: 'ready',
@@ -4804,6 +5136,8 @@ function buildCapabilityInjectionReadinessObject() {
     codeOwnedCapabilityFactoryReady: true,
     dryRunCapabilityRegistryReady: isDryRunCapabilityRegistryReady() === true,
     realRenderCapabilityImplementationReady: realRenderReady,
+    realStatusCapabilityImplementationReady: realStatusReady,
+    // Global independent fact: 2/7 real kinds only — NOT a "ready success" input signal.
     executeCapabilityRegistryReady: false,
     realCapabilityImplementationsReady: false,
     realRunnerWiringReady: false,
@@ -4811,7 +5145,7 @@ function buildCapabilityInjectionReadinessObject() {
     readyCount: 1,
     blockedCount: 0,
     entries: [{ ...GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY }],
-    realImplementationEntries: realEntry ? [realEntry] : [],
+    realImplementationEntries: realEntries,
     capabilityKinds: [...CAPABILITY_KIND_ALLOWLIST],
     blockers: [],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
@@ -4831,6 +5165,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       ready.pureCapabilityInjectionReady = false;
       ready.dryRunCapabilityRegistryReady = false;
       ready.realRenderCapabilityImplementationReady = false;
+      ready.realStatusCapabilityImplementationReady = false;
       ready.readyCount = 0;
       ready.blockedCount = 1;
       ready.blockers = ['capability-registry-incomplete'];
@@ -4842,13 +5177,26 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
         evidenceCode: null,
       }];
       ready.realImplementationEntries = [];
-    } else if (ready.realRenderCapabilityImplementationReady !== true) {
-      // Dry-run ready but real-render bootstrap incomplete: local fact false; global still ready.
-      ready.realRenderCapabilityImplementationReady = false;
-      ready.realImplementationEntries = [];
+    } else {
+      // Per-kind local readiness: incomplete probe only clears that kind's entries/flags.
+      if (ready.realRenderCapabilityImplementationReady !== true) {
+        ready.realRenderCapabilityImplementationReady = false;
+        ready.realImplementationEntries = ready.realImplementationEntries.filter(
+          (e) => e.capabilityKind !== 'render',
+        );
+      }
+      if (ready.realStatusCapabilityImplementationReady !== true) {
+        ready.realStatusCapabilityImplementationReady = false;
+        ready.realImplementationEntries = ready.realImplementationEntries.filter(
+          (e) => e.capabilityKind !== 'status',
+        );
+      }
     }
     // Never export handler/function fields
     ready.handler = undefined;
+    // Global independent fact always false (2/7); not elevated by local ready.
+    ready.realCapabilityImplementationsReady = false;
+    ready.executeCapabilityAuthorized = false;
     return capabilityPublicDeepCopy(ready);
   } catch {
     return capabilityPublicDeepCopy({
@@ -4858,6 +5206,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       codeOwnedCapabilityFactoryReady: false,
       dryRunCapabilityRegistryReady: false,
       realRenderCapabilityImplementationReady: false,
+      realStatusCapabilityImplementationReady: false,
       executeCapabilityRegistryReady: false,
       realCapabilityImplementationsReady: false,
       realRunnerWiringReady: false,
@@ -5059,6 +5408,16 @@ export function resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(candi
         mapping.realImplementationClass = REAL_IMPLEMENTATION_CLASS;
         mapping.realSupportsModes = ['real-proof'];
         mapping.realRenderCapabilityImplementationReady = isRealRenderCapabilityRegistryReady() === true;
+      }
+      // V1.33: rollback capture-current-state surfaces real-status fields (non-live; no observation).
+      if (actionId === 'capture-current-state' && primaryCapabilityKind === 'status') {
+        mapping.realCapabilityId = REAL_STATUS_CAPABILITY_ID;
+        mapping.realImplementationClass = REAL_IMPLEMENTATION_CLASS;
+        mapping.realSupportsModes = ['real-proof'];
+        mapping.realStatusCapabilityImplementationReady = isRealStatusCapabilityRegistryReady() === true;
+        mapping.hostMutationOccurred = false;
+        mapping.hostObservationOccurred = false;
+        mapping.hostSideEffectOccurred = false;
       }
       mappings.push(mapping);
     }
@@ -6024,6 +6383,1168 @@ export function invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
   }
 }
 
+// ── V1.33 Real status observational metadata reader + RealStatusProof ──
+// real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+// 真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
+// （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
+// observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
+// Production reader: async fs/promises metadata-only; no content read; no Sync APIs.
+
+function deriveRealStatusInternalTargetPath(targetToken) {
+  if (typeof targetToken !== 'string' || !REAL_STATUS_TARGET_TOKEN_SET.has(targetToken)) {
+    return { ok: false, reason: 'validation' };
+  }
+  const basename = REAL_STATUS_TARGET_BASENAME_BY_TOKEN[targetToken];
+  if (typeof basename !== 'string' || basename.length < 1 || basename.includes('/') || basename.includes('\\') || basename.includes('..')) {
+    return { ok: false, reason: 'validation' };
+  }
+  let home;
+  try {
+    home = os.homedir();
+  } catch {
+    return { ok: false, reason: 'observation-error' };
+  }
+  if (typeof home !== 'string' || home.length < 1 || home.includes('\0')) {
+    return { ok: false, reason: 'observation-error' };
+  }
+  // Fixed segments only — never user-controlled path segments.
+  const library = pathJoin(home, 'Library');
+  const agents = pathJoin(library, 'LaunchAgents');
+  const target = pathJoin(agents, basename);
+  // Normalize check: must remain under home/Library/LaunchAgents
+  const homeResolved = resolve(home);
+  const targetResolved = resolve(target);
+  const agentsResolved = resolve(agents);
+  if (
+    !targetResolved.startsWith(agentsResolved + sep) &&
+    targetResolved !== agentsResolved
+  ) {
+    return { ok: false, reason: 'observation-error' };
+  }
+  if (!agentsResolved.startsWith(homeResolved + sep) && agentsResolved !== homeResolved) {
+    return { ok: false, reason: 'observation-error' };
+  }
+  // Parent walk includes os.homedir root itself. path.resolve is lexical only
+  // (does not follow symlinks); real type is enforced via lstat fail-closed.
+  return {
+    ok: true,
+    home: homeResolved,
+    segments: [homeResolved, library, agents],
+    target: targetResolved,
+  };
+}
+
+function mapSizeClassFromMetadataBytes(size) {
+  if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) return 'unknown';
+  if (size === 0) return 'empty';
+  if (size <= 1024) return 'small';
+  if (size <= REAL_STATUS_MAX_METADATA_SIZE_BYTES) return 'medium';
+  return 'oversize';
+}
+
+function sanitizeStatusObservation(raw, targetToken) {
+  // Single sanitize exit: enums/boolean/token only. No path/error/code/size/hash.
+  const base = {
+    schemaVersion: 1,
+    observationClass: 'launch-agent-presence',
+    targetToken,
+    presence: 'observation-error',
+    isRegularFile: null,
+    readability: 'unknown',
+    sizeClass: 'unknown',
+    deterministic: true,
+  };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return base;
+  }
+  // Reject any function / Buffer-like leakage before public return.
+  if (capabilityContainsFunction(raw)) {
+    return base;
+  }
+  let presence = typeof raw.presence === 'string' ? raw.presence : null;
+  let isRegularFile = raw.isRegularFile;
+  let readability = typeof raw.readability === 'string' ? raw.readability : null;
+  let sizeClass = typeof raw.sizeClass === 'string' ? raw.sizeClass : null;
+
+  // Accept private raw shapes from production reader / test inject.
+  if (presence == null && typeof raw.kind === 'string') {
+    if (raw.kind === 'absent') {
+      presence = 'absent';
+      isRegularFile = null;
+      readability = 'not-applicable';
+      sizeClass = 'unknown';
+    } else if (raw.kind === 'unreadable') {
+      presence = 'unreadable';
+      isRegularFile = null;
+      readability = 'unreadable';
+      sizeClass = 'unknown';
+    } else if (raw.kind === 'symlink') {
+      presence = 'symlink-blocked';
+      isRegularFile = false;
+      readability = 'not-applicable';
+      sizeClass = 'unknown';
+    } else if (raw.kind === 'unexpected-type') {
+      presence = 'unexpected-type';
+      isRegularFile = false;
+      readability = 'not-applicable';
+      sizeClass = 'unknown';
+    } else if (raw.kind === 'regular-file') {
+      const size = raw.size;
+      if (typeof size === 'number' && Number.isFinite(size) && size > REAL_STATUS_MAX_METADATA_SIZE_BYTES) {
+        presence = 'oversize';
+        isRegularFile = true;
+        readability = 'not-applicable';
+        sizeClass = 'oversize';
+      } else {
+        presence = 'present';
+        isRegularFile = true;
+        readability = 'readable';
+        sizeClass = mapSizeClassFromMetadataBytes(size);
+      }
+    } else if (raw.kind === 'timeout') {
+      return null; // signal timeout path; no completed statusResult
+    } else if (raw.kind === 'observation-error' || raw.kind === 'error') {
+      presence = 'observation-error';
+      isRegularFile = null;
+      readability = 'unknown';
+      sizeClass = 'unknown';
+    }
+  }
+
+  if (!REAL_STATUS_PRESENCE_ENUM.includes(presence)) {
+    presence = 'observation-error';
+  }
+  if (isRegularFile !== true && isRegularFile !== false && isRegularFile !== null) {
+    isRegularFile = null;
+  }
+  if (!REAL_STATUS_READABILITY_ENUM.includes(readability)) {
+    readability = presence === 'observation-error' ? 'unknown' : 'not-applicable';
+  }
+  if (!REAL_STATUS_SIZE_CLASS_ENUM.includes(sizeClass)) {
+    sizeClass = 'unknown';
+  }
+  // Force targetToken allowlist only.
+  if (typeof targetToken !== 'string' || !REAL_STATUS_TARGET_TOKEN_SET.has(targetToken)) {
+    return base;
+  }
+  return {
+    schemaVersion: 1,
+    observationClass: 'launch-agent-presence',
+    targetToken,
+    presence,
+    isRegularFile,
+    readability,
+    sizeClass,
+    deterministic: true,
+  };
+}
+
+function assertStatusResultRedactionSafe(statusResult) {
+  if (!statusResult || typeof statusResult !== 'object') return false;
+  const json = JSON.stringify(statusResult);
+  if (typeof json !== 'string') return false;
+  if (/\/Users\//.test(json)) return false;
+  if (/LaunchAgents/.test(json)) return false;
+  if (json.includes('contentSha256')) return false;
+  if (/"ENOENT"|"EACCES"|"EPERM"|"ELOOP"/.test(json)) return false;
+  if (/"path"\s*:/.test(json)) return false;
+  if (/"stack"\s*:/.test(json)) return false;
+  if (/"message"\s*:/.test(json) && /Error|ENOENT|EACCES/.test(json)) return false;
+  // No raw size field.
+  if (/"size"\s*:/.test(json)) return false;
+  if (/"inode"\s*:/.test(json)) return false;
+  return true;
+}
+
+async function observeLaunchAgentPresenceMetadata(targetToken, options = {}) {
+  // Deadline is a public return boundary via Promise.race — NOT forced fs syscall cancel.
+  // (Node 24: lstat signal ignored; open options with signal → ERR_INVALID_ARG_TYPE.)
+  // token/global in-flight locks release only when the real observation task finishes.
+  const ops = getRealStatusFsOps();
+  const deadlineMs =
+    typeof options.deadlineMs === 'number' && Number.isFinite(options.deadlineMs) && options.deadlineMs > 0
+      ? options.deadlineMs
+      : ops.deadlineMs;
+
+  // Reader pre-reject: no fs observation started.
+  if (realStatusInFlightCount >= REAL_STATUS_MAX_IN_FLIGHT) {
+    return { kind: 'observation-error', reason: 'in-flight-cap', observationStarted: false };
+  }
+  if (realStatusInFlightByToken.has(targetToken)) {
+    return { kind: 'observation-error', reason: 'duplicate-inflight', observationStarted: false };
+  }
+
+  realStatusInFlightCount += 1;
+  realStatusInFlightByToken.set(targetToken, true);
+
+  const observationTask = (async () => {
+    // Local FileHandle ownership: only this task may close it (in its own finally).
+    // Single exit after finally so close-fail can override a provisional regular-file raw.
+    let fh = null;
+    let raw = { kind: 'observation-error', observationStarted: true };
+    try {
+      const derived = deriveRealStatusInternalTargetPath(targetToken);
+      if (!derived.ok) {
+        raw = { kind: 'observation-error', observationStarted: true };
+      } else {
+        // Parent walk includes home root + intermediates. path.resolve is lexical only
+        // (does not follow symlinks); lstat enforces symlink/non-directory fail-closed.
+        let parentOk = true;
+        for (const segmentPath of derived.segments) {
+          let st;
+          try {
+            st = await ops.lstat(segmentPath);
+          } catch (err) {
+            const code = err && typeof err.code === 'string' ? err.code : '';
+            if (code === 'ENOENT') {
+              raw = { kind: 'absent', observationStarted: true };
+            } else if (code === 'EACCES' || code === 'EPERM') {
+              raw = { kind: 'unreadable', observationStarted: true };
+            } else {
+              raw = { kind: 'observation-error', observationStarted: true };
+            }
+            parentOk = false;
+            break;
+          }
+          if (typeof st.isSymbolicLink === 'function' && st.isSymbolicLink()) {
+            raw = { kind: 'symlink', observationStarted: true };
+            parentOk = false;
+            break;
+          }
+          if (typeof st.isDirectory === 'function' && !st.isDirectory()) {
+            raw = { kind: 'unexpected-type', observationStarted: true };
+            parentOk = false;
+            break;
+          }
+        }
+
+        if (parentOk) {
+          let targetLstat = null;
+          let targetOk = true;
+          try {
+            targetLstat = await ops.lstat(derived.target);
+          } catch (err) {
+            const code = err && typeof err.code === 'string' ? err.code : '';
+            if (code === 'ENOENT') {
+              raw = { kind: 'absent', observationStarted: true };
+            } else if (code === 'EACCES' || code === 'EPERM') {
+              raw = { kind: 'unreadable', observationStarted: true };
+            } else {
+              raw = { kind: 'observation-error', observationStarted: true };
+            }
+            targetOk = false;
+          }
+          if (targetOk && targetLstat) {
+            if (typeof targetLstat.isSymbolicLink === 'function' && targetLstat.isSymbolicLink()) {
+              raw = { kind: 'symlink', observationStarted: true };
+              targetOk = false;
+            } else if (typeof targetLstat.isFile === 'function' && !targetLstat.isFile()) {
+              raw = { kind: 'unexpected-type', observationStarted: true };
+              targetOk = false;
+            }
+          }
+
+          if (targetOk) {
+            // open O_RDONLY | O_NOFOLLOW — macOS mandatory; no silent follow degradation.
+            // No AbortSignal passed to open (Node 24: ERR_INVALID_ARG_TYPE on open options).
+            const openFlags = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+            if (typeof fsConstants.O_NOFOLLOW !== 'number') {
+              raw = { kind: 'observation-error', observationStarted: true };
+            } else {
+              let openOk = true;
+              try {
+                fh = await ops.open(derived.target, openFlags);
+              } catch (err) {
+                const code = err && typeof err.code === 'string' ? err.code : '';
+                // Target swap / symlink race often surfaces as ELOOP / EMLINK / EPERM.
+                if (code === 'ELOOP' || code === 'EMLINK' || code === 'EPERM') {
+                  raw = { kind: 'symlink', observationStarted: true };
+                } else if (code === 'ENOENT') {
+                  raw = { kind: 'absent', observationStarted: true };
+                } else if (code === 'EACCES') {
+                  raw = { kind: 'unreadable', observationStarted: true };
+                } else {
+                  raw = { kind: 'observation-error', observationStarted: true };
+                }
+                openOk = false;
+              }
+
+              if (openOk && fh) {
+                let st2 = null;
+                try {
+                  st2 = await ops.stat(fh);
+                } catch {
+                  raw = { kind: 'observation-error', observationStarted: true };
+                  st2 = null;
+                }
+                if (st2) {
+                  if (typeof st2.isFile === 'function' && !st2.isFile()) {
+                    // lstat/open/stat type mismatch after swap — fail-closed.
+                    raw = { kind: 'observation-error', observationStarted: true };
+                  } else {
+                    // NEVER read content bytes — metadata size only.
+                    const size = typeof st2.size === 'number' ? st2.size : NaN;
+                    if (!Number.isFinite(size) || size < 0) {
+                      raw = { kind: 'observation-error', observationStarted: true };
+                    } else {
+                      // Provisional success — becomes regular-file only after close succeeds.
+                      raw = { kind: 'regular-file', size, observationStarted: true };
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      raw = { kind: 'observation-error', observationStarted: true };
+    } finally {
+      // Always own close for late open after public timeout; never leak handles.
+      // Close failure overrides provisional regular-file (P1-1 single receipt).
+      if (fh) {
+        try {
+          await ops.close(fh);
+        } catch {
+          raw = { kind: 'observation-error', reason: 'close-failed', observationStarted: true };
+        }
+        fh = null;
+      }
+      // Release locks only after the real underlying task completes (not on timeout receipt).
+      realStatusInFlightCount = Math.max(0, realStatusInFlightCount - 1);
+      realStatusInFlightByToken.delete(targetToken);
+    }
+    return raw;
+  })();
+
+  // Always attach catch so late reject after public timeout is never unhandled.
+  const observationGuarded = observationTask.then(
+    (value) => value,
+    () => ({ kind: 'observation-error', observationStarted: true }),
+  );
+
+  let timeoutId = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      // Timeout raw only — does NOT release lock; background task continues cleanup.
+      resolve({ kind: 'timeout', observationStarted: true });
+    }, deadlineMs);
+  });
+
+  try {
+    const raced = await Promise.race([observationGuarded, timeoutPromise]);
+    if (raced && raced.kind === 'timeout') {
+      // Public proof may return; keep observationGuarded alive for close/lock release.
+      return raced;
+    }
+    return raced;
+  } finally {
+    if (timeoutId != null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+/**
+ * Production default async host reader — metadata only via fs/promises.
+ * Never uses Sync APIs; never reads content; never shells.
+ */
+function createDefaultRealStatusHostReader() {
+  return {
+    async observe(targetToken) {
+      return observeLaunchAgentPresenceMetadata(targetToken);
+    },
+  };
+}
+
+function getActiveRealStatusHostReader() {
+  if (
+    realStatusHostReaderOverrideForTest &&
+    typeof realStatusHostReaderOverrideForTest.observe === 'function'
+  ) {
+    return realStatusHostReaderOverrideForTest;
+  }
+  // Always return a production-grade default reader (never null).
+  return createDefaultRealStatusHostReader();
+}
+
+function rebindRealStatusCapabilityHandler() {
+  const entry = realCapabilityRegistry.get('status');
+  if (!entry) return;
+  entry.handler = createRealStatusCapabilityHandler(getActiveRealStatusHostReader());
+}
+
+/**
+ * Independent nested exact snapshot for statusInput.
+ * Object.hasOwn + data descriptor; reject symbol/undefined/non-string/empty/extra/symbol/function/getter/proxy/prototype.
+ */
+function snapshotStatusInput(rawStatusInput) {
+  if (
+    rawStatusInput === null ||
+    typeof rawStatusInput !== 'object' ||
+    Array.isArray(rawStatusInput) ||
+    typeof rawStatusInput === 'function'
+  ) {
+    return null;
+  }
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(rawStatusInput);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+    if (CAPABILITY_STATUS_IO_INJECTION_KEYS.includes(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_STATUS_INPUT_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of CAPABILITY_STATUS_INPUT_KEYS) {
+    if (!Object.hasOwn(rawStatusInput, key)) return null;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(rawStatusInput, key);
+    } catch {
+      return null;
+    }
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value')
+    ) {
+      return null;
+    }
+    if (typeof desc.value === 'function') return null;
+    if (desc.value !== null && typeof desc.value === 'object') return null;
+    snapshot[key] = desc.value;
+  }
+  return snapshot;
+}
+
+/**
+ * Top-level exact snapshot for real-status proof request.
+ * Nested statusInput snapshotted independently.
+ */
+function snapshotRealStatusProofRequest(request) {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(request);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+    if (CAPABILITY_STATUS_IO_INJECTION_KEYS.includes(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_REAL_STATUS_PROOF_REQUEST_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const top = Object.create(null);
+  for (const key of CAPABILITY_REAL_STATUS_PROOF_REQUEST_KEYS) {
+    if (!Object.hasOwn(request, key)) return null;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(request, key);
+    } catch {
+      return null;
+    }
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value')
+    ) {
+      return null;
+    }
+    if (typeof desc.value === 'function') return null;
+    top[key] = desc.value;
+  }
+
+  const statusInput = snapshotStatusInput(top.statusInput);
+  if (!statusInput) return null;
+
+  return {
+    capabilityKind: top.capabilityKind,
+    actionId: top.actionId,
+    operation: top.operation,
+    mode: top.mode,
+    idempotencyKey: top.idempotencyKey,
+    attemptRef: top.attemptRef,
+    anchorRef: top.anchorRef,
+    statusInput,
+  };
+}
+
+function validateRealStatusInputFields(statusInput) {
+  if (!statusInput || typeof statusInput !== 'object') {
+    return { ok: false, blocker: 'capability-real-status-validation-failed' };
+  }
+  const { targetToken } = statusInput;
+  // Hard type reject: exact allowlisted string only.
+  if (targetToken === null || targetToken === undefined) {
+    return { ok: false, blocker: 'capability-real-status-validation-failed' };
+  }
+  if (typeof targetToken !== 'string') {
+    return { ok: false, blocker: 'capability-real-status-validation-failed' };
+  }
+  if (targetToken.length < 1) {
+    return { ok: false, blocker: 'capability-real-status-validation-failed' };
+  }
+  // Exact match only — no trim/whitespace-only acceptance.
+  if (!REAL_STATUS_TARGET_TOKEN_SET.has(targetToken)) {
+    return { ok: false, blocker: 'capability-real-status-validation-failed' };
+  }
+  return { ok: true };
+}
+
+function buildRealStatusProofAuthorization(fields) {
+  return {
+    command: CAPABILITY_MODE_AUTH_COMMAND,
+    state: fields.state,
+    mode: fields.mode || 'real-proof',
+    realStatusProofAuthorized: fields.realStatusProofAuthorized === true,
+    dryRunCapabilityAuthorized: false,
+    executeCapabilityAuthorized: false,
+    hostMutationOccurred: false,
+    hostObservationOccurred: false,
+    hostSideEffectOccurred: false,
+    realStatusCapabilityImplementationReady: isRealStatusCapabilityRegistryReady() === true,
+    realRenderCapabilityImplementationReady: isRealRenderCapabilityRegistryReady() === true,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.primaryBlocker ? [fields.primaryBlocker] : [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+function buildRealStatusReceiptBase(fields) {
+  const receipt = buildCapabilityReceiptBase({
+    receiptKind: fields.receiptKind || 'capability-real-implementation-receipt',
+    state: fields.state,
+    mode: fields.mode || 'real-proof',
+    capabilityKind: fields.capabilityKind || 'status',
+    capabilityId: fields.capabilityId === undefined ? REAL_STATUS_CAPABILITY_ID : fields.capabilityId,
+    actionId: fields.actionId || 'capture-current-state',
+    operation: fields.operation || 'rollback',
+    outcomeCode: fields.outcomeCode,
+    errorClass: fields.errorClass,
+    plannedAction: fields.plannedAction === undefined ? null : fields.plannedAction,
+    evidenceCode: fields.evidenceCode === undefined ? null : fields.evidenceCode,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.blockers || (fields.primaryBlocker ? [fields.primaryBlocker] : []),
+  });
+  receipt.implementationClass = REAL_IMPLEMENTATION_CLASS;
+  receipt.sideEffectClass = REAL_STATUS_SIDE_EFFECT_CLASS;
+  receipt.hostMutationOccurred = false;
+  receipt.hostObservationOccurred = fields.hostObservationOccurred === true;
+  // V1.32 honor: reading host-controlled resources is a host side effect.
+  receipt.hostSideEffectOccurred = fields.hostSideEffectOccurred === true;
+  receipt.realStatusCapabilityImplementationReady = isRealStatusCapabilityRegistryReady() === true;
+  receipt.realRenderCapabilityImplementationReady = isRealRenderCapabilityRegistryReady() === true;
+  receipt.realCapabilityImplementationsReady = false;
+  receipt.executeCapabilityAuthorized = false;
+  receipt.realRunnerWiringReady = false;
+  receipt.runnerWiringContractReady = false;
+  receipt.executionEligible = false;
+  receipt.idempotencyKeyFingerprint = null;
+  if (fields.statusResult !== undefined) {
+    receipt.statusResult = fields.statusResult;
+  }
+  if (fields.timedOut === true) {
+    receipt.timedOut = true;
+  }
+  return receipt;
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Authorize real-proof mode for **status only**. Never authorizes execute.
+ * Status-specific: do not reuse this API for other real kinds.
+ * Sync validation only — does not call host reader.
+ */
+export function authorizeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(request) {
+  try {
+    const snapshot = snapshotRealStatusProofRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'unknown',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'execute',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    // Status-specific: never expand kind range.
+    if (snapshot.capabilityKind !== 'status') {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-kind-unknown',
+      }));
+    }
+    if (snapshot.actionId !== 'capture-current-state') {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-action-unmapped',
+      }));
+    }
+    if (snapshot.operation !== 'rollback') {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realStatusProofAuthorized: false,
+        primaryBlocker: 'capability-operation-invalid',
+      }));
+    }
+    const opaque = validateCapabilityOpaqueKeyAndRefs(snapshot);
+    if (!opaque.ok) {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realStatusProofAuthorized: false,
+        primaryBlocker: opaque.blocker,
+      }));
+    }
+    const fieldCheck = validateRealStatusInputFields(snapshot.statusInput);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realStatusProofAuthorized: false,
+        primaryBlocker: fieldCheck.blocker,
+      }));
+    }
+
+    const entry = realCapabilityRegistry.get('status');
+    const authorized =
+      isRealStatusCapabilityRegistryReady() === true &&
+      entry &&
+      entry.descriptor.implementationClass === REAL_IMPLEMENTATION_CLASS &&
+      entry.descriptor.sideEffectClass === REAL_STATUS_SIDE_EFFECT_CLASS &&
+      entry.descriptor.supportsModes.includes('real-proof') &&
+      entry.descriptor.realImplementationReady === true &&
+      entry.descriptor.hostObservationAllowed === true &&
+      entry.descriptor.contentReadAllowed === false &&
+      entry.descriptor.wouldMutateHost === false &&
+      entry.descriptor.launchctlAllowed === false &&
+      entry.descriptor.filesystemWriteAllowed === false &&
+      entry.descriptor.processListReadAllowed === false &&
+      entry.descriptor.networkAllowed === false;
+
+    return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+      state: authorized ? 'authorized' : 'denied',
+      mode: 'real-proof',
+      realStatusProofAuthorized: authorized === true,
+      primaryBlocker: authorized ? null : 'capability-registry-incomplete',
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildRealStatusProofAuthorization({
+      state: 'denied',
+      mode: 'unknown',
+      realStatusProofAuthorized: false,
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Invoke real **status** observational implementation proof (async).
+ * Metadata-only host observation via Node fs/promises; never reads file content.
+ * On real fs observation start: hostObservationOccurred=true AND
+ * hostSideEffectOccurred=true AND hostMutationOccurred=false
+ * (V1.32: reading host-controlled resources is a host side effect).
+ * Never accepts mode execute. Never returns functions / raw paths / raw stdout / content hashes.
+ * Status-specific proof API — do not expand kind range.
+ * @returns {Promise<object>} single settled receipt
+ */
+export async function invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(request) {
+  try {
+    const snapshot = snapshotRealStatusProofRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'denied',
+        mode: 'real-proof',
+        capabilityId: null,
+        actionId: 'unknown',
+        operation: 'unknown',
+        outcomeCode: 'capability-caller-injection-rejected',
+        errorClass: 'authorization',
+        primaryBlocker: 'capability-caller-injection-rejected',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        receiptKind: 'capability-execute-denied-receipt',
+        state: 'denied',
+        mode: 'execute',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        capabilityId: null,
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        capabilityId: null,
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    if (snapshot.capabilityKind !== 'status') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: snapshot.capabilityKind,
+        capabilityId: null,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-kind-unknown',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-kind-unknown',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+    if (snapshot.actionId !== 'capture-current-state') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-action-unmapped',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-action-unmapped',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+    if (snapshot.operation !== 'rollback') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-validation-failed',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-operation-invalid',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    const opaque = validateCapabilityOpaqueKeyAndRefs(snapshot);
+    if (!opaque.ok) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-validation-failed',
+        errorClass: opaque.errorClass || 'validation',
+        primaryBlocker: opaque.blocker,
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    const fieldCheck = validateRealStatusInputFields(snapshot.statusInput);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-validation-failed',
+        errorClass: 'validation',
+        primaryBlocker: fieldCheck.blocker,
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    if (!isRealStatusCapabilityRegistryReady()) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-registry-incomplete',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    const entry = realCapabilityRegistry.get('status');
+    if (!entry || typeof entry.handler !== 'function') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-registry-incomplete',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+      }));
+    }
+
+    // Registry dispatch locus: must call entry.handler (TEST ONLY rebind updates this).
+    // Do NOT create a temporary handler here.
+    let handlerResult;
+    try {
+      handlerResult = await entry.handler(snapshot.statusInput);
+    } catch {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-observation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-observation-failed',
+        // Catch path without truthful observationStarted evidence → fail-closed false.
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    const observed =
+      handlerResult?.observationStarted === true ||
+      handlerResult?.hostObservationOccurred === true ||
+      handlerResult?.observationRaw?.observationStarted === true;
+
+    if (!handlerResult || handlerResult.ok !== true) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-observation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-observation-failed',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    const raw = handlerResult.observationRaw;
+    // Reader pre-reject (in-flight-cap / duplicate) before fs observation.
+    if (raw && raw.observationStarted === false) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-observation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-observation-failed',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    if (raw && raw.kind === 'timeout') {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-timeout',
+        errorClass: 'timeout',
+        primaryBlocker: 'capability-real-status-timeout',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        timedOut: true,
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    const statusResult = sanitizeStatusObservation(raw, snapshot.statusInput.targetToken);
+    if (statusResult === null) {
+      // timeout signaled via sanitize null
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-timeout',
+        errorClass: 'timeout',
+        primaryBlocker: 'capability-real-status-timeout',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        timedOut: true,
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    if (!assertStatusResultRedactionSafe(statusResult)) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-redaction-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-redaction-failed',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    // observation-error kind with error outcome when unrecoverable
+    if (statusResult.presence === 'observation-error' && raw && (raw.kind === 'observation-error' || raw.kind === 'error')) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-observation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-observation-failed',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        statusResult: observed === true ? statusResult : undefined,
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    // Guard against accidental content hash fields on statusResult.
+    if (Object.prototype.hasOwnProperty.call(statusResult, 'contentSha256')) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-redaction-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-redaction-failed',
+        hostObservationOccurred: observed === true,
+        hostSideEffectOccurred: observed === true,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    // Completed path requires a real observation start (never claim observe without it).
+    if (observed !== true) {
+      return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-status-observation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-status-observation-failed',
+        hostObservationOccurred: false,
+        hostSideEffectOccurred: false,
+        plannedAction: 'capture-state',
+        evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+      state: 'completed',
+      mode: 'real-proof',
+      actionId: snapshot.actionId,
+      operation: snapshot.operation,
+      outcomeCode: 'capability-real-status-completed',
+      errorClass: null,
+      plannedAction: 'capture-state',
+      hostObservationOccurred: true,
+      hostSideEffectOccurred: true,
+      statusResult,
+      primaryBlocker: null,
+      blockers: [],
+      evidenceCode: CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE,
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildRealStatusReceiptBase({
+      state: 'error',
+      mode: 'real-proof',
+      outcomeCode: 'capability-real-status-validation-failed',
+      errorClass: 'internal',
+      primaryBlocker: 'capability-injection-input-invalid',
+      hostObservationOccurred: false,
+      hostSideEffectOccurred: false,
+    }));
+  }
+}
+
+/**
+ * @internal TEST ONLY — never call from production bootstrap / server / agent / web
+ * Swap the RealStatusHostReader for failure-injection tests.
+ * Does not accept path/home/cwd injection from callers.
+ * Production trustedBootstrap must never invoke this function.
+ * Must reset to null in afterEach.
+ */
+export function setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(readerOrNull) {
+  if (readerOrNull === null || readerOrNull === undefined) {
+    realStatusHostReaderOverrideForTest = null;
+    rebindRealStatusCapabilityHandler();
+    return;
+  }
+  if (typeof readerOrNull !== 'object' || typeof readerOrNull.observe !== 'function') {
+    throw new Error('capability-real-status-validation-failed');
+  }
+  realStatusHostReaderOverrideForTest = readerOrNull;
+  rebindRealStatusCapabilityHandler();
+}
+
+/**
+ * @internal TEST ONLY — never call from production bootstrap / server / agent / web
+ * Low-level fs-ops seam for real observe orchestration coverage.
+ * Allowed inject keys only: lstat, open, stat, close, deadlineMs.
+ * MUST NOT inject path/home/homedir/cwd/request/HTTP/CLI/Web surfaces.
+ * Production trustedBootstrap must never invoke this function.
+ * Must reset to null in afterEach.
+ */
+export function setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(opsOrNull) {
+  if (opsOrNull === null || opsOrNull === undefined) {
+    realStatusFsOpsOverrideForTest = null;
+    return;
+  }
+  if (typeof opsOrNull !== 'object' || Array.isArray(opsOrNull) || utilTypes.isProxy(opsOrNull)) {
+    throw new Error('capability-real-status-validation-failed');
+  }
+  let proto;
+  try {
+    proto = Object.getPrototypeOf(opsOrNull);
+  } catch {
+    throw new Error('capability-real-status-validation-failed');
+  }
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error('capability-real-status-validation-failed');
+  }
+
+  const allowed = new Set(['lstat', 'open', 'stat', 'close', 'deadlineMs']);
+  const requiredFns = ['lstat', 'open', 'stat', 'close'];
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(opsOrNull);
+  } catch {
+    throw new Error('capability-real-status-validation-failed');
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol' || !allowed.has(key)) {
+      throw new Error('capability-real-status-validation-failed');
+    }
+  }
+
+  const normalized = Object.create(null);
+  for (const fnKey of requiredFns) {
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(opsOrNull, fnKey);
+    } catch {
+      throw new Error('capability-real-status-validation-failed');
+    }
+    // Require own data descriptor (no getter/setter) whose value is a function.
+    // Partial missing any of the four is rejected — never fall back to production fs.
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value') ||
+      typeof desc.value !== 'function'
+    ) {
+      throw new Error('capability-real-status-validation-failed');
+    }
+    normalized[fnKey] = desc.value;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(opsOrNull, 'deadlineMs') || ownKeys.includes('deadlineMs')) {
+    let deadlineDesc;
+    try {
+      deadlineDesc = Object.getOwnPropertyDescriptor(opsOrNull, 'deadlineMs');
+    } catch {
+      throw new Error('capability-real-status-validation-failed');
+    }
+    if (
+      !deadlineDesc ||
+      deadlineDesc.get !== undefined ||
+      deadlineDesc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(deadlineDesc, 'value') ||
+      typeof deadlineDesc.value !== 'number' ||
+      !Number.isFinite(deadlineDesc.value) ||
+      deadlineDesc.value <= 0
+    ) {
+      throw new Error('capability-real-status-validation-failed');
+    }
+    normalized.deadlineMs = deadlineDesc.value;
+  }
+
+  realStatusFsOpsOverrideForTest = normalized;
+}
+
 /**
  * Internal pure recompute helper for tests (structure/byte contract).
  * Not an HTTP/CLI surface. Returns rendered string + hash only.
@@ -6372,8 +7893,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
 
   // Ignore options.capabilityInjectionDecision / options.capabilityReceipt /
   // options.capabilityInjectionReady / options.handlers / options.capabilities /
-  // any realCapability* / realRender* / execute / wiring / executionEligible override.
-  // Production-derived only.
+  // any realCapability* / realRender* / realStatus* / hostObservation* /
+  // hostSideEffect* / execute / wiring / executionEligible override.
+  // Production-derived only. Gate is non-live: never calls RealStatusProof / host reader.
+  // realCapabilityImplementationsReady:false is an independent fail-closed fact, not a ready success signal.
   const capabilityInjectionReadiness =
     buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
   const capabilityInjectionDecision =
@@ -6389,10 +7912,14 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
   const realRenderCapabilityImplementationReady =
     capabilityInjectionReadiness?.realRenderCapabilityImplementationReady === true &&
     isRealRenderCapabilityRegistryReady() === true;
+  // Local real-status fact only; gate never live-observes host.
+  const realStatusCapabilityImplementationReady =
+    capabilityInjectionReadiness?.realStatusCapabilityImplementationReady === true &&
+    isRealStatusCapabilityRegistryReady() === true;
 
   // Gate attaches decision + readiness only (invoke remains pure unit-tested).
   // Optional receipt summary omitted to avoid secretsRedacted vocabulary colliding
-  // with existing full-JSON sensitive-scan tests; pure invokeDryRun/RealRenderProof cover receipts.
+  // with existing full-JSON sensitive-scan tests; pure invokeDryRun/RealRenderProof/RealStatusProof cover receipts.
 
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
@@ -6403,9 +7930,15 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executorReady: false,
     wouldExecute: false,
     realRunnerWiringReady: false,
+    // Independent global fact (2/7 real kinds): false-as-boundary, not ready-success input.
     realCapabilityImplementationsReady: false,
     executeCapabilityAuthorized: false,
     realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
+    realStatusCapabilityImplementationReady: realStatusCapabilityImplementationReady === true,
+    // Gate non-live observe: never statusResult / never host reader.
+    hostMutationOccurred: false,
+    hostObservationOccurred: false,
+    hostSideEffectOccurred: false,
     blockers: [...new Set(blockers)],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     runnerWiringContract,
@@ -6440,8 +7973,12 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       capabilityInjectionReady: capabilityInjectionReady === true,
       dryRunCapabilityRegistryReady: dryRunCapabilityRegistryReady === true,
       realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
+      realStatusCapabilityImplementationReady: realStatusCapabilityImplementationReady === true,
       realCapabilityImplementationsReady: false,
       executeCapabilityAuthorized: false,
+      hostMutationOccurred: false,
+      hostObservationOccurred: false,
+      hostSideEffectOccurred: false,
     },
     safety: executionPreviewSafety(),
   };

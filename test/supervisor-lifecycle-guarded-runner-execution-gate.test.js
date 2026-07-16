@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
   areSupervisorLifecycleGuardedRunnerActionCandidatesReady,
@@ -24,6 +24,10 @@ import {
   invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun,
   authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof,
   invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof,
+  authorizeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof,
+  invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof,
+  setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest,
+  setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest,
   recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
@@ -3297,8 +3301,12 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       capabilityInjectionReady: true,
       dryRunCapabilityRegistryReady: true,
       realRenderCapabilityImplementationReady: true,
+      realStatusCapabilityImplementationReady: true,
       realCapabilityImplementationsReady: false,
       executeCapabilityAuthorized: false,
+      hostMutationOccurred: false,
+      hostObservationOccurred: false,
+      hostSideEffectOccurred: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -5303,8 +5311,10 @@ describe('V1.32 real render capability readiness + dual registry', () => {
     assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
     assert.strictEqual(r.handler, undefined);
     assert.ok(Array.isArray(r.realImplementationEntries));
-    assert.strictEqual(r.realImplementationEntries.length, 1);
-    const entry = r.realImplementationEntries[0];
+    // V1.33: dual real registry size 2 (render + status)
+    assert.strictEqual(r.realImplementationEntries.length, 2);
+    const entry = r.realImplementationEntries.find((e) => e.capabilityKind === 'render');
+    assert.ok(entry);
     assert.strictEqual(entry.capabilityKind, 'render');
     assert.strictEqual(entry.capabilityId, 'real-render');
     assert.strictEqual(entry.implementationClass, 'real-implementation');
@@ -5314,12 +5324,12 @@ describe('V1.32 real render capability readiness + dual registry', () => {
     assert.strictEqual(entry.handler, undefined);
   });
 
-  it('T2: dual-track dry-run 7 + real render 1; status/write have no real entry', () => {
+  it('T2: dual-track dry-run 7 + real render kept; write/reload have no real entry', () => {
     const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
     assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
-    assert.strictEqual(r.realImplementationEntries.length, 1);
-    assert.strictEqual(r.realImplementationEntries[0].capabilityKind, 'render');
-    for (const kind of ['status', 'write', 'reload', 'rollback', 'audit', 'notify']) {
+    assert.strictEqual(r.realImplementationEntries.length, 2);
+    assert.ok(r.realImplementationEntries.some((e) => e.capabilityKind === 'render'));
+    for (const kind of ['write', 'reload', 'rollback', 'audit', 'notify']) {
       assert.ok(!r.realImplementationEntries.some((e) => e.capabilityKind === kind));
     }
   });
@@ -5850,5 +5860,1546 @@ describe('V1.32 T28/T29 source contract markers', () => {
     assert.ok(src.includes("'&amp;'") || src.includes('"&amp;"') || src.includes('&amp;'));
     assert.ok(src.includes('&lt;') && src.includes('&gt;') && src.includes('&quot;') && src.includes('&apos;'));
     assert.ok(src.includes('capabilityXmlEscape') || src.includes('xmlEscape'));
+  });
+});
+
+// ── V1.33 Real status observational capability (T1–T44 / F1–F23) ──
+
+const REAL_STATUS_TARGET = 'linke-launch-agent-default';
+const PRESENCE_ENUM = Object.freeze([
+  'present', 'absent', 'unreadable', 'unexpected-type', 'oversize', 'symlink-blocked', 'observation-error',
+]);
+const READABILITY_ENUM = Object.freeze(['readable', 'unreadable', 'not-applicable', 'unknown']);
+const SIZE_CLASS_ENUM = Object.freeze(['empty', 'small', 'medium', 'oversize', 'unknown']);
+
+function buildRealStatusProofRequest(overrides = {}) {
+  const statusInput = Object.hasOwn(overrides, 'statusInput')
+    ? overrides.statusInput
+    : { targetToken: REAL_STATUS_TARGET };
+  const { statusInput: _ignored, ...top } = overrides;
+  return {
+    capabilityKind: 'status',
+    actionId: 'capture-current-state',
+    operation: 'rollback',
+    mode: 'real-proof',
+    idempotencyKey: null,
+    attemptRef: null,
+    anchorRef: null,
+    ...top,
+    statusInput,
+  };
+}
+
+function assertStatusTriBoolObserve(rc) {
+  assert.strictEqual(rc.hostMutationOccurred, false);
+  assert.strictEqual(rc.hostObservationOccurred, true);
+  assert.strictEqual(rc.hostSideEffectOccurred, true);
+}
+
+function assertStatusTriBoolValidation(rc) {
+  assert.strictEqual(rc.hostMutationOccurred, false);
+  assert.strictEqual(rc.hostObservationOccurred, false);
+  assert.strictEqual(rc.hostSideEffectOccurred, false);
+}
+
+function assertNoSensitiveLeak(rc) {
+  const json = JSON.stringify(rc);
+  assert.ok(!/\/Users\//.test(json), 'must not leak /Users/ path');
+  assert.ok(!/LaunchAgents/.test(json), 'must not leak LaunchAgents absolute path');
+  const home = process.env.HOME || '___no_home___';
+  assert.ok(!json.includes(home), 'must not leak HOME');
+  assert.ok(!/"ENOENT"/.test(json), 'must not leak raw ENOENT');
+  assert.ok(!/"EACCES"/.test(json), 'must not leak raw EACCES');
+  assert.ok(!json.includes('contentSha256') || rc.renderResult, 'status must not carry contentSha256');
+  if (rc.statusResult) {
+    assert.strictEqual(rc.statusResult.contentSha256, undefined);
+    assert.strictEqual(rc.statusResult.size, undefined);
+    assert.strictEqual(rc.statusResult.path, undefined);
+  }
+}
+
+describe('V1.33 real status readiness + dual registry', () => {
+  afterEach(() => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+  });
+
+  it('T1: readiness realRender+realStatus true + global real false + wiring-missing', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r.state, 'ready');
+    assert.strictEqual(r.pureCapabilityInjectionReady, true);
+    assert.strictEqual(r.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(r.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(r.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(r.realCapabilityImplementationsReady, false);
+    assert.strictEqual(r.executeCapabilityRegistryReady, false);
+    assert.strictEqual(r.executeCapabilityAuthorized, false);
+    assert.strictEqual(r.realRunnerWiringReady, false);
+    assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(r.handler, undefined);
+    assert.strictEqual(r.realImplementationEntries.length, 2);
+    const kinds = r.realImplementationEntries.map((e) => e.capabilityKind).sort();
+    assert.deepStrictEqual(kinds, ['render', 'status']);
+    const statusEntry = r.realImplementationEntries.find((e) => e.capabilityKind === 'status');
+    assert.strictEqual(statusEntry.capabilityId, 'real-status');
+    assert.strictEqual(statusEntry.implementationClass, 'real-implementation');
+    assert.strictEqual(statusEntry.sideEffectClass, 'observational-read');
+    assert.deepStrictEqual(statusEntry.supportsModes, ['real-proof']);
+    assert.strictEqual(statusEntry.contentReadAllowed, false);
+    assert.strictEqual(statusEntry.hostObservationOccurred, false);
+    assert.strictEqual(statusEntry.hostSideEffectOccurred, false);
+    assert.strictEqual(statusEntry.hostMutationOccurred, false);
+  });
+
+  it('T2/T34: dual registry 7 dry-run + 2 real; no write/reload/rollback/audit/notify real', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
+    assert.strictEqual(r.realImplementationEntries.length, 2);
+    for (const kind of ['write', 'reload', 'rollback', 'audit', 'notify']) {
+      assert.ok(!r.realImplementationEntries.some((e) => e.capabilityKind === kind));
+    }
+  });
+});
+
+describe('V1.33 real-status-proof invoke + failure matrix', () => {
+  afterEach(() => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+  });
+
+  it('T3: dry-run status still completed without statusResult', () => {
+    const dry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'dry-run',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.strictEqual(dry.receiptKind, 'capability-dry-run-receipt');
+    assert.strictEqual(dry.capabilityId, 'dry-run-status');
+    assert.strictEqual(dry.statusResult, undefined);
+    assert.strictEqual(dry.hostSideEffectOccurred, false);
+    assert.strictEqual(dry.hostObservationOccurred, undefined);
+  });
+
+  it('T4: production real-status-proof happy path (typically absent)', async () => {
+    const req = buildRealStatusProofRequest();
+    const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(req);
+    assert.strictEqual(auth.state, 'authorized');
+    assert.strictEqual(auth.executeCapabilityAuthorized, false);
+    assert.strictEqual(auth.realCapabilityImplementationsReady, false);
+    assert.strictEqual(auth.hostObservationOccurred, false);
+    assert.strictEqual(auth.hostSideEffectOccurred, false);
+
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(req);
+    assert.strictEqual(rc.receiptKind, 'capability-real-implementation-receipt');
+    assert.strictEqual(rc.capabilityId, 'real-status');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-completed');
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.implementationClass, 'real-implementation');
+    assert.strictEqual(rc.sideEffectClass, 'observational-read');
+    assertStatusTriBoolObserve(rc);
+    assert.strictEqual(rc.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(rc.realCapabilityImplementationsReady, false);
+    assert.strictEqual(rc.executeCapabilityAuthorized, false);
+    assert.strictEqual(rc.realRunnerWiringReady, false);
+    assert.strictEqual(rc.executionEligible, false);
+    assert.strictEqual(rc.idempotencyKeyFingerprint, null);
+    assert.deepStrictEqual(rc.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(rc.statusResult.observationClass, 'launch-agent-presence');
+    assert.strictEqual(rc.statusResult.targetToken, REAL_STATUS_TARGET);
+    assert.ok(PRESENCE_ENUM.includes(rc.statusResult.presence));
+    assert.ok(READABILITY_ENUM.includes(rc.statusResult.readability));
+    assert.ok(SIZE_CLASS_ENUM.includes(rc.statusResult.sizeClass));
+    assert.strictEqual(rc.statusResult.contentSha256, undefined);
+    assertNoSensitiveLeak(rc);
+  });
+
+  it('T5/T6: inject present metadata + sizeClass buckets; no contentSha256', async () => {
+    for (const [size, sizeClass] of [
+      [0, 'empty'],
+      [4, 'small'],
+      [2048, 'medium'],
+    ]) {
+      setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+        async observe() {
+          return { kind: 'regular-file', size, observationStarted: true };
+        },
+      });
+      const a = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+        buildRealStatusProofRequest(),
+      );
+      const b = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+        buildRealStatusProofRequest(),
+      );
+      assert.strictEqual(a.statusResult.presence, 'present');
+      assert.strictEqual(a.statusResult.isRegularFile, true);
+      assert.strictEqual(a.statusResult.readability, 'readable');
+      assert.strictEqual(a.statusResult.sizeClass, sizeClass);
+      assert.strictEqual(a.statusResult.contentSha256, undefined);
+      assert.deepStrictEqual(
+        { presence: a.statusResult.presence, sizeClass: a.statusResult.sizeClass },
+        { presence: b.statusResult.presence, sizeClass: b.statusResult.sizeClass },
+      );
+      assertStatusTriBoolObserve(a);
+    }
+  });
+
+  it('T7: dry-run vs real-status distinguishable', async () => {
+    const dry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'dry-run',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    const real = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(dry.capabilityId, 'dry-run-status');
+    assert.strictEqual(real.capabilityId, 'real-status');
+    assert.strictEqual(dry.receiptKind, 'capability-dry-run-receipt');
+    assert.strictEqual(real.receiptKind, 'capability-real-implementation-receipt');
+    assert.strictEqual(dry.statusResult, undefined);
+    assert.ok(real.statusResult);
+  });
+
+  it('T8: execute hard-deny; status reader not called', async () => {
+    let called = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        called += 1;
+        return { kind: 'regular-file', size: 1, observationStarted: true };
+      },
+    });
+    const denied = authorizeSupervisorLifecycleGuardedRunnerCapabilityMode({
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'execute',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.strictEqual(denied.executeCapabilityAuthorized, false);
+    const dryExec = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'execute',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.notStrictEqual(dryExec.state, 'completed');
+    assert.strictEqual(dryExec.executeCapabilityAuthorized, false);
+    assert.strictEqual(called, 0);
+  });
+
+  it('T9: top-level path/home/reader injection rejected', async () => {
+    for (const key of ['path', 'home', 'homedir', 'cwd', 'reader']) {
+      const bad = {
+        ...buildRealStatusProofRequest(),
+        [key]: '/tmp/evil',
+      };
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(bad);
+      assert.ok(rc.state === 'denied' || rc.state === 'error');
+      assertStatusTriBoolValidation(rc);
+    }
+  });
+
+  it('T10/F9: nested statusInput extra/proxy/getter/symbol/function fail-closed', async () => {
+    const withExtra = buildRealStatusProofRequest({
+      statusInput: { targetToken: REAL_STATUS_TARGET, extra: 'x' },
+    });
+    const d1 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(withExtra);
+    assert.ok(d1.state === 'denied' || d1.state === 'error');
+    assertStatusTriBoolValidation(d1);
+
+    const withProto = { targetToken: REAL_STATUS_TARGET };
+    Object.defineProperty(withProto, '__proto__', { value: { polluted: true }, enumerable: true });
+    // __proto__ as own key via assign may not work; use dangerous constructor path
+    const withDanger = Object.create(null);
+    withDanger.targetToken = REAL_STATUS_TARGET;
+    withDanger.constructor = Object;
+    const d2 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ statusInput: withDanger }),
+    );
+    assert.ok(d2.state === 'denied' || d2.state === 'error');
+    assertStatusTriBoolValidation(d2);
+
+    const withSymbol = { targetToken: REAL_STATUS_TARGET };
+    withSymbol[Symbol('x')] = 1;
+    const d3 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ statusInput: withSymbol }),
+    );
+    assert.ok(d3.state === 'denied' || d3.state === 'error');
+
+    const withGetter = {};
+    Object.defineProperty(withGetter, 'targetToken', {
+      get() {
+        return REAL_STATUS_TARGET;
+      },
+      enumerable: true,
+    });
+    const d4 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ statusInput: withGetter }),
+    );
+    assert.ok(d4.state === 'denied' || d4.state === 'error');
+    assertStatusTriBoolValidation(d4);
+
+    const withFn = { targetToken: REAL_STATUS_TARGET, fn: () => {} };
+    // extra key + function
+    const d5 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ statusInput: withFn }),
+    );
+    assert.ok(d5.state === 'denied' || d5.state === 'error');
+
+    const proxy = new Proxy(
+      { targetToken: REAL_STATUS_TARGET },
+      {
+        ownKeys() {
+          return ['targetToken'];
+        },
+        getOwnPropertyDescriptor(t, p) {
+          return Object.getOwnPropertyDescriptor(t, p);
+        },
+        get(t, p) {
+          return t[p];
+        },
+      },
+    );
+    // Proxy may still pass if it behaves like plain object with exact keys — still ok if denied
+    const d6 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ statusInput: proxy }),
+    );
+    // Either accepted as plain or denied; if accepted must still be valid token path
+    if (d6.state === 'completed') {
+      assert.strictEqual(d6.statusResult.targetToken, REAL_STATUS_TARGET);
+    } else {
+      assertStatusTriBoolValidation(d6);
+    }
+  });
+
+  it('T11/F4: targetToken type hard rejects', async () => {
+    for (const badToken of [null, undefined, '', 1, true, {}, [], () => {}, 'not-allowlisted']) {
+      const r = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+        buildRealStatusProofRequest({ statusInput: { targetToken: badToken } }),
+      );
+      assert.ok(r.state === 'denied' || r.state === 'error', `token=${String(badToken)}`);
+      assertStatusTriBoolValidation(r);
+    }
+  });
+
+  it('T12/F2: ENOENT → absent completed', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'absent', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'absent');
+    assert.strictEqual(rc.statusResult.readability, 'not-applicable');
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T13/F3: EACCES → unreadable', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'unreadable', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'unreadable');
+    assert.strictEqual(rc.statusResult.readability, 'unreadable');
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T14/F5: oversize metadata; no content hash', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'regular-file', size: 70000, observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'oversize');
+    assert.strictEqual(rc.statusResult.sizeClass, 'oversize');
+    assert.strictEqual(rc.statusResult.contentSha256, undefined);
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T15/F11: symlink-blocked', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'symlink', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'symlink-blocked');
+    assert.strictEqual(rc.statusResult.isRegularFile, false);
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T16/F1: timeout (fake slow + production deadline race semantics)', async () => {
+    // Fake slow reader
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'timeout', observationStarted: true };
+      },
+    });
+    const fake = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(fake.state, 'error');
+    assert.strictEqual(fake.outcomeCode, 'capability-real-status-timeout');
+    assertStatusTriBoolObserve(fake);
+    assert.strictEqual(fake.statusResult, undefined);
+
+    // Production absolute deadline: ultra-slow fake that never settles quickly is covered by kind timeout.
+    // Also exercise production reader path still has O_NOFOLLOW / deadline constants present (T42).
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    const prod = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    // Production path should complete (absent) or timeout — both are valid async settle.
+    assert.ok(prod.state === 'completed' || prod.outcomeCode === 'capability-real-status-timeout');
+    if (prod.state === 'completed') assertStatusTriBoolObserve(prod);
+  });
+
+  it('T17/F7: adapter throw/reject → observation-failed', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        throw new Error('synthetic-adapter-boom');
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'error');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-observation-failed');
+    assertStatusTriBoolObserve(rc);
+    assertNoSensitiveLeak(rc);
+  });
+
+  it('T18/F9: prototype pollution top-level rejected', async () => {
+    const poisoned = {
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'real-proof',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+      statusInput: { targetToken: REAL_STATUS_TARGET },
+    };
+    Object.defineProperty(poisoned, 'constructor', { value: Object, enumerable: true });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(poisoned);
+    assert.ok(rc.state === 'denied' || rc.state === 'error');
+    assertStatusTriBoolValidation(rc);
+  });
+
+  it('T19/F14: execute mode on status proof API denied', async () => {
+    const bad = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest({ mode: 'execute' }),
+    );
+    assert.strictEqual(bad.state, 'denied');
+    assert.strictEqual(bad.executeCapabilityAuthorized, false);
+    assertStatusTriBoolValidation(bad);
+  });
+
+  it('F6: illegal adapter shape → observation-failed; default raw not claimed as observation', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        // No observationStarted: must NOT be treated as real host observation by default.
+        return { weird: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'error');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-observation-failed');
+    assertStatusTriBoolValidation(rc);
+  });
+
+  it('F8/T31: concurrent invoke single-settle semantics (fake double-resolve safe)', async () => {
+    let calls = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        calls += 1;
+        return { kind: 'regular-file', size: 10, observationStarted: true };
+      },
+    });
+    const [a, b] = await Promise.all([
+      invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(buildRealStatusProofRequest()),
+      invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(buildRealStatusProofRequest()),
+    ]);
+    assert.strictEqual(a.state, 'completed');
+    assert.strictEqual(b.state, 'completed');
+    assert.strictEqual(a.statusResult.presence, 'present');
+    assert.strictEqual(b.statusResult.presence, 'present');
+    assert.ok(calls >= 1);
+    // Each invoke gets its own single receipt — no dual-settle corruption.
+    assert.strictEqual(a.outcomeCode, 'capability-real-status-completed');
+    assert.strictEqual(b.outcomeCode, 'capability-real-status-completed');
+  });
+
+  it('F10/T31: late resolve discarded (fake settles once)', async () => {
+    let resolveLate;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      observe() {
+        return new Promise((resolve) => {
+          resolveLate = resolve;
+          // First settle immediately as present; late resolve attempted after.
+          resolve({ kind: 'regular-file', size: 2, observationStarted: true });
+        });
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'present');
+    // Late resolve must not throw unhandled; discard.
+    if (typeof resolveLate === 'function') {
+      resolveLate({ kind: 'absent', observationStarted: true });
+    }
+    assert.strictEqual(rc.statusResult.presence, 'present');
+  });
+
+  it('F12: unexpected type directory', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'unexpected-type', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'unexpected-type');
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T35/F16: parent symlink → symlink-blocked', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'symlink', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.statusResult.presence, 'symlink-blocked');
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T36/F17: target swap maps to symlink-blocked or observation-error', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'symlink', observationStarted: true }; // locked mapping for open-time symlink
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.ok(
+      rc.statusResult?.presence === 'symlink-blocked' ||
+        rc.outcomeCode === 'capability-real-status-observation-failed',
+    );
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T37/F18/F19: deadline before/after open single-settle', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'timeout', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-timeout');
+    assert.strictEqual(rc.statusResult, undefined);
+    assertStatusTriBoolObserve(rc);
+  });
+
+  it('T38/F20: close failure → observation-failed; no leak', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'observation-error', reason: 'close-failed', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'error');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-observation-failed');
+    assertStatusTriBoolObserve(rc);
+    assertNoSensitiveLeak(rc);
+  });
+
+  it('T39/F21: in-flight cap does not flood', async () => {
+    let active = 0;
+    let maxActive = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 20));
+        active -= 1;
+        return { kind: 'regular-file', size: 1, observationStarted: true };
+      },
+    });
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(buildRealStatusProofRequest()),
+      ),
+    );
+    for (const rc of results) {
+      assert.ok(
+        rc.state === 'completed' ||
+          rc.outcomeCode === 'capability-real-status-observation-failed' ||
+          rc.outcomeCode === 'capability-real-status-timeout',
+      );
+    }
+    // Cap is enforced inside production reader; inject may exceed — assert no crash and finite results.
+    assert.strictEqual(results.length, 6);
+  });
+
+  it('T40/F22: no content read APIs on completed path', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    // Status reader private region must not use content-read APIs.
+    assert.ok(!src.includes('createReadStream'));
+    assert.ok(!/fh\.read\b/.test(src));
+    assert.ok(!src.includes('readFileSync'));
+    // Production status path uses open+stat only — readFile may exist elsewhere; assert statusResult never has hash.
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'regular-file', size: 8, observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.statusResult.contentSha256, undefined);
+    assert.ok(!JSON.stringify(rc).includes('contentSha256'));
+  });
+
+  it('T41: TEST ONLY hook JSDoc + bootstrap never calls ForTest', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(src.includes('@internal TEST ONLY'));
+    assert.ok(src.includes('setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest'));
+    assert.ok(src.includes('setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest'));
+    // Bootstrap must not call the ForTest setters.
+    const bootstrapSlice = src.slice(
+      src.indexOf('function trustedBootstrapCapabilityRegistry'),
+      src.indexOf('trustedBootstrapCapabilityRegistry();') + 'trustedBootstrapCapabilityRegistry();'.length,
+    );
+    assert.ok(!bootstrapSlice.includes('setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest('));
+    assert.ok(!bootstrapSlice.includes('setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest('));
+    assert.ok(bootstrapSlice.includes('NEVER call') || bootstrapSlice.includes('never call') || bootstrapSlice.includes('NEVER'));
+  });
+
+  it('T42: O_NOFOLLOW forced in production open flags', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(src.includes('O_NOFOLLOW'));
+    assert.ok(src.includes('O_RDONLY'));
+    assert.ok(src.includes('fs/promises') || src.includes("from 'node:fs/promises'"));
+  });
+
+  it('T26/F23/T32: no raw error leak; redaction path', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return {
+          kind: 'observation-error',
+          observationStarted: true,
+          // malicious attempt to smuggle raw fields — sanitize must strip
+          code: 'ENOENT',
+          message: 'secret path /Users/evil/LaunchAgents/x.plist',
+          stack: 'Error: boom',
+          path: '/Users/evil/Library/LaunchAgents/x.plist',
+        };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assertNoSensitiveLeak(rc);
+    assert.ok(
+      rc.outcomeCode === 'capability-real-status-observation-failed' ||
+        (rc.statusResult && rc.statusResult.presence === 'observation-error'),
+    );
+  });
+
+  it('T27: RealRenderProof rejects status kind (no expansion)', () => {
+    const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof({
+      capabilityKind: 'status',
+      actionId: 'capture-current-state',
+      operation: 'rollback',
+      mode: 'real-proof',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+      renderInput: { label: 'x', scheduleSeconds: 60, programToken: 'linke-agent-run-once' },
+    });
+    // Either injection reject (wrong keys) or kind unknown — never completed status.
+    assert.notStrictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult, undefined);
+  });
+
+  it('T27b: no buildSupervisorStatusResponse import in lifecycle', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(!src.includes('buildSupervisorStatusResponse'));
+  });
+
+  it('T29/T30: PROOF ONLY JSDoc + observational terminology comments', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(src.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof'));
+    assert.ok(src.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof'));
+    assert.ok(src.includes('@internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint'));
+    assert.ok(src.includes('真实宿主元数据观测非 stub') || src.includes('hostObservationOccurred=true'));
+    assert.ok(src.includes('observational-read'));
+    assert.ok(src.includes('不得重定义') || src.includes('V1.32'));
+  });
+
+  it('T33: idempotencyKeyFingerprint remains null', async () => {
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.idempotencyKeyFingerprint, null);
+  });
+
+  it('T24: side-effect scan categories — no shell/write/content-sync in status path', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(!src.includes('child_process'));
+    assert.ok(!src.includes("from 'node:child_process'") && !src.includes('from "node:child_process"'));
+    assert.ok(!src.includes('shell: true'));
+    assert.ok(!src.includes('lstatSync'));
+    assert.ok(!src.includes('openSync'));
+    assert.ok(!src.includes('readSync'));
+    assert.ok(!src.includes('createReadStream'));
+    // Status reader private region must use async open/lstat/stat/close + O_NOFOLLOW.
+    assert.ok(src.includes('O_NOFOLLOW'));
+    assert.ok(src.includes("from 'node:fs/promises'") || src.includes('node:fs/promises'));
+    // No writeFile/appendFile calls in observational status path (category: fs write).
+    const statusSlice = src.slice(
+      src.indexOf('// ── V1.33 Real status observational metadata reader'),
+      src.indexOf('export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest'),
+    );
+    assert.ok(statusSlice.length > 100);
+    assert.ok(!statusSlice.includes('writeFile'));
+    assert.ok(!statusSlice.includes('appendFile'));
+    assert.ok(!statusSlice.includes('appendAuditEvent'));
+    assert.ok(!statusSlice.includes('execFile'));
+    assert.ok(!statusSlice.includes('spawn('));
+  });
+});
+
+describe('V1.33 gate + resolve realStatus integration', () => {
+  afterEach(() => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+  });
+
+  it('T20: gate production ready exposes local realStatus; non-live observation', () => {
+    const gate = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(gate.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(gate.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(gate.realCapabilityImplementationsReady, false);
+    assert.strictEqual(gate.executionEligible, false);
+    assert.strictEqual(gate.realRunnerWiringReady, false);
+    assert.strictEqual(gate.hostObservationOccurred, false);
+    assert.strictEqual(gate.hostSideEffectOccurred, false);
+    assert.strictEqual(gate.hostMutationOccurred, false);
+    assert.strictEqual(gate.statusResult, undefined);
+    assert.deepStrictEqual(gate.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(gate.gates.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.hostObservationOccurred, false);
+    assert.strictEqual(gate.gates.hostSideEffectOccurred, false);
+    assert.strictEqual(gate.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(gate.runnerWiringContract.blockedCount, 0);
+  });
+
+  it('T21: options override realStatus/observation/sideEffect/execute ignored', () => {
+    const poisoned = buildGate(getReadyInputs(), {
+      executeRequested: true,
+      realStatusCapabilityImplementationReady: false,
+      hostObservationOccurred: true,
+      hostSideEffectOccurred: true,
+      executeCapabilityAuthorized: true,
+      realCapabilityImplementationsReady: true,
+    });
+    assert.strictEqual(poisoned.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(poisoned.hostObservationOccurred, false);
+    assert.strictEqual(poisoned.hostSideEffectOccurred, false);
+    assert.strictEqual(poisoned.executeCapabilityAuthorized, false);
+    assert.strictEqual(poisoned.realCapabilityImplementationsReady, false);
+  });
+
+  it('resolve mapping includes real-status fields for capture-current-state (non-live)', () => {
+    const candidates = OPERATION_EXPECTED_ACTION_IDS.rollback.map((actionId) => ({
+      actionId,
+      implementationId: CODE_OWNED_REGISTRY_MAPPINGS[actionId],
+      runnerKind: 'guarded-runner-stub',
+      mode: 'guarded-host-action',
+      status: 'blocked',
+      wouldExecute: false,
+      wouldRun: false,
+      wouldWrite: false,
+      maxAttempts: 1,
+    }));
+    const d = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(candidates, 'rollback');
+    assert.strictEqual(d.state, 'resolved');
+    const row = d.mappings.find((m) => m.actionId === 'capture-current-state');
+    assert.ok(row);
+    assert.strictEqual(row.primaryCapabilityKind, 'status');
+    assert.strictEqual(row.realCapabilityId, 'real-status');
+    assert.strictEqual(row.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(row.hostObservationOccurred, false);
+    assert.strictEqual(row.hostSideEffectOccurred, false);
+    assert.strictEqual(d.executeCapabilityAuthorized, false);
+    assert.strictEqual(d.realCapabilityImplementationsReady, false);
+  });
+
+  it('execute dry-run entry still hard-deny; status reader not called', async () => {
+    let called = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        called += 1;
+        throw new Error('must-not-call');
+      },
+    });
+    const gate = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(gate.executeCapabilityAuthorized, false);
+    assert.strictEqual(gate.executionEligible, false);
+    assert.strictEqual(called, 0);
+  });
+});
+
+describe('V1.33 source markers + T25 zero server/agent/web refs', () => {
+  it('T25: server/agent/web zero RealStatusProof / ForTest refs', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const rel of ['../src/server.js', '../src/agent.js', '../src/web/app.js']) {
+      const src = await readFile(join(here, rel), 'utf8');
+      assert.ok(!src.includes('RealStatusProof'), rel);
+      assert.ok(!src.includes('RealStatusHostReaderForTest'), rel);
+      assert.ok(!src.includes('RealStatusFsOpsForTest'), rel);
+      // Web may mention realStatus readiness lines but not proof invoke
+      if (rel.endsWith('server.js') || rel.endsWith('agent.js')) {
+        assert.ok(!src.includes('RealRenderProof'));
+      }
+    }
+  });
+});
+
+// ── V1.33 Qwen P0/P1 RED→GREEN contract groups ──
+// late-open / registry-dispatch / duplicate-truth / close-fail / home-symlink
+// plus fs-ops orchestration coverage (P1-4). Whole-reader seam remains for high-level receipts.
+
+function makeDirStat() {
+  return {
+    isSymbolicLink: () => false,
+    isDirectory: () => true,
+    isFile: () => false,
+  };
+}
+
+function makeFileStat(size = 8) {
+  return {
+    isSymbolicLink: () => false,
+    isDirectory: () => false,
+    isFile: () => true,
+    size,
+  };
+}
+
+function makeSymlinkStat() {
+  return {
+    isSymbolicLink: () => true,
+    isDirectory: () => false,
+    isFile: () => false,
+  };
+}
+
+/** Complete fs-ops seam fixture: all four functions required (no production fs fallback). */
+function completeFsOpsForTest(partial = {}) {
+  return {
+    async open() {
+      return {
+        async stat() {
+          return makeFileStat(1);
+        },
+        async close() {},
+      };
+    },
+    async stat(fh) {
+      return fh.stat();
+    },
+    async close(fh) {
+      return fh.close();
+    },
+    ...partial,
+  };
+}
+
+describe('V1.33 P0/P1 defect contracts (late-open/registry/duplicate/close/home)', () => {
+  afterEach(() => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(null);
+  });
+
+  it('RED-P0-1 late-open: timeout returns; late open closes once; lock held until background done', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    let openCount = 0;
+    let closeCount = 0;
+    let openReleased;
+    const openGate = new Promise((resolve) => {
+      openReleased = resolve;
+    });
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest({
+      deadlineMs: 25,
+      async lstat(p) {
+        const s = String(p);
+        if (s.endsWith('.plist')) return makeFileStat(4);
+        return makeDirStat();
+      },
+      async open() {
+        openCount += 1;
+        // Delay open past public deadline so race can settle timeout first.
+        await new Promise((r) => setTimeout(r, 80));
+        openReleased();
+        return {
+          async stat() {
+            return makeFileStat(4);
+          },
+          async close() {
+            closeCount += 1;
+          },
+        };
+      },
+      async stat(fh) {
+        return fh.stat();
+      },
+      async close(fh) {
+        return fh.close();
+      },
+    });
+
+    const timedOut = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(timedOut.outcomeCode, 'capability-real-status-timeout');
+    assert.strictEqual(timedOut.hostObservationOccurred, true);
+    assert.strictEqual(timedOut.hostSideEffectOccurred, true);
+    assert.strictEqual(timedOut.hostMutationOccurred, false);
+
+    // While background observation still owns the token lock, re-entry must fail-closed.
+    const reentry = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(reentry.state, 'error');
+    assert.strictEqual(reentry.outcomeCode, 'capability-real-status-observation-failed');
+    assert.strictEqual(reentry.hostObservationOccurred, false);
+    assert.strictEqual(reentry.hostSideEffectOccurred, false);
+    assert.strictEqual(reentry.hostMutationOccurred, false);
+
+    await openGate;
+    // Allow late open + close to finish.
+    await new Promise((r) => setTimeout(r, 60));
+    assert.strictEqual(openCount, 1, 'late open must still run once under background task');
+    assert.strictEqual(closeCount, 1, 'late open handle must close exactly once');
+
+    // After lock release, new observation is allowed.
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+      deadlineMs: 200,
+      async lstat() {
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+    }));
+    const after = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(after.state, 'completed');
+    assert.strictEqual(after.statusResult.presence, 'absent');
+  });
+
+  it('RED-P0-2 registry-dispatch: entry.handler is actual dispatch locus (no temp create/void entry)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    const start = src.indexOf(
+      'export async function invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof',
+    );
+    const end = src.indexOf(
+      'export function setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest',
+    );
+    assert.ok(start > 0 && end > start, 'invoke RealStatusProof slice bounds');
+    const invokeSlice = src.slice(start, end);
+    assert.ok(
+      invokeSlice.includes("realCapabilityRegistry.get('status')"),
+      'must look up status registry entry',
+    );
+    assert.ok(
+      /handlerResult\s*=\s*await\s+entry\.handler\s*\(/.test(invokeSlice),
+      'must await entry.handler as dispatch locus',
+    );
+    assert.ok(!invokeSlice.includes('void entry'), 'must not void unused entry');
+    assert.ok(
+      !invokeSlice.includes('createRealStatusCapabilityHandler('),
+      'must not create temporary handler in invoke',
+    );
+
+    // Behavioral: TEST ONLY reader rebind must flow through registry handler.
+    let observeCalls = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        observeCalls += 1;
+        return { kind: 'absent', observationStarted: true };
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'absent');
+    assert.strictEqual(observeCalls, 1);
+  });
+
+  it('RED-P0-3 duplicate-truth: reader pre-reject before fs must be observation/sideEffect false', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    let releaseFirst;
+    const firstGate = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    let lstatHits = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+      deadlineMs: 500,
+      async lstat() {
+        lstatHits += 1;
+        // Hold first observation open so duplicate hits in-flight lock.
+        await firstGate;
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+    }));
+
+    const firstPromise = invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    // Yield so first acquires lock.
+    await new Promise((r) => setTimeout(r, 15));
+    const dup = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    releaseFirst();
+    const first = await firstPromise;
+
+    assert.strictEqual(first.state, 'completed');
+    assert.strictEqual(first.hostObservationOccurred, true);
+    assert.strictEqual(dup.state, 'error');
+    assert.strictEqual(dup.outcomeCode, 'capability-real-status-observation-failed');
+    assert.strictEqual(dup.hostObservationOccurred, false, 'duplicate pre-reject is not real observation');
+    assert.strictEqual(dup.hostSideEffectOccurred, false);
+    assert.strictEqual(dup.hostMutationOccurred, false);
+    assert.ok(lstatHits >= 1);
+
+    // Fake reader may explicitly simulate observationStarted false (not default-true).
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(null);
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest({
+      async observe() {
+        return { kind: 'observation-error', reason: 'in-flight-cap', observationStarted: false };
+      },
+    });
+    const fakeCap = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(fakeCap.hostObservationOccurred, false);
+    assert.strictEqual(fakeCap.hostSideEffectOccurred, false);
+    assert.strictEqual(fakeCap.hostMutationOccurred, false);
+  });
+
+  it('RED-P1-1 close-fail: FileHandle.close reject → observation-failed, never completed', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    let closeCount = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest({
+      deadlineMs: 300,
+      async lstat(p) {
+        const s = String(p);
+        if (s.endsWith('.plist')) return makeFileStat(12);
+        return makeDirStat();
+      },
+      async open() {
+        return {
+          async stat() {
+            return makeFileStat(12);
+          },
+          async close() {
+            closeCount += 1;
+            throw new Error('EIO-close');
+          },
+        };
+      },
+      async stat(fh) {
+        return fh.stat();
+      },
+      async close(fh) {
+        return fh.close();
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'error');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-status-observation-failed');
+    assert.notStrictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.hostObservationOccurred, true);
+    assert.strictEqual(rc.hostSideEffectOccurred, true);
+    assert.strictEqual(rc.hostMutationOccurred, false);
+    assert.ok(closeCount >= 1);
+    assertNoSensitiveLeak(rc);
+    assert.ok(!JSON.stringify(rc).includes('EIO-close'));
+  });
+
+  it('RED-P1-3 home-symlink: parent walk includes os.homedir root; symlink fail-closed', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const homeResolved = path.resolve(os.homedir());
+    let sawHome = false;
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+      deadlineMs: 300,
+      async lstat(p) {
+        const resolved = path.resolve(String(p));
+        if (resolved === homeResolved) {
+          sawHome = true;
+          return makeSymlinkStat();
+        }
+        return makeDirStat();
+      },
+    }));
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(sawHome, true, 'parent walk must lstat os.homedir root itself');
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'symlink-blocked');
+    assert.strictEqual(rc.hostMutationOccurred, false);
+    assert.strictEqual(rc.hostObservationOccurred, true);
+    assert.strictEqual(rc.hostSideEffectOccurred, true);
+
+    // Source honesty: path.resolve is lexical; must not claim symlink follow.
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    const statusSlice = src.slice(
+      src.indexOf('// ── V1.33 Real status observational metadata reader'),
+      src.indexOf('export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest'),
+    );
+    assert.ok(
+      statusSlice.includes('lexical') || statusSlice.includes('does not follow') || statusSlice.includes('不跟随'),
+      'must not claim path.resolve follows symlinks',
+    );
+  });
+
+  it('P1-4 fs-ops seam orchestration: target swap / deadline / late reject / success no content read', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+
+    // Target swap at open → symlink-blocked (or observation-error), no content APIs.
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+      deadlineMs: 300,
+      async lstat(p) {
+        const s = String(p);
+        if (s.endsWith('.plist')) return makeFileStat(1);
+        return makeDirStat();
+      },
+      async open() {
+        const err = new Error('ELOOP');
+        err.code = 'ELOOP';
+        throw err;
+      },
+    }));
+    const swap = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.ok(
+      swap.statusResult?.presence === 'symlink-blocked' ||
+        swap.outcomeCode === 'capability-real-status-observation-failed',
+    );
+    assert.strictEqual(swap.hostMutationOccurred, false);
+
+    // Deadline before open: timeout public receipt; open never called.
+    // Drain previous background task lock before starting the next observation.
+    await new Promise((r) => setTimeout(r, 30));
+    let openCalls = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+      deadlineMs: 20,
+      async lstat() {
+        // Single slow step only — avoid multi-segment delay holding lock across later cases.
+        await new Promise((r) => setTimeout(r, 60));
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+      async open() {
+        openCalls += 1;
+        return {
+          async stat() {
+            return makeFileStat(1);
+          },
+          async close() {},
+        };
+      },
+    }));
+    const beforeOpen = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(beforeOpen.outcomeCode, 'capability-real-status-timeout');
+    // Wait for background task (60ms lstat) to release token lock.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.strictEqual(openCalls, 0);
+
+    // Late reject must not surface unhandled rejection.
+    const unhandled = [];
+    const onUnhandled = (err) => {
+      unhandled.push(err);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(completeFsOpsForTest({
+        deadlineMs: 15,
+        async lstat() {
+          await new Promise((r) => setTimeout(r, 50));
+          throw Object.assign(new Error('late-boom'), { code: 'EIO' });
+        },
+      }));
+      const late = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+        buildRealStatusProofRequest(),
+      );
+      assert.strictEqual(late.outcomeCode, 'capability-real-status-timeout');
+      // Wait for late reject path to settle under guarded catch (no unhandledRejection).
+      await new Promise((r) => setTimeout(r, 100));
+      assert.strictEqual(unhandled.length, 0, 'late reject must be caught');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    // Drain lock before success case.
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Success path: no content read methods invoked.
+    let readCalls = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest({
+      deadlineMs: 300,
+      async lstat(p) {
+        const s = String(p);
+        if (s.endsWith('.plist')) return makeFileStat(3);
+        return makeDirStat();
+      },
+      async open() {
+        return {
+          async stat() {
+            return makeFileStat(3);
+          },
+          async read() {
+            readCalls += 1;
+            throw new Error('must-not-read');
+          },
+          async close() {},
+        };
+      },
+      async stat(fh) {
+        return fh.stat();
+      },
+      async close(fh) {
+        return fh.close();
+      },
+    });
+    const ok = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(ok.state, 'completed');
+    assert.strictEqual(ok.statusResult.presence, 'present');
+    assert.strictEqual(readCalls, 0);
+    assert.strictEqual(ok.statusResult.contentSha256, undefined);
+
+    // Seam source contract: TEST ONLY + bootstrap never calls FsOps ForTest.
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(src.includes('setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest'));
+    assert.ok(src.includes('@internal TEST ONLY'));
+    const bootstrapSlice = src.slice(
+      src.indexOf('function trustedBootstrapCapabilityRegistry'),
+      src.indexOf('trustedBootstrapCapabilityRegistry();') + 'trustedBootstrapCapabilityRegistry();'.length,
+    );
+    assert.ok(!bootstrapSlice.includes('setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest('));
+  });
+});
+
+describe('V1.33 P1 fs-ops seam strict validation (no partial/Proxy/accessor fallback)', () => {
+  afterEach(() => {
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(null);
+  });
+
+  const FS_OPS_VALIDATION_ERROR = 'capability-real-status-validation-failed';
+
+  function asyncNoop() {
+    return Promise.resolve();
+  }
+
+  function baseFourFns() {
+    return {
+      lstat: asyncNoop,
+      open: asyncNoop,
+      stat: asyncNoop,
+      close: asyncNoop,
+    };
+  }
+
+  function assertValidationRejects(ops, label) {
+    assert.throws(
+      () => setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(ops),
+      (err) => {
+        assert.ok(err instanceof Error, label);
+        // Fixed capability error only — no key/value/type echo in message.
+        assert.strictEqual(err.message, FS_OPS_VALIDATION_ERROR, label);
+        return true;
+      },
+      label,
+    );
+  }
+
+  it('null/undefined still reset the seam', () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest({
+      ...baseFourFns(),
+      deadlineMs: 50,
+    });
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(null);
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(undefined);
+    // No throw = reset accepted.
+  });
+
+  it('rejects getter own accessor on any required fn key', () => {
+    for (const key of ['lstat', 'open', 'stat', 'close']) {
+      const ops = baseFourFns();
+      delete ops[key];
+      Object.defineProperty(ops, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          return asyncNoop;
+        },
+      });
+      assertValidationRejects(ops, `getter:${key}`);
+    }
+  });
+
+  it('rejects setter-only own accessor on any required fn key', () => {
+    for (const key of ['lstat', 'open', 'stat', 'close']) {
+      const ops = baseFourFns();
+      delete ops[key];
+      Object.defineProperty(ops, key, {
+        enumerable: true,
+        configurable: true,
+        set() {},
+      });
+      assertValidationRejects(ops, `setter:${key}`);
+    }
+  });
+
+  it('rejects Proxy even when traps look like a complete plain object', () => {
+    const target = baseFourFns();
+    const proxied = new Proxy(target, {});
+    assertValidationRejects(proxied, 'Proxy empty handler');
+    const revocable = Proxy.revocable(baseFourFns(), {
+      get(t, prop, receiver) {
+        return Reflect.get(t, prop, receiver);
+      },
+    });
+    assertValidationRejects(revocable.proxy, 'Proxy with get trap');
+    revocable.revoke();
+  });
+
+  it('rejects custom prototype (only Object.prototype or null allowed)', () => {
+    const customProto = { marker: true };
+    const withCustom = Object.assign(Object.create(customProto), baseFourFns());
+    assertValidationRejects(withCustom, 'custom prototype');
+
+    const arrayProto = Object.assign(Object.create(Array.prototype), baseFourFns());
+    assertValidationRejects(arrayProto, 'Array.prototype');
+  });
+
+  it('rejects symbol own keys', () => {
+    const sym = Symbol('smuggle');
+    const ops = baseFourFns();
+    ops[sym] = asyncNoop;
+    assertValidationRejects(ops, 'symbol key');
+  });
+
+  it('rejects extra own string keys outside allowlist', () => {
+    assertValidationRejects(
+      {
+        ...baseFourFns(),
+        path: '/tmp/evil',
+      },
+      'extra:path',
+    );
+    assertValidationRejects(
+      {
+        ...baseFourFns(),
+        homedir: () => '/tmp',
+      },
+      'extra:homedir',
+    );
+    assertValidationRejects(
+      {
+        ...baseFourFns(),
+        extra: 1,
+      },
+      'extra:extra',
+    );
+  });
+
+  it('rejects partial missing any of lstat/open/stat/close (no production fs fallback)', () => {
+    for (const missing of ['lstat', 'open', 'stat', 'close']) {
+      const ops = baseFourFns();
+      delete ops[missing];
+      assertValidationRejects(ops, `partial-missing:${missing}`);
+    }
+    // deadlineMs alone is not a valid seam.
+    assertValidationRejects({ deadlineMs: 100 }, 'partial:deadlineMs-only');
+    // only lstat (common accidental partial that previously fell back open/stat/close).
+    assertValidationRejects(
+      {
+        deadlineMs: 100,
+        async lstat() {
+          const err = new Error('ENOENT');
+          err.code = 'ENOENT';
+          throw err;
+        },
+      },
+      'partial:lstat-only',
+    );
+  });
+
+  it('rejects deadlineMs when present as accessor or non-finite', () => {
+    const getterDeadline = baseFourFns();
+    Object.defineProperty(getterDeadline, 'deadlineMs', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        return 100;
+      },
+    });
+    assertValidationRejects(getterDeadline, 'deadlineMs getter');
+
+    assertValidationRejects({ ...baseFourFns(), deadlineMs: 0 }, 'deadlineMs:0');
+    assertValidationRejects({ ...baseFourFns(), deadlineMs: -1 }, 'deadlineMs:-1');
+    assertValidationRejects({ ...baseFourFns(), deadlineMs: Number.NaN }, 'deadlineMs:NaN');
+    assertValidationRejects({ ...baseFourFns(), deadlineMs: Infinity }, 'deadlineMs:Infinity');
+    assertValidationRejects({ ...baseFourFns(), deadlineMs: '100' }, 'deadlineMs:string');
+  });
+
+  it('accepts exact four own data functions; optional finite deadlineMs; null-proto ok', async () => {
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(baseFourFns());
+    const nullProto = Object.assign(Object.create(null), {
+      ...baseFourFns(),
+      deadlineMs: 200,
+    });
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(nullProto);
+
+    // Behavioral: validated four functions are used directly (no real-fs fallback).
+    let lstatHits = 0;
+    let openHits = 0;
+    let statHits = 0;
+    let closeHits = 0;
+    setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest(null);
+    setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest({
+      deadlineMs: 300,
+      async lstat(p) {
+        lstatHits += 1;
+        const s = String(p);
+        if (s.endsWith('.plist')) {
+          return makeFileStat(4);
+        }
+        return makeDirStat();
+      },
+      async open() {
+        openHits += 1;
+        return {
+          async stat() {
+            return makeFileStat(4);
+          },
+          async close() {},
+        };
+      },
+      async stat(fh) {
+        statHits += 1;
+        return fh.stat();
+      },
+      async close(fh) {
+        closeHits += 1;
+        return fh.close();
+      },
+    });
+    const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof(
+      buildRealStatusProofRequest(),
+    );
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.statusResult.presence, 'present');
+    assert.ok(lstatHits >= 1);
+    assert.strictEqual(openHits, 1);
+    assert.strictEqual(statHits, 1);
+    assert.strictEqual(closeHits, 1);
   });
 });

@@ -1751,6 +1751,44 @@ function buildSupervisorLifecycleGuardedRunnerRealRenderCapabilityLines(canonica
   ];
 }
 
+/**
+ * V1.33 real-status capability fixed lines (shall). Gate non-live facts only:
+ * hostObservationOccurred/hostSideEffectOccurred always false on Web (no live observe).
+ * Never shows statusResult / path / hash. Never elevates executionEligible/Gold.
+ */
+function isCanonicalRealStatusCapabilityReady(payload) {
+  const gates = payload?.gates || null;
+  const readiness = payload?.capabilityInjectionReadiness || null;
+  const topReady = payload?.realStatusCapabilityImplementationReady === true;
+  const gateReady = gates?.realStatusCapabilityImplementationReady === true;
+  const readinessReady = readiness?.realStatusCapabilityImplementationReady === true;
+  return (
+    (topReady === true || gateReady === true || readinessReady === true) &&
+    gates?.realCapabilityImplementationsReady !== true &&
+    payload?.realCapabilityImplementationsReady !== true &&
+    payload?.realRunnerWiringReady !== true &&
+    payload?.executionEligible !== true &&
+    payload?.executeCapabilityAuthorized !== true &&
+    // Gate/Web non-live: observation/sideEffect must not be true elevation signals.
+    payload?.hostObservationOccurred !== true &&
+    (payload?.hostSideEffectOccurred === false ||
+      payload?.hostSideEffectOccurred === undefined ||
+      gates?.hostSideEffectOccurred === false) &&
+    payload?.hostMutationOccurred !== true
+  );
+}
+
+function buildSupervisorLifecycleGuardedRunnerRealStatusCapabilityLines(canonicalReady = false) {
+  if (canonicalReady === true) {
+    return [
+      'realStatusCapability:state:ready:realStatusReady:true:hostObservationOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [
+    'realStatusCapability:state:not-ready:realStatusReady:false:hostObservationOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:real-status-capability-not-ready',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload) {
   const receipt = payload?.capabilityReceipt;
   if (
@@ -2126,6 +2164,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const realRenderCapabilityLines = buildSupervisorLifecycleGuardedRunnerRealRenderCapabilityLines(
     canonicalRealRenderReady,
   );
+  const canonicalRealStatusReady = isCanonicalRealStatusCapabilityReady(payload) === true;
+  const realStatusCapabilityLines = buildSupervisorLifecycleGuardedRunnerRealStatusCapabilityLines(
+    canonicalRealStatusReady,
+  );
   const capabilityReceiptLines = buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload);
 
   return {
@@ -2151,6 +2193,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...wiringPlanSealLines,
       ...capabilityInjectionLines,
       ...realRenderCapabilityLines,
+      ...realStatusCapabilityLines,
       ...capabilityReceiptLines,
     ],
     recordLines: [],
@@ -2174,8 +2217,11 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `capabilityInjectionReady:${canonicalCapabilityInjectionReady ? 'true' : 'false'}`,
       `dryRunCapabilityRegistryReady:${gates.dryRunCapabilityRegistryReady === true ? 'true' : 'false'}`,
       `realRenderCapabilityImplementationReady:${canonicalRealRenderReady ? 'true' : 'false'}`,
+      `realStatusCapabilityImplementationReady:${canonicalRealStatusReady ? 'true' : 'false'}`,
       'executeCapabilityAuthorized:false',
       'realCapabilityImplementationsReady:false',
+      'hostMutationOccurred:false',
+      'hostObservationOccurred:false',
       'hostSideEffectOccurred:false',
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
