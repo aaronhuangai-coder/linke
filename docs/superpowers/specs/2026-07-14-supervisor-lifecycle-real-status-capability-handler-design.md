@@ -1131,17 +1131,22 @@ executionEligible:false
 
 ### 9.1 实现阶段允许修改（精确 allowlist）
 
+**精确 10 files：** `README.md` + 4 src + 5 tests（gate / web / gold / version / readme）。**默认禁止**改 `src/agent.js` / `src/server.js` / `package.json`。
+
 | 文件 | 变更 |
 | --- | --- |
 | `src/supervisor-lifecycle.js` | real status registry / async metadata reader / authorize+invoke RealStatusProof / readiness+gate+mappings 字段 / 注释与常量 / TEST ONLY hook |
 | `src/web/app.js` | realStatus 固定行 + validationLines（无新 button；仅 gate 非 live 事实） |
 | `src/gold-readiness.js` | evidence + nextStep 指向 V1.33 real status；仍 blocked；不宣称 V2.0 Gold |
 | `src/version.js` | → `V1.33` |
-| `README.md` | 版本条 + 边界措辞（诚实 observational metadata；非 Gold；非跨局域网） |
+| `README.md` | 版本条 + 边界措辞（诚实 observational metadata；非 Gold；非跨局域网）；V1.33 为当前版本；**保留** V1.32 历史条目且不再 current |
 | `test/supervisor-lifecycle-guarded-runner-execution-gate.test.js` | TDD 主矩阵（async） |
 | `test/web-console.test.js` | realStatus 行 + sentinel 保持 |
 | `test/gold-readiness.test.js` | evidence / nextStep |
-| 既有 gate API/CLI 透传测试 | 仅断言扩展字段 |
+| `test/version.test.js` | 当前里程碑断言 → `V1.33`（现有 L16–17 仍断言 `V1.32`；未改则 full test 红） |
+| `test/readme.test.js` | V1.33 current + V1.32 historical 合同（现有约 L1871+ 仍断言 V1.32 current milestone；未改则 full test 红） |
+
+若既有 gate API/CLI 透传测试仅因 additive 字段失败：先停；仅允许断言扩展字段，且须经确认后补入 allowlist（**不得**凭猜测扩大出 10 files）。
 
 ### 9.2 明确禁止
 
@@ -1218,6 +1223,8 @@ executionEligible:false
 | T40 | F22 无 content read API | spy 断言 |
 | T41 | TEST ONLY hook JSDoc；bootstrap 永不调用；request 不能注入 path/reader | 扫描 |
 | T42 | O_NOFOLLOW 在 macOS open flags 中强制存在 | 源码/单测 |
+| T43 | version 合同：`LINKE_RELEASE_VERSION === 'V1.33'`；`test/version.test.js` 同步当前里程碑（先 RED 后 GREEN） | 不得残留 `V1.32` 为 current release 断言 |
+| T44 | README current/historical：title/badge/version table 以 **V1.33 为当前版本**；**V1.32 历史条目仍存在且不再 current**；`test/readme.test.js` 同步（先 RED 后 GREEN） | 诚实 observational metadata；非 Gold/GA；非跨局域网 |
 
 ---
 
@@ -1244,6 +1251,8 @@ executionEligible:false
 node --test test/supervisor-lifecycle-guarded-runner-execution-gate.test.js
 node --test test/web-console.test.js
 node --test test/gold-readiness.test.js
+node --test test/version.test.js
+node --test test/readme.test.js
 ```
 
 #### Full
@@ -1258,7 +1267,7 @@ node --test
 - **禁止新增：** `child_process` / `execFile` / `spawn` / `exec(` / `shell:true` / `launchctl` / `writeFile` / `appendFile` / `process.kill` / `net.` / `fetch(` / `appendAuditEvent`（于 capability status 路径）/ `readFile` / `readSync` / `createReadStream`（于 status reader）
 - **禁止生产 status reader：** `lstatSync` / `openSync` / `readSync` / `fstatSync` / `closeSync`
 - **允许且必须限制在 reader 私有函数内：** `fs.lstat` / `fs.open` / `FileHandle.stat` / `FileHandle.close`（`fs/promises`）；`O_RDONLY | O_NOFOLLOW`
-- scope 仅 §9.1
+- scope 仅 §9.1 **精确 10 files**（README + 4 src + 5 tests：gate/web/gold/version/readme）；默认禁止 agent/server/package
 - server/agent/Web 对 `RealStatusProof` / `ForTest` hits = 0
 - public JSON 敏感类别：path / HOME / username / pid / token / Authorization / error.message / raw size / content hash → **0 回显**
 
@@ -1346,11 +1355,12 @@ V1.33 MUST NOT:
 5. 输出 sanitized enum/boolean schema；无 path/HOME/username/pid/stdout/plist 全文/raw size/content hash/error 原文
 6. observe 路径：`hostMutationOccurred:false` + `hostObservationOccurred:true` + `hostSideEffectOccurred:true`；validation/Gate/Web：三者 observation/sideEffect 为 false、mutation false
 7. execute hard-deny 零 dispatch；不抬升 execute/wiring/executionEligible/Gold；wiring-missing 保留
-8. 失败注入矩阵 F1–F23 / T1–T42 覆盖；F1/F8/F10 生产+fake；inject ≠ 生产证据
+8. 失败注入矩阵 F1–F23 / T1–T44 覆盖；F1/F8/F10 生产+fake；inject ≠ 生产证据
 9. Web shall realStatus 行（非 live）+ sentinel 保持；Gold blocked + evidence 更新；不宣称 V2.0 Gold
-10. scope 仅 §9.1；恢复锚点 `c311a7e`；**无** `git reset --hard` 常规步骤
+10. scope 仅 §9.1 **精确 10 files**（README + 4 src + 5 tests：gate/web/gold/version/readme）；默认禁止 agent/server/package；恢复锚点 `c311a7e`；**无** `git reset --hard` 常规步骤
 11. 差分扫描：无 shell/launchctl/write/network/audit-persist/content-read/Sync-fs 于 status 路径；O_NOFOLLOW 强制
 12. **不**宣称 Gold/GA 发布、跨局域网完成、或 real runner wiring 完成
+13. version/README 合同：当前里程碑 **V1.33**；**V1.32 历史条目仍存在且不再 current**；`test/version.test.js` + `test/readme.test.js` 绿
 
 ---
 
@@ -1400,13 +1410,14 @@ V1.33 MUST NOT:
 - [ ] validation/Gate/Web：observation false + sideEffect false + mutation false
 - [ ] execute 零 dispatch；全局 real/execute/wiring/Gold 边界；全局 false 为独立事实
 - [ ] wiring-missing 保留
-- [ ] 失败注入矩阵 F1–F23 与 TDD T1–T42 完整；F1/F8/F10 生产+fake
+- [ ] 失败注入矩阵 F1–F23 与 TDD T1–T44 完整；F1/F8/F10 生产+fake
 - [ ] fixed path trust：request 无 path；homedir 内部；token 硬校验；error 去敏
 - [ ] O_NOFOLLOW macOS 强制；close failure 映射明确
 - [ ] TEST ONLY hook 边界；bootstrap 永不调用
 - [ ] Web 仅 gate 非 live 事实；无 live statusResult
 - [ ] V2.0 Gold/GA + 跨局域网声明在非目标/下一步；不扩本版 scope
-- [ ] scope allowlist 精确；锚点 c311a7e
+- [ ] scope allowlist **精确 10 files**（README + 4 src + 5 tests：gate/web/gold/version/readme）；默认禁止 agent/server/package；锚点 c311a7e
+- [ ] version/README：V1.33 current；V1.32 historical 仍在且不再 current；`test/version.test.js` + `test/readme.test.js` 纳入 allowlist 与 focused
 - [ ] 无 git reset --hard 常规建议
 - [ ] server/agent/Web 零 proof / ForTest 引用
 - [ ] 敏感扫描与 side-effect 分类规则明确
@@ -1426,7 +1437,7 @@ V1.33 MUST NOT:
 | 7 | execute / Gold | 仍 deny/blocked；Gold/GA 与跨局域网属 **V2.0**；§4.6 / §8 / §12.4 |
 | 8 | dual registry | 7+2；§4 |
 | 9 | 失败注入 | §6；inject ≠ 生产证据；F1/F8/F10 生产+fake |
-| 10 | scope / 锚点 | §9 / §11.4 = c311a7e |
+| 10 | scope / 锚点 | §9.1 **精确 10 files**（README + 4 src + 5 tests：gate/web/gold/version/readme）/ §11.4 = c311a7e；默认禁止 agent/server/package |
 
 ---
 

@@ -94,7 +94,7 @@ SIDE_EFFECT_SEMANTICS = honor V1.32
 - Test hook JSDoc **必须**含：`@internal TEST ONLY`；生产 bootstrap **永不**调用；server/agent/Web **零引用**；**不得**让 request 注入 path/reader。
 - RealStatusProof API **status-specific**：不得扩 kind；invoke **async**。
 - Side-effect scan：**禁止**新增 child_process/launchctl/writeFile/appendAuditEvent/content-read/Sync-fs；**允许** reader 私有区 async lstat/open/stat/close + O_NOFOLLOW。
-- TDD 矩阵与 spec 同步为 **T1–T42** + failure **F1–F23**。
+- TDD 矩阵与 spec 同步为 **T1–T44** + failure **F1–F23**（含 T43 version / T44 README current+historical）。
 - F1 / F8 / F10 **必须**同时覆盖生产 async 语义与 test fake；**不得**标 N/A 或 fake-only。
 - V2.0 定义 Gold/GA；跨局域网为 V2.0 强制里程碑——**不**扩本版 scope，**不**在 README/Gold nextStep 暗示本版完成。
 
@@ -628,9 +628,11 @@ feat: wire V1.33 real status readiness into gate and mappings
 - Modify: `src/gold-readiness.js`
 - Modify: `test/gold-readiness.test.js`
 - Modify: `src/version.js` → `V1.33`
-- Modify: `README.md`（版本条 + 诚实边界）
+- Modify: `README.md`（版本条 + 诚实边界；V1.33 current；V1.32 historical 仍在且不再 current）
+- Modify: `test/version.test.js`（当前里程碑断言 → V1.33；现有 L16–17 仍断言 V1.32）
+- Modify: `test/readme.test.js`（V1.33 current + V1.32 historical；现有约 L1871+ 仍断言 V1.32 current milestone）
 
-- [ ] **Step 1: RED Web**
+- [ ] **Step 1: RED Web + Gold + version/README**
 
 ```js
 // ready path includes gate non-live facts only:
@@ -641,22 +643,31 @@ feat: wire V1.33 real status readiness into gate and mappings
 // existing web consumption points display gate non-live facts only (not live observation)
 ```
 
-- [ ] **Step 2: RED Gold**
-
 - evidence 含 RealStatusProof 函数名、`realStatusCapabilityImplementationReady:true`、observe 三布尔语义、`realCapabilityImplementationsReady:false`、`capability-real-status-completed`、metadata-only / no content hash 等
 - overall blocked
 - nextStep 指向 V1.33 observational status metadata completed + 下一步仍为更多 real kinds / §4.5 loci / dual-gate execute；Gold remains blocked
 - **不得**暗示 cross-LAN 或 V2.0 Gold/GA 已由本版完成
 
-- [ ] **Step 3: Implement Web + Gold + version + README (GREEN)**
+**version/README RED（必做；否则 full `node --test` 必红）：**
+
+```bash
+# 先写/改测试期望为 V1.33 current，在实现 version/README 之前跑 → 期望失败（RED）
+node --test test/version.test.js
+node --test test/readme.test.js
+# version.test.js：LINKE_RELEASE_VERSION 当前里程碑从 V1.32 → V1.33
+# readme.test.js：title/badge/version table 以 V1.33 为当前；V1.32 历史条目仍存在且不再 current
+```
+
+- [ ] **Step 2: Implement Web + Gold + version + README + version/readme tests (GREEN)**
 
 1. `buildSupervisorLifecycleGuardedRunnerRealStatusCapabilityLines` 镜像 realRender 行模式，含 sideEffect false（非 live）。
 2. validationLines 增量字段；**无** statusResult 行。
 3. **不** live 调用 proof API。
-4. version `V1.33`。
-5. README：V1.33 = second real capability = observational **metadata** status only；hostSideEffect true on live observe（V1.32）；非 Gold/GA；非跨局域网。
+4. `src/version.js` → `V1.33`；同步 `test/version.test.js` 当前里程碑断言。
+5. README：V1.33 = second real capability = observational **metadata** status only；hostSideEffect true on live observe（V1.32 语义）；非 Gold/GA；非跨局域网；**保留** V1.32 历史条目且标记为历史（不再 current）。
+6. 同步 `test/readme.test.js`：V1.33 current + V1.32 historical 合同。
 
-- [ ] **Step 4: Scope & scans**
+- [ ] **Step 3: GREEN focused verification + Scope & scans**
 
 ```bash
 # server/agent/web zero refs to proof/test seam
@@ -669,18 +680,22 @@ rg -n "child_process|execFile|spawn\(|shell:\s*true|launchctl|appendAuditEvent|w
 # O_NOFOLLOW present
 rg -n "O_NOFOLLOW" src/supervisor-lifecycle.js
 
-# focused tests
+# focused tests（含 version/readme；遗漏则 full test 红）
 node --test test/supervisor-lifecycle-guarded-runner-execution-gate.test.js
 node --test test/web-console.test.js
 node --test test/gold-readiness.test.js
+node --test test/version.test.js
+node --test test/readme.test.js
 
 # full
 node --test
 ```
 
-Assert: no import of `buildSupervisorStatusResponse` from lifecycle；no `contentSha256` on statusResult.
+Assert: no import of `buildSupervisorStatusResponse` from lifecycle；no `contentSha256` on statusResult。
 
-- [ ] **Step 5: Commit (only when user explicitly asks)**
+Scope：diff 路径 ⊆ §9.1 **精确 10 files**（README + 4 src + 5 tests：gate/web/gold/version/readme）；**默认禁止** agent/server/package。
+
+- [ ] **Step 4: Commit (only when user explicitly asks)**
 
 ```text
 feat: add V1.33 real observational status capability handler
@@ -688,13 +703,13 @@ feat: add V1.33 real observational status capability handler
 
 ---
 
-### Task 6: Full TDD matrix closeout（T1–T42 / F1–F23）+ 自检
+### Task 6: Full TDD matrix closeout（T1–T44 / F1–F23）+ 自检
 
-**Files:** tests only if gaps remain; no new product files.
+**Files:** tests only if gaps remain; no new product files beyond §9.1 精确 10 files.
 
 - [ ] **Step 1: Checklist pass**
 
-对照 spec §10 T1–T42 与 §6 F1–F23，补齐缺失用例（尤其 F1/F8/F10 生产+fake、F16–F23、T35–T42、三布尔、无 content hash、O_NOFOLLOW、TEST ONLY hook、Web 无 statusResult）。
+对照 spec §10 T1–T44 与 §6 F1–F23，补齐缺失用例（尤其 F1/F8/F10 生产+fake、F16–F23、T35–T44、三布尔、无 content hash、O_NOFOLLOW、TEST ONLY hook、Web 无 statusResult、version V1.33 current、README V1.32 historical 仍在且不再 current）。
 
 - [ ] **Step 2: Full test**
 
@@ -704,7 +719,7 @@ node --test
 
 - [ ] **Step 3: Final honesty checklist**（见文首清单）全部勾选
 
-- [ ] **Step 4: Confirm recovery anchor documented as `c311a7e`**；确认 plan/tasks **无** `git reset --hard` 常规步骤；确认 **无** V2.0 Gold/跨局域网实现任务
+- [ ] **Step 4: Confirm recovery anchor documented as `c311a7e`**；确认 plan/tasks **无** `git reset --hard` 常规步骤；确认 **无** V2.0 Gold/跨局域网实现任务；确认 scope **精确 10 files**
 
 - [ ] **Step 5: Commit (only when user explicitly asks)** — 若 Task 5 已 monorepo 一次提交，本 task 仅补测试：
 
@@ -722,6 +737,8 @@ test: complete V1.33 real status observational proof matrix
 node --test test/supervisor-lifecycle-guarded-runner-execution-gate.test.js
 node --test test/web-console.test.js
 node --test test/gold-readiness.test.js
+node --test test/version.test.js
+node --test test/readme.test.js
 ```
 
 ### Full
@@ -739,6 +756,8 @@ rg -n "child_process|execFile|spawn\(|shell:\s*true|appendAuditEvent|readFile|re
 rg -n "O_NOFOLLOW|fs/promises|hostSideEffectOccurred|contentReadAllowed" src/supervisor-lifecycle.js
 # Public receipt samples in tests: assert no /Users/, HOME, LaunchAgents absolute,
 # pid lists, contentSha256, raw error codes/messages, raw size
+# Scope: exact 10 files only — README + 4 src + 5 tests (gate/web/gold/version/readme)
+# Default forbidden: src/agent.js src/server.js package.json
 ```
 
 **Pass rules:**
@@ -749,6 +768,7 @@ rg -n "O_NOFOLLOW|fs/promises|hostSideEffectOccurred|contentReadAllowed" src/sup
 - async lstat/open/stat/close + O_NOFOLLOW 仅出现在 status reader 私有区
 - 敏感 category 回显 = 0（测试断言）
 - observe 路径三布尔 true/true/false；Gate/Web false/false/false
+- scope **精确 10 files**；version V1.33 current；README V1.32 historical 仍在且不再 current
 
 ### Recovery
 
@@ -760,20 +780,24 @@ rg -n "O_NOFOLLOW|fs/promises|hostSideEffectOccurred|contentReadAllowed" src/sup
 
 ## Implementation Scope Summary（预计实现阶段）
 
+**精确 10 files：** README + 4 src + 5 tests（gate / web / gold / version / readme）。**默认禁止** `src/agent.js` / `src/server.js` / `package.json`。
+
 | 路径 | 动作 |
 | --- | --- |
 | `src/supervisor-lifecycle.js` | real-status registry、**async metadata** reader、async RealStatusProof、deadline/single-settle/in-flight、readiness/gate/mappings、TEST ONLY hook |
 | `src/web/app.js` | shall realStatus 行 + validationLines（**非 live**；无 statusResult） |
 | `src/gold-readiness.js` | evidence + nextStep（仍 blocked；无 V2.0 Gold 宣称） |
 | `src/version.js` | V1.33 |
-| `README.md` | 版本/边界（metadata-only；V1.32 side-effect 语义；非 Gold/跨局域网） |
-| `test/supervisor-lifecycle-guarded-runner-execution-gate.test.js` | 主 TDD async 矩阵 T1–T42 / F1–F23 |
+| `README.md` | 版本/边界（metadata-only；V1.32 side-effect 语义；非 Gold/跨局域网）；V1.33 current；**保留** V1.32 历史且不再 current |
+| `test/supervisor-lifecycle-guarded-runner-execution-gate.test.js` | 主 TDD async 矩阵 T1–T44 / F1–F23 |
 | `test/web-console.test.js` | Web 行 |
 | `test/gold-readiness.test.js` | Gold |
+| `test/version.test.js` | 当前里程碑 → V1.33（先 RED 后 GREEN） |
+| `test/readme.test.js` | V1.33 current + V1.32 historical 合同（先 RED 后 GREEN） |
 
 **默认不改：** `src/agent.js`、`src/server.js`、`package.json`、audit-log、任何 NAS/G0a 报告、跨局域网协议模块。
 
-**预计实现规模（相对旧 sync+content 方案）：** 略增于 async deadline/race/close/in-flight 测试；**删除** content hash / Sync read 实现与相关测试；**不**增加跨局域网或 Gold 任务。
+**预计实现规模（相对旧 sync+content 方案）：** 略增于 async deadline/race/close/in-flight 测试；**删除** content hash / Sync read 实现与相关测试；**不**增加跨局域网或 Gold 任务；**必须**同步 version/readme 测试否则 full test 红。
 
 ---
 
@@ -788,9 +812,10 @@ rg -n "O_NOFOLLOW|fs/promises|hostSideEffectOccurred|contentReadAllowed" src/sup
 7. Execute hard-deny zero dispatch; no elevation of execute/wiring/executionEligible/Gold; wiring-missing retained.
 8. Failure injection matrix F1–F23 covered; F1/F8/F10 production+fake; test fakes ≠ production evidence.
 9. Web shall realStatus line (non-live only); sentinel blocked; Gold blocked with updated evidence; no V2.0 Gold/cross-LAN claim.
-10. Tests T1–T42 green; focused + full `node --test` green.
-11. Scans pass; O_NOFOLLOW forced; recovery anchor `c311a7e` documented.
-12. **No** claim of Gold/GA release, cross-LAN completion, or real runner wiring complete.
+10. Scope **exact 10 files**: README + 4 src + 5 tests (gate/web/gold/version/readme); default forbid agent/server/package.
+11. Tests T1–T44 green (incl. version V1.33 current + README V1.32 historical still present, no longer current); focused + full `node --test` green.
+12. Scans pass; O_NOFOLLOW forced; recovery anchor `c311a7e` documented.
+13. **No** claim of Gold/GA release, cross-LAN completion, or real runner wiring complete.
 
 ---
 
@@ -807,7 +832,8 @@ rg -n "O_NOFOLLOW|fs/promises|hostSideEffectOccurred|contentReadAllowed" src/sup
 - [x] execute 边界与 dual registry 7+2；全局 false 独立事实
 - [x] Gate/Web 非 live；validation 无 statusResult
 - [x] V2.0 Gold/GA + 跨局域网声明（非本版 scope）
-- [x] TDD 分 task；精确文件 allowlist；预计 scope 对齐 async metadata-only
+- [x] TDD 分 task；**精确 10 files** allowlist（README + 4 src + 5 tests：gate/web/gold/version/readme）；默认禁止 agent/server/package
+- [x] version/readme 测试纳入 Task5 Files / focused / scope（遗漏则 full test 红）；V1.32 historical 仍在且不再 current
 - [x] 验证命令、扫描、锚点 c311a7e
 - [x] 无 git reset --hard 常规步骤
 - [x] P0/P1 与完成标准更新
