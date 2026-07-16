@@ -4146,8 +4146,14 @@ function buildGuardedRunnerExecutionGateActionCandidates(plan, executionPreview)
 
 
 // ── V1.31 Capability injection + dry-run / execute single-gate boundary ─
-// Execute architecture: 单闸 immediate hard-deny + 无 real handler（非双闸）。
-// V1.32+ registers real-side-effect handlers and re-validates full execute formula pre-dispatch.
+// V1.32: first real implementation = render only (real-proof). Execute remains hard-deny.
+// Execute architecture: 单闸 immediate hard-deny + 不 dispatch real handler（完整公式仍 false）。
+// real = 真实产物非stub，与 host side effect 正交
+// Mode formula:
+//   dry-run: implementationClass=dry-run-non-side-effect, supportsModes=['dry-run']
+//   real render: implementationClass=real-implementation, sideEffectClass=none,
+//                supportsModes=['real-proof'], hostSideEffectOccurred=false always
+//   executeCapabilityAuthorized = FULL multi-fact conjunction → V1.32 STILL always false
 
 const CAPABILITY_KIND_ALLOWLIST = Object.freeze([
   'render', 'write', 'reload', 'status', 'rollback', 'audit', 'notify',
@@ -4174,6 +4180,18 @@ const CAPABILITY_INVOKE_REQUEST_KEYS = Object.freeze([
   'attemptRef',
   'anchorRef',
 ]);
+// Real-proof request: top-level exact whitelist includes nested renderInput (snapshotted independently).
+const CAPABILITY_REAL_RENDER_PROOF_REQUEST_KEYS = Object.freeze([
+  'capabilityKind',
+  'actionId',
+  'operation',
+  'mode',
+  'idempotencyKey',
+  'attemptRef',
+  'anchorRef',
+  'renderInput',
+]);
+const CAPABILITY_RENDER_INPUT_KEYS = Object.freeze(['label', 'scheduleSeconds', 'programToken']);
 const CAPABILITY_DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CAPABILITY_AUDIT_SEQUENCE = Object.freeze([
   'authorize',
@@ -4197,6 +4215,9 @@ const CAPABILITY_OUTCOME_CODES = Object.freeze([
   'capability-timeout-simulated',
   'capability-partial-failure-simulated',
   'capability-rollback-planned-only',
+  'capability-real-render-completed',
+  'capability-real-render-validation-failed',
+  'capability-real-render-redaction-failed',
 ]);
 const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-injection-input-invalid',
@@ -4217,16 +4238,51 @@ const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-rollback-failed',
   'capability-audit-sequence-invalid',
   'capability-redaction-failed',
+  'capability-real-render-validation-failed',
+  'capability-real-render-redaction-failed',
 ]);
 const CAPABILITY_BLOCKER_CODE_SET = new Set(CAPABILITY_BLOCKER_CODES);
 const CAPABILITY_INJECTION_READY_EVIDENCE = 'capability-injection-ready';
 const CAPABILITY_INJECTION_PLAN_READY_EVIDENCE = 'capability-injection-plan-ready';
 const CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE = 'capability-dry-run-descriptor-ready';
+const CAPABILITY_REAL_RENDER_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-render-implementation-ready';
 const CAPABILITY_INJECTION_READINESS_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection-readiness';
 const CAPABILITY_INJECTION_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection';
 const CAPABILITY_RECEIPT_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-receipt';
 const CAPABILITY_MODE_AUTH_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-mode-authorization';
 const CAPABILITY_CROSS_CUTTING_KINDS = new Set(['audit', 'notify']);
+
+// V1.32 real-render constants (render-specific; not host side effect).
+// real=真实产物非stub，与host side effect正交
+const REAL_IMPLEMENTATION_CLASS = 'real-implementation';
+const REAL_RENDER_CAPABILITY_ID = 'real-render';
+const REAL_RENDER_TEMPLATE_ID = 'code-owned-launch-agent-plist-v1';
+const REAL_RENDER_PROGRAM_TOKENS = Object.freeze(['linke-agent-run-once']);
+const REAL_RENDER_PROGRAM_TOKEN_SET = new Set(REAL_RENDER_PROGRAM_TOKENS);
+const REAL_RENDER_REDACTED_PROGRAM_REF = '__LINKE_REDACTED_PROGRAM_REF__';
+const REAL_RENDER_REDACTED_CONFIG_REF = '__LINKE_REDACTED_CONFIG_REF__';
+const REAL_RENDER_CONTENT_TYPE = 'application/x-apple-plist-xml';
+const REAL_RENDER_LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
+const REAL_RENDER_MAX_BYTE_LENGTH = 8192;
+const REAL_RENDER_STRUCTURE_FINGERPRINT = createHash('sha256')
+  .update(
+    'template:code-owned-launch-agent-plist-v1|keys:Label>ProgramArguments>StartInterval|args:env>node>program>run-once>--config>config',
+    'utf8',
+  )
+  .digest('hex');
+const EXECUTE_FORMULA_MISSING_PREREQUISITE_CODES = Object.freeze([
+  'realCapabilityImplementationsReady',
+  'executeCapabilityRegistryReady',
+  'realRunnerWiringReady',
+  'runnerWiringContractReady',
+  'idempotency-store',
+  'dual-host-capability-locus',
+  'failure-injection-suite-evidence',
+  'realHostMutationImplementationReady',
+  'realRollbackAnchorImplementationReady',
+  'realAttemptAuditImplementationReady',
+  'realOperatorRecoveryImplementationReady',
+]);
 
 const CAPABILITY_KIND_ACTION_IDS = Object.freeze({
   render: Object.freeze(['render-launch-agent-plist']),
@@ -4267,8 +4323,11 @@ const GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY = Object.freeze({
   evidenceCode: CAPABILITY_INJECTION_READY_EVIDENCE,
 });
 
-/** Module-private registry: capabilityKind -> { descriptor, handler }. Not exported. */
+/** Module-private dual-track registries. Not exported. Never accept caller injection. */
 const dryRunCapabilityRegistry = new Map();
+// realCapabilityRegistry: V1.32 only 'render' with real-implementation / real-proof.
+// real=真实产物非stub，与host side effect正交
+const realCapabilityRegistry = new Map();
 
 function capabilityContainsFunction(value, seen = new WeakSet()) {
   if (typeof value === 'function') return true;
@@ -4412,11 +4471,184 @@ function createDryRunCapabilityHandler(capabilityKind) {
 }
 
 /**
- * Module-private. Registers only dry-run-non-side-effect descriptors+handlers
- * from code-owned tables. Not exported. Not callable from request/CLI/Web.
+ * xmlEscape exact five-character map. Only accepts validated strings (no null/control).
+ * Single-pass char iteration; no double-escape path.
+ */
+function capabilityXmlEscape(value) {
+  if (typeof value !== 'string') {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    const code = value.charCodeAt(i);
+    if (code === 0 || (code >= 1 && code <= 0x1f) || code === 0x7f) {
+      throw new Error('capability-real-render-validation-failed');
+    }
+    if (ch === '&') out += '&amp;';
+    else if (ch === '<') out += '&lt;';
+    else if (ch === '>') out += '&gt;';
+    else if (ch === '"') out += '&quot;';
+    else if (ch === "'") out += '&apos;';
+    else out += ch;
+  }
+  return out;
+}
+
+/**
+ * Module-private pure renderer: code-owned launch-agent plist v1.
+ * UTF-8 exact prologue; Unix \\n only; no trailing newline; TAB indent;
+ * key order Label → ProgramArguments → StartInterval; redacted program/config refs.
+ * Never reads fs/env/path. real=真实产物非stub，与host side effect正交
+ */
+function pureRenderLaunchAgentPlistV1(renderInput) {
+  const label = renderInput.label;
+  const scheduleSeconds = renderInput.scheduleSeconds;
+  const programToken = renderInput.programToken;
+  if (typeof label !== 'string' || typeof scheduleSeconds !== 'number' || typeof programToken !== 'string') {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  if (!REAL_RENDER_PROGRAM_TOKEN_SET.has(programToken)) {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  if (
+    label.length < 1 ||
+    label.length > 128 ||
+    !REAL_RENDER_LABEL_PATTERN.test(label)
+  ) {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  for (let i = 0; i < label.length; i++) {
+    const code = label.charCodeAt(i);
+    if (code === 0 || (code >= 1 && code <= 0x1f) || code === 0x7f) {
+      throw new Error('capability-real-render-validation-failed');
+    }
+  }
+  if (
+    !Number.isInteger(scheduleSeconds) ||
+    !Number.isFinite(scheduleSeconds) ||
+    scheduleSeconds < 60 ||
+    scheduleSeconds > 86400
+  ) {
+    throw new Error('capability-real-render-validation-failed');
+  }
+
+  const escapedLabel = capabilityXmlEscape(label);
+  // Program/config refs are fixed redacted tokens (no path/secret).
+  if (
+    REAL_RENDER_REDACTED_PROGRAM_REF.includes('/') ||
+    REAL_RENDER_REDACTED_CONFIG_REF.includes('/') ||
+    REAL_RENDER_REDACTED_PROGRAM_REF.includes('\\') ||
+    REAL_RENDER_REDACTED_CONFIG_REF.includes('\\')
+  ) {
+    throw new Error('capability-real-render-redaction-failed');
+  }
+
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '\t<key>Label</key>',
+    `\t<string>${escapedLabel}</string>`,
+    '\t<key>ProgramArguments</key>',
+    '\t<array>',
+    '\t\t<string>/usr/bin/env</string>',
+    '\t\t<string>node</string>',
+    `\t\t<string>${REAL_RENDER_REDACTED_PROGRAM_REF}</string>`,
+    '\t\t<string>run-once</string>',
+    '\t\t<string>--config</string>',
+    `\t\t<string>${REAL_RENDER_REDACTED_CONFIG_REF}</string>`,
+    '\t</array>',
+    '\t<key>StartInterval</key>',
+    `\t<integer>${scheduleSeconds}</integer>`,
+    '</dict>',
+    '</plist>',
+  ];
+  // join('\n') → Unix LF only; no trailing newline
+  return lines.join('\n');
+}
+
+function hashRenderedPlistUtf8(rendered) {
+  if (typeof rendered !== 'string') {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  if (rendered.includes('\r') || rendered.endsWith('\n')) {
+    throw new Error('capability-real-render-redaction-failed');
+  }
+  const buf = Buffer.from(rendered, 'utf8');
+  if (buf.byteLength <= 0 || buf.byteLength >= REAL_RENDER_MAX_BYTE_LENGTH) {
+    throw new Error('capability-real-render-validation-failed');
+  }
+  return {
+    contentSha256: createHash('sha256').update(buf).digest('hex'),
+    renderedByteLength: buf.byteLength,
+  };
+}
+
+function buildRealRenderCapabilityDescriptor() {
+  return {
+    capabilityKind: 'render',
+    capabilityId: REAL_RENDER_CAPABILITY_ID,
+    implementationClass: REAL_IMPLEMENTATION_CLASS,
+    sideEffectClass: 'none',
+    supportsModes: ['real-proof'],
+    actionIds: ['render-launch-agent-plist'],
+    realImplementationReady: true,
+    wouldMutateHost: false,
+    wouldPersistAudit: false,
+    wouldNotifyExternal: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    evidenceCode: CAPABILITY_REAL_RENDER_IMPLEMENTATION_READY_EVIDENCE,
+    blockerCode: null,
+  };
+}
+
+/**
+ * Real render handler: pure render only. No host IO.
+ * real=真实产物非stub，与host side effect正交
+ */
+function createRealRenderCapabilityHandler() {
+  return function realRenderCapabilityHandler(renderInputSnapshot) {
+    const rendered = pureRenderLaunchAgentPlistV1(renderInputSnapshot);
+    const hashed = hashRenderedPlistUtf8(rendered);
+    return {
+      ok: true,
+      plannedAction: 'render-plist',
+      capabilityId: REAL_RENDER_CAPABILITY_ID,
+      renderResult: {
+        contentType: REAL_RENDER_CONTENT_TYPE,
+        templateId: REAL_RENDER_TEMPLATE_ID,
+        renderedByteLength: hashed.renderedByteLength,
+        contentSha256: hashed.contentSha256,
+        deterministic: true,
+        structureFingerprint: REAL_RENDER_STRUCTURE_FINGERPRINT,
+      },
+      // internal only; not returned on public receipt by default
+      _renderedForTest: rendered,
+    };
+  };
+}
+
+/**
+ * Module-private dual-track bootstrap:
+ * - dry-run: all 7 kinds (V1.31 unchanged)
+ * - real: only render with real-implementation / real-proof
+ * real=真实产物非stub，与host side effect正交
+ * Not exported. Not callable from request/CLI/Web.
  */
 function trustedBootstrapCapabilityRegistry() {
   dryRunCapabilityRegistry.clear();
+  realCapabilityRegistry.clear();
   for (const kind of CAPABILITY_KIND_ALLOWLIST) {
     const descriptor = buildCapabilityDescriptor(kind);
     if (descriptor.implementationClass !== 'dry-run-non-side-effect') {
@@ -4446,13 +4678,64 @@ function trustedBootstrapCapabilityRegistry() {
       handler: createDryRunCapabilityHandler(kind),
     });
   }
-  // Every primary map kind must have a handler.
+  // Every primary map kind must have a dry-run handler.
   for (const kind of Object.values(CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP)) {
     if (!dryRunCapabilityRegistry.has(kind)) {
       throw new Error('capability-registry-incomplete');
     }
   }
   if (dryRunCapabilityRegistry.size !== CAPABILITY_KIND_ALLOWLIST.length) {
+    throw new Error('capability-registry-incomplete');
+  }
+
+  // V1.32: register only real-render (not status/write/reload/...)
+  const realDescriptor = buildRealRenderCapabilityDescriptor();
+  if (realDescriptor.implementationClass !== REAL_IMPLEMENTATION_CLASS) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (realDescriptor.sideEffectClass !== 'none') {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(realDescriptor.supportsModes) ||
+    realDescriptor.supportsModes.length !== 1 ||
+    realDescriptor.supportsModes[0] !== 'real-proof'
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (realDescriptor.realImplementationReady !== true) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    realDescriptor.wouldMutateHost !== false ||
+    realDescriptor.wouldExecute !== false ||
+    realDescriptor.wouldRun !== false ||
+    realDescriptor.wouldWrite !== false ||
+    realDescriptor.launchctlAllowed !== false ||
+    realDescriptor.filesystemWriteAllowed !== false ||
+    realDescriptor.processListReadAllowed !== false ||
+    realDescriptor.networkAllowed !== false ||
+    realDescriptor.metadataWriteAllowed !== false ||
+    realDescriptor.auditWriteAllowed !== false ||
+    realDescriptor.rollbackAnchorWriteAllowed !== false
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(realDescriptor.actionIds) ||
+    realDescriptor.actionIds.length !== 1 ||
+    realDescriptor.actionIds[0] !== 'render-launch-agent-plist'
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  realCapabilityRegistry.set('render', {
+    descriptor: realDescriptor,
+    handler: createRealRenderCapabilityHandler(),
+  });
+  if (realCapabilityRegistry.size !== 1) {
+    throw new Error('capability-registry-incomplete');
+  }
+  if (realCapabilityRegistry.has('status') || realCapabilityRegistry.has('write') || realCapabilityRegistry.has('reload')) {
     throw new Error('capability-registry-incomplete');
   }
 }
@@ -4473,13 +4756,54 @@ function isDryRunCapabilityRegistryReady() {
   return true;
 }
 
+function isRealRenderCapabilityRegistryReady() {
+  if (realCapabilityRegistry.size !== 1) return false;
+  const entry = realCapabilityRegistry.get('render');
+  if (!entry || typeof entry.handler !== 'function') return false;
+  const d = entry.descriptor;
+  if (!d) return false;
+  if (d.capabilityId !== REAL_RENDER_CAPABILITY_ID) return false;
+  if (d.implementationClass !== REAL_IMPLEMENTATION_CLASS) return false;
+  if (d.sideEffectClass !== 'none') return false;
+  if (!Array.isArray(d.supportsModes) || d.supportsModes[0] !== 'real-proof') return false;
+  if (d.realImplementationReady !== true) return false;
+  if (d.wouldMutateHost !== false || d.launchctlAllowed !== false || d.filesystemWriteAllowed !== false) {
+    return false;
+  }
+  // Only render may be registered as real in V1.32.
+  for (const kind of CAPABILITY_KIND_ALLOWLIST) {
+    if (kind === 'render') continue;
+    if (realCapabilityRegistry.has(kind)) return false;
+  }
+  return true;
+}
+
+function buildRealImplementationEntrySummary() {
+  const entry = realCapabilityRegistry.get('render');
+  if (!entry) return null;
+  const d = entry.descriptor;
+  return {
+    capabilityKind: 'render',
+    capabilityId: d.capabilityId,
+    implementationClass: d.implementationClass,
+    sideEffectClass: d.sideEffectClass,
+    supportsModes: [...d.supportsModes],
+    realImplementationReady: d.realImplementationReady === true,
+    hostSideEffectOccurred: false,
+    evidenceCode: d.evidenceCode,
+  };
+}
+
 function buildCapabilityInjectionReadinessObject() {
+  const realRenderReady = isRealRenderCapabilityRegistryReady() === true;
+  const realEntry = buildRealImplementationEntrySummary();
   return {
     command: CAPABILITY_INJECTION_READINESS_COMMAND,
     state: 'ready',
     pureCapabilityInjectionReady: true,
     codeOwnedCapabilityFactoryReady: true,
     dryRunCapabilityRegistryReady: isDryRunCapabilityRegistryReady() === true,
+    realRenderCapabilityImplementationReady: realRenderReady,
     executeCapabilityRegistryReady: false,
     realCapabilityImplementationsReady: false,
     realRunnerWiringReady: false,
@@ -4487,6 +4811,7 @@ function buildCapabilityInjectionReadinessObject() {
     readyCount: 1,
     blockedCount: 0,
     entries: [{ ...GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY }],
+    realImplementationEntries: realEntry ? [realEntry] : [],
     capabilityKinds: [...CAPABILITY_KIND_ALLOWLIST],
     blockers: [],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
@@ -4505,6 +4830,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       ready.state = 'blocked';
       ready.pureCapabilityInjectionReady = false;
       ready.dryRunCapabilityRegistryReady = false;
+      ready.realRenderCapabilityImplementationReady = false;
       ready.readyCount = 0;
       ready.blockedCount = 1;
       ready.blockers = ['capability-registry-incomplete'];
@@ -4515,7 +4841,14 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
         blockerCode: 'capability-registry-incomplete',
         evidenceCode: null,
       }];
+      ready.realImplementationEntries = [];
+    } else if (ready.realRenderCapabilityImplementationReady !== true) {
+      // Dry-run ready but real-render bootstrap incomplete: local fact false; global still ready.
+      ready.realRenderCapabilityImplementationReady = false;
+      ready.realImplementationEntries = [];
     }
+    // Never export handler/function fields
+    ready.handler = undefined;
     return capabilityPublicDeepCopy(ready);
   } catch {
     return capabilityPublicDeepCopy({
@@ -4524,6 +4857,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       pureCapabilityInjectionReady: false,
       codeOwnedCapabilityFactoryReady: false,
       dryRunCapabilityRegistryReady: false,
+      realRenderCapabilityImplementationReady: false,
       executeCapabilityRegistryReady: false,
       realCapabilityImplementationsReady: false,
       realRunnerWiringReady: false,
@@ -4531,6 +4865,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       readyCount: 0,
       blockedCount: 1,
       entries: [],
+      realImplementationEntries: [],
       capabilityKinds: [...CAPABILITY_KIND_ALLOWLIST],
       blockers: ['capability-registry-incomplete'],
       nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
@@ -4709,7 +5044,7 @@ export function resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(candi
           buildUnresolvedCapabilityInjectionDecision(operation, 'capability-registry-incomplete'),
         );
       }
-      mappings.push({
+      const mapping = {
         actionId,
         primaryCapabilityKind,
         capabilityId: entry.descriptor.capabilityId,
@@ -4717,7 +5052,15 @@ export function resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(candi
         supportsModes: ['dry-run'],
         wouldExecute: false,
         hostSideEffectOccurred: false,
-      });
+      };
+      // V1.32: install render action surfaces realCapabilityId fields (no functions).
+      if (actionId === 'render-launch-agent-plist' && primaryCapabilityKind === 'render') {
+        mapping.realCapabilityId = REAL_RENDER_CAPABILITY_ID;
+        mapping.realImplementationClass = REAL_IMPLEMENTATION_CLASS;
+        mapping.realSupportsModes = ['real-proof'];
+        mapping.realRenderCapabilityImplementationReady = isRealRenderCapabilityRegistryReady() === true;
+      }
+      mappings.push(mapping);
     }
 
     return capabilityPublicDeepCopy(
@@ -4869,6 +5212,24 @@ function buildCapabilityModeAuthorization(fields) {
   };
 }
 
+/**
+ * Shared null|string gate for opaque top-level key/ref fields.
+ * Matches authorize + dry-run validateCapabilityRequestSemantics semantics.
+ * Never echoes raw values — callers only receive blocker codes.
+ */
+function validateCapabilityOpaqueKeyAndRefs(snapshot) {
+  if (!(snapshot.idempotencyKey === null || typeof snapshot.idempotencyKey === 'string')) {
+    return { ok: false, blocker: 'capability-idempotency-key-invalid', errorClass: 'validation' };
+  }
+  if (!(snapshot.attemptRef === null || typeof snapshot.attemptRef === 'string')) {
+    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
+  }
+  if (!(snapshot.anchorRef === null || typeof snapshot.anchorRef === 'string')) {
+    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
+  }
+  return { ok: true };
+}
+
 function validateCapabilityRequestSemantics(snapshot) {
   if (snapshot.mode !== 'dry-run' && snapshot.mode !== 'execute') {
     return { ok: false, blocker: 'capability-mode-invalid', errorClass: 'validation' };
@@ -4882,15 +5243,8 @@ function validateCapabilityRequestSemantics(snapshot) {
   if (typeof snapshot.operation !== 'string' || !ALLOWED_OPERATIONS.has(snapshot.operation)) {
     return { ok: false, blocker: 'capability-operation-invalid', errorClass: 'validation' };
   }
-  if (!(snapshot.idempotencyKey === null || typeof snapshot.idempotencyKey === 'string')) {
-    return { ok: false, blocker: 'capability-idempotency-key-invalid', errorClass: 'validation' };
-  }
-  if (!(snapshot.attemptRef === null || typeof snapshot.attemptRef === 'string')) {
-    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
-  }
-  if (!(snapshot.anchorRef === null || typeof snapshot.anchorRef === 'string')) {
-    return { ok: false, blocker: 'capability-injection-input-invalid', errorClass: 'validation' };
-  }
+  const opaque = validateCapabilityOpaqueKeyAndRefs(snapshot);
+  if (!opaque.ok) return opaque;
 
   // Primary kinds must map-consistently; cross-cutting audit/notify accept any mapped actionId.
   if (!CAPABILITY_CROSS_CUTTING_KINDS.has(snapshot.capabilityKind)) {
@@ -5023,8 +5377,18 @@ export function invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(request) 
       }));
     }
 
-    // V1.31 = 单闸 immediate hard-deny + 无 real handler 架构保证
-    // if (mode === 'execute') → denied receipt immediately; 不得调用任何 handler
+    // V1.32: real-render exists for real-proof only.
+    // Full executeCapabilityAuthorized still false because e.g.:
+    // - realCapabilityImplementationsReady (global) false
+    // - executeCapabilityRegistryReady false (no execute-mode handlers)
+    // - realRunnerWiringReady / runnerWiringContractReady false
+    // - idempotency store absent
+    // - dual-host capability locus absent (G0a PASS is not this locus)
+    // - failure-injection suite evidence absent
+    // - other real*ImplementationReady false
+    // Therefore: deny execute; do not call real or dry-run handler.
+    // RealRenderProof is render-specific — do not expand kind range for future reals.
+    // V1.31 = 单闸 immediate hard-deny; V1.32 adds formula incompleteness observability.
     if (snapshot.mode === 'execute') {
       const missingKey = snapshot.idempotencyKey === null || snapshot.idempotencyKey === '';
       const primary = missingKey
@@ -5033,7 +5397,7 @@ export function invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(request) 
       const outcome = missingKey
         ? 'capability-execute-prerequisites-incomplete'
         : 'capability-execute-hard-denied';
-      return capabilityPublicDeepCopy(buildCapabilityReceiptBase({
+      const denied = buildCapabilityReceiptBase({
         receiptKind: 'capability-execute-denied-receipt',
         state: 'denied',
         mode: 'execute',
@@ -5047,6 +5411,28 @@ export function invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(request) 
         evidenceCode: null,
         primaryBlocker: primary,
         blockers: [primary],
+      });
+      // Gate 2 observability: full formula still incomplete (allowlisted codes only; no secrets).
+      denied.executeFormulaIncomplete = true;
+      denied.missingPrerequisiteCodes = [...EXECUTE_FORMULA_MISSING_PREREQUISITE_CODES];
+      denied.executeCapabilityAuthorized = false;
+      // Must not expose renderResult (proves real handler was not dispatched).
+      denied.renderResult = undefined;
+      return capabilityPublicDeepCopy(denied);
+    }
+
+    // mode real-proof is not accepted on dry-run API
+    if (snapshot.mode === 'real-proof') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-dry-run-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: snapshot.capabilityKind,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
       }));
     }
 
@@ -5113,6 +5499,551 @@ export function invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(request) 
       primaryBlocker: 'capability-injection-input-invalid',
     }));
   }
+}
+
+/**
+ * Independent nested exact snapshot for renderInput (spec §4.1.2).
+ * Must NOT rely only on top-level V1.31 snapshot.
+ * Object.hasOwn + data descriptor; reject symbol/dangerous/extra/getter/function/proxy.
+ */
+function snapshotRenderInput(rawRenderInput) {
+  if (
+    rawRenderInput === null ||
+    typeof rawRenderInput !== 'object' ||
+    Array.isArray(rawRenderInput) ||
+    typeof rawRenderInput === 'function'
+  ) {
+    return null;
+  }
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(rawRenderInput);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_RENDER_INPUT_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of CAPABILITY_RENDER_INPUT_KEYS) {
+    if (!Object.hasOwn(rawRenderInput, key)) return null;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(rawRenderInput, key);
+    } catch {
+      return null;
+    }
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value')
+    ) {
+      return null;
+    }
+    if (typeof desc.value === 'function') return null;
+    // Primitive-only for this version (no nested object/array).
+    if (desc.value !== null && typeof desc.value === 'object') return null;
+    snapshot[key] = desc.value;
+  }
+  return snapshot;
+}
+
+/**
+ * Top-level exact snapshot for real-render proof request.
+ * Nested renderInput is snapshotted independently after top-level extraction.
+ */
+function snapshotRealRenderProofRequest(request) {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(request);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_REAL_RENDER_PROOF_REQUEST_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const top = Object.create(null);
+  for (const key of CAPABILITY_REAL_RENDER_PROOF_REQUEST_KEYS) {
+    if (!Object.hasOwn(request, key)) return null;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(request, key);
+    } catch {
+      return null;
+    }
+    if (
+      !desc ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value')
+    ) {
+      return null;
+    }
+    if (typeof desc.value === 'function') return null;
+    top[key] = desc.value;
+  }
+
+  // Nested independent exact snapshot — never read fields off the source object after this.
+  const renderInput = snapshotRenderInput(top.renderInput);
+  if (!renderInput) return null;
+
+  return {
+    capabilityKind: top.capabilityKind,
+    actionId: top.actionId,
+    operation: top.operation,
+    mode: top.mode,
+    idempotencyKey: top.idempotencyKey,
+    attemptRef: top.attemptRef,
+    anchorRef: top.anchorRef,
+    renderInput,
+  };
+}
+
+function validateRealRenderInputFields(renderInput) {
+  if (!renderInput || typeof renderInput !== 'object') {
+    return { ok: false, blocker: 'capability-real-render-validation-failed' };
+  }
+  const { label, scheduleSeconds, programToken } = renderInput;
+  if (typeof label !== 'string') {
+    return { ok: false, blocker: 'capability-real-render-validation-failed' };
+  }
+  if (label.length < 1 || label.length > 128 || !REAL_RENDER_LABEL_PATTERN.test(label)) {
+    return { ok: false, blocker: 'capability-real-render-validation-failed' };
+  }
+  for (let i = 0; i < label.length; i++) {
+    const code = label.charCodeAt(i);
+    if (code === 0 || (code >= 1 && code <= 0x1f) || code === 0x7f) {
+      return { ok: false, blocker: 'capability-real-render-validation-failed' };
+    }
+  }
+  if (
+    typeof scheduleSeconds !== 'number' ||
+    !Number.isInteger(scheduleSeconds) ||
+    !Number.isFinite(scheduleSeconds) ||
+    Object.is(scheduleSeconds, -0) ||
+    scheduleSeconds < 60 ||
+    scheduleSeconds > 86400
+  ) {
+    return { ok: false, blocker: 'capability-real-render-validation-failed' };
+  }
+  if (typeof programToken !== 'string' || !REAL_RENDER_PROGRAM_TOKEN_SET.has(programToken)) {
+    return { ok: false, blocker: 'capability-real-render-validation-failed' };
+  }
+  return { ok: true };
+}
+
+function buildRealRenderProofAuthorization(fields) {
+  return {
+    command: CAPABILITY_MODE_AUTH_COMMAND,
+    state: fields.state,
+    mode: fields.mode || 'real-proof',
+    realRenderProofAuthorized: fields.realRenderProofAuthorized === true,
+    dryRunCapabilityAuthorized: false,
+    executeCapabilityAuthorized: false,
+    hostSideEffectOccurred: false,
+    realRenderCapabilityImplementationReady: isRealRenderCapabilityRegistryReady() === true,
+    realCapabilityImplementationsReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.primaryBlocker ? [fields.primaryBlocker] : [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Authorize real-proof mode for **render only**. Never authorizes execute.
+ * Render-specific: do not reuse this API for future real kinds.
+ */
+export function authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(request) {
+  try {
+    const snapshot = snapshotRealRenderProofRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'unknown',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'execute',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    // Render-specific: never expand kind range.
+    if (snapshot.capabilityKind !== 'render') {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-kind-unknown',
+      }));
+    }
+    if (snapshot.actionId !== 'render-launch-agent-plist') {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-action-unmapped',
+      }));
+    }
+    if (snapshot.operation !== 'install') {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realRenderProofAuthorized: false,
+        primaryBlocker: 'capability-operation-invalid',
+      }));
+    }
+    const opaque = validateCapabilityOpaqueKeyAndRefs(snapshot);
+    if (!opaque.ok) {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realRenderProofAuthorized: false,
+        primaryBlocker: opaque.blocker,
+      }));
+    }
+
+    const fieldCheck = validateRealRenderInputFields(snapshot.renderInput);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realRenderProofAuthorized: false,
+        primaryBlocker: fieldCheck.blocker,
+      }));
+    }
+
+    const entry = realCapabilityRegistry.get('render');
+    const authorized =
+      isRealRenderCapabilityRegistryReady() === true &&
+      entry &&
+      entry.descriptor.implementationClass === REAL_IMPLEMENTATION_CLASS &&
+      entry.descriptor.sideEffectClass === 'none' &&
+      entry.descriptor.supportsModes.includes('real-proof') &&
+      entry.descriptor.realImplementationReady === true &&
+      entry.descriptor.wouldMutateHost === false &&
+      entry.descriptor.launchctlAllowed === false &&
+      entry.descriptor.filesystemWriteAllowed === false &&
+      entry.descriptor.processListReadAllowed === false &&
+      entry.descriptor.networkAllowed === false;
+
+    return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+      state: authorized ? 'authorized' : 'denied',
+      mode: 'real-proof',
+      realRenderProofAuthorized: authorized === true,
+      primaryBlocker: authorized ? null : 'capability-registry-incomplete',
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildRealRenderProofAuthorization({
+      state: 'denied',
+      mode: 'unknown',
+      realRenderProofAuthorized: false,
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Invoke real **render** implementation proof. Never host side effect.
+ * Never accepts mode execute. Never returns functions.
+ * Render-specific proof API — future real kinds must not expand this function's
+ * kind range; they require a separate proof API or a later generic framework.
+ */
+export function invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(request) {
+  try {
+    const snapshot = snapshotRealRenderProofRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'denied',
+        mode: 'real-proof',
+        outcomeCode: 'capability-caller-injection-rejected',
+        errorClass: 'authorization',
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-execute-denied-receipt',
+        state: 'denied',
+        mode: 'execute',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+
+    // Render-specific contract — refuse non-render kinds here.
+    if (snapshot.capabilityKind !== 'render') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: snapshot.capabilityKind,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-kind-unknown',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-kind-unknown',
+      }));
+    }
+    if (snapshot.actionId !== 'render-launch-agent-plist') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-action-unmapped',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-action-unmapped',
+      }));
+    }
+    if (snapshot.operation !== 'install') {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-dry-run-validation-failed',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-operation-invalid',
+      }));
+    }
+
+    // Same null|string opaque key/ref gate as authorize / dry-run semantics.
+    // Prevents number/object/array/symbol from entering completed proof receipts.
+    const opaque = validateCapabilityOpaqueKeyAndRefs(snapshot);
+    if (!opaque.ok) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-dry-run-validation-failed',
+        errorClass: opaque.errorClass || 'validation',
+        primaryBlocker: opaque.blocker,
+      }));
+    }
+
+    const fieldCheck = validateRealRenderInputFields(snapshot.renderInput);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        capabilityId: REAL_RENDER_CAPABILITY_ID,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-render-validation-failed',
+        errorClass: 'validation',
+        primaryBlocker: fieldCheck.blocker,
+      }));
+    }
+
+    if (!isRealRenderCapabilityRegistryReady()) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-dry-run-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-registry-incomplete',
+      }));
+    }
+
+    const entry = realCapabilityRegistry.get('render');
+    let handlerResult;
+    try {
+      handlerResult = entry.handler(snapshot.renderInput);
+    } catch (err) {
+      const msg = err && typeof err.message === 'string' ? err.message : '';
+      const isValidation = msg === 'capability-real-render-validation-failed';
+      const isRedaction = msg === 'capability-real-render-redaction-failed';
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        capabilityId: REAL_RENDER_CAPABILITY_ID,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: isRedaction
+          ? 'capability-real-render-redaction-failed'
+          : 'capability-real-render-validation-failed',
+        errorClass: isRedaction ? 'internal' : 'validation',
+        primaryBlocker: isRedaction
+          ? 'capability-real-render-redaction-failed'
+          : (isValidation ? 'capability-real-render-validation-failed' : 'capability-real-render-validation-failed'),
+      }));
+    }
+
+    if (!handlerResult || handlerResult.ok !== true || !handlerResult.renderResult) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        capabilityId: REAL_RENDER_CAPABILITY_ID,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-render-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-registry-incomplete',
+      }));
+    }
+
+    const rr = handlerResult.renderResult;
+    if (
+      typeof rr.contentSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(rr.contentSha256) ||
+      typeof rr.renderedByteLength !== 'number' ||
+      !(rr.renderedByteLength > 0 && rr.renderedByteLength < REAL_RENDER_MAX_BYTE_LENGTH)
+    ) {
+      return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+        receiptKind: 'capability-real-implementation-receipt',
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: 'render',
+        capabilityId: REAL_RENDER_CAPABILITY_ID,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-render-validation-failed',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-render-validation-failed',
+      }));
+    }
+
+    const receipt = buildCapabilityReceiptBase({
+      receiptKind: 'capability-real-implementation-receipt',
+      state: 'completed',
+      mode: 'real-proof',
+      capabilityKind: 'render',
+      capabilityId: REAL_RENDER_CAPABILITY_ID,
+      actionId: snapshot.actionId,
+      operation: snapshot.operation,
+      outcomeCode: 'capability-real-render-completed',
+      errorClass: null,
+      plannedAction: 'render-plist',
+      evidenceCode: CAPABILITY_REAL_RENDER_IMPLEMENTATION_READY_EVIDENCE,
+      primaryBlocker: null,
+      blockers: [],
+    });
+    receipt.implementationClass = REAL_IMPLEMENTATION_CLASS;
+    receipt.sideEffectClass = 'none';
+    receipt.realRenderCapabilityImplementationReady = true;
+    receipt.realCapabilityImplementationsReady = false;
+    receipt.executeCapabilityAuthorized = false;
+    receipt.realRunnerWiringReady = false;
+    receipt.runnerWiringContractReady = false;
+    receipt.executionEligible = false;
+    receipt.hostSideEffectOccurred = false;
+    receipt.idempotencyKeyFingerprint = null;
+    // Public receipt: hash/size only — no full plist content (no path/secret leak).
+    receipt.renderResult = {
+      contentType: rr.contentType,
+      templateId: rr.templateId,
+      renderedByteLength: rr.renderedByteLength,
+      contentSha256: rr.contentSha256,
+      deterministic: true,
+      structureFingerprint: rr.structureFingerprint,
+    };
+    return capabilityPublicDeepCopy(receipt);
+  } catch {
+    return capabilityPublicDeepCopy(buildCapabilityErrorReceipt({
+      receiptKind: 'capability-real-implementation-receipt',
+      state: 'error',
+      mode: 'real-proof',
+      outcomeCode: 'capability-real-render-validation-failed',
+      errorClass: 'internal',
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+/**
+ * Internal pure recompute helper for tests (structure/byte contract).
+ * Not an HTTP/CLI surface. Returns rendered string + hash only.
+ */
+export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest(renderInput) {
+  const snap = snapshotRenderInput(renderInput);
+  if (!snap) {
+    throw new Error('capability-caller-injection-rejected');
+  }
+  const fieldCheck = validateRealRenderInputFields(snap);
+  if (!fieldCheck.ok) {
+    throw new Error(fieldCheck.blocker);
+  }
+  const rendered = pureRenderLaunchAgentPlistV1(snap);
+  const hashed = hashRenderedPlistUtf8(rendered);
+  return {
+    rendered,
+    contentSha256: hashed.contentSha256,
+    renderedByteLength: hashed.renderedByteLength,
+  };
 }
 
 function deriveCapabilityInjectionReady(capabilityInjectionReadiness, capabilityInjectionDecision) {
@@ -5441,7 +6372,8 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
 
   // Ignore options.capabilityInjectionDecision / options.capabilityReceipt /
   // options.capabilityInjectionReady / options.handlers / options.capabilities /
-  // any realCapability* override. Production-derived only.
+  // any realCapability* / realRender* / execute / wiring / executionEligible override.
+  // Production-derived only.
   const capabilityInjectionReadiness =
     buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
   const capabilityInjectionDecision =
@@ -5453,10 +6385,14 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
   const dryRunCapabilityRegistryReady =
     capabilityInjectionReadiness?.dryRunCapabilityRegistryReady === true &&
     capabilityInjectionDecision?.dryRunCapabilityRegistryReady === true;
+  // Local real-render fact only; global realCapabilityImplementationsReady stays false.
+  const realRenderCapabilityImplementationReady =
+    capabilityInjectionReadiness?.realRenderCapabilityImplementationReady === true &&
+    isRealRenderCapabilityRegistryReady() === true;
 
   // Gate attaches decision + readiness only (invoke remains pure unit-tested).
   // Optional receipt summary omitted to avoid secretsRedacted vocabulary colliding
-  // with existing full-JSON sensitive-scan tests; pure invokeDryRun covers receipts.
+  // with existing full-JSON sensitive-scan tests; pure invokeDryRun/RealRenderProof cover receipts.
 
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
@@ -5467,6 +6403,9 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executorReady: false,
     wouldExecute: false,
     realRunnerWiringReady: false,
+    realCapabilityImplementationsReady: false,
+    executeCapabilityAuthorized: false,
+    realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
     blockers: [...new Set(blockers)],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     runnerWiringContract,
@@ -5500,6 +6439,9 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       pureWiringOrchestratorPlanReady: pureWiringOrchestratorPlanReady === true,
       capabilityInjectionReady: capabilityInjectionReady === true,
       dryRunCapabilityRegistryReady: dryRunCapabilityRegistryReady === true,
+      realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
+      realCapabilityImplementationsReady: false,
+      executeCapabilityAuthorized: false,
     },
     safety: executionPreviewSafety(),
   };

@@ -127,13 +127,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.31', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.31');
+  it('expects LINKE_RELEASE_VERSION to be V1.32', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.32');
   });
 
-  it('expects report.version to be V1.31', () => {
+  it('expects report.version to be V1.32', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.31');
+    assert.strictEqual(report.version, 'V1.32');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -368,17 +368,21 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.ok(automationItem.nextStep.includes('V1.32'));
     assert.ok(automationItem.nextStep.includes('V1.31'));
     assert.ok(automationItem.nextStep.includes('buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness'));
     assert.ok(automationItem.nextStep.includes('resolveSupervisorLifecycleGuardedRunnerCapabilityInjection'));
     assert.ok(automationItem.nextStep.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityMode'));
     assert.ok(automationItem.nextStep.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun'));
+    assert.ok(automationItem.nextStep.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof'));
+    assert.ok(automationItem.nextStep.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(automationItem.nextStep.includes('pureCapabilityInjectionReady'));
     assert.ok(automationItem.nextStep.includes('dryRunCapabilityRegistryReady'));
     assert.ok(automationItem.nextStep.includes('executeCapabilityAuthorized:false'));
     assert.ok(automationItem.nextStep.includes('realCapabilityImplementationsReady:false'));
     assert.ok(automationItem.nextStep.includes('capability-dry-run-receipt'));
     assert.ok(automationItem.nextStep.includes('capability-execute-denied-receipt'));
+    assert.ok(automationItem.nextStep.includes('capability-real-implementation-receipt'));
     assert.ok(automationItem.nextStep.includes('hostSideEffectOccurred:false'));
     assert.ok(automationItem.nextStep.includes('single-gate'));
     assert.ok(automationItem.nextStep.includes('NOT wiringPlanSeal'));
@@ -388,12 +392,15 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('resolveSupervisorLifecycleGuardedRunnerCapabilityInjection'));
     assert.ok(automationEvidence.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityMode'));
     assert.ok(automationEvidence.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun'));
+    assert.ok(automationEvidence.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof'));
     assert.ok(automationEvidence.includes('pureCapabilityInjectionReady'));
     assert.ok(automationEvidence.includes('dryRunCapabilityRegistryReady'));
+    assert.ok(automationEvidence.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(automationEvidence.includes('executeCapabilityAuthorized:false'));
     assert.ok(automationEvidence.includes('realCapabilityImplementationsReady:false'));
     assert.ok(automationEvidence.includes('capability-dry-run-receipt'));
     assert.ok(automationEvidence.includes('capability-execute-denied-receipt'));
+    assert.ok(automationEvidence.includes('capability-real-implementation-receipt'));
     assert.ok(automationEvidence.includes('hostSideEffectOccurred:false'));
     assert.ok(automationItem.nextStep.includes('V1.30'));
     assert.ok(automationItem.nextStep.includes('buildSupervisorLifecycleGuardedRunnerRealWiringPlan'));

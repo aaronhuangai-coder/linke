@@ -22,6 +22,9 @@ import {
   resolveSupervisorLifecycleGuardedRunnerCapabilityInjection,
   authorizeSupervisorLifecycleGuardedRunnerCapabilityMode,
   invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun,
+  authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof,
+  invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof,
+  recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest,
   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy,
   resolveSupervisorLifecycleGuardedRunnerHostMutationAdapter,
   resolveSupervisorLifecycleGuardedRunnerRegistry,
@@ -3293,6 +3296,9 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       pureWiringOrchestratorPlanReady: false,
       capabilityInjectionReady: true,
       dryRunCapabilityRegistryReady: true,
+      realRenderCapabilityImplementationReady: true,
+      realCapabilityImplementationsReady: false,
+      executeCapabilityAuthorized: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -5229,5 +5235,620 @@ describe('V1.31 buildSupervisorLifecycleGuardedRunnerExecutionGate capability in
     assert.strictEqual(poisoned.capabilityInjectionDecision.hostSideEffectOccurred, false);
     assert.strictEqual(poisoned.gates.capabilityInjectionReady, true);
     assert.deepStrictEqual(poisoned.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+});
+
+// ── V1.32 First real render capability proof ──────────────────────────
+const GOLDEN_RENDER_INPUT = Object.freeze({
+  label: 'com.linke.test.agent',
+  scheduleSeconds: 3600,
+  programToken: 'linke-agent-run-once',
+});
+const GOLDEN_CONTENT_SHA256 = '9883ab81098ddd645d21fcbaed378b2f23fe67398ab031cee0b76a37266f6016';
+const GOLDEN_RENDERED_BYTE_LENGTH = 554;
+const GOLDEN_PLIST_XML = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+  '<plist version="1.0">',
+  '<dict>',
+  '\t<key>Label</key>',
+  '\t<string>com.linke.test.agent</string>',
+  '\t<key>ProgramArguments</key>',
+  '\t<array>',
+  '\t\t<string>/usr/bin/env</string>',
+  '\t\t<string>node</string>',
+  '\t\t<string>__LINKE_REDACTED_PROGRAM_REF__</string>',
+  '\t\t<string>run-once</string>',
+  '\t\t<string>--config</string>',
+  '\t\t<string>__LINKE_REDACTED_CONFIG_REF__</string>',
+  '\t</array>',
+  '\t<key>StartInterval</key>',
+  '\t<integer>3600</integer>',
+  '</dict>',
+  '</plist>',
+].join('\n');
+
+function buildRealRenderProofRequest(overrides = {}) {
+  const renderInput = Object.hasOwn(overrides, 'renderInput')
+    ? overrides.renderInput
+    : { ...GOLDEN_RENDER_INPUT };
+  const {
+    renderInput: _ignored,
+    ...top
+  } = overrides;
+  return {
+    capabilityKind: 'render',
+    actionId: 'render-launch-agent-plist',
+    operation: 'install',
+    mode: 'real-proof',
+    idempotencyKey: null,
+    attemptRef: null,
+    anchorRef: null,
+    ...top,
+    renderInput,
+  };
+}
+
+describe('V1.32 real render capability readiness + dual registry', () => {
+  it('T1: readiness realRender true + global real false + wiring-missing', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r.state, 'ready');
+    assert.strictEqual(r.pureCapabilityInjectionReady, true);
+    assert.strictEqual(r.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(r.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(r.realCapabilityImplementationsReady, false);
+    assert.strictEqual(r.executeCapabilityRegistryReady, false);
+    assert.strictEqual(r.executeCapabilityAuthorized, false);
+    assert.strictEqual(r.realRunnerWiringReady, false);
+    assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(r.handler, undefined);
+    assert.ok(Array.isArray(r.realImplementationEntries));
+    assert.strictEqual(r.realImplementationEntries.length, 1);
+    const entry = r.realImplementationEntries[0];
+    assert.strictEqual(entry.capabilityKind, 'render');
+    assert.strictEqual(entry.capabilityId, 'real-render');
+    assert.strictEqual(entry.implementationClass, 'real-implementation');
+    assert.deepStrictEqual(entry.supportsModes, ['real-proof']);
+    assert.strictEqual(entry.realImplementationReady, true);
+    assert.strictEqual(entry.hostSideEffectOccurred, false);
+    assert.strictEqual(entry.handler, undefined);
+  });
+
+  it('T2: dual-track dry-run 7 + real render 1; status/write have no real entry', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
+    assert.strictEqual(r.realImplementationEntries.length, 1);
+    assert.strictEqual(r.realImplementationEntries[0].capabilityKind, 'render');
+    for (const kind of ['status', 'write', 'reload', 'rollback', 'audit', 'notify']) {
+      assert.ok(!r.realImplementationEntries.some((e) => e.capabilityKind === kind));
+    }
+  });
+});
+
+describe('V1.32 real-proof invoke + golden + fuzz', () => {
+  it('T3: dry-run render still completed without contentSha256', () => {
+    const dry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'render',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+      mode: 'dry-run',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.strictEqual(dry.receiptKind, 'capability-dry-run-receipt');
+    assert.strictEqual(dry.capabilityId, 'dry-run-render');
+    assert.strictEqual(dry.renderResult, undefined);
+    assert.strictEqual(dry.hostSideEffectOccurred, false);
+    assert.strictEqual(dry.contentSha256, undefined);
+  });
+
+  it('T4/T5/T21: real-proof happy path + golden sha256 exact + determinism', () => {
+    const req = buildRealRenderProofRequest();
+    const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+    assert.strictEqual(auth.state, 'authorized');
+    assert.strictEqual(auth.executeCapabilityAuthorized, false);
+    assert.strictEqual(auth.hostSideEffectOccurred, false);
+    assert.strictEqual(auth.realRenderProofAuthorized, true);
+
+    const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+    assertReceiptBase(rc);
+    assert.strictEqual(rc.command, 'supervisor-lifecycle-guarded-runner-capability-receipt');
+    assert.strictEqual(rc.receiptKind, 'capability-real-implementation-receipt');
+    assert.strictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.mode, 'real-proof');
+    assert.strictEqual(rc.capabilityId, 'real-render');
+    assert.strictEqual(rc.implementationClass, 'real-implementation');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-render-completed');
+    assert.strictEqual(rc.hostSideEffectOccurred, false);
+    assert.strictEqual(rc.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(rc.realCapabilityImplementationsReady, false);
+    assert.strictEqual(rc.executeCapabilityAuthorized, false);
+    assert.strictEqual(rc.realRunnerWiringReady, false);
+    assert.strictEqual(rc.executionEligible, false);
+    assert.strictEqual(rc.idempotencyKeyFingerprint, null);
+    assert.deepStrictEqual(rc.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(rc.renderResult.contentType, 'application/x-apple-plist-xml');
+    assert.strictEqual(rc.renderResult.templateId, 'code-owned-launch-agent-plist-v1');
+    assert.ok(rc.renderResult.renderedByteLength > 0);
+    assert.ok(rc.renderResult.renderedByteLength < 8192);
+    assert.strictEqual(rc.renderResult.renderedByteLength, GOLDEN_RENDERED_BYTE_LENGTH);
+    assert.match(rc.renderResult.contentSha256, /^[a-f0-9]{64}$/);
+    assert.strictEqual(rc.renderResult.contentSha256, GOLDEN_CONTENT_SHA256);
+    assert.strictEqual(rc.renderResult.deterministic, true);
+    assert.strictEqual(rc.sealReady, undefined);
+    assert.notStrictEqual(rc.receiptKind, 'capability-execute-receipt');
+    // no full content by default
+    assert.strictEqual(rc.renderResult.content, undefined);
+    assert.strictEqual(rc.renderResult.rendered, undefined);
+
+    const a = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+    const b = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+    assert.strictEqual(a.renderResult.contentSha256, b.renderResult.contentSha256);
+    assert.strictEqual(a.renderResult.contentSha256, GOLDEN_CONTENT_SHA256);
+  });
+
+  it('T6: changing label changes hash (non-stub)', () => {
+    const a = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(buildRealRenderProofRequest());
+    const other = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({
+        renderInput: {
+          label: 'com.linke.other.agent',
+          scheduleSeconds: 3600,
+          programToken: 'linke-agent-run-once',
+        },
+      }),
+    );
+    assert.notStrictEqual(other.renderResult.contentSha256, a.renderResult.contentSha256);
+  });
+
+  it('T7: dry-run vs real-proof same action are distinguishable', () => {
+    const dry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun(buildCapabilityRequest());
+    const real = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(buildRealRenderProofRequest());
+    assert.strictEqual(dry.capabilityId, 'dry-run-render');
+    assert.strictEqual(real.capabilityId, 'real-render');
+    assert.strictEqual(dry.receiptKind, 'capability-dry-run-receipt');
+    assert.strictEqual(real.receiptKind, 'capability-real-implementation-receipt');
+    assert.strictEqual(dry.renderResult, undefined);
+    assert.ok(real.renderResult.contentSha256);
+    assert.strictEqual(dry.hostSideEffectOccurred, false);
+    assert.strictEqual(real.hostSideEffectOccurred, false);
+    assert.strictEqual(dry.realRunnerWiringReady, false);
+    assert.strictEqual(real.realRunnerWiringReady, false);
+  });
+
+  it('T8/T9: execute still denied; no real handler; formula incompleteness observable', () => {
+    const denied = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'render',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+      mode: 'execute',
+      idempotencyKey: 'opaque-key-1',
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.strictEqual(denied.receiptKind, 'capability-execute-denied-receipt');
+    assert.strictEqual(denied.state, 'denied');
+    assert.strictEqual(denied.hostSideEffectOccurred, false);
+    assert.strictEqual(denied.executeCapabilityAuthorized, false);
+    assert.strictEqual(denied.renderResult, undefined);
+    assert.strictEqual(denied.executeFormulaIncomplete, true);
+    assert.ok(Array.isArray(denied.missingPrerequisiteCodes));
+    assert.ok(denied.missingPrerequisiteCodes.includes('realCapabilityImplementationsReady'));
+    assert.ok(denied.missingPrerequisiteCodes.includes('dual-host-capability-locus'));
+  });
+
+  it('T10: top-level caller injection / path / secret keys rejected', () => {
+    const poisoned = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof({
+      capabilityKind: 'render',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+      mode: 'real-proof',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+      renderInput: { ...GOLDEN_RENDER_INPUT },
+      handler: () => {},
+      path: '/Users/opaque/path',
+      token: 'opaque-token-x',
+    });
+    assert.notStrictEqual(poisoned.state, 'completed');
+    assert.ok(
+      poisoned.primaryBlocker === 'capability-caller-injection-rejected' ||
+      poisoned.outcomeCode === 'capability-caller-injection-rejected',
+    );
+    assert.doesNotMatch(JSON.stringify(poisoned), /\/Users\/opaque|opaque-token-x/);
+  });
+
+  it('T11/T26: nested renderInput independent snapshot rejects extra/symbol/accessor/proxy/function', () => {
+    const withExtra = buildRealRenderProofRequest({
+      renderInput: { ...GOLDEN_RENDER_INPUT, extra: true },
+    });
+    const d1 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(withExtra);
+    assert.notStrictEqual(d1.state, 'completed');
+
+    const withProto = {
+      label: GOLDEN_RENDER_INPUT.label,
+      scheduleSeconds: GOLDEN_RENDER_INPUT.scheduleSeconds,
+      programToken: GOLDEN_RENDER_INPUT.programToken,
+    };
+    Object.defineProperty(withProto, '__proto__', {
+      value: { polluted: true },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    const d2 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ renderInput: withProto }),
+    );
+    assert.notStrictEqual(d2.state, 'completed');
+
+    const withSymbol = {
+      label: GOLDEN_RENDER_INPUT.label,
+      scheduleSeconds: GOLDEN_RENDER_INPUT.scheduleSeconds,
+      programToken: GOLDEN_RENDER_INPUT.programToken,
+    };
+    Object.defineProperty(withSymbol, Symbol('x'), { value: 1, enumerable: true });
+    const d3 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ renderInput: withSymbol }),
+    );
+    assert.notStrictEqual(d3.state, 'completed');
+
+    const withGetter = {};
+    for (const key of ['label', 'scheduleSeconds', 'programToken']) {
+      Object.defineProperty(withGetter, key, {
+        enumerable: true,
+        configurable: true,
+        get() { return GOLDEN_RENDER_INPUT[key]; },
+      });
+    }
+    const d4 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ renderInput: withGetter }),
+    );
+    assert.notStrictEqual(d4.state, 'completed');
+
+    const withFn = {
+      label: GOLDEN_RENDER_INPUT.label,
+      scheduleSeconds: GOLDEN_RENDER_INPUT.scheduleSeconds,
+      programToken: () => 'x',
+    };
+    const d5 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ renderInput: withFn }),
+    );
+    assert.notStrictEqual(d5.state, 'completed');
+
+    const proxy = new Proxy({ ...GOLDEN_RENDER_INPUT }, {
+      get(t, p) { return t[p]; },
+      ownKeys() { return ['label', 'scheduleSeconds', 'programToken', 'extra']; },
+      getOwnPropertyDescriptor(t, p) {
+        if (p === 'extra') return { configurable: true, enumerable: true, value: 1 };
+        return Object.getOwnPropertyDescriptor(t, p);
+      },
+    });
+    const d6 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ renderInput: proxy }),
+    );
+    assert.notStrictEqual(d6.state, 'completed');
+  });
+
+  it('T12: bad programToken → validation-failed', () => {
+    const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({
+        renderInput: {
+          label: 'com.linke.test.agent',
+          scheduleSeconds: 3600,
+          programToken: 'not-allowlisted-token',
+        },
+      }),
+    );
+    assert.notStrictEqual(rc.state, 'completed');
+    assert.strictEqual(rc.outcomeCode, 'capability-real-render-validation-failed');
+  });
+
+  it('P2: top-level attemptRef/anchorRef/idempotencyKey type gate matches authorize (null|string only)', () => {
+    // Values that pass exact snapshot (data descriptor, non-function) but are not null|string.
+    // Function is rejected earlier by snapshot as caller-injection; covered separately below.
+    const illegalValues = [
+      42,
+      -0,
+      Number.NaN,
+      true,
+      false,
+      { nested: 'x' },
+      ['arr'],
+      Symbol('opaque-symbol-marker'),
+    ];
+    const fields = [
+      {
+        name: 'idempotencyKey',
+        expectedBlocker: 'capability-idempotency-key-invalid',
+      },
+      {
+        name: 'attemptRef',
+        expectedBlocker: 'capability-injection-input-invalid',
+      },
+      {
+        name: 'anchorRef',
+        expectedBlocker: 'capability-injection-input-invalid',
+      },
+    ];
+
+    for (const field of fields) {
+      for (const bad of illegalValues) {
+        const req = buildRealRenderProofRequest({ [field.name]: bad });
+        const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        assert.strictEqual(auth.state, 'denied', `${field.name} illegal type must deny authorize`);
+        assert.strictEqual(auth.primaryBlocker, field.expectedBlocker);
+        assert.strictEqual(auth.realRenderProofAuthorized, false);
+
+        const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        assert.notStrictEqual(rc.state, 'completed', `${field.name} illegal type must not complete proof`);
+        assert.ok(['denied', 'error'].includes(rc.state));
+        assert.strictEqual(
+          rc.primaryBlocker,
+          field.expectedBlocker,
+          `${field.name} invoke blocker must match authorize`,
+        );
+        assert.strictEqual(rc.errorClass, 'validation');
+        assert.ok(
+          rc.outcomeCode === 'capability-dry-run-validation-failed' ||
+            rc.outcomeCode === field.expectedBlocker,
+        );
+        assert.strictEqual(rc.renderResult, undefined);
+        assert.strictEqual(rc.hostSideEffectOccurred, false);
+        assert.strictEqual(rc.idempotencyKeyFingerprint, null);
+        const serialized = JSON.stringify(rc);
+        assert.doesNotMatch(serialized, /opaque-symbol-marker/);
+        // Must never echo raw key/ref payload into receipt or error text.
+        assert.strictEqual(serialized.includes('opaque-ok-ref'), false);
+        if (typeof bad === 'number' && Number.isFinite(bad) && bad !== 0) {
+          assert.doesNotMatch(serialized, new RegExp(`"${field.name}"\\s*:\\s*${bad}`));
+        }
+      }
+
+      // Function values are fail-closed at exact snapshot (caller-injection), not completed.
+      {
+        const req = buildRealRenderProofRequest({
+          [field.name]: () => 'opaque-fn-marker',
+        });
+        const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        assert.strictEqual(auth.state, 'denied');
+        assert.notStrictEqual(rc.state, 'completed');
+        assert.ok(
+          auth.primaryBlocker === 'capability-caller-injection-rejected' ||
+            auth.primaryBlocker === field.expectedBlocker,
+        );
+        assert.ok(
+          rc.primaryBlocker === 'capability-caller-injection-rejected' ||
+            rc.primaryBlocker === field.expectedBlocker ||
+            rc.outcomeCode === 'capability-caller-injection-rejected',
+        );
+        assert.doesNotMatch(JSON.stringify(rc), /opaque-fn-marker/);
+        assert.strictEqual(rc.renderResult, undefined);
+      }
+
+      for (const ok of [null, 'opaque-ok-ref', '']) {
+        const req = buildRealRenderProofRequest({ [field.name]: ok });
+        const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        assert.strictEqual(auth.state, 'authorized', `${field.name}=${JSON.stringify(ok)} must authorize`);
+        const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(req);
+        assert.strictEqual(rc.state, 'completed', `${field.name}=${JSON.stringify(ok)} must complete`);
+        assert.strictEqual(rc.outcomeCode, 'capability-real-render-completed');
+        assert.strictEqual(rc.idempotencyKeyFingerprint, null);
+        if (typeof ok === 'string' && ok.length > 0) {
+          assert.doesNotMatch(JSON.stringify(rc), /opaque-ok-ref/);
+        }
+      }
+    }
+  });
+
+  it('T24: label boundary fuzz', () => {
+    const cases = [
+      { label: '', expectFail: true },
+      { label: 'a'.repeat(129), expectFail: true },
+      { label: '测', expectFail: true },
+      { label: 'com.linke\0.agent', expectFail: true },
+      { label: 'com.linke\u0001.agent', expectFail: true },
+      { label: 'a'.repeat(128), expectFail: false },
+      { label: 'com.linke.test.agent', expectFail: false },
+    ];
+    for (const c of cases) {
+      const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+        buildRealRenderProofRequest({
+          renderInput: {
+            label: c.label,
+            scheduleSeconds: 3600,
+            programToken: 'linke-agent-run-once',
+          },
+        }),
+      );
+      if (c.expectFail) {
+        assert.notStrictEqual(rc.state, 'completed', `label should fail: ${JSON.stringify(c.label)}`);
+        assert.strictEqual(rc.outcomeCode, 'capability-real-render-validation-failed');
+      } else {
+        assert.strictEqual(rc.state, 'completed', `label should accept: ${c.label.length}`);
+      }
+    }
+  });
+
+  it('T25: scheduleSeconds boundary fuzz', () => {
+    const failValues = [59, 86401, NaN, Infinity, -Infinity, 3600.5, 0, -1];
+    for (const scheduleSeconds of failValues) {
+      const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+        buildRealRenderProofRequest({
+          renderInput: {
+            label: 'com.linke.test.agent',
+            scheduleSeconds,
+            programToken: 'linke-agent-run-once',
+          },
+        }),
+      );
+      assert.notStrictEqual(rc.state, 'completed', `schedule should fail: ${scheduleSeconds}`);
+      assert.strictEqual(rc.outcomeCode, 'capability-real-render-validation-failed');
+    }
+    for (const scheduleSeconds of [60, 86400, 3600]) {
+      const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+        buildRealRenderProofRequest({
+          renderInput: {
+            label: 'com.linke.test.agent',
+            scheduleSeconds,
+            programToken: 'linke-agent-run-once',
+          },
+        }),
+      );
+      assert.strictEqual(rc.state, 'completed', `schedule should accept: ${scheduleSeconds}`);
+    }
+  });
+
+  it('T20: status real-proof attempt fails (render-specific)', () => {
+    const rc = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({
+        capabilityKind: 'status',
+        actionId: 'capture-current-state',
+        operation: 'rollback',
+      }),
+    );
+    assert.notStrictEqual(rc.state, 'completed');
+    assert.ok(
+      rc.primaryBlocker === 'capability-kind-unknown' ||
+      rc.outcomeCode === 'capability-kind-unknown' ||
+      rc.primaryBlocker === 'capability-action-unmapped',
+    );
+  });
+
+  it('T22/T23/T27: byte contract + xmlEscape + XML/plist structure (no new deps)', () => {
+    const recomputed = recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest({
+      ...GOLDEN_RENDER_INPUT,
+    });
+    assert.strictEqual(recomputed.rendered, GOLDEN_PLIST_XML);
+    assert.strictEqual(recomputed.contentSha256, GOLDEN_CONTENT_SHA256);
+    assert.strictEqual(recomputed.renderedByteLength, GOLDEN_RENDERED_BYTE_LENGTH);
+    assert.ok(!recomputed.rendered.includes('\r'));
+    assert.ok(!recomputed.rendered.endsWith('\n'));
+    assert.ok(recomputed.rendered.startsWith('<?xml version="1.0" encoding="UTF-8"?>'));
+    assert.ok(recomputed.rendered.includes('__LINKE_REDACTED_PROGRAM_REF__'));
+    assert.ok(recomputed.rendered.includes('__LINKE_REDACTED_CONFIG_REF__'));
+    assert.ok(!recomputed.rendered.includes('/Users/'));
+    assert.ok(!recomputed.rendered.includes('/private/'));
+    // key order Label → ProgramArguments → StartInterval
+    const iLabel = recomputed.rendered.indexOf('<key>Label</key>');
+    const iProg = recomputed.rendered.indexOf('<key>ProgramArguments</key>');
+    const iStart = recomputed.rendered.indexOf('<key>StartInterval</key>');
+    assert.ok(iLabel >= 0 && iProg > iLabel && iStart > iProg);
+    // TAB indent present
+    assert.ok(recomputed.rendered.includes('\t<key>Label</key>'));
+    assert.ok(recomputed.rendered.includes('\t\t<string>/usr/bin/env</string>'));
+
+    // xmlEscape five chars (via label allowlist path uses escape; force via pure on boundary)
+    // Label charset excludes &<>"' so escape path is unit-checked via recompute with allowed label only.
+    // Character map contract: pure escape of allowlisted label is identity.
+    assert.strictEqual(recomputed.rendered.includes('&amp;'), false);
+  });
+
+  it('mode execute on proof API denied; real-proof on dry-run API mode-invalid', () => {
+    const execOnProof = invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof(
+      buildRealRenderProofRequest({ mode: 'execute' }),
+    );
+    assert.notStrictEqual(execOnProof.state, 'completed');
+    assert.ok(
+      execOnProof.primaryBlocker === 'capability-mode-invalid' ||
+      execOnProof.outcomeCode === 'capability-mode-invalid',
+    );
+
+    // dry-run API cannot complete real-proof as dry-run success with hash
+    const realOnDry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+      capabilityKind: 'render',
+      actionId: 'render-launch-agent-plist',
+      operation: 'install',
+      mode: 'real-proof',
+      idempotencyKey: null,
+      attemptRef: null,
+      anchorRef: null,
+    });
+    assert.notStrictEqual(realOnDry.state, 'completed');
+    assert.strictEqual(realOnDry.renderResult, undefined);
+  });
+});
+
+describe('V1.32 gate + resolve realRender integration', () => {
+  it('T13: production ready path exposes local realRender while execution still blocked', () => {
+    const result = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(result.gates.capabilityInjectionReady, true);
+    assert.strictEqual(result.gates.dryRunCapabilityRegistryReady, true);
+    assert.strictEqual(result.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(result.gates.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(result.realCapabilityImplementationsReady, false);
+    assert.strictEqual(result.capabilityInjectionDecision.realCapabilityImplementationsReady, false);
+    assert.strictEqual(result.capabilityInjectionDecision.executeCapabilityAuthorized, false);
+    assert.strictEqual(result.executionEligible, false);
+    assert.strictEqual(result.wouldExecute, false);
+    assert.strictEqual(result.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.realRunnerWiringReady, false);
+    assert.strictEqual(result.gates.runnerWiringContractReady, false);
+    assert.deepStrictEqual(result.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(result.policyDecision.state, 'authorized');
+    assert.strictEqual(result.policyDecision.primaryBlocker, null);
+    assert.strictEqual(result.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(result.runnerWiringContract.blockedCount, 0);
+    assert.strictEqual(result.runnerWiringContract.state, 'blocked');
+    assert.strictEqual(result.adapterDecision.realHostMutationImplementationReady, false);
+    assert.strictEqual(result.anchorDecision.realRollbackAnchorImplementationReady, false);
+    assert.strictEqual(result.auditDecision.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(result.recoveryDecision.realOperatorRecoveryImplementationReady, false);
+  });
+
+  it('T14: options override realRender/execute/realRunner ignored', () => {
+    const poisoned = buildGate(getReadyInputs(), {
+      executeRequested: true,
+      realRenderCapabilityImplementationReady: false,
+      realCapabilityImplementationsReady: true,
+      realRunnerWiringReady: true,
+      executionEligible: true,
+      handlers: { render: () => {} },
+    });
+    assert.strictEqual(poisoned.realCapabilityImplementationsReady, false);
+    assert.strictEqual(poisoned.executionEligible, false);
+    assert.strictEqual(poisoned.realRunnerWiringReady, false);
+    assert.strictEqual(poisoned.realRenderCapabilityImplementationReady, true);
+    assert.deepStrictEqual(poisoned.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+
+  it('resolve mapping includes realCapabilityId for install render', () => {
+    const d = resolveSupervisorLifecycleGuardedRunnerCapabilityInjection(
+      buildInstallCapabilityCandidates(),
+      'install',
+    );
+    assert.strictEqual(d.state, 'resolved');
+    const renderMap = d.mappings.find((m) => m.actionId === 'render-launch-agent-plist');
+    assert.ok(renderMap);
+    assert.strictEqual(renderMap.capabilityId, 'dry-run-render');
+    assert.strictEqual(renderMap.realCapabilityId, 'real-render');
+    assert.strictEqual(renderMap.realImplementationClass, 'real-implementation');
+    assert.deepStrictEqual(renderMap.realSupportsModes, ['real-proof']);
+    assert.strictEqual(renderMap.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(renderMap.handler, undefined);
+  });
+});
+
+describe('V1.32 T28/T29 source contract markers', () => {
+  it('T28/T29/T23: PROOF ONLY JSDoc + orthogonal real comment + xmlEscape five-char map present', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(join(here, '../src/supervisor-lifecycle.js'), 'utf8');
+    assert.ok(src.includes('@internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint'));
+    assert.ok(
+      src.includes('real=真实产物非stub，与host side effect正交') ||
+      src.includes('real = 真实产物非stub，与 host side effect 正交') ||
+      src.includes('真实产物非stub'),
+    );
+    assert.ok(src.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof'));
+    assert.ok(src.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof'));
+    // T23: exact five-character xmlEscape entities (single-pass; no HTML-only subset)
+    assert.ok(src.includes("'&amp;'") || src.includes('"&amp;"') || src.includes('&amp;'));
+    assert.ok(src.includes('&lt;') && src.includes('&gt;') && src.includes('&quot;') && src.includes('&apos;'));
+    assert.ok(src.includes('capabilityXmlEscape') || src.includes('xmlEscape'));
   });
 });

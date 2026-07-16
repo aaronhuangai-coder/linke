@@ -1718,6 +1718,39 @@ function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionLines(canonical
   ];
 }
 
+/**
+ * V1.32 real-render capability fixed lines (shall). Local realRenderReady only;
+ * global realCapabilityImplementationsReady / realRunnerWiringReady stay false.
+ * Never echoes content hash/body; never elevates executionEligible.
+ */
+function isCanonicalRealRenderCapabilityReady(payload) {
+  const gates = payload?.gates || null;
+  const readiness = payload?.capabilityInjectionReadiness || null;
+  const topReady = payload?.realRenderCapabilityImplementationReady === true;
+  const gateReady = gates?.realRenderCapabilityImplementationReady === true;
+  const readinessReady = readiness?.realRenderCapabilityImplementationReady === true;
+  return (
+    (topReady === true || gateReady === true || readinessReady === true) &&
+    gates?.realCapabilityImplementationsReady !== true &&
+    payload?.realCapabilityImplementationsReady !== true &&
+    payload?.realRunnerWiringReady !== true &&
+    payload?.executionEligible !== true &&
+    payload?.executeCapabilityAuthorized !== true &&
+    (payload?.hostSideEffectOccurred === false || payload?.hostSideEffectOccurred === undefined)
+  );
+}
+
+function buildSupervisorLifecycleGuardedRunnerRealRenderCapabilityLines(canonicalReady = false) {
+  if (canonicalReady === true) {
+    return [
+      'realRenderCapability:state:ready:realRenderReady:true:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [
+    'realRenderCapability:state:not-ready:realRenderReady:false:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:real-render-capability-not-ready',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload) {
   const receipt = payload?.capabilityReceipt;
   if (
@@ -1987,8 +2020,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'pureWiringOrchestratorPlanReady:false',
         'capabilityInjectionReady:false',
         'dryRunCapabilityRegistryReady:false',
+        'realRenderCapabilityImplementationReady:false',
         'executeCapabilityAuthorized:false',
         'realCapabilityImplementationsReady:false',
+        'hostSideEffectOccurred:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: 'Guarded runner execution gate 检查失败: ' + sanitizeSupervisorLifecycleGuardedRunnerExecutionPreviewField(errorMessage),
@@ -2026,8 +2061,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
         'pureWiringOrchestratorPlanReady:false',
         'capabilityInjectionReady:false',
         'dryRunCapabilityRegistryReady:false',
+        'realRenderCapabilityImplementationReady:false',
         'executeCapabilityAuthorized:false',
         'realCapabilityImplementationsReady:false',
+        'hostSideEffectOccurred:false',
       ],
       safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
       messageText: '点击手动 POST /api/supervisor-lifecycle-guarded-runner-execution-gate 获取 guarded runner execution gate',
@@ -2085,6 +2122,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const capabilityInjectionLines = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionLines(
     canonicalCapabilityInjectionReady,
   );
+  const canonicalRealRenderReady = isCanonicalRealRenderCapabilityReady(payload) === true;
+  const realRenderCapabilityLines = buildSupervisorLifecycleGuardedRunnerRealRenderCapabilityLines(
+    canonicalRealRenderReady,
+  );
   const capabilityReceiptLines = buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload);
 
   return {
@@ -2109,6 +2150,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...wiringPlanLines,
       ...wiringPlanSealLines,
       ...capabilityInjectionLines,
+      ...realRenderCapabilityLines,
       ...capabilityReceiptLines,
     ],
     recordLines: [],
@@ -2131,8 +2173,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `pureWiringOrchestratorPlanReady:${canonicalPureWiringOrchestratorPlanReady ? 'true' : 'false'}`,
       `capabilityInjectionReady:${canonicalCapabilityInjectionReady ? 'true' : 'false'}`,
       `dryRunCapabilityRegistryReady:${gates.dryRunCapabilityRegistryReady === true ? 'true' : 'false'}`,
+      `realRenderCapabilityImplementationReady:${canonicalRealRenderReady ? 'true' : 'false'}`,
       'executeCapabilityAuthorized:false',
       'realCapabilityImplementationsReady:false',
+      'hostSideEffectOccurred:false',
     ],
     safetyLines: buildSupervisorLifecycleGuardedRunnerExecutionGateSafetyLines(),
     messageText: 'Guarded runner execution gate completed; execution remains blocked and fail-closed.',

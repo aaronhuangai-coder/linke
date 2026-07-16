@@ -10913,6 +10913,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       wiringPlanSeal: wiringPlanSealOverrides,
       runnerWiringContract: runnerWiringContractOverrides,
       capabilityInjectionDecision: capabilityInjectionDecisionOverrides,
+      capabilityInjectionReadiness: capabilityInjectionReadinessOverrides,
       ...topLevelOverrides
     } = overrides;
     return {
@@ -10920,6 +10921,11 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       state: 'blocked',
       executionEligible: false,
       wouldExecute: false,
+      realRenderCapabilityImplementationReady: true,
+      realCapabilityImplementationsReady: false,
+      executeCapabilityAuthorized: false,
+      realRunnerWiringReady: false,
+      hostSideEffectOccurred: false,
       blockers: ['real-guarded-runner-execution-wiring-missing'],
       nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
       gates: {
@@ -10940,7 +10946,18 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         runnerWiringContractReady: false,
         capabilityInjectionReady: true,
         dryRunCapabilityRegistryReady: true,
+        realRenderCapabilityImplementationReady: true,
+        realCapabilityImplementationsReady: false,
+        executeCapabilityAuthorized: false,
         ...(gateOverrides || {}),
+      },
+      capabilityInjectionReadiness: {
+        state: 'ready',
+        realRenderCapabilityImplementationReady: true,
+        realCapabilityImplementationsReady: false,
+        dryRunCapabilityRegistryReady: true,
+        executeCapabilityAuthorized: false,
+        ...(capabilityInjectionReadinessOverrides || {}),
       },
       wiringPlan: {
         state: 'planned',
@@ -11283,6 +11300,11 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       text,
       /^capabilityInjection:state:resolved:dryRunReady:true:executeReady:false:realRunnerWiringReady:false:blocker:none$/m,
     );
+    // V1.32 shall: realRenderCapability fixed line
+    assert.match(
+      text,
+      /^realRenderCapability:state:ready:realRenderReady:true:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none$/m,
+    );
     assert.match(text, /real-guarded-runner-execution-wiring-missing/);
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
@@ -11293,8 +11315,10 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('pureWiringOrchestratorPlanReady:true'));
     assert.ok(viewModel.validationLines.includes('capabilityInjectionReady:true'));
     assert.ok(viewModel.validationLines.includes('dryRunCapabilityRegistryReady:true'));
+    assert.ok(viewModel.validationLines.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(viewModel.validationLines.includes('executeCapabilityAuthorized:false'));
     assert.ok(viewModel.validationLines.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(viewModel.validationLines.includes('hostSideEffectOccurred:false'));
     assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
     assert.ok(viewModel.validationLines.includes('runnerWiringContractReady:false'));
     assert.doesNotMatch(text, /primaryBlocker:operator-recovery-not-ready/);
@@ -11315,11 +11339,13 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     const wiringPlanLines = viewModel.requiredFields.filter((line) => line.startsWith('wiringPlan:'));
     const wiringPlanSealLines = viewModel.requiredFields.filter((line) => line.startsWith('wiringPlanSeal:'));
     const capabilityInjectionLines = viewModel.requiredFields.filter((line) => line.startsWith('capabilityInjection:'));
+    const realRenderLines = viewModel.requiredFields.filter((line) => line.startsWith('realRenderCapability:'));
     assert.strictEqual(policyLines.length, 1);
     assert.strictEqual(sentinelLines.length, 1);
     assert.strictEqual(wiringPlanLines.length, 1);
     assert.strictEqual(wiringPlanSealLines.length, 1);
     assert.strictEqual(capabilityInjectionLines.length, 1);
+    assert.strictEqual(realRenderLines.length, 1);
   });
 
   it('V1.30 W-plan: malicious wiringPlan payload never elevates real wiring or echoes secrets', () => {
@@ -11394,9 +11420,14 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     );
     assert.match(
       readyText,
+      /^realRenderCapability:state:ready:realRenderReady:true:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none$/m,
+    );
+    assert.match(
+      readyText,
       /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
     );
     assert.ok(ready.validationLines.includes('capabilityInjectionReady:true'));
+    assert.ok(ready.validationLines.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(ready.validationLines.includes('executeCapabilityAuthorized:false'));
     assert.doesNotMatch(readyText, /executeReady:true|executionEligible:true/);
 
@@ -11439,6 +11470,57 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('executeCapabilityAuthorized:false'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.doesNotMatch(text, /UNSAFE_SECRET_MATERIAL|launchctl load|executeReady:true|executionEligible:true|realRunnerWiringReady:true/);
+  });
+
+  it('V1.32 W-realRender: shall line + malicious elevation never exposes content or elevates global real', () => {
+    const ready = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload(),
+    );
+    const readyText = [...ready.requiredFields, ...ready.validationLines].join('\n');
+    assert.match(
+      readyText,
+      /^realRenderCapability:state:ready:realRenderReady:true:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none$/m,
+    );
+    assert.match(
+      readyText,
+      /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
+    );
+    assert.ok(ready.validationLines.includes('realRenderCapabilityImplementationReady:true'));
+    assert.ok(ready.validationLines.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(ready.validationLines.includes('hostSideEffectOccurred:false'));
+    assert.doesNotMatch(readyText, /contentSha256|9883ab81|__LINKE_REDACTED/);
+
+    const viewModel = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        realRenderCapabilityImplementationReady: true,
+        realCapabilityImplementationsReady: true,
+        realRunnerWiringReady: true,
+        executionEligible: true,
+        executeCapabilityAuthorized: true,
+        hostSideEffectOccurred: true,
+        gates: {
+          realRenderCapabilityImplementationReady: true,
+          realCapabilityImplementationsReady: true,
+          realRunnerWiringReady: true,
+          executionEligible: true,
+          executeCapabilityAuthorized: true,
+        },
+        capabilityInjectionReadiness: {
+          realRenderCapabilityImplementationReady: true,
+          realCapabilityImplementationsReady: true,
+        },
+      }),
+    );
+    const text = [...viewModel.requiredFields, ...viewModel.validationLines].join('\n');
+    // global real still shown false on the realRender shall line
+    assert.match(
+      text,
+      /^realRenderCapability:state:not-ready:realRenderReady:false:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:real-render-capability-not-ready$/m,
+    );
+    assert.ok(viewModel.validationLines.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(viewModel.validationLines.includes('executionEligible:false'));
+    assert.ok(viewModel.validationLines.includes('realRunnerWiringReady:false'));
+    assert.doesNotMatch(text, /realCapabilityImplementationsReady:true|executionEligible:true|realRunnerWiringReady:true/);
   });
 
   it('policy W2: denied allowlisted primary renders denied + blocked executionSentinel', () => {
