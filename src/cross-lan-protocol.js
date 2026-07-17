@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.7 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.8 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -9,6 +9,7 @@ import { ERROR_CODES } from './error-codes.js';
  * T1.5: pure protocol profile allowlist (exact six-field shape + values only).
  * T1.6: pure deviceId algebraic consistency (three caller-supplied strings only).
  * T1.7: pure clock-skew policy + configuration resolver + window predicate.
+ * T1.8: declarative session-construction boundary (lifecycle execute/authorize hard-false only).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -671,3 +672,39 @@ export function isWithinCrossLanClockSkew(input) {
     return false;
   }
 }
+
+/**
+ * T1.8 M1 declarative architecture contract only.
+ *
+ * Four hard-false flags map 1:1 to the current supervisor-lifecycle
+ * execute / authorize entry surfaces:
+ * - executeSupervisorLifecycleApply
+ * - evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy
+ * - buildSupervisorLifecycleGuardedRunnerExecutionGate
+ * - authorizeSupervisorLifecycleGuardedRunnerCapabilityMode
+ *
+ * This module does not import or call supervisor-lifecycle. It does not
+ * create a session builder, DI hook, executor, authorization decision, or
+ * host mutation. No generalized hostMutationAllowed field and no helper
+ * functions are added.
+ *
+ * The constant alone cannot prove future M2/M3 session-builder runtime
+ * zero-call. When a builder appears, DI / call-count sentinels must cover
+ * happy and failure paths.
+ *
+ * T1.0 Noise library selection gate remains BLOCKED. No network, crypto, or
+ * runtime surface. Does not claim session / A15 / Gold readiness.
+ *
+ * @type {Readonly<{
+ *   executeSupervisorLifecycleApplyAllowed: false,
+ *   evaluateSupervisorLifecycleGuardedRunnerExecutionPolicyAllowed: false,
+ *   buildSupervisorLifecycleGuardedRunnerExecutionGateAllowed: false,
+ *   authorizeSupervisorLifecycleGuardedRunnerCapabilityModeAllowed: false,
+ * }>}
+ */
+export const CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY = Object.freeze({
+  executeSupervisorLifecycleApplyAllowed: false,
+  evaluateSupervisorLifecycleGuardedRunnerExecutionPolicyAllowed: false,
+  buildSupervisorLifecycleGuardedRunnerExecutionGateAllowed: false,
+  authorizeSupervisorLifecycleGuardedRunnerCapabilityModeAllowed: false,
+});

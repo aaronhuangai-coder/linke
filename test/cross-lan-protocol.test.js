@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import {
   CONTROL_PLANE_MESSAGE_SCHEMAS,
   DENYLIST_ENTRY_SCHEMA,
@@ -9,6 +12,9 @@ import {
 // Namespace import so missing T1.3/T1.4/T1.7 named exports do not break T1.2 load-time.
 import * as protocol from '../src/cross-lan-protocol.js';
 import { ERROR_CODES } from '../src/error-codes.js';
+
+/** Promisified execFile for isolated Node subprocess checks (T1.8). */
+const execFileAsync = promisify(execFile);
 
 /**
  * Closed-set pin of all 13 control-plane message schemas (T1.2).
@@ -1950,5 +1956,146 @@ describe('cross-LAN clock skew policy contract (T1.7)', () => {
     assert.strictEqual(clockFalse && seqTrue, false, 'outside + forward must fail');
     assert.strictEqual(clockTrue && seqFalse, false, 'inside + duplicate must fail');
     assert.strictEqual(clockFalse && seqFalse, false, 'outside + duplicate must fail');
+  });
+});
+
+/**
+ * T1.8 — cross-LAN session construction must not call lifecycle execute/authorize paths.
+ *
+ * Current evidence scope (M1 scaffold only; honest bounds):
+ * - Declared constant contract: `CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY` (all false, frozen).
+ * - Semantic static import graph of `src/cross-lan-protocol.js` (SourceTextModule).
+ * - Namespace export surface isolation (no lifecycle function names re-exported).
+ *
+ * This does **not** prove future M2/M3 session-builder zero runtime calls.
+ * T1.0 Noise library selection remains BLOCKED; no real session builder exists.
+ * When a builder appears, DI / call-count sentinels must cover happy + failure paths.
+ * Do not invent a fake builder or a no-DI throwing sentinel here.
+ */
+describe('cross-LAN session construction lifecycle isolation (T1.8)', () => {
+  const EXPECTED_CONSTRUCTION_BOUNDARY = Object.freeze({
+    executeSupervisorLifecycleApplyAllowed: false,
+    evaluateSupervisorLifecycleGuardedRunnerExecutionPolicyAllowed: false,
+    buildSupervisorLifecycleGuardedRunnerExecutionGateAllowed: false,
+    authorizeSupervisorLifecycleGuardedRunnerCapabilityModeAllowed: false,
+  });
+
+  const LIFECYCLE_FUNCTION_NAMES = Object.freeze([
+    'executeSupervisorLifecycleApply',
+    'evaluateSupervisorLifecycleGuardedRunnerExecutionPolicy',
+    'buildSupervisorLifecycleGuardedRunnerExecutionGate',
+    'authorizeSupervisorLifecycleGuardedRunnerCapabilityMode',
+  ]);
+
+  /**
+   * RED until production exports the frozen all-false construction boundary.
+   * Missing export is the sole intentional RED under current M1 scaffold.
+   */
+  it('exports frozen CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY with exact four all-false flags', () => {
+    const boundary = protocol.CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY;
+    assert.notStrictEqual(
+      boundary,
+      undefined,
+      'protocol.CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY must be exported (T1.8 RED if missing)',
+    );
+    assert.deepStrictEqual(boundary, EXPECTED_CONSTRUCTION_BOUNDARY);
+    assert.strictEqual(Object.keys(boundary).length, 4);
+    assert.ok(Object.isFrozen(boundary), 'boundary object must be frozen');
+
+    for (const key of Object.keys(EXPECTED_CONSTRUCTION_BOUNDARY)) {
+      assert.strictEqual(boundary[key], false, `${key} must be strict false`);
+    }
+
+    // ESM is strict mode: frozen assignment throws (do not rely on silent/sloppy mutation).
+    for (const key of Object.keys(EXPECTED_CONSTRUCTION_BOUNDARY)) {
+      assert.throws(() => {
+        boundary[key] = true;
+      }, TypeError);
+      assert.strictEqual(boundary[key], false, `${key} must remain false after failed assign`);
+    }
+    assert.ok(Object.isFrozen(boundary), 'boundary must remain frozen after assign attempts');
+    assert.deepStrictEqual(boundary, EXPECTED_CONSTRUCTION_BOUNDARY);
+  });
+
+  /**
+   * GREEN baseline: real syntax/static import graph via isolated SourceTextModule.
+   * Proves only that the protocol module's static import graph is exactly
+   * `./error-codes.js` (evaluation) and has no direct dynamic load / child_process
+   * surface in source text. Not a future runtime zero-call proof.
+   */
+  it('static import graph is only evaluation of ./error-codes.js (SourceTextModule baseline)', async () => {
+    const sourceUrl = new URL('../src/cross-lan-protocol.js', import.meta.url);
+    const sourcePathHref = sourceUrl.href;
+
+    // Parent-side source text negative surface (read-only; never print body).
+    const sourceText = await readFile(sourceUrl, 'utf8');
+    assert.ok(!sourceText.includes('import('), 'source must not contain direct dynamic import(');
+    assert.ok(!sourceText.includes('require('), 'source must not contain require(');
+    assert.ok(!sourceText.includes('eval('), 'source must not contain eval(');
+    assert.ok(!sourceText.includes('new Function'), 'source must not contain new Function');
+    assert.ok(
+      !sourceText.includes('node:child_process'),
+      'source must not reference node:child_process',
+    );
+
+    // Isolated Node: real moduleRequest parse via vm.SourceTextModule (not regex).
+    const childScript = [
+      "import vm from 'node:vm';",
+      "import { readFile } from 'node:fs/promises';",
+      'const source = await readFile(new URL(process.argv[1]), "utf8");',
+      'const mod = new vm.SourceTextModule(source);',
+      'const moduleRequests = mod.moduleRequests.map((r) => ({',
+      '  specifier: r.specifier,',
+      '  phase: r.phase,',
+      '}));',
+      'process.stdout.write(JSON.stringify(moduleRequests));',
+    ].join('\n');
+
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [
+        '--no-warnings',
+        '--experimental-vm-modules',
+        '--input-type=module',
+        '-e',
+        childScript,
+        sourcePathHref,
+      ],
+      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+    );
+
+    assert.strictEqual(stderr, '', 'isolated import-graph child stderr must be empty');
+    const parsed = JSON.parse(stdout);
+    assert.deepStrictEqual(parsed, [{ specifier: './error-codes.js', phase: 'evaluation' }]);
+  });
+
+  /**
+   * GREEN baseline: namespace export isolation + residual pure FSM smoke.
+   * Confirms lifecycle function originals are not re-exported from protocol, and
+   * idle → handshaking still works. Does **not** prove future builder zero-call.
+   */
+  it('namespace excludes lifecycle execute/authorize names; pure FSM idle→handshaking still works', () => {
+    const exportNames = Object.keys(protocol);
+
+    for (const name of LIFECYCLE_FUNCTION_NAMES) {
+      assert.ok(
+        !exportNames.includes(name),
+        `protocol namespace must not export lifecycle function ${name}`,
+      );
+    }
+
+    const forbiddenTopLevel = /^(execute|authorize|evaluateSupervisorLifecycle|buildSupervisorLifecycleGuardedRunnerExecutionGate)/;
+    for (const name of exportNames) {
+      assert.ok(
+        !forbiddenTopLevel.test(name),
+        `protocol top-level export must not match lifecycle isolation pattern: ${name}`,
+      );
+    }
+
+    // Residual pure FSM contract still holds (scaffold smoke only).
+    assert.strictEqual(
+      protocol.getNextCrossLanSessionState('idle', 'start-handshake'),
+      'handshaking',
+    );
   });
 });
