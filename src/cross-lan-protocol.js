@@ -1,8 +1,9 @@
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.3 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.4 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
+ * T1.4: pure strictly-forward sequence predicate (no window / no state).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -266,5 +267,55 @@ export function getNextCrossLanSessionState(currentState, event) {
     return row[event];
   } catch {
     return null;
+  }
+}
+
+/**
+ * Pure strictly-forward sequence primitive (T1.4).
+ *
+ * The name means only: given a pre-computed nonce-match flag and two bigint
+ * counters, is `sequence` strictly greater than `highestAcceptedSequence`?
+ * It is **not** a complete replay guard, freshness check, security oracle,
+ * receive-window enforcer, or high-watermark mutator.
+ *
+ * Honesty / composition contract:
+ * - `sessionNonceMatched` must be produced by a future runtime **secure nonce
+ *   byte comparison**. This function never compares nonce bytes.
+ * - T1.0 Noise library selection remains BLOCKED; do not wire this predicate
+ *   to live network accept paths until that gate is unblocked and a real
+ *   session runtime owns verification + state.
+ * - After a true result, the caller still must update the accepted
+ *   high-watermark in order / atomically; this function never mutates state.
+ * - T1.14 will add receive-window upper bound, uint64 max, and reservation.
+ *   That layer will not admit `sequence <= highestAcceptedSequence`; this
+ *   primitive already rejects non-forward sequences and must stay that way.
+ * - Wall-clock / skew is owned by an independent clock layer; this predicate
+ *   never reads time fields (including `clientTimeUtc`).
+ *
+ * Implementation constraints: fail-closed try/catch; plain-record gate only;
+ * direct property reads of the three named fields only — no enumeration of
+ * `input`, no BigInt coercion, no window/uint64/persistence/error codes.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function isStrictlyForwardSequence(input) {
+  try {
+    if (!isPlainRecord(input)) return false;
+
+    // Direct named reads only — do not enumerate, do not touch clientTimeUtc.
+    const sessionNonceMatched = input.sessionNonceMatched;
+    const highestAcceptedSequence = input.highestAcceptedSequence;
+    const sequence = input.sequence;
+
+    if (sessionNonceMatched !== true) return false;
+    if (typeof highestAcceptedSequence !== 'bigint') return false;
+    if (typeof sequence !== 'bigint') return false;
+    if (highestAcceptedSequence < 0n) return false;
+    if (sequence < 0n) return false;
+
+    return sequence > highestAcceptedSequence;
+  } catch {
+    return false;
   }
 }

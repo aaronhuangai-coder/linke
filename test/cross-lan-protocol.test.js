@@ -6,7 +6,7 @@ import {
   hasExactControlPlaneMessageFields,
   hasExactDenylistEntryFields,
 } from '../src/cross-lan-protocol.js';
-// Namespace import so missing T1.3 named exports do not break T1.2 load-time.
+// Namespace import so missing T1.3/T1.4 named exports do not break T1.2 load-time.
 import * as protocol from '../src/cross-lan-protocol.js';
 
 /**
@@ -617,5 +617,265 @@ describe('cross-LAN session state machine (T1.3)', () => {
       ['handshaking', 'key-confirmed', 'established'],
       ['rekeying', 'rekey-confirmed', 'established'],
     ]);
+  });
+});
+
+/**
+ * T1.4 pure predicate pin: protocol.isStrictlyForwardSequence(input).
+ *
+ * Honesty contract (not a complete replay guard):
+ * - This is ONLY a pure forward-sequence predicate over a pre-computed
+ *   `sessionNonceMatched` flag plus two non-negative bigint counters.
+ * - `sessionNonceMatched` MUST be produced by a future runtime secure nonce
+ *   byte compare; T1.4 does NOT compare nonce bytes itself.
+ * - T1.14 will add receive-window upper bound, uint64 max, and reservation;
+ *   this predicate must NOT admit sequence <= highestAcceptedSequence.
+ * - No time reads, no state mutation, no persistence, no error codes.
+ * - T1.0 Noise library selection gate remains BLOCKED; these tests do not
+ *   claim Noise / E2EE / cross-LAN / M1 readiness.
+ *
+ * GREEN truth (future): true only when input is a plain record,
+ * sessionNonceMatched === true, highestAcceptedSequence and sequence are
+ * non-negative bigint, and sequence > highestAcceptedSequence; otherwise
+ * false without throwing.
+ */
+describe('strictly-forward sequence predicate (T1.4)', () => {
+  it('returns true for matched nonce and bigint strictly-forward sequences (incl. > MAX_SAFE_INTEGER)', () => {
+    const fn = protocol.isStrictlyForwardSequence;
+    // Small counters.
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 0n,
+        sequence: 1n,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 5n,
+        sequence: 6n,
+      }),
+      true,
+    );
+    // Prove bigint path (not Number): values above Number.MAX_SAFE_INTEGER.
+    const aboveSafe = BigInt(Number.MAX_SAFE_INTEGER) + 10n;
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: aboveSafe,
+        sequence: aboveSafe + 1n,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 9007199254740991n, // Number.MAX_SAFE_INTEGER
+        sequence: 9007199254740993n, // +2, not representable exactly as Number steps from MAX_SAFE
+      }),
+      true,
+    );
+    // null-prototype plain record is still a plain record.
+    const nullProto = Object.assign(Object.create(null), {
+      sessionNonceMatched: true,
+      highestAcceptedSequence: 100n,
+      sequence: 101n,
+    });
+    assert.strictEqual(fn(nullProto), true);
+  });
+
+  it('returns false for duplicate/equal and lower (non-forward) sequences', () => {
+    const fn = protocol.isStrictlyForwardSequence;
+    // Equal / duplicate: sequence === highestAcceptedSequence.
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 7n,
+        sequence: 7n,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 0n,
+        sequence: 0n,
+      }),
+      false,
+    );
+    // Lower: sequence < highestAcceptedSequence.
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 10n,
+        sequence: 9n,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 9007199254740993n,
+        sequence: 9007199254740991n,
+      }),
+      false,
+    );
+  });
+
+  it('returns false when sessionNonceMatched is not true even if sequence is forward', () => {
+    const fn = protocol.isStrictlyForwardSequence;
+    const forward = {
+      highestAcceptedSequence: 1n,
+      sequence: 2n,
+    };
+    // Explicit false.
+    assert.strictEqual(fn({ ...forward, sessionNonceMatched: false }), false);
+    // Missing / undefined.
+    assert.strictEqual(fn({ ...forward }), false);
+    assert.strictEqual(fn({ ...forward, sessionNonceMatched: undefined }), false);
+    // Truthy-but-not-true must not pass (strict === true).
+    assert.strictEqual(fn({ ...forward, sessionNonceMatched: 1 }), false);
+    assert.strictEqual(fn({ ...forward, sessionNonceMatched: 'true' }), false);
+  });
+
+  it('does not read clientTimeUtc: extreme times and throwing getter do not affect pure forward check', () => {
+    const fn = protocol.isStrictlyForwardSequence;
+    // Extremely old clientTimeUtc + valid forward still true (time is irrelevant).
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 0n,
+        sequence: 1n,
+        clientTimeUtc: 0,
+      }),
+      true,
+    );
+    // Extremely new time does not rescue duplicate or nonce mismatch.
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: true,
+        highestAcceptedSequence: 5n,
+        sequence: 5n,
+        clientTimeUtc: Number.MAX_SAFE_INTEGER,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        sessionNonceMatched: false,
+        highestAcceptedSequence: 5n,
+        sequence: 6n,
+        clientTimeUtc: '9999-12-31T23:59:59.999Z',
+      }),
+      false,
+    );
+    // Stronger proof: getter throws if read — call must not throw and must return true.
+    const withThrowingTime = {
+      sessionNonceMatched: true,
+      highestAcceptedSequence: 2n,
+      sequence: 3n,
+    };
+    Object.defineProperty(withThrowingTime, 'clientTimeUtc', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw new Error(SENTINEL_SECRET);
+      },
+    });
+    let result;
+    assert.doesNotThrow(() => {
+      result = fn(withThrowingTime);
+    });
+    assert.strictEqual(result, true);
+  });
+
+  it('returns false without throwing for Number/string/negative bigint/null/array/Date/class/throwing Proxy', () => {
+    const fn = protocol.isStrictlyForwardSequence;
+    const throwingProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+
+    assert.doesNotThrow(() => {
+      // Non-plain / non-record inputs.
+      assert.strictEqual(fn(null), false);
+      assert.strictEqual(fn([]), false);
+      assert.strictEqual(fn(new Date()), false);
+      assert.strictEqual(fn(new ExampleClass()), false);
+      assert.strictEqual(fn(throwingProxy), false);
+      // Number/string counters (must be non-negative bigint).
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: 0,
+          sequence: 1,
+        }),
+        false,
+      );
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: '0',
+          sequence: '1',
+        }),
+        false,
+      );
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: 0n,
+          sequence: 1,
+        }),
+        false,
+      );
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: 0,
+          sequence: 1n,
+        }),
+        false,
+      );
+      // Negative bigint counters.
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: -1n,
+          sequence: 0n,
+        }),
+        false,
+      );
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: 0n,
+          sequence: -1n,
+        }),
+        false,
+      );
+      assert.strictEqual(
+        fn({
+          sessionNonceMatched: true,
+          highestAcceptedSequence: -5n,
+          sequence: -1n,
+        }),
+        false,
+      );
+    });
   });
 });
