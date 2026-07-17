@@ -635,8 +635,8 @@ describe('cross-LAN session state machine (T1.3)', () => {
  *   `sessionNonceMatched` flag plus two non-negative bigint counters.
  * - `sessionNonceMatched` MUST be produced by a future runtime secure nonce
  *   byte compare; T1.4 does NOT compare nonce bytes itself.
- * - T1.14 will add receive-window upper bound, uint64 max, and reservation;
- *   this predicate must NOT admit sequence <= highestAcceptedSequence.
+ * - T1.14 adds receive-window upper bound, uint64 max, and reservation as
+ *   separate pure APIs; this predicate must NOT admit sequence <= highestAcceptedSequence.
  * - No time reads, no state mutation, no persistence, no error codes.
  * - T1.0 Noise library selection gate remains BLOCKED; these tests do not
  *   claim Noise / E2EE / cross-LAN / M1 readiness.
@@ -3532,5 +3532,804 @@ describe('cross-LAN Noise IK token sequence (T1.12a non-crypto scaffold)', () =>
       assert.strictEqual(fn({ msg1: base.msg1, msg2: revokedRow }), false);
     });
     // Transparent Proxy residual risk is not required to reject.
+  });
+});
+
+/**
+ * T1.14 pure counter reservation / receive-window / trustEpoch contract only.
+ *
+ * Honesty / scope (highest priority):
+ * - BigInt uint64 semantic constants + pure decision/predicate only.
+ * - Does NOT implement dataDir I/O, fsync, reservation execution, session,
+ *   ack, signature/authority verification, or wire encoding.
+ * - T1.13 lives in the independent enrollment module; T1.0 remains BLOCKED.
+ * - Must NOT claim A18 / M1 crypto / cross-LAN runtime READY.
+ * - gap > R false only means not a normal single-crash forward gap — not
+ *   automatic rollback. Receive path uses a single five-state classifier.
+ * - Old control-plane shape validators still do not verify uint64 ranges;
+ *   only T1.14 pure APIs validate their BigInt uint64 inputs (still not wire).
+ */
+describe('cross-LAN counter reservation + trustEpoch contract (T1.14)', () => {
+  const UINT64_MAX = (1n << 64n) - 1n;
+
+  const EXPECTED_COUNTER_POLICY = Object.freeze({
+    defaultReservationRange: 32,
+    reservationRangeHardCeiling: 256,
+    defaultReceiveWindow: 64,
+    maximumDefaultCrashForwardGap: 32,
+    minimumDefaultForwardHeadroom: 32,
+    counterType: 'uint64',
+    uint64Max: UINT64_MAX,
+    requiredRelation: 'reservation-range-less-than-receive-window',
+    reservationAtomicPersistRequiredBeforeSend: true,
+    steadyStatePerMessageFsyncRequired: false,
+    m1ExecutesAnyFsync: false,
+    rollbackErrorCode: ERROR_CODES.DEVICE_COUNTER_ROLLBACK,
+    replayErrorCode: ERROR_CODES.DEVICE_REPLAY_DETECTED,
+    implementationStage: 'contract-only-no-counter-io',
+  });
+
+  const EXPECTED_TRUST_POLICY = Object.freeze({
+    name: 'trustEpoch',
+    scope: 'controller-global',
+    type: 'uint64',
+    bootstrapInitialTrustEpoch: 1n,
+    uint64Max: UINT64_MAX,
+    staleRule: 'candidate-less-than-or-equal-to-last-accepted-rejected',
+    staleErrorCode: ERROR_CODES.STALE_EPOCH_REJECTED,
+    persistBeforeAck: 'required-at-m3-runtime-not-m1',
+    orthogonalFields: Object.freeze(['enrollmentEpoch', 'revokeGeneration']),
+    fleetReenrollRequiredOnIncrement: false,
+    wrapAllowed: false,
+    implementationStage: 'contract-only-no-epoch-io',
+  });
+
+  const RECEIVE_CLASSIFICATIONS = Object.freeze([
+    'accept',
+    'reject-rollback',
+    'reject-replay',
+    'reject-outside-window',
+    'reject-invalid',
+  ]);
+
+  function createThrowingProxy() {
+    return new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+  }
+
+  function createRevokedProxy(target) {
+    const { proxy, revoke } = Proxy.revocable(target, {});
+    revoke();
+    return proxy;
+  }
+
+  it('1) CROSS_LAN_COUNTER_RESERVATION_POLICY exact14 / frozen / relations / error codes / fsync honesty', () => {
+    const policy = protocol.CROSS_LAN_COUNTER_RESERVATION_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'CROSS_LAN_COUNTER_RESERVATION_POLICY must be exported (T1.14 RED if missing)',
+    );
+    assert.deepStrictEqual(policy, EXPECTED_COUNTER_POLICY);
+    assert.strictEqual(Object.keys(policy).length, 14);
+    assert.deepStrictEqual(
+      Object.keys(policy).sort(),
+      Object.keys(EXPECTED_COUNTER_POLICY).sort(),
+    );
+    assert.ok(Object.isFrozen(policy));
+
+    assert.strictEqual(policy.defaultReservationRange, 32);
+    assert.strictEqual(policy.defaultReceiveWindow, 64);
+    assert.ok(policy.defaultReservationRange < policy.defaultReceiveWindow);
+    assert.strictEqual(
+      policy.maximumDefaultCrashForwardGap,
+      policy.defaultReservationRange,
+    );
+    assert.strictEqual(
+      policy.minimumDefaultForwardHeadroom,
+      policy.defaultReceiveWindow - policy.defaultReservationRange,
+    );
+    assert.ok(
+      policy.defaultReservationRange <= policy.reservationRangeHardCeiling,
+    );
+    assert.strictEqual(policy.uint64Max, UINT64_MAX);
+    assert.strictEqual(policy.uint64Max, (1n << 64n) - 1n);
+
+    assert.strictEqual(
+      policy.rollbackErrorCode,
+      ERROR_CODES.DEVICE_COUNTER_ROLLBACK,
+    );
+    assert.strictEqual(
+      policy.replayErrorCode,
+      ERROR_CODES.DEVICE_REPLAY_DETECTED,
+    );
+    assert.strictEqual(policy.rollbackErrorCode, 'device-counter-rollback');
+    assert.strictEqual(policy.replayErrorCode, 'device-replay-detected');
+
+    // Exact three-field persist/fsync honesty (no perMessageFsyncAllowed flag).
+    assert.strictEqual(policy.reservationAtomicPersistRequiredBeforeSend, true);
+    assert.strictEqual(policy.steadyStatePerMessageFsyncRequired, false);
+    assert.strictEqual(policy.m1ExecutesAnyFsync, false);
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(policy, 'perMessageFsyncAllowed'),
+      false,
+    );
+    assert.strictEqual(policy.implementationStage, 'contract-only-no-counter-io');
+
+    assert.throws(() => {
+      policy.defaultReservationRange = 1;
+    }, TypeError);
+  });
+
+  it('2) isValidCrossLanCounterConfiguration: 32/64 256/257 true; invalid/extra/accessor/proxy/revoked false', () => {
+    const fn = protocol.isValidCrossLanCounterConfiguration;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.14 RED)');
+
+    assert.strictEqual(fn({ reservationRange: 32, receiveWindow: 64 }), true);
+    assert.strictEqual(fn({ reservationRange: 256, receiveWindow: 257 }), true);
+    assert.strictEqual(fn({ reservationRange: 1, receiveWindow: 2 }), true);
+
+    const nullProto = Object.assign(Object.create(null), {
+      reservationRange: 32,
+      receiveWindow: 64,
+    });
+    assert.strictEqual(fn(nullProto), true);
+    assert.strictEqual(
+      fn(Object.freeze({ reservationRange: 32, receiveWindow: 64 })),
+      true,
+    );
+
+    assert.strictEqual(fn({ reservationRange: 0, receiveWindow: 64 }), false);
+    assert.strictEqual(fn({ reservationRange: 32, receiveWindow: 0 }), false);
+    assert.strictEqual(fn({ reservationRange: 32, receiveWindow: 32 }), false);
+    assert.strictEqual(fn({ reservationRange: 64, receiveWindow: 32 }), false);
+    assert.strictEqual(fn({ reservationRange: 257, receiveWindow: 300 }), false);
+    assert.strictEqual(fn({ reservationRange: 32.5, receiveWindow: 64 }), false);
+    assert.strictEqual(fn({ reservationRange: '32', receiveWindow: 64 }), false);
+    assert.strictEqual(fn({ reservationRange: 32n, receiveWindow: 64 }), false);
+    assert.strictEqual(fn({ reservationRange: 32, receiveWindow: 64n }), false);
+    assert.strictEqual(
+      fn({ reservationRange: 32, receiveWindow: 64, extra: 1 }),
+      false,
+    );
+    assert.strictEqual(fn({ reservationRange: 32 }), false);
+    assert.strictEqual(fn({ receiveWindow: 64 }), false);
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn(new ExampleClass()), false);
+
+    const withAccessor = {};
+    Object.defineProperty(withAccessor, 'reservationRange', {
+      get() {
+        return 32;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(withAccessor, 'receiveWindow', {
+      value: 64,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(withAccessor), false);
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), false);
+      assert.strictEqual(
+        fn(createRevokedProxy({ reservationRange: 32, receiveWindow: 64 })),
+        false,
+      );
+    });
+  });
+
+  it('3) isNormalCrossLanCrashForwardGap: 0/32 true, 33 false (not classifier rollback); invalid false', () => {
+    const gapFn = protocol.isNormalCrossLanCrashForwardGap;
+    const classify = protocol.classifyCrossLanReceivedCounter;
+    assert.strictEqual(typeof gapFn, 'function', 'export must exist (T1.14 RED)');
+
+    assert.strictEqual(
+      gapFn({ forwardGap: 0, reservationRange: 32, receiveWindow: 64 }),
+      true,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 32, reservationRange: 32, receiveWindow: 64 }),
+      true,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 33, reservationRange: 32, receiveWindow: 64 }),
+      false,
+    );
+
+    // gap>R false only means not a normal single-crash gap — NOT rollback.
+    assert.strictEqual(
+      classify({
+        counter: 100n + 33n,
+        highestAcceptedCounter: 100n,
+        receiveWindow: 64,
+      }),
+      'accept',
+      'gap=33 with window=64 must still accept; gap>R is not automatic rollback',
+    );
+
+    assert.strictEqual(
+      gapFn({ forwardGap: -1, reservationRange: 32, receiveWindow: 64 }),
+      false,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 1.5, reservationRange: 32, receiveWindow: 64 }),
+      false,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: '0', reservationRange: 32, receiveWindow: 64 }),
+      false,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 0, reservationRange: 257, receiveWindow: 300 }),
+      false,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 0, reservationRange: 32, receiveWindow: 32 }),
+      false,
+    );
+    assert.strictEqual(
+      gapFn({ forwardGap: 0, reservationRange: 32, receiveWindow: 64, extra: 1 }),
+      false,
+    );
+    assert.strictEqual(gapFn({ reservationRange: 32, receiveWindow: 64 }), false);
+    assert.strictEqual(gapFn(null), false);
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(gapFn(createThrowingProxy()), false);
+      assert.strictEqual(
+        gapFn(
+          createRevokedProxy({
+            forwardGap: 0,
+            reservationRange: 32,
+            receiveWindow: 64,
+          }),
+        ),
+        false,
+      );
+    });
+  });
+
+  it('4) shouldRejectCrossLanPersistedCounterState: regress/authority/invalid true; equal/greater/max false', () => {
+    const fn = protocol.shouldRejectCrossLanPersistedCounterState;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.14 RED)');
+
+    // cause (a): persisted < confirmed
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 10n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: true,
+      }),
+      true,
+    );
+    // cause (c): authority not verified
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 20n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: false,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 30n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: false,
+      }),
+      true,
+    );
+
+    // equal / greater with authority true → accept (do not reject)
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 20n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: true,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 30n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: true,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: UINT64_MAX,
+        previouslyConfirmedReservedEnd: UINT64_MAX,
+        authorityVerified: true,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: UINT64_MAX,
+        previouslyConfirmedReservedEnd: UINT64_MAX - 1n,
+        authorityVerified: true,
+      }),
+      false,
+    );
+
+    // invalid shape / type / bounds → fail-closed reject true
+    assert.strictEqual(fn(null), true);
+    assert.strictEqual(fn(undefined), true);
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 20,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: true,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: -1n,
+        previouslyConfirmedReservedEnd: 0n,
+        authorityVerified: true,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: UINT64_MAX + 1n,
+        previouslyConfirmedReservedEnd: 0n,
+        authorityVerified: true,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 20n,
+        previouslyConfirmedReservedEnd: 20n,
+        authorityVerified: true,
+        extra: 1,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        persistedReservedEnd: 20n,
+        previouslyConfirmedReservedEnd: 20n,
+      }),
+      true,
+    );
+
+    const withAccessor = {};
+    Object.defineProperty(withAccessor, 'persistedReservedEnd', {
+      get() {
+        return 20n;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(withAccessor, 'previouslyConfirmedReservedEnd', {
+      value: 20n,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(withAccessor, 'authorityVerified', {
+      value: true,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(withAccessor), true);
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), true);
+      assert.strictEqual(
+        fn(
+          createRevokedProxy({
+            persistedReservedEnd: 20n,
+            previouslyConfirmedReservedEnd: 20n,
+            authorityVerified: true,
+          }),
+        ),
+        true,
+      );
+    });
+  });
+
+  it('5) classifyCrossLanReceivedCounter: lower/equal/+1/+33/+64/+65; max; invalid; five-state closed', () => {
+    const fn = protocol.classifyCrossLanReceivedCounter;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.14 RED)');
+
+    const highest = 100n;
+    const window = 64;
+    assert.strictEqual(
+      fn({ counter: 99n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'reject-rollback',
+    );
+    assert.strictEqual(
+      fn({ counter: 100n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'reject-replay',
+    );
+    assert.strictEqual(
+      fn({ counter: 101n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'accept',
+    );
+    // gap=33 (R=32 default) still accept under window=64
+    assert.strictEqual(
+      fn({ counter: 133n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'accept',
+    );
+    // +64 inclusive upper bound
+    assert.strictEqual(
+      fn({ counter: 164n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'accept',
+    );
+    // +65 outside window — not invented as rollback
+    assert.strictEqual(
+      fn({ counter: 165n, highestAcceptedCounter: highest, receiveWindow: window }),
+      'reject-outside-window',
+    );
+
+    // highest = max: equal replay, lower rollback, no legal forward/wrap
+    assert.strictEqual(
+      fn({
+        counter: UINT64_MAX,
+        highestAcceptedCounter: UINT64_MAX,
+        receiveWindow: window,
+      }),
+      'reject-replay',
+    );
+    assert.strictEqual(
+      fn({
+        counter: UINT64_MAX - 1n,
+        highestAcceptedCounter: UINT64_MAX,
+        receiveWindow: window,
+      }),
+      'reject-rollback',
+    );
+    // near-max forward still capped by uint64Max
+    assert.strictEqual(
+      fn({
+        counter: UINT64_MAX,
+        highestAcceptedCounter: UINT64_MAX - 1n,
+        receiveWindow: window,
+      }),
+      'accept',
+    );
+    assert.strictEqual(
+      fn({
+        counter: UINT64_MAX + 1n,
+        highestAcceptedCounter: 0n,
+        receiveWindow: window,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: -1n,
+        highestAcceptedCounter: 0n,
+        receiveWindow: window,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: 1n,
+        highestAcceptedCounter: -1n,
+        receiveWindow: window,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: 1,
+        highestAcceptedCounter: 0n,
+        receiveWindow: window,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: 1n,
+        highestAcceptedCounter: 0n,
+        receiveWindow: 0,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: 1n,
+        highestAcceptedCounter: 0n,
+        receiveWindow: 64.5,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(
+      fn({
+        counter: 1n,
+        highestAcceptedCounter: 0n,
+        receiveWindow: window,
+        extra: true,
+      }),
+      'reject-invalid',
+    );
+    assert.strictEqual(fn(null), 'reject-invalid');
+    assert.strictEqual(fn({ counter: 1n, highestAcceptedCounter: 0n }), 'reject-invalid');
+
+    // Five-state closed set over representative outcomes
+    const outcomes = new Set([
+      fn({ counter: 99n, highestAcceptedCounter: highest, receiveWindow: window }),
+      fn({ counter: 100n, highestAcceptedCounter: highest, receiveWindow: window }),
+      fn({ counter: 101n, highestAcceptedCounter: highest, receiveWindow: window }),
+      fn({ counter: 165n, highestAcceptedCounter: highest, receiveWindow: window }),
+      fn(null),
+    ]);
+    for (const outcome of outcomes) {
+      assert.ok(
+        RECEIVE_CLASSIFICATIONS.includes(outcome),
+        `unexpected classification: ${String(outcome)}`,
+      );
+      assert.strictEqual(typeof outcome, 'string');
+    }
+    assert.deepStrictEqual(
+      [...outcomes].sort(),
+      [
+        'accept',
+        'reject-invalid',
+        'reject-outside-window',
+        'reject-replay',
+        'reject-rollback',
+      ].sort(),
+    );
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), 'reject-invalid');
+      assert.strictEqual(
+        fn(
+          createRevokedProxy({
+            counter: 1n,
+            highestAcceptedCounter: 0n,
+            receiveWindow: 64,
+          }),
+        ),
+        'reject-invalid',
+      );
+    });
+  });
+
+  it('6) CROSS_LAN_TRUST_EPOCH_POLICY exact12 / deep freeze / orthogonality / no fleet re-enroll / wrap false', () => {
+    const policy = protocol.CROSS_LAN_TRUST_EPOCH_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'CROSS_LAN_TRUST_EPOCH_POLICY must be exported (T1.14 RED if missing)',
+    );
+    assert.deepStrictEqual(policy, EXPECTED_TRUST_POLICY);
+    assert.strictEqual(Object.keys(policy).length, 12);
+    assert.deepStrictEqual(
+      Object.keys(policy).sort(),
+      Object.keys(EXPECTED_TRUST_POLICY).sort(),
+    );
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.orthogonalFields));
+    assert.deepStrictEqual(policy.orthogonalFields, [
+      'enrollmentEpoch',
+      'revokeGeneration',
+    ]);
+    assert.strictEqual(policy.fleetReenrollRequiredOnIncrement, false);
+    assert.strictEqual(policy.wrapAllowed, false);
+    assert.strictEqual(policy.bootstrapInitialTrustEpoch, 1n);
+    assert.strictEqual(policy.uint64Max, UINT64_MAX);
+    assert.strictEqual(policy.staleErrorCode, ERROR_CODES.STALE_EPOCH_REJECTED);
+    assert.strictEqual(policy.staleErrorCode, 'stale-epoch-rejected');
+    assert.strictEqual(policy.persistBeforeAck, 'required-at-m3-runtime-not-m1');
+    assert.strictEqual(policy.implementationStage, 'contract-only-no-epoch-io');
+
+    assert.throws(() => {
+      policy.wrapAllowed = true;
+    }, TypeError);
+    assert.throws(() => {
+      policy.orthogonalFields.push('trustEpoch');
+    }, TypeError);
+  });
+
+  it('7) shouldRejectCrossLanTrustEpoch: accept/stale/max boundary; invalid/extra/proxy/revoked reject', () => {
+    const fn = protocol.shouldRejectCrossLanTrustEpoch;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.14 RED)');
+
+    // 1 vs 0 accept; 1 vs 1 stale; 2 vs 1 accept
+    assert.strictEqual(
+      fn({ trustEpoch: 1n, lastAcceptedTrustEpoch: 0n }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: 1n, lastAcceptedTrustEpoch: 1n }),
+      true,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: 2n, lastAcceptedTrustEpoch: 1n }),
+      false,
+    );
+
+    // max / max-1 accept; max / max stale
+    assert.strictEqual(
+      fn({ trustEpoch: UINT64_MAX, lastAcceptedTrustEpoch: UINT64_MAX - 1n }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: UINT64_MAX, lastAcceptedTrustEpoch: UINT64_MAX }),
+      true,
+    );
+
+    // 0 / max+1 / negative last / Number → invalid fail-closed true
+    assert.strictEqual(
+      fn({ trustEpoch: 0n, lastAcceptedTrustEpoch: 0n }),
+      true,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: UINT64_MAX + 1n, lastAcceptedTrustEpoch: 0n }),
+      true,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: 2n, lastAcceptedTrustEpoch: -1n }),
+      true,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: 2, lastAcceptedTrustEpoch: 1n }),
+      true,
+    );
+    assert.strictEqual(
+      fn({ trustEpoch: 2n, lastAcceptedTrustEpoch: 1 }),
+      true,
+    );
+
+    // extra orthogonal fields prove API orthogonality (reject extra shape)
+    assert.strictEqual(
+      fn({
+        trustEpoch: 2n,
+        lastAcceptedTrustEpoch: 1n,
+        enrollmentEpoch: 1n,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        trustEpoch: 2n,
+        lastAcceptedTrustEpoch: 1n,
+        revokeGeneration: 1n,
+      }),
+      true,
+    );
+    assert.strictEqual(
+      fn({
+        trustEpoch: 2n,
+        lastAcceptedTrustEpoch: 1n,
+        enrollmentEpoch: 1n,
+        revokeGeneration: 1n,
+      }),
+      true,
+    );
+
+    assert.strictEqual(fn(null), true);
+    assert.strictEqual(fn({ trustEpoch: 2n }), true);
+    assert.strictEqual(
+      fn({ trustEpoch: 2n, lastAcceptedTrustEpoch: 1n, extra: true }),
+      true,
+    );
+
+    const withAccessor = {};
+    Object.defineProperty(withAccessor, 'trustEpoch', {
+      get() {
+        return 2n;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(withAccessor, 'lastAcceptedTrustEpoch', {
+      value: 1n,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(withAccessor), true);
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), true);
+      assert.strictEqual(
+        fn(
+          createRevokedProxy({
+            trustEpoch: 2n,
+            lastAcceptedTrustEpoch: 1n,
+          }),
+        ),
+        true,
+      );
+    });
+  });
+
+  it('8) honesty: T1.14 is contract-only; not A18/runtime/READY; no toString/I/O oracle', () => {
+    const counter = protocol.CROSS_LAN_COUNTER_RESERVATION_POLICY;
+    const trust = protocol.CROSS_LAN_TRUST_EPOCH_POLICY;
+    assert.strictEqual(counter.implementationStage, 'contract-only-no-counter-io');
+    assert.strictEqual(trust.implementationStage, 'contract-only-no-epoch-io');
+    assert.strictEqual(counter.m1ExecutesAnyFsync, false);
+    assert.strictEqual(trust.persistBeforeAck, 'required-at-m3-runtime-not-m1');
+
+    // Namespace must export the pure T1.14 surface and must not claim runtime I/O APIs.
+    const names = Object.keys(protocol);
+    for (const required of [
+      'CROSS_LAN_COUNTER_RESERVATION_POLICY',
+      'isValidCrossLanCounterConfiguration',
+      'isNormalCrossLanCrashForwardGap',
+      'shouldRejectCrossLanPersistedCounterState',
+      'classifyCrossLanReceivedCounter',
+      'CROSS_LAN_TRUST_EPOCH_POLICY',
+      'shouldRejectCrossLanTrustEpoch',
+    ]) {
+      assert.ok(names.includes(required), `missing export ${required}`);
+    }
+    for (const forbidden of [
+      'persistCrossLanCounterReservation',
+      'fsyncCrossLanCounterState',
+      'verifyCrossLanCounterAuthority',
+      'executeCrossLanCounterReservation',
+      'runA18CounterRollback',
+    ]) {
+      assert.ok(!names.includes(forbidden), `must not export runtime I/O ${forbidden}`);
+    }
+
+    // Pure no-throw decisions only — contract is export behavior, not function.toString / stdout / I/O.
+    assert.doesNotThrow(() => {
+      assert.strictEqual(
+        protocol.isValidCrossLanCounterConfiguration({
+          reservationRange: 32,
+          receiveWindow: 64,
+        }),
+        true,
+      );
+      assert.strictEqual(
+        protocol.classifyCrossLanReceivedCounter({
+          counter: 1n,
+          highestAcceptedCounter: 0n,
+          receiveWindow: 64,
+        }),
+        'accept',
+      );
+      assert.strictEqual(
+        protocol.shouldRejectCrossLanTrustEpoch({
+          trustEpoch: 1n,
+          lastAcceptedTrustEpoch: 0n,
+        }),
+        false,
+      );
+      assert.strictEqual(
+        protocol.shouldRejectCrossLanPersistedCounterState({
+          persistedReservedEnd: 1n,
+          previouslyConfirmedReservedEnd: 1n,
+          authorityVerified: true,
+        }),
+        false,
+      );
+    });
   });
 });

@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.12a / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.14 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -21,16 +21,28 @@ import { ERROR_CODES } from './error-codes.js';
  * T1.12a: non-crypto Noise IK token-sequence scaffold only (frozen msg1/msg2
  *         token order table + pure sequence matcher). T1.12 fixed vectors
  *         remain NOT READY / NOT COMPLETE.
+ * T1.13: enrollment secret lifecycle / delivery / clipboard contracts live in
+ *        the independent enrollment module (`cross-lan-enrollment-contract`),
+ *        not in this file.
+ * T1.14: pure counter reservation / receive-window / trustEpoch contract only
+ *        (BigInt uint64 semantic constants + pure decision/predicate; no
+ *        dataDir, fsync, reservation execution, session, ack, signature /
+ *        authority verification, or wire encoding).
  *
- * NOT a security, crypto, wire-encoding, or semantic validator.
- * Does not verify nonces, MACs/signatures, times, uint64 ranges,
- * binary encodings, trust state, or AEAD.
+ * NOT a security, crypto, wire-encoding, or full semantic validator.
+ * Does not verify nonces, MACs/signatures, times, binary encodings, trust
+ * state, or AEAD.
+ * Old control-plane shape validators do **not** verify uint64 ranges; only
+ * T1.14's new pure APIs validate their input BigInt uint64 semantics, and
+ * they are still **not** wire validators.
  * Does not open network sockets, timers, or persistence.
  *
  * T1.0 Noise library selection gate remains BLOCKED (not M1 crypto PASS).
  * This module does not claim Noise / E2EE / cross-LAN / M1 readiness.
  * T1.12a does not load fixtures, verify ciphertext/handshake hash, bind a
  * Noise library, or execute DH/AEAD/hash/handshake.
+ * T1.14 does not claim A18 / counter persistence / authority verification /
+ * M1 crypto readiness.
  *
  * Keepalive types are Noise AEAD application-layer messages with empty
  * payloads — not RFC6455 WebSocket ping/pong (transport timing is M3).
@@ -305,9 +317,10 @@ export function getNextCrossLanSessionState(currentState, event) {
  *   session runtime owns verification + state.
  * - After a true result, the caller still must update the accepted
  *   high-watermark in order / atomically; this function never mutates state.
- * - T1.14 will add receive-window upper bound, uint64 max, and reservation.
- *   That layer will not admit `sequence <= highestAcceptedSequence`; this
- *   primitive already rejects non-forward sequences and must stay that way.
+ * - T1.14 adds receive-window upper bound, uint64 max, and reservation
+ *   contracts as separate pure APIs; that layer still does not admit
+ *   `sequence <= highestAcceptedSequence`. This primitive already rejects
+ *   non-forward sequences and must stay that way.
  * - Wall-clock / skew is owned by an independent clock layer; this predicate
  *   never reads time fields (including `clientTimeUtc`).
  *
@@ -1520,4 +1533,360 @@ function matchesNoiseIkTokenRow(row, expected) {
     if (token !== expected[i]) return false;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// T1.14 — pure counter reservation / receive-window / trustEpoch contract
+// (BigInt uint64 semantic constants + pure decision/predicate only; no I/O)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact plain/null-prototype record reader: only enumerable own string data
+ * fields, no symbols, no accessors, no non-enumerable own keys. Values are
+ * taken from property descriptors (`desc.value`) so accessor / get traps are
+ * never invoked. Rejects class instances, arrays, Date, Proxy throw/revoke
+ * (via try/catch), and extra/missing fields vs `expectedKeys`.
+ *
+ * @param {unknown} value
+ * @param {readonly string[]} expectedKeys
+ * @returns {Record<string, unknown> | null}
+ */
+function readExactOwnDataRecord(value, expectedKeys) {
+  try {
+    if (!isPlainRecord(value)) return null;
+    const keys = getExactOwnStringDataKeys(value);
+    if (keys === null || keys.length !== expectedKeys.length) return null;
+    /** @type {Set<string>} */
+    const expected = new Set(expectedKeys);
+    /** @type {Record<string, unknown>} */
+    const out = Object.create(null);
+    for (const key of keys) {
+      if (!expected.has(key)) return null;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || desc.enumerable !== true) return null;
+      if (desc.get !== undefined || desc.set !== undefined) return null;
+      out[key] = desc.value;
+    }
+    for (const k of expectedKeys) {
+      if (!Object.hasOwn(out, k)) return null;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Private uint64 BigInt check — no coercion.
+ * @param {unknown} value
+ * @returns {value is bigint}
+ */
+function isUint64BigInt(value) {
+  return (
+    typeof value === 'bigint' &&
+    value >= 0n &&
+    value <= CROSS_LAN_COUNTER_RESERVATION_POLICY.uint64Max
+  );
+}
+
+/**
+ * Private positive uint64 BigInt check (≥ 1) — no coercion.
+ * @param {unknown} value
+ * @returns {value is bigint}
+ */
+function isPositiveUint64BigInt(value) {
+  return (
+    typeof value === 'bigint' &&
+    value >= 1n &&
+    value <= CROSS_LAN_COUNTER_RESERVATION_POLICY.uint64Max
+  );
+}
+
+/**
+ * Private positive safe integer (Number) check — no coercion.
+ * @param {unknown} value
+ * @returns {value is number}
+ */
+function isPositiveSafeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * Private nonnegative safe integer (Number) check — no coercion.
+ * @param {unknown} value
+ * @returns {value is number}
+ */
+function isNonnegativeSafeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Frozen counter reservation policy constants (T1.14 / §6.8).
+ *
+ * Contract-only: no dataDir, fsync execution, reservation I/O, session, or
+ * wire encoding. M1 does not execute any fsync; reservation atomic persist
+ * before send is required at future runtime; steady-state per-message fsync
+ * is not required.
+ *
+ * @type {Readonly<{
+ *   defaultReservationRange: number,
+ *   reservationRangeHardCeiling: number,
+ *   defaultReceiveWindow: number,
+ *   maximumDefaultCrashForwardGap: number,
+ *   minimumDefaultForwardHeadroom: number,
+ *   counterType: string,
+ *   uint64Max: bigint,
+ *   requiredRelation: string,
+ *   reservationAtomicPersistRequiredBeforeSend: boolean,
+ *   steadyStatePerMessageFsyncRequired: boolean,
+ *   m1ExecutesAnyFsync: boolean,
+ *   rollbackErrorCode: string,
+ *   replayErrorCode: string,
+ *   implementationStage: string,
+ * }>}
+ */
+export const CROSS_LAN_COUNTER_RESERVATION_POLICY = Object.freeze({
+  defaultReservationRange: 32,
+  reservationRangeHardCeiling: 256,
+  defaultReceiveWindow: 64,
+  maximumDefaultCrashForwardGap: 32,
+  minimumDefaultForwardHeadroom: 32,
+  counterType: 'uint64',
+  uint64Max: (1n << 64n) - 1n,
+  requiredRelation: 'reservation-range-less-than-receive-window',
+  reservationAtomicPersistRequiredBeforeSend: true,
+  steadyStatePerMessageFsyncRequired: false,
+  m1ExecutesAnyFsync: false,
+  rollbackErrorCode: ERROR_CODES.DEVICE_COUNTER_ROLLBACK,
+  replayErrorCode: ERROR_CODES.DEVICE_REPLAY_DETECTED,
+  implementationStage: 'contract-only-no-counter-io',
+});
+
+/**
+ * Pure counter configuration validator (T1.14).
+ *
+ * Exact record `{ reservationRange, receiveWindow }`: both positive safe
+ * integers; `reservationRange ≤ 256`; `reservationRange < receiveWindow`.
+ * Window has no separate hard ceiling beyond Number safe integer.
+ * Never throws; invalid / extra / accessor / Proxy / revoked → false.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function isValidCrossLanCounterConfiguration(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, ['reservationRange', 'receiveWindow']);
+    if (rec === null) return false;
+    const reservationRange = rec.reservationRange;
+    const receiveWindow = rec.receiveWindow;
+    if (!isPositiveSafeInteger(reservationRange)) return false;
+    if (!isPositiveSafeInteger(receiveWindow)) return false;
+    if (reservationRange > CROSS_LAN_COUNTER_RESERVATION_POLICY.reservationRangeHardCeiling) {
+      return false;
+    }
+    return reservationRange < receiveWindow;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure crash-forward-gap normality predicate (T1.14 / §6.8.1).
+ *
+ * Exact record `{ forwardGap, reservationRange, receiveWindow }`.
+ * Requires a valid counter configuration and a nonnegative safe-integer
+ * `forwardGap`. Returns true iff `forwardGap ≤ reservationRange`.
+ *
+ * **Honesty:** `false` when `forwardGap > R` means only that the gap is
+ * **not** a normal single-crash reservation skip. It does **not** mean
+ * rollback, replay, or that `classifyCrossLanReceivedCounter` must reject.
+ * Receive classification is a separate five-state pure API and does not
+ * take `R` as an input.
+ *
+ * Never throws.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function isNormalCrossLanCrashForwardGap(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, [
+      'forwardGap',
+      'reservationRange',
+      'receiveWindow',
+    ]);
+    if (rec === null) return false;
+    if (
+      !isValidCrossLanCounterConfiguration({
+        reservationRange: rec.reservationRange,
+        receiveWindow: rec.receiveWindow,
+      })
+    ) {
+      return false;
+    }
+    if (!isNonnegativeSafeInteger(rec.forwardGap)) return false;
+    // reservationRange is a validated positive safe integer after config check.
+    return /** @type {number} */ (rec.forwardGap) <= /** @type {number} */ (rec.reservationRange);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure persisted counter-state rollback gate (T1.14 / §6.8.1 causes a + c).
+ *
+ * Exact record:
+ * `{ persistedReservedEnd, previouslyConfirmedReservedEnd, authorityVerified }`.
+ *
+ * Fail-closed: invalid shape/type/Proxy/revoked → true (function name is
+ * `shouldReject`; malformed input is not claimed to prove rollback itself).
+ * - `authorityVerified !== true` → true (spec cause c; real signature /
+ *   authority verification is M3, not M1).
+ * - `persistedReservedEnd < previouslyConfirmedReservedEnd` → true (cause a).
+ * - equal/greater with authority true → false.
+ *
+ * No I/O, no counter reset. Never throws.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function shouldRejectCrossLanPersistedCounterState(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, [
+      'persistedReservedEnd',
+      'previouslyConfirmedReservedEnd',
+      'authorityVerified',
+    ]);
+    if (rec === null) return true;
+    if (!isUint64BigInt(rec.persistedReservedEnd)) return true;
+    if (!isUint64BigInt(rec.previouslyConfirmedReservedEnd)) return true;
+    if (rec.authorityVerified !== true) return true;
+    if (rec.persistedReservedEnd < rec.previouslyConfirmedReservedEnd) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Pure five-state receive-counter classifier (T1.14 / §6.8.2).
+ *
+ * Exact record `{ counter, highestAcceptedCounter, receiveWindow }`.
+ * Returns only one of:
+ *   `accept` | `reject-rollback` | `reject-replay` |
+ *   `reject-outside-window` | `reject-invalid`
+ *
+ * Evaluation order:
+ * 1. invalid shape/type; counter/highest not uint64 BigInt; window not a
+ *    positive safe integer → `reject-invalid`
+ * 2. `counter < highest` → `reject-rollback` (strict lower only)
+ * 3. `counter === highest` → `reject-replay`
+ * 4. `upper = min(highest + BigInt(window), uint64Max)`;
+ *    `counter ≤ upper` → `accept`; else `reject-outside-window`
+ *
+ * `R` is intentionally **not** an input. A crash forward gap > R that still
+ * lands inside the receive window is `accept`, not automatic rollback.
+ * When `highest === uint64Max`, only equal (replay) / lower (rollback) /
+ * invalid are possible — no legal forward or wrap.
+ *
+ * Never throws. Does not echo inputs.
+ *
+ * @param {unknown} input
+ * @returns {'accept' | 'reject-rollback' | 'reject-replay' | 'reject-outside-window' | 'reject-invalid'}
+ */
+export function classifyCrossLanReceivedCounter(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, [
+      'counter',
+      'highestAcceptedCounter',
+      'receiveWindow',
+    ]);
+    if (rec === null) return 'reject-invalid';
+    if (!isUint64BigInt(rec.counter)) return 'reject-invalid';
+    if (!isUint64BigInt(rec.highestAcceptedCounter)) return 'reject-invalid';
+    if (!isPositiveSafeInteger(rec.receiveWindow)) return 'reject-invalid';
+
+    const counter = /** @type {bigint} */ (rec.counter);
+    const highest = /** @type {bigint} */ (rec.highestAcceptedCounter);
+    if (counter < highest) return 'reject-rollback';
+    if (counter === highest) return 'reject-replay';
+
+    const uint64Max = CROSS_LAN_COUNTER_RESERVATION_POLICY.uint64Max;
+    const rawUpper = highest + BigInt(/** @type {number} */ (rec.receiveWindow));
+    const upper = rawUpper < uint64Max ? rawUpper : uint64Max;
+    if (counter <= upper) return 'accept';
+    return 'reject-outside-window';
+  } catch {
+    return 'reject-invalid';
+  }
+}
+
+/**
+ * Frozen controller-global `trustEpoch` policy (T1.14 / §6.7.8.1).
+ *
+ * Orthogonal to `enrollmentEpoch` and `revokeGeneration` (listed, not merged).
+ * Increment does **not** require fleet re-enroll. Wrap is not allowed.
+ * Persist-before-ack is required at M3 runtime, not implemented in M1.
+ *
+ * @type {Readonly<{
+ *   name: string,
+ *   scope: string,
+ *   type: string,
+ *   bootstrapInitialTrustEpoch: bigint,
+ *   uint64Max: bigint,
+ *   staleRule: string,
+ *   staleErrorCode: string,
+ *   persistBeforeAck: string,
+ *   orthogonalFields: ReadonlyArray<string>,
+ *   fleetReenrollRequiredOnIncrement: boolean,
+ *   wrapAllowed: boolean,
+ *   implementationStage: string,
+ * }>}
+ */
+export const CROSS_LAN_TRUST_EPOCH_POLICY = Object.freeze({
+  name: 'trustEpoch',
+  scope: 'controller-global',
+  type: 'uint64',
+  bootstrapInitialTrustEpoch: 1n,
+  uint64Max: (1n << 64n) - 1n,
+  staleRule: 'candidate-less-than-or-equal-to-last-accepted-rejected',
+  staleErrorCode: ERROR_CODES.STALE_EPOCH_REJECTED,
+  persistBeforeAck: 'required-at-m3-runtime-not-m1',
+  orthogonalFields: Object.freeze(['enrollmentEpoch', 'revokeGeneration']),
+  fleetReenrollRequiredOnIncrement: false,
+  wrapAllowed: false,
+  implementationStage: 'contract-only-no-epoch-io',
+});
+
+/**
+ * Pure trustEpoch stale/reject predicate (T1.14 / §6.7.8.1).
+ *
+ * Exact record `{ trustEpoch, lastAcceptedTrustEpoch }`:
+ * - `trustEpoch` must be a **positive** uint64 BigInt (≥ 1)
+ * - `lastAcceptedTrustEpoch` must be a **nonnegative** uint64 BigInt
+ * - invalid shape/type/Proxy/revoked → true (fail-closed)
+ * - candidate ≤ last → true (stale / replay)
+ * - candidate > last → false (accept path for future runtime)
+ *
+ * Extra keys such as `enrollmentEpoch` / `revokeGeneration` are rejected
+ * (API orthogonality only — this function does not validate those fields).
+ * Never throws. No I/O.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function shouldRejectCrossLanTrustEpoch(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, [
+      'trustEpoch',
+      'lastAcceptedTrustEpoch',
+    ]);
+    if (rec === null) return true;
+    if (!isPositiveUint64BigInt(rec.trustEpoch)) return true;
+    if (!isUint64BigInt(rec.lastAcceptedTrustEpoch)) return true;
+    if (rec.trustEpoch <= rec.lastAcceptedTrustEpoch) return true;
+    return false;
+  } catch {
+    return true;
+  }
 }
