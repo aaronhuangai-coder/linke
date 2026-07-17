@@ -2990,3 +2990,211 @@ describe('cross-LAN capacity / keepalive / data-resume policy (T1.9)', () => {
     // Transparent Proxy residual risk is not required to reject.
   });
 });
+
+/**
+ * T1.10 pure Noise suite / prologue / domain-separation constants + pure
+ * protocol_name / prologue byte encoders only.
+ *
+ * Honesty / scope (PM final adjudication for M1 T1.10):
+ * - Freezes the unique suite/protocol_name, prologue policy fields, and the
+ *   seven domain labels from Gold §6.7.2.3; encodes exact ASCII / wire bytes.
+ * - Does NOT implement Noise handshake, hash, HKDF, ChaCha, X25519, token
+ *   sequences (T1.12), or relay KE participation contracts (T1.11).
+ * - T1.0 Noise library selection gate remains BLOCKED. These tests do not
+ *   claim Noise / E2EE / cross-LAN / M1 crypto readiness.
+ * - Independent hex pins below are dual-source literals — never derived from
+ *   the production encoders under test.
+ */
+describe('cross-LAN Noise suite / prologue / domain labels (T1.10)', () => {
+  /** Independent pin: Noise protocol_name ASCII hex (dual-source, not from production). */
+  const EXPECTED_PROTOCOL_NAME_HEX =
+    '4e6f6973655f494b5f32353531395f436861436861506f6c795f534841323536';
+  /** Independent pin: prologue prefix ASCII hex (dual-source, not from production). */
+  const EXPECTED_PROLOGUE_PREFIX_HEX =
+    '6c696e6b652d76322f63726f73732d6c616e2f6e6f6973652d696b2f7631';
+
+  const EXPECTED_PROTOCOL_NAME = 'Noise_IK_25519_ChaChaPoly_SHA256';
+  const EXPECTED_PROLOGUE_POLICY = Object.freeze({
+    prefixAscii: 'linke-v2/cross-lan/noise-ik/v1',
+    protocolVersionByteLength: 2,
+    protocolVersionByteOrder: 'BE',
+    suiteId: 1,
+    suiteIdByteLength: 1,
+  });
+  const EXPECTED_DOMAIN_LABELS = Object.freeze({
+    handshake: 'linke-v2/e2ee/handshake',
+    trafficControllerToDevice: 'linke-v2/e2ee/traffic-c2d',
+    trafficDeviceToController: 'linke-v2/e2ee/traffic-d2c',
+    rekey: 'linke-v2/e2ee/rekey',
+    keyConfirm: 'linke-v2/e2ee/key-confirm',
+    dataChunkMac: 'linke-v2/data/chunk-mac',
+    relayCapability: 'linke-v2/relay-cap',
+  });
+
+  /** Small test-only hex helper — never uses production encoders for expected. */
+  function bytesToHex(bytes) {
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  it('exports exact frozen suite / prologue policy / seven unique ASCII domain labels', () => {
+    assert.strictEqual(protocol.CROSS_LAN_NOISE_PROTOCOL_NAME, EXPECTED_PROTOCOL_NAME);
+
+    assert.deepStrictEqual(
+      protocol.CROSS_LAN_NOISE_PROLOGUE_POLICY,
+      EXPECTED_PROLOGUE_POLICY,
+    );
+    assert.strictEqual(Object.isFrozen(protocol.CROSS_LAN_NOISE_PROLOGUE_POLICY), true);
+
+    assert.deepStrictEqual(
+      protocol.CROSS_LAN_DOMAIN_SEPARATION_LABELS,
+      EXPECTED_DOMAIN_LABELS,
+    );
+    assert.strictEqual(Object.isFrozen(protocol.CROSS_LAN_DOMAIN_SEPARATION_LABELS), true);
+
+    const labels = protocol.CROSS_LAN_DOMAIN_SEPARATION_LABELS;
+    const keys = Object.keys(labels);
+    assert.strictEqual(keys.length, 7);
+    const values = Object.values(labels);
+    assert.strictEqual(values.length, 7);
+    assert.strictEqual(new Set(values).size, 7);
+    for (const value of values) {
+      assert.strictEqual(typeof value, 'string');
+      assert.match(value, /^[\x00-\x7f]+$/);
+    }
+  });
+
+  it('encodeCrossLanNoiseProtocolNameBytes returns fresh exact ASCII Uint8Array', () => {
+    const encode = protocol.encodeCrossLanNoiseProtocolNameBytes;
+    assert.strictEqual(typeof encode, 'function');
+
+    const a = encode();
+    const b = encode();
+    assert.ok(a instanceof Uint8Array);
+    assert.strictEqual(bytesToHex(a), EXPECTED_PROTOCOL_NAME_HEX);
+    assert.notStrictEqual(a, b);
+    assert.strictEqual(bytesToHex(b), EXPECTED_PROTOCOL_NAME_HEX);
+
+    a[0] = 0x00;
+    assert.strictEqual(bytesToHex(encode()), EXPECTED_PROTOCOL_NAME_HEX);
+    assert.strictEqual(protocol.CROSS_LAN_NOISE_PROTOCOL_NAME, EXPECTED_PROTOCOL_NAME);
+  });
+
+  it('encodeCrossLanNoisePrologueBytes exact wire hex for uint16 BE + suiteId 0x01', () => {
+    const encode = protocol.encodeCrossLanNoisePrologueBytes;
+    assert.strictEqual(typeof encode, 'function');
+
+    assert.strictEqual(
+      bytesToHex(encode(0)),
+      `${EXPECTED_PROLOGUE_PREFIX_HEX}000001`,
+    );
+    assert.strictEqual(
+      bytesToHex(encode(1)),
+      `${EXPECTED_PROLOGUE_PREFIX_HEX}000101`,
+    );
+    assert.strictEqual(
+      bytesToHex(encode(0x1234)),
+      `${EXPECTED_PROLOGUE_PREFIX_HEX}123401`,
+    );
+    assert.strictEqual(
+      bytesToHex(encode(65535)),
+      `${EXPECTED_PROLOGUE_PREFIX_HEX}ffff01`,
+    );
+  });
+
+  it('encodeCrossLanNoisePrologueBytes rejects invalid protocolVersion without throw', () => {
+    const encode = protocol.encodeCrossLanNoisePrologueBytes;
+    const throwingProxy = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        valueOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        toString() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({ valueOf: () => 1 }, {});
+    revoke();
+
+    const invalids = [
+      -1,
+      65536,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      0n,
+      1n,
+      '0',
+      '1',
+      null,
+      undefined,
+      [],
+      {},
+      Symbol('v'),
+      throwingProxy,
+      revokedProxy,
+    ];
+    for (const bad of invalids) {
+      let result;
+      assert.doesNotThrow(() => {
+        result = encode(bad);
+      });
+      assert.strictEqual(result, null);
+    }
+    // Transparent Proxy residual risk is not required to reject.
+  });
+
+  it('encodeCrossLanNoisePrologueBytes returns mutable fresh arrays with isolation', () => {
+    const encode = protocol.encodeCrossLanNoisePrologueBytes;
+    const a = encode(0x1234);
+    const b = encode(0x1234);
+    assert.ok(a instanceof Uint8Array);
+    assert.notStrictEqual(a, b);
+    assert.strictEqual(Object.isFrozen(a), false);
+
+    a[0] = 0x00;
+    assert.strictEqual(bytesToHex(encode(0x1234)), `${EXPECTED_PROLOGUE_PREFIX_HEX}123401`);
+    assert.strictEqual(
+      protocol.CROSS_LAN_NOISE_PROLOGUE_POLICY.prefixAscii,
+      EXPECTED_PROLOGUE_POLICY.prefixAscii,
+    );
+    assert.strictEqual(protocol.CROSS_LAN_NOISE_PROLOGUE_POLICY.suiteId, 1);
+  });
+
+  it('T1.5 profile allowlist still requires full record; noiseSuite uses exported name', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+    assert.strictEqual(typeof fn, 'function');
+
+    // Must not pass the suite string alone as a profile.
+    assert.strictEqual(fn(protocol.CROSS_LAN_NOISE_PROTOCOL_NAME), false);
+    assert.strictEqual(fn(EXPECTED_PROTOCOL_NAME), false);
+
+    const valid = {
+      noiseSuite: protocol.CROSS_LAN_NOISE_PROTOCOL_NAME,
+      mutualAuthenticationRequired: true,
+      independentE2eeRequired: true,
+      relayTransport: 'wss',
+      tlsVersion: '1.3',
+      tcpPort: 443,
+    };
+    assert.strictEqual(fn(valid), true);
+
+    assert.strictEqual(
+      fn({ ...valid, noiseSuite: 'Noise_XX_25519_ChaChaPoly_SHA256' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...valid, noiseSuite: 'noise_ik_25519_chachapoly_sha256' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...valid, noiseSuite: 'NOISE_IK_25519_CHACHAPOLY_SHA256' }),
+      false,
+    );
+  });
+});

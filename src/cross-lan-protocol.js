@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.9 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.10 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -14,6 +14,9 @@ import { ERROR_CODES } from './error-codes.js';
  *       configuration resolvers + pure liveness classification / timeout
  *       decision only (no timers, sockets, random/jitter, sleep, persistence,
  *       or runtime wiring).
+ * T1.10: pure Noise suite / protocol_name / prologue policy / domain-label
+ *        constants + pure protocol_name / prologue byte encoders only
+ *        (no Noise handshake, hash, HKDF, ChaCha, X25519, or token sequence).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -331,6 +334,128 @@ export function isStrictlyForwardSequence(input) {
 }
 
 /**
+ * Unique Noise suite / protocol_name ASCII text (T1.10 / §6.7.2.3).
+ *
+ * Single production source for both the Gold suite name and the Noise
+ * `protocol_name` string mixed into the handshake hash. Not a crypto
+ * implementation and not proof of Noise readiness (T1.0 remains BLOCKED).
+ *
+ * @type {string}
+ */
+export const CROSS_LAN_NOISE_PROTOCOL_NAME = 'Noise_IK_25519_ChaChaPoly_SHA256';
+
+/**
+ * Frozen Noise prologue construction policy (T1.10 / §6.7.2.3).
+ *
+ * Wire shape: `prefixAscii` UTF-8/ASCII bytes || protocolVersion (uint16 BE)
+ * || suiteId byte(s). Spec explicitly freezes the prefix, uint16 BE version,
+ * and suiteId=1, but does **not** state suiteId width; T1.10 locks suiteId to
+ * a single byte `0x01` so the exact-byte encoder contract is complete. A future
+ * spec revision that changes width/value must update this frozen contract
+ * explicitly — silent drift is forbidden.
+ *
+ * Does **not** define or guess a current protocolVersion. Pure encoders accept
+ * the full uint16 range including 0.
+ *
+ * @type {Readonly<{
+ *   prefixAscii: string,
+ *   protocolVersionByteLength: number,
+ *   protocolVersionByteOrder: string,
+ *   suiteId: number,
+ *   suiteIdByteLength: number,
+ * }>}
+ */
+export const CROSS_LAN_NOISE_PROLOGUE_POLICY = Object.freeze({
+  prefixAscii: 'linke-v2/cross-lan/noise-ik/v1',
+  protocolVersionByteLength: 2,
+  protocolVersionByteOrder: 'BE',
+  suiteId: 1,
+  suiteIdByteLength: 1,
+});
+
+/**
+ * Frozen application domain-separation labels (T1.10 / §6.7.2.3).
+ *
+ * Exactly seven JS keys mapped 1:1 to the seven Gold ASCII labels used when
+ * deriving business keys after Noise/HKDF export. Keys are local names only —
+ * they add no extra protocol semantics. No domain-bytes encoder is provided.
+ *
+ * @type {Readonly<{
+ *   handshake: string,
+ *   trafficControllerToDevice: string,
+ *   trafficDeviceToController: string,
+ *   rekey: string,
+ *   keyConfirm: string,
+ *   dataChunkMac: string,
+ *   relayCapability: string,
+ * }>}
+ */
+export const CROSS_LAN_DOMAIN_SEPARATION_LABELS = Object.freeze({
+  handshake: 'linke-v2/e2ee/handshake',
+  trafficControllerToDevice: 'linke-v2/e2ee/traffic-c2d',
+  trafficDeviceToController: 'linke-v2/e2ee/traffic-d2c',
+  rekey: 'linke-v2/e2ee/rekey',
+  keyConfirm: 'linke-v2/e2ee/key-confirm',
+  dataChunkMac: 'linke-v2/data/chunk-mac',
+  relayCapability: 'linke-v2/relay-cap',
+});
+
+/**
+ * Encode the unique Noise protocol_name as fresh ASCII bytes (T1.10).
+ *
+ * Returns a new `Uint8Array` owned by the caller each call. The typed array is
+ * mutable; “frozen bytes” means the wire byte contract is locked by the string
+ * constant + dual-source tests, not that the returned memory is immutable
+ * (Node throws on `Object.freeze` of non-empty TypedArrays).
+ *
+ * Pure encoder only — no Noise handshake, hash, or library wiring.
+ * T1.0 remains BLOCKED.
+ *
+ * @returns {Uint8Array}
+ */
+export function encodeCrossLanNoiseProtocolNameBytes() {
+  return new TextEncoder().encode(CROSS_LAN_NOISE_PROTOCOL_NAME);
+}
+
+/**
+ * Encode Noise prologue bytes for a caller-supplied protocolVersion (T1.10).
+ *
+ * Accepts only a primitive Number safe integer in 0..65535 inclusive; any
+ * other input returns `null` (never coerce, never throw). Version is written
+ * as uint16 big-endian. Suite id is the single locked byte `0x01` from
+ * `CROSS_LAN_NOISE_PROLOGUE_POLICY` (see policy JSDoc for the width honesty
+ * note). Version 0 is legal — the spec freezes uint16 encoding and does not
+ * forbid 0. Does not guess a current protocolVersion.
+ *
+ * Returns a fresh caller-owned mutable `Uint8Array` on success. “Frozen bytes”
+ * is the wire contract locked by policy + tests, not returned-memory immutability.
+ *
+ * Pure encoder only — no Noise handshake/hash/HKDF. T1.0 remains BLOCKED.
+ *
+ * @param {unknown} protocolVersion
+ * @returns {Uint8Array | null}
+ */
+export function encodeCrossLanNoisePrologueBytes(protocolVersion) {
+  try {
+    if (typeof protocolVersion !== 'number') return null;
+    if (!Number.isSafeInteger(protocolVersion)) return null;
+    if (protocolVersion < 0 || protocolVersion > 65535) return null;
+
+    const prefix = new TextEncoder().encode(
+      CROSS_LAN_NOISE_PROLOGUE_POLICY.prefixAscii,
+    );
+    const out = new Uint8Array(prefix.length + 2 + 1);
+    out.set(prefix, 0);
+    out[prefix.length] = (protocolVersion >>> 8) & 0xff;
+    out[prefix.length + 1] = protocolVersion & 0xff;
+    out[prefix.length + 2] = CROSS_LAN_NOISE_PROLOGUE_POLICY.suiteId & 0xff;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * T1.5 pure profile allowlist only: is the input exactly the single allowed
  * cross-LAN protocol profile record (shape + values)?
  *
@@ -356,9 +481,10 @@ export function isStrictlyForwardSequence(input) {
  * still canonicalize/freeze profile data and must not keep using mutable
  * original input after a true result.
  *
- * Suite / protocol_name / prologue / domain string constants are intentionally
- * **not** extracted or exported here; the suite literal appears once in this
- * function. T1.10 will migrate those constants to a shared constants surface.
+ * Suite / protocol_name is the single exported constant
+ * `CROSS_LAN_NOISE_PROTOCOL_NAME` (T1.10). Prologue / domain labels live on
+ * their own T1.10 exports; this predicate still only checks the six-field
+ * profile record and does not bind prologue or domain bytes.
  *
  * Implementation: ordinary object (prototype Object.prototype or null);
  * own keys exactly six string enumerable data properties; exact value match
@@ -387,9 +513,8 @@ export function isAllowedCrossLanProtocolProfile(input) {
       return false;
     }
 
-    // Unique allowed profile values; suite literal appears only here (T1.10
-    // will extract suite / protocol_name / prologue / domain constants).
-    if (input.noiseSuite !== 'Noise_IK_25519_ChaChaPoly_SHA256') return false;
+    // Unique allowed profile values; suite name from T1.10 single source.
+    if (input.noiseSuite !== CROSS_LAN_NOISE_PROTOCOL_NAME) return false;
     if (input.mutualAuthenticationRequired !== true) return false;
     if (input.independentE2eeRequired !== true) return false;
     if (input.relayTransport !== 'wss') return false;
