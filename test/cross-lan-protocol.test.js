@@ -3215,3 +3215,322 @@ describe('cross-LAN Noise suite / prologue / domain labels (T1.10)', () => {
     );
   });
 });
+
+/**
+ * T1.12a non-crypto Noise IK token-sequence scaffold only.
+ *
+ * Honesty / scope (highest priority status boundary):
+ * - [status] T1.0 Noise library gate = BLOCKED (not M1 crypto PASS)
+ * - [scope] T1.12a non-crypto token scaffold only; T1.12 fixed vectors
+ *   NOT READY / NOT COMPLETE
+ * - Does NOT load fixtures, verify ciphertext / handshake hash, bind a Noise
+ *   library, or run DH/AEAD/hash/handshake. No independent authoritative
+ *   expected handshake hash is present in the current gate evidence
+ *   (public cacophony does not provide one); full 6-message fixture vs
+ *   selected implementation waits for gate reopen + user path decision.
+ * - matcher true only means two token rows match the frozen indexed
+ *   content/order table — not Noise, library compatibility, E2EE, or a real
+ *   handshake. Scaffold rejects disorder; does not claim real Noise
+ *   implementations reject or that T1.12 is complete.
+ */
+describe('cross-LAN Noise IK token sequence (T1.12a non-crypto scaffold)', () => {
+  /** Independent dual-source pin — never derived from production under test. */
+  const EXPECTED_NOISE_IK_TOKEN_SEQUENCE = Object.freeze({
+    msg1: Object.freeze(['e', 'es', 's', 'ss']),
+    msg2: Object.freeze(['e', 'ee', 'se']),
+  });
+
+  /** Fresh exact canonical input — independent per call so tests never share state. */
+  function createCanonicalTokenSequenceInput() {
+    return {
+      msg1: ['e', 'es', 's', 'ss'],
+      msg2: ['e', 'ee', 'se'],
+    };
+  }
+
+  it('exports exact frozen CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE pin (deep frozen; strict mutation throws)', () => {
+    const seq = protocol.CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE;
+    assert.notStrictEqual(
+      seq,
+      undefined,
+      'protocol.CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE must be exported (T1.12a RED if missing)',
+    );
+    assert.deepStrictEqual(seq, EXPECTED_NOISE_IK_TOKEN_SEQUENCE);
+    assert.strictEqual(Object.keys(seq).length, 2);
+    assert.ok(Object.isFrozen(seq), 'top-level token sequence must be frozen');
+    assert.ok(Object.isFrozen(seq.msg1), 'msg1 array must be frozen');
+    assert.ok(Object.isFrozen(seq.msg2), 'msg2 array must be frozen');
+    assert.deepStrictEqual(seq.msg1, ['e', 'es', 's', 'ss']);
+    assert.deepStrictEqual(seq.msg2, ['e', 'ee', 'se']);
+    assert.strictEqual(seq.msg1.length, 4);
+    assert.strictEqual(seq.msg2.length, 3);
+
+    // ESM is strict mode: frozen assignment throws (do not rely on silent/sloppy mutation).
+    assert.throws(() => {
+      seq.msg1 = ['x'];
+    }, TypeError);
+    assert.throws(() => {
+      seq.msg2 = ['x'];
+    }, TypeError);
+    assert.throws(() => {
+      seq.msg1[0] = 'x';
+    }, TypeError);
+    assert.throws(() => {
+      seq.msg2[0] = 'x';
+    }, TypeError);
+    assert.throws(() => {
+      seq.msg1.push('x');
+    }, TypeError);
+    assert.throws(() => {
+      seq.msg2.push('x');
+    }, TypeError);
+    assert.deepStrictEqual(seq, EXPECTED_NOISE_IK_TOKEN_SEQUENCE);
+    assert.ok(Object.isFrozen(seq));
+    assert.ok(Object.isFrozen(seq.msg1));
+    assert.ok(Object.isFrozen(seq.msg2));
+  });
+
+  it('matchesCrossLanNoiseIkTokenSequence accepts canonical ordinary / null-proto / frozen inputs', () => {
+    const fn = protocol.matchesCrossLanNoiseIkTokenSequence;
+    assert.strictEqual(
+      typeof fn,
+      'function',
+      'matchesCrossLanNoiseIkTokenSequence must be exported (T1.12a RED if missing)',
+    );
+
+    assert.strictEqual(fn(createCanonicalTokenSequenceInput()), true);
+
+    const frozen = Object.freeze({
+      msg1: Object.freeze(['e', 'es', 's', 'ss']),
+      msg2: Object.freeze(['e', 'ee', 'se']),
+    });
+    assert.strictEqual(fn(frozen), true);
+
+    const nullProto = Object.assign(Object.create(null), {
+      msg1: ['e', 'es', 's', 'ss'],
+      msg2: ['e', 'ee', 'se'],
+    });
+    assert.strictEqual(fn(nullProto), true);
+
+    // Frozen constant itself is a valid match source.
+    assert.strictEqual(fn(protocol.CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE), true);
+  });
+
+  it('scaffold rejects disorder: reorder / missing / insert-custom / swap rows', () => {
+    const fn = protocol.matchesCrossLanNoiseIkTokenSequence;
+
+    // msg1 typical disorder (not "handshake rejects").
+    assert.strictEqual(
+      fn({ msg1: ['es', 'e', 's', 'ss'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 's', 'es', 'ss'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['ss', 's', 'es', 'e'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 'ss', 's'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+
+    // msg2 typical disorder.
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['ee', 'e', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['e', 'se', 'ee'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['se', 'ee', 'e'] }),
+      false,
+    );
+
+    // Missing tokens (shorter rows).
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['e', 'ee'] }),
+      false,
+    );
+    assert.strictEqual(fn({ msg1: [], msg2: ['e', 'ee', 'se'] }), false);
+    assert.strictEqual(fn({ msg1: ['e', 'es', 's', 'ss'], msg2: [] }), false);
+
+    // Insert / custom tokens.
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss', 'psk'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['e', 'ee', 'se', 'ss'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'xx'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', 'ss'], msg2: ['e', 'ee', 'xx'] }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: ['E', 'es', 's', 'ss'], msg2: ['e', 'ee', 'se'] }),
+      false,
+    );
+
+    // Swap msg1/msg2 rows.
+    assert.strictEqual(
+      fn({ msg1: ['e', 'ee', 'se'], msg2: ['e', 'es', 's', 'ss'] }),
+      false,
+    );
+  });
+
+  it('rejects malformed top records and rows (shape / sparse / extra enumerable)', () => {
+    const fn = protocol.matchesCrossLanNoiseIkTokenSequence;
+    const base = createCanonicalTokenSequenceInput();
+
+    // Top-level missing / extra / wrong type.
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn('msg1'), false);
+    assert.strictEqual(fn(42), false);
+    assert.strictEqual(fn({ msg1: base.msg1 }), false);
+    assert.strictEqual(fn({ msg2: base.msg2 }), false);
+    assert.strictEqual(fn({ ...base, extra: true }), false);
+    assert.strictEqual(fn({ msg1: base.msg1, msg2: base.msg2, msg3: [] }), false);
+
+    // Symbol own key.
+    const withSymbol = { ...base };
+    withSymbol[Symbol('x')] = true;
+    assert.strictEqual(fn(withSymbol), false);
+
+    // Non-enumerable own data property.
+    const nonEnum = { ...base };
+    Object.defineProperty(nonEnum, 'msg1', {
+      value: base.msg1,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(nonEnum), false);
+
+    // Accessor top-level property.
+    const withAccessor = {};
+    Object.defineProperty(withAccessor, 'msg1', {
+      get() {
+        return base.msg1;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(withAccessor, 'msg2', {
+      value: base.msg2,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(withAccessor), false);
+
+    // Non-plain top records.
+    assert.strictEqual(fn(Object.create({ msg1: base.msg1, msg2: base.msg2 })), false);
+    assert.strictEqual(fn(new Date()), false);
+    assert.strictEqual(fn(new Map()), false);
+
+    // Row not array / wrong types.
+    assert.strictEqual(fn({ msg1: 'e,es,s,ss', msg2: base.msg2 }), false);
+    assert.strictEqual(fn({ msg1: base.msg1, msg2: 'e,ee,se' }), false);
+    assert.strictEqual(fn({ msg1: { 0: 'e', 1: 'es', 2: 's', 3: 'ss', length: 4 }, msg2: base.msg2 }), false);
+    assert.strictEqual(
+      fn({ msg1: ['e', 'es', 's', new String('ss')], msg2: base.msg2 }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ msg1: base.msg1, msg2: ['e', 'ee', 0] }),
+      false,
+    );
+
+    // Sparse rows (Object.keys length < expected length).
+    const sparseMsg1 = [];
+    sparseMsg1[0] = 'e';
+    sparseMsg1[1] = 'es';
+    sparseMsg1[3] = 'ss';
+    sparseMsg1.length = 4;
+    assert.strictEqual(fn({ msg1: sparseMsg1, msg2: base.msg2 }), false);
+
+    const sparseMsg2 = [];
+    sparseMsg2[0] = 'e';
+    sparseMsg2[2] = 'se';
+    sparseMsg2.length = 3;
+    assert.strictEqual(fn({ msg1: base.msg1, msg2: sparseMsg2 }), false);
+
+    // Extra enumerable string own property on row (Object.keys length check).
+    const extraPropMsg1 = ['e', 'es', 's', 'ss'];
+    extraPropMsg1.meta = 'x';
+    assert.strictEqual(fn({ msg1: extraPropMsg1, msg2: base.msg2 }), false);
+    const extraPropMsg2 = ['e', 'ee', 'se'];
+    extraPropMsg2.note = 'y';
+    assert.strictEqual(fn({ msg1: base.msg1, msg2: extraPropMsg2 }), false);
+  });
+
+  it('returns false without throwing for throwing / revoked top and row Proxies', () => {
+    const fn = protocol.matchesCrossLanNoiseIkTokenSequence;
+    const base = createCanonicalTokenSequenceInput();
+
+    const throwingTop = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+
+    const throwingRow = new Proxy(
+      ['e', 'es', 's', 'ss'],
+      {
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+
+    const { proxy: revokedTop, revoke: revokeTop } = Proxy.revocable(base, {});
+    revokeTop();
+    const { proxy: revokedRow, revoke: revokeRow } = Proxy.revocable(
+      ['e', 'es', 's', 'ss'],
+      {},
+    );
+    revokeRow();
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(throwingTop), false);
+      assert.strictEqual(fn(revokedTop), false);
+      assert.strictEqual(fn({ msg1: throwingRow, msg2: base.msg2 }), false);
+      assert.strictEqual(fn({ msg1: base.msg1, msg2: revokedRow }), false);
+    });
+    // Transparent Proxy residual risk is not required to reject.
+  });
+});

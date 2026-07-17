@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.10 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.12a / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -16,15 +16,21 @@ import { ERROR_CODES } from './error-codes.js';
  *       or runtime wiring).
  * T1.10: pure Noise suite / protocol_name / prologue policy / domain-label
  *        constants + pure protocol_name / prologue byte encoders only
- *        (no Noise handshake, hash, HKDF, ChaCha, X25519, or token sequence).
+ *        (no Noise handshake, hash, HKDF, ChaCha, or X25519; does not include
+ *        Noise IK token-sequence contract — T1.12a provides that scaffold).
+ * T1.12a: non-crypto Noise IK token-sequence scaffold only (frozen msg1/msg2
+ *         token order table + pure sequence matcher). T1.12 fixed vectors
+ *         remain NOT READY / NOT COMPLETE.
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
  * binary encodings, trust state, or AEAD.
  * Does not open network sockets, timers, or persistence.
  *
- * T1.0 Noise library selection gate remains BLOCKED.
+ * T1.0 Noise library selection gate remains BLOCKED (not M1 crypto PASS).
  * This module does not claim Noise / E2EE / cross-LAN / M1 readiness.
+ * T1.12a does not load fixtures, verify ciphertext/handshake hash, bind a
+ * Noise library, or execute DH/AEAD/hash/handshake.
  *
  * Keepalive types are Noise AEAD application-layer messages with empty
  * payloads — not RFC6455 WebSocket ping/pong (transport timing is M3).
@@ -1402,4 +1408,116 @@ export function evaluateCrossLanKeepaliveTimeout(input) {
   } catch {
     return freezeKeepaliveTimeoutDecision(false, true, null);
   }
+}
+
+/**
+ * Frozen Noise IK handshake token-sequence table (T1.12a non-crypto scaffold).
+ *
+ * Exact Noise_IK pattern token order:
+ * - msg1: e, es, s, ss
+ * - msg2: e, ee, se
+ *
+ * Status / honesty boundary (highest priority):
+ * - [status] T1.0 Noise library gate = BLOCKED (not M1 crypto PASS)
+ * - [scope] T1.12a non-crypto token scaffold only; T1.12 fixed vectors
+ *   NOT READY / NOT COMPLETE
+ * - Does **not** load fixtures, verify ciphertext or handshake hash, bind a
+ *   Noise library, or execute DH/AEAD/hash/handshake. No independent
+ *   authoritative expected handshake hash is present in the current gate
+ *   evidence (public cacophony does not provide one). Full 6-message
+ *   fixture comparison against a selected implementation waits for gate
+ *   reopen + user path decision.
+ * - Freezing this table does **not** prove Noise, library compatibility,
+ *   E2EE, or an actual handshake.
+ *
+ * @type {Readonly<{
+ *   msg1: ReadonlyArray<string>,
+ *   msg2: ReadonlyArray<string>,
+ * }>}
+ */
+export const CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE = Object.freeze({
+  msg1: Object.freeze(['e', 'es', 's', 'ss']),
+  msg2: Object.freeze(['e', 'ee', 'se']),
+});
+
+/**
+ * Pure non-crypto scaffold matcher for Noise IK token indexed content/order
+ * (T1.12a only).
+ *
+ * Returns true **only** when `input` is a plain record whose own keys are
+ * exactly the two string enumerable data properties `msg1` and `msg2`, each
+ * an Array whose indexed primitive-string tokens and length match
+ * `CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE` (msg1 length 4, msg2 length 3). Extra
+ * enumerable string own properties on a row (including sparse holes) are
+ * rejected via `Object.keys(row).length === expected.length`. Non-enumerable
+ * / symbol custom metadata is not treated as tokens — this matches indexed
+ * token content+order, not a wire parser.
+ *
+ * Status / honesty boundary (highest priority):
+ * - [status] T1.0 Noise library gate = BLOCKED (not M1 crypto PASS)
+ * - [scope] T1.12a non-crypto token scaffold only; T1.12 fixed vectors
+ *   NOT READY / NOT COMPLETE
+ * - Does **not** load fixtures, verify ciphertext or handshake hash, bind a
+ *   Noise library, or execute DH/AEAD/hash/handshake. No independent
+ *   authoritative expected handshake hash is present in the current gate
+ *   evidence (public cacophony does not provide one). Full 6-message
+ *   fixture comparison against a selected implementation waits for gate
+ *   reopen + user path decision.
+ * - A true result only means the two token rows match the frozen indexed
+ *   content/order table. It does **not** prove Noise, library compatibility,
+ *   E2EE, or an actual handshake. Scaffold rejection of disorder does **not**
+ *   claim a real Noise implementation would reject, that fixed vectors pass,
+ *   or that T1.12 is complete.
+ *
+ * Pure ECMAScript cannot reliably detect transparent Proxies. Throwing and
+ * revoked Proxies fail closed (return false, never throw). Transparent
+ * Proxies remain a residual risk. Accessor index slots that throw fail
+ * closed; if they return the correct primitive string they may match by
+ * indexed content (array property-descriptor safety is not over-promised).
+ *
+ * Implementation: fail-closed try/catch around all `Object.keys` /
+ * prototype / descriptor / property access; reuses module-private
+ * `isPlainRecord` and `getExactOwnStringDataKeys`.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function matchesCrossLanNoiseIkTokenSequence(input) {
+  try {
+    if (!isPlainRecord(input)) return false;
+
+    const keys = getExactOwnStringDataKeys(input);
+    if (keys === null || keys.length !== 2) return false;
+
+    const keySet = new Set(keys);
+    if (!keySet.has('msg1') || !keySet.has('msg2')) return false;
+
+    return (
+      matchesNoiseIkTokenRow(input.msg1, CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE.msg1) &&
+      matchesNoiseIkTokenRow(input.msg2, CROSS_LAN_NOISE_IK_TOKEN_SEQUENCE.msg2)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Match one token row: Array, exact length, no extra enumerable string own
+ * properties, each index a primitive string strict-equal to expected.
+ * @param {unknown} row
+ * @param {ReadonlyArray<string>} expected
+ * @returns {boolean}
+ */
+function matchesNoiseIkTokenRow(row, expected) {
+  if (!Array.isArray(row)) return false;
+  if (row.length !== expected.length) return false;
+  // Reject sparse rows and extra enumerable string own properties.
+  if (Object.keys(row).length !== expected.length) return false;
+
+  for (let i = 0; i < expected.length; i += 1) {
+    const token = row[i];
+    if (typeof token !== 'string') return false;
+    if (token !== expected[i]) return false;
+  }
+  return true;
 }
