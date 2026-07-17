@@ -1,11 +1,14 @@
+import { ERROR_CODES } from './error-codes.js';
+
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.6 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.7 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
  * T1.4: pure strictly-forward sequence predicate (no window / no state).
  * T1.5: pure protocol profile allowlist (exact six-field shape + values only).
  * T1.6: pure deviceId algebraic consistency (three caller-supplied strings only).
+ * T1.7: pure clock-skew policy + configuration resolver + window predicate.
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -469,6 +472,201 @@ export function hasConsistentCrossLanDeviceIds(input) {
       authenticatedDeviceId === sessionDeviceId &&
       sessionDeviceId === messageDeviceId
     );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Frozen cross-LAN clock-skew policy (T1.7).
+ *
+ * Single production source for default/min/max seconds and the error code
+ * used when a future runtime maps a confirmed schema-valid over-window
+ * rejection. errorCode is taken from ERROR_CODES — not a copied string.
+ *
+ * @type {Readonly<{
+ *   defaultSeconds: number,
+ *   minSeconds: number,
+ *   maxSeconds: number,
+ *   errorCode: string,
+ * }>}
+ */
+export const CROSS_LAN_CLOCK_SKEW_POLICY = Object.freeze({
+  defaultSeconds: 120,
+  minSeconds: 30,
+  maxSeconds: 600,
+  errorCode: ERROR_CODES.DEVICE_CLOCK_SKEW,
+});
+
+/**
+ * Module-private decision freezer for resolveCrossLanClockSkewConfiguration.
+ * Always returns a fresh frozen object; not a second policy/registry export.
+ *
+ * @param {boolean} configurationAccepted
+ * @param {boolean} usedDefault
+ * @param {number} allowedSkewSeconds
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   allowedSkewSeconds: number,
+ * }>}
+ */
+function freezeClockSkewConfigurationDecision(
+  configurationAccepted,
+  usedDefault,
+  allowedSkewSeconds,
+) {
+  return Object.freeze({
+    configurationAccepted,
+    usedDefault,
+    allowedSkewSeconds,
+  });
+}
+
+/**
+ * Resolve a caller-supplied clock-skew configuration into a frozen decision.
+ *
+ * Pure configuration gate only — no runtime reporting, no network, no I/O.
+ *
+ * Decision semantics:
+ * - `undefined` → accepted default path (`usedDefault: true`, 120s).
+ * - primitive Number safe integer in [30, 600] inclusive → accepted explicit
+ *   value (`usedDefault: false`, that value).
+ * - any other input (including objects / Proxies) → rejected fallback
+ *   (`configurationAccepted: false`, `usedDefault: true`, 120s). Properties
+ *   of objects/Proxies are never read; no coercion.
+ *
+ * **Honesty boundary:** `configurationAccepted: false` means the configured
+ * value was rejected. A future caller **must** report/reject that bad config
+ * before using the default; it must not treat `usedDefault: true` alone as
+ * silent acceptance. T1.7 freezes that responsibility but does not implement
+ * runtime reporting.
+ *
+ * Never throws. Does not export a second policy or registry.
+ *
+ * @param {unknown} configuredSeconds
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   allowedSkewSeconds: number,
+ * }>}
+ */
+export function resolveCrossLanClockSkewConfiguration(configuredSeconds) {
+  try {
+    if (configuredSeconds === undefined) {
+      return freezeClockSkewConfigurationDecision(
+        true,
+        true,
+        CROSS_LAN_CLOCK_SKEW_POLICY.defaultSeconds,
+      );
+    }
+
+    // Primitive Number safe integer only — no coercion, no object unboxing.
+    if (
+      typeof configuredSeconds === 'number' &&
+      Number.isSafeInteger(configuredSeconds) &&
+      configuredSeconds >= CROSS_LAN_CLOCK_SKEW_POLICY.minSeconds &&
+      configuredSeconds <= CROSS_LAN_CLOCK_SKEW_POLICY.maxSeconds
+    ) {
+      return freezeClockSkewConfigurationDecision(true, false, configuredSeconds);
+    }
+
+    return freezeClockSkewConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_CLOCK_SKEW_POLICY.defaultSeconds,
+    );
+  } catch {
+    return freezeClockSkewConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_CLOCK_SKEW_POLICY.defaultSeconds,
+    );
+  }
+}
+
+/**
+ * Pure clock-skew window predicate (T1.7).
+ *
+ * Given explicit endpoint/controller UTC ms and an allowed skew in seconds,
+ * returns whether the absolute time difference is within the allowed window.
+ *
+ * `true` means **only**: exact three-field schema + both times are primitive
+ * Number safe integers + allowed is a primitive Number safe integer in
+ * [30, 600] + abs(endpoint − controller) ≤ allowed × 1000 ms.
+ * It does **not** verify timestamp provenance, AAD binding, signatures, or
+ * system-clock calibration.
+ *
+ * `false` mixes schema-invalid inputs and over-window cases. Only a future
+ * runtime that has already confirmed schema-valid input and observed an
+ * over-window result may map the rejection to
+ * `CROSS_LAN_CLOCK_SKEW_POLICY.errorCode`. T1.7 does not invent an invalid
+ * input classification or error taxonomy.
+ *
+ * Nonce / sequence remain the primary anti-replay defense. Future composition
+ * must require clock-inside **and** sequence-forward; this module does not
+ * export a combinator and does not wire production accept paths.
+ *
+ * T1.0 Noise library selection remains BLOCKED. Do not claim
+ * replay / Noise / E2EE / cross-LAN / M1 / runtime readiness from a true result.
+ *
+ * Pure ECMAScript cannot reliably detect transparent Proxies. Throwing and
+ * revoked Proxies fail closed (return false, never throw). Transparent Proxies
+ * remain a residual risk: future trust-boundary callers must still
+ * canonicalize/freeze inputs and must not keep trusting mutable originals
+ * after a true result.
+ *
+ * Implementation: ordinary object; own keys exactly the three named string
+ * enumerable data properties; values validated as above; absolute difference
+ * computed with BigInt after validation. Never reads Date.now / clientTimeUtc;
+ * never Date.parse; no logging / network / crypto / sequence calls.
+ * Fail-closed try/catch.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function isWithinCrossLanClockSkew(input) {
+  try {
+    if (!isPlainRecord(input)) return false;
+
+    const keys = getExactOwnStringDataKeys(input);
+    if (keys === null || keys.length !== 3) return false;
+
+    const keySet = new Set(keys);
+    if (
+      !keySet.has('endpointTimeUtcMs') ||
+      !keySet.has('controllerTimeUtcMs') ||
+      !keySet.has('allowedSkewSeconds')
+    ) {
+      return false;
+    }
+
+    const endpointTimeUtcMs = input.endpointTimeUtcMs;
+    const controllerTimeUtcMs = input.controllerTimeUtcMs;
+    const allowedSkewSeconds = input.allowedSkewSeconds;
+
+    // Primitive Number safe integers only — times may be negative; no coercion.
+    if (typeof endpointTimeUtcMs !== 'number' || !Number.isSafeInteger(endpointTimeUtcMs)) {
+      return false;
+    }
+    if (typeof controllerTimeUtcMs !== 'number' || !Number.isSafeInteger(controllerTimeUtcMs)) {
+      return false;
+    }
+    if (typeof allowedSkewSeconds !== 'number' || !Number.isSafeInteger(allowedSkewSeconds)) {
+      return false;
+    }
+    if (
+      allowedSkewSeconds < CROSS_LAN_CLOCK_SKEW_POLICY.minSeconds ||
+      allowedSkewSeconds > CROSS_LAN_CLOCK_SKEW_POLICY.maxSeconds
+    ) {
+      return false;
+    }
+
+    // BigInt after validation so MAX_SAFE − MIN_SAFE abs stays exact.
+    const endpoint = BigInt(endpointTimeUtcMs);
+    const controller = BigInt(controllerTimeUtcMs);
+    const absDiff = endpoint >= controller ? endpoint - controller : controller - endpoint;
+    return absDiff <= BigInt(allowedSkewSeconds) * 1000n;
   } catch {
     return false;
   }

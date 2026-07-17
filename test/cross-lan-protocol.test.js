@@ -6,8 +6,9 @@ import {
   hasExactControlPlaneMessageFields,
   hasExactDenylistEntryFields,
 } from '../src/cross-lan-protocol.js';
-// Namespace import so missing T1.3/T1.4 named exports do not break T1.2 load-time.
+// Namespace import so missing T1.3/T1.4/T1.7 named exports do not break T1.2 load-time.
 import * as protocol from '../src/cross-lan-protocol.js';
+import { ERROR_CODES } from '../src/error-codes.js';
 
 /**
  * Closed-set pin of all 13 control-plane message schemas (T1.2).
@@ -1412,5 +1413,542 @@ describe('cross-LAN deviceId consistency contract (T1.6)', () => {
       assert.strictEqual(fn(throwingProxy), false);
       assert.strictEqual(fn(revokedProxy), false);
     });
+  });
+});
+
+/**
+ * T1.7 pure clock-skew policy + configuration resolver + window predicate.
+ *
+ * Honesty contract (auxiliary time gate only — not replay/auth readiness):
+ * - Explicit time inputs only: does NOT read Date.now / clientTimeUtc.
+ * - Does NOT verify provenance / AAD / signatures; does NOT calibrate clocks.
+ * - Time window is an auxiliary gate; nonce/seq remain the primary anti-replay
+ *   defense (compose with isStrictlyForwardSequence in callers — no production
+ *   combinator is exported here).
+ * - T1.0 Noise library selection remains BLOCKED; these tests do not wire
+ *   production handshake or claim Noise / E2EE / cross-LAN readiness.
+ * - When configurationAccepted is false, a future caller MUST report/reject
+ *   the bad config before falling back to the default; usedDefault alone must
+ *   not be treated as silent acceptance. T1.7 only freezes that responsibility.
+ *
+ * Frozen production API:
+ * - CROSS_LAN_CLOCK_SKEW_POLICY: { defaultSeconds, minSeconds, maxSeconds, errorCode }
+ * - resolveCrossLanClockSkewConfiguration(configuredSeconds) → frozen decision
+ * - isWithinCrossLanClockSkew(input) → true/false, never throws
+ *
+ * Expected numeric pins below are independent literals — never derived from
+ * the policy export (single-source production, dual-source test verification).
+ */
+describe('cross-LAN clock skew policy contract (T1.7)', () => {
+  /** Independent expected pins — must not be read from policy export. */
+  const EXPECTED_DEFAULT_SECONDS = 120;
+  const EXPECTED_MIN_SECONDS = 30;
+  const EXPECTED_MAX_SECONDS = 600;
+  const EXPECTED_ERROR_CODE = ERROR_CODES.DEVICE_CLOCK_SKEW;
+
+  const EXPECTED_POLICY = {
+    defaultSeconds: EXPECTED_DEFAULT_SECONDS,
+    minSeconds: EXPECTED_MIN_SECONDS,
+    maxSeconds: EXPECTED_MAX_SECONDS,
+    errorCode: EXPECTED_ERROR_CODE,
+  };
+
+  const EXPECTED_DEFAULT_DECISION = Object.freeze({
+    configurationAccepted: true,
+    usedDefault: true,
+    allowedSkewSeconds: EXPECTED_DEFAULT_SECONDS,
+  });
+
+  const EXPECTED_INVALID_DECISION = Object.freeze({
+    configurationAccepted: false,
+    usedDefault: true,
+    allowedSkewSeconds: EXPECTED_DEFAULT_SECONDS,
+  });
+
+  /**
+   * Fresh exact valid skew input — independent per call so tests never share state.
+   * @param {{ endpointTimeUtcMs?: number, controllerTimeUtcMs?: number, allowedSkewSeconds?: number }} [overrides]
+   */
+  function createValidSkewInput(overrides = {}) {
+    return {
+      endpointTimeUtcMs: 1_700_000_000_000,
+      controllerTimeUtcMs: 1_700_000_000_000,
+      allowedSkewSeconds: EXPECTED_DEFAULT_SECONDS,
+      ...overrides,
+    };
+  }
+
+  /**
+   * @param {{ configurationAccepted: boolean, usedDefault: boolean, allowedSkewSeconds: number }} decision
+   * @param {{ configurationAccepted: boolean, usedDefault: boolean, allowedSkewSeconds: number }} expected
+   */
+  function assertExactFrozenDecision(decision, expected) {
+    assert.deepStrictEqual(decision, expected);
+    assert.ok(Object.isFrozen(decision), 'decision must be frozen');
+    // Legal-state invariant: accepted implies usedDefault only when falling back is not the path
+    // for accepted configs that pin an explicit value (usedDefault false). Rejected configs must
+    // always usedDefault true with the default seconds. Unreachable (false, false) never appears.
+    if (decision.configurationAccepted === false) {
+      assert.strictEqual(decision.usedDefault, true);
+      assert.strictEqual(decision.allowedSkewSeconds, EXPECTED_DEFAULT_SECONDS);
+    }
+    assert.notDeepStrictEqual(
+      { configurationAccepted: decision.configurationAccepted, usedDefault: decision.usedDefault },
+      { configurationAccepted: false, usedDefault: false },
+    );
+  }
+
+  it('pins CROSS_LAN_CLOCK_SKEW_POLICY exact four fields, frozen, single-source errorCode', () => {
+    const policy = protocol.CROSS_LAN_CLOCK_SKEW_POLICY;
+    assert.notStrictEqual(policy, undefined, 'export must exist');
+    assert.deepStrictEqual(policy, EXPECTED_POLICY);
+    assert.ok(Object.isFrozen(policy));
+    assert.strictEqual(policy.errorCode, ERROR_CODES.DEVICE_CLOCK_SKEW);
+    assert.strictEqual(policy.errorCode, EXPECTED_ERROR_CODE);
+    assert.strictEqual(Object.keys(policy).length, 4);
+  });
+
+  it('resolveCrossLanClockSkewConfiguration accepted triad: undefined / explicit 120 / bounds / mid', () => {
+    const resolve = protocol.resolveCrossLanClockSkewConfiguration;
+    assert.strictEqual(typeof resolve, 'function');
+
+    // undefined → accepted default; each call returns a fresh frozen object.
+    const firstUndefinedDecision = resolve(undefined);
+    const secondUndefinedDecision = resolve(undefined);
+    assertExactFrozenDecision(firstUndefinedDecision, EXPECTED_DEFAULT_DECISION);
+    assertExactFrozenDecision(secondUndefinedDecision, EXPECTED_DEFAULT_DECISION);
+    assert.notStrictEqual(firstUndefinedDecision, secondUndefinedDecision);
+
+    // Explicit 120 must be accepted with usedDefault=false (not treated as "default path").
+    assertExactFrozenDecision(
+      resolve(120),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        allowedSkewSeconds: 120,
+      }),
+    );
+
+    // Inclusive bounds 30 and 600, plus a mid value 60.
+    assertExactFrozenDecision(
+      resolve(30),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        allowedSkewSeconds: 30,
+      }),
+    );
+    assertExactFrozenDecision(
+      resolve(600),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        allowedSkewSeconds: 600,
+      }),
+    );
+    assertExactFrozenDecision(
+      resolve(60),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        allowedSkewSeconds: 60,
+      }),
+    );
+  });
+
+  it('resolveCrossLanClockSkewConfiguration invalid inputs fall back frozen {false,true,120}', () => {
+    const resolve = protocol.resolveCrossLanClockSkewConfiguration;
+    assert.strictEqual(typeof resolve, 'function');
+
+    const throwingNumberProxy = new Proxy(new Number(120), {
+      get() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getOwnPropertyDescriptor() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      ownKeys() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getPrototypeOf() {
+        throw new Error(SENTINEL_SECRET);
+      },
+    });
+
+    const invalidInputs = [
+      29,
+      601,
+      30.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      '120',
+      120n,
+      null,
+      true,
+      Symbol('120'),
+      { value: 120 },
+      [120],
+      new Number(120),
+      throwingNumberProxy,
+    ];
+
+    for (const bad of invalidInputs) {
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = resolve(bad);
+      }, 'must not throw for invalid configuredSeconds input');
+      assertExactFrozenDecision(decision, EXPECTED_INVALID_DECISION);
+    }
+
+    // Unreachable (false, false) never appears across the invalid matrix.
+    for (const bad of invalidInputs) {
+      const decision = resolve(bad);
+      assert.notStrictEqual(
+        decision.configurationAccepted === false && decision.usedDefault === false,
+        true,
+        'unreachable (configurationAccepted:false, usedDefault:false) must never appear',
+      );
+    }
+  });
+
+  it('isWithinCrossLanClockSkew numeric boundaries at default/min/max and epoch extremes', () => {
+    const fn = protocol.isWithinCrossLanClockSkew;
+    assert.strictEqual(typeof fn, 'function');
+
+    const baseMs = 1_700_000_000_000;
+
+    // Zero difference with default allowed.
+    assert.strictEqual(
+      fn(
+        createValidSkewInput({
+          endpointTimeUtcMs: baseMs,
+          controllerTimeUtcMs: baseMs,
+          allowedSkewSeconds: 120,
+        }),
+      ),
+      true,
+    );
+
+    // Default 120s window: ±119999 / ±120000 true; ±120001 / ±121000 false.
+    for (const delta of [119_999, 120_000, -119_999, -120_000]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 120,
+          }),
+        ),
+        true,
+        `default window should accept delta=${delta}`,
+      );
+    }
+    for (const delta of [120_001, 121_000, -120_001, -121_000]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 120,
+          }),
+        ),
+        false,
+        `default window should reject delta=${delta}`,
+      );
+    }
+
+    // Min 30s: ±29999 / ±30000 true; ±30001 false.
+    for (const delta of [29_999, 30_000, -29_999, -30_000]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 30,
+          }),
+        ),
+        true,
+        `min window should accept delta=${delta}`,
+      );
+    }
+    for (const delta of [30_001, -30_001]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 30,
+          }),
+        ),
+        false,
+        `min window should reject delta=${delta}`,
+      );
+    }
+
+    // Max 600s: ±599999 / ±600000 true; ±600001 false.
+    for (const delta of [599_999, 600_000, -599_999, -600_000]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 600,
+          }),
+        ),
+        true,
+        `max window should accept delta=${delta}`,
+      );
+    }
+    for (const delta of [600_001, -600_001]) {
+      assert.strictEqual(
+        fn(
+          createValidSkewInput({
+            endpointTimeUtcMs: baseMs + delta,
+            controllerTimeUtcMs: baseMs,
+            allowedSkewSeconds: 600,
+          }),
+        ),
+        false,
+        `max window should reject delta=${delta}`,
+      );
+    }
+
+    // Negative epoch values are allowed (no extra rejection); window still applies.
+    assert.strictEqual(
+      fn(
+        createValidSkewInput({
+          endpointTimeUtcMs: -10_000,
+          controllerTimeUtcMs: -40_000,
+          allowedSkewSeconds: 30,
+        }),
+      ),
+      true,
+    );
+    assert.strictEqual(
+      fn(
+        createValidSkewInput({
+          endpointTimeUtcMs: -10_000,
+          controllerTimeUtcMs: -40_001,
+          allowedSkewSeconds: 30,
+        }),
+      ),
+      false,
+    );
+
+    // MAX_SAFE_INTEGER same → true; MAX_SAFE vs MIN_SAFE → false (out of any allowed window).
+    assert.strictEqual(
+      fn(
+        createValidSkewInput({
+          endpointTimeUtcMs: Number.MAX_SAFE_INTEGER,
+          controllerTimeUtcMs: Number.MAX_SAFE_INTEGER,
+          allowedSkewSeconds: 30,
+        }),
+      ),
+      true,
+    );
+    assert.strictEqual(
+      fn(
+        createValidSkewInput({
+          endpointTimeUtcMs: Number.MAX_SAFE_INTEGER,
+          controllerTimeUtcMs: Number.MIN_SAFE_INTEGER,
+          allowedSkewSeconds: 600,
+        }),
+      ),
+      false,
+    );
+
+    // null-prototype exact valid record must still accept.
+    assert.strictEqual(
+      fn(Object.assign(Object.create(null), createValidSkewInput())),
+      true,
+    );
+  });
+
+  it('isWithinCrossLanClockSkew exact-record/type/no-throw; does not read Date.now', (t) => {
+    const fn = protocol.isWithinCrossLanClockSkew;
+    assert.strictEqual(typeof fn, 'function');
+
+    // Missing each required field.
+    for (const key of ['endpointTimeUtcMs', 'controllerTimeUtcMs', 'allowedSkewSeconds']) {
+      const missing = createValidSkewInput();
+      delete missing[key];
+      assert.strictEqual(fn(missing), false, `missing field: ${key}`);
+    }
+
+    // Extra own enumerable key — including throwing getter clientTimeUtc:
+    // must reject for extra without reading the getter (no throw).
+    const extraClientTime = createValidSkewInput();
+    Object.defineProperty(extraClientTime, 'clientTimeUtc', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw new Error(SENTINEL_SECRET);
+      },
+    });
+    let extraResult;
+    assert.doesNotThrow(() => {
+      extraResult = fn(extraClientTime);
+    });
+    assert.strictEqual(extraResult, false);
+    assert.strictEqual(fn({ ...createValidSkewInput(), extra: true }), false);
+
+    // Symbol own key.
+    const withSymbol = createValidSkewInput();
+    Object.defineProperty(withSymbol, Symbol('s'), { value: 1, enumerable: true });
+    assert.strictEqual(fn(withSymbol), false);
+
+    // Non-enumerable required field.
+    const nonEnumRequired = createValidSkewInput();
+    Object.defineProperty(nonEnumRequired, 'allowedSkewSeconds', {
+      value: 120,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumRequired), false);
+
+    // Non-enumerable extra key.
+    const nonEnumExtra = createValidSkewInput();
+    Object.defineProperty(nonEnumExtra, 'hidden', {
+      value: true,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumExtra), false);
+
+    // Accessor returning a correct value must still fail (data fields only).
+    const accessor = createValidSkewInput();
+    Object.defineProperty(accessor, 'endpointTimeUtcMs', {
+      get() {
+        return 1_700_000_000_000;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(accessor), false);
+
+    // Non-plain / non-ordinary / primitive inputs.
+    assert.strictEqual(fn(new ExampleClass()), false);
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn(new Date()), false);
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn(true), false);
+    assert.strictEqual(fn(0), false);
+    assert.strictEqual(fn('skew'), false);
+
+    // Time field type/safety drift.
+    assert.strictEqual(
+      fn(createValidSkewInput({ endpointTimeUtcMs: '1700000000000' })),
+      false,
+    );
+    assert.strictEqual(fn(createValidSkewInput({ endpointTimeUtcMs: 1_700_000_000_000n })), false);
+    assert.strictEqual(
+      fn(createValidSkewInput({ endpointTimeUtcMs: Number.MAX_SAFE_INTEGER + 1 })),
+      false,
+    );
+    assert.strictEqual(fn(createValidSkewInput({ controllerTimeUtcMs: Number.NaN })), false);
+    assert.strictEqual(
+      fn(createValidSkewInput({ controllerTimeUtcMs: Number.POSITIVE_INFINITY })),
+      false,
+    );
+    assert.strictEqual(
+      fn(createValidSkewInput({ controllerTimeUtcMs: Number.NEGATIVE_INFINITY })),
+      false,
+    );
+
+    // allowedSkewSeconds out of range / type drift.
+    assert.strictEqual(fn(createValidSkewInput({ allowedSkewSeconds: 29 })), false);
+    assert.strictEqual(fn(createValidSkewInput({ allowedSkewSeconds: 601 })), false);
+    assert.strictEqual(fn(createValidSkewInput({ allowedSkewSeconds: 30.5 })), false);
+    assert.strictEqual(fn(createValidSkewInput({ allowedSkewSeconds: '120' })), false);
+
+    // Throwing Proxy + revoked Proxy → false without throwing.
+    const throwingProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+    const base = createValidSkewInput();
+    const { proxy: revokedProxy, revoke } = Proxy.revocable(base, {});
+    revoke();
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(throwingProxy), false);
+      assert.strictEqual(fn(revokedProxy), false);
+    });
+
+    // Prove no Date.now read: mock throws if touched; valid call must still return true.
+    t.mock.method(Date, 'now', () => {
+      throw new Error(SENTINEL_SECRET);
+    });
+    let validWhileMocked;
+    assert.doesNotThrow(() => {
+      validWhileMocked = fn(createValidSkewInput());
+    });
+    assert.strictEqual(validWhileMocked, true);
+    // Transparent Proxy residual risk is not required to return false.
+  });
+
+  it('replay independence truth table: only clock-inside AND seq-forward passes', () => {
+    const clockFn = protocol.isWithinCrossLanClockSkew;
+    const seqFn = protocol.isStrictlyForwardSequence;
+    assert.strictEqual(typeof clockFn, 'function');
+    assert.strictEqual(typeof seqFn, 'function');
+
+    const baseMs = 1_700_000_000_000;
+
+    // Clock inside default 120s window.
+    const clockInside = createValidSkewInput({
+      endpointTimeUtcMs: baseMs + 60_000,
+      controllerTimeUtcMs: baseMs,
+      allowedSkewSeconds: 120,
+    });
+    // Clock outside default 120s window.
+    const clockOutside = createValidSkewInput({
+      endpointTimeUtcMs: baseMs + 121_000,
+      controllerTimeUtcMs: baseMs,
+      allowedSkewSeconds: 120,
+    });
+
+    const seqForward = {
+      sessionNonceMatched: true,
+      highestAcceptedSequence: 0n,
+      sequence: 1n,
+    };
+    const seqDuplicate = {
+      sessionNonceMatched: true,
+      highestAcceptedSequence: 5n,
+      sequence: 5n,
+    };
+
+    const clockTrue = clockFn(clockInside);
+    const clockFalse = clockFn(clockOutside);
+    const seqTrue = seqFn(seqForward);
+    const seqFalse = seqFn(seqDuplicate);
+
+    assert.strictEqual(clockTrue, true);
+    assert.strictEqual(clockFalse, false);
+    assert.strictEqual(seqTrue, true);
+    assert.strictEqual(seqFalse, false);
+
+    // Four-cell truth table (test composition only — no production combinator).
+    assert.strictEqual(clockTrue && seqTrue, true, 'inside + forward must pass');
+    assert.strictEqual(clockFalse && seqTrue, false, 'outside + forward must fail');
+    assert.strictEqual(clockTrue && seqFalse, false, 'inside + duplicate must fail');
+    assert.strictEqual(clockFalse && seqFalse, false, 'outside + duplicate must fail');
   });
 });
