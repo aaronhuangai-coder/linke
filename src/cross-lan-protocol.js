@@ -1,10 +1,13 @@
 /**
- * Linke V2 control-plane message schema scaffold (T1.2 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.3 / M1).
  *
- * Field-level + nested field-shape only.
+ * T1.2: field-level + nested field-shape only (control-plane message schemas).
+ * T1.3: pure session-state transition table + reducer (no side effects).
+ *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
  * binary encodings, trust state, or AEAD.
+ * Does not open network sockets, timers, or persistence.
  *
  * T1.0 Noise library selection gate remains BLOCKED.
  * This module does not claim Noise / E2EE / cross-LAN / M1 readiness.
@@ -207,5 +210,61 @@ export function hasExactControlPlaneMessageFields(messageType, payload) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Frozen closed-set of cross-LAN session state transitions (T1.3).
+ *
+ * Events `key-confirmed` / `rekey-confirmed` are runtime-synthesized only
+ * after verified auth/MAC — not raw control-plane message type names.
+ *
+ * `fail` → `failed` does not destroy keys, write audit, or close sockets
+ * here; future session runtime owns those side effects and eventual close.
+ *
+ * @type {Readonly<Record<string, Readonly<Record<string, string>>>>}
+ */
+export const CROSS_LAN_SESSION_TRANSITIONS = Object.freeze({
+  idle: Object.freeze({ 'start-handshake': 'handshaking', close: 'closed' }),
+  handshaking: Object.freeze({ 'key-confirmed': 'established', fail: 'failed', close: 'closed' }),
+  established: Object.freeze({ 'start-rekey': 'rekeying', fail: 'failed', close: 'closed' }),
+  rekeying: Object.freeze({ 'rekey-confirmed': 'established', fail: 'failed', close: 'closed' }),
+  failed: Object.freeze({ close: 'closed' }),
+  closed: Object.freeze({}),
+});
+
+/**
+ * Pure session-state reducer: look up the next state for (currentState, event).
+ *
+ * Returns the frozen target state string on a legal edge; otherwise `null`.
+ * Callers must treat `null` as "no transition" — never as success.
+ * Never throws; never echoes inputs; no mutable session object; no side effects.
+ *
+ * Event synthesis rules (T1.3 does **not** implement verification):
+ * - `key-confirmed` may be emitted only by future session runtime after
+ *   **both** server and client key confirmation / MAC checks succeed.
+ * - `rekey-confirmed` may be emitted only after an authenticated rekey
+ *   completes successfully.
+ * - Raw control-plane message types (e.g. `key-confirm-client`,
+ *   `noise-msg2-payload`, `msg2-received`, `handshake-complete`) must
+ *   **never** be passed as events to advance this table.
+ *
+ * Side effects for `fail` → `failed` (key wipe, audit, eventual close) and
+ * transport close are owned by future runtime — not this reducer.
+ *
+ * @param {unknown} currentState
+ * @param {unknown} event
+ * @returns {string | null}
+ */
+export function getNextCrossLanSessionState(currentState, event) {
+  try {
+    if (typeof currentState !== 'string' || typeof event !== 'string') return null;
+    // Own-key only: reject Object.prototype names via inherited lookup.
+    if (!Object.hasOwn(CROSS_LAN_SESSION_TRANSITIONS, currentState)) return null;
+    const row = CROSS_LAN_SESSION_TRANSITIONS[currentState];
+    if (!Object.hasOwn(row, event)) return null;
+    return row[event];
+  } catch {
+    return null;
   }
 }

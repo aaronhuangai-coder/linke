@@ -6,6 +6,8 @@ import {
   hasExactControlPlaneMessageFields,
   hasExactDenylistEntryFields,
 } from '../src/cross-lan-protocol.js';
+// Namespace import so missing T1.3 named exports do not break T1.2 load-time.
+import * as protocol from '../src/cross-lan-protocol.js';
 
 /**
  * Closed-set pin of all 13 control-plane message schemas (T1.2).
@@ -459,5 +461,161 @@ describe('control-plane message schemas (T1.2)', () => {
       }),
       false,
     );
+  });
+});
+
+/**
+ * Closed-set pin of cross-LAN session state transitions (T1.3).
+ * Exact table only — not generated from production values.
+ * key-confirmed / rekey-confirmed are runtime-synthesized internal events
+ * after auth/MAC verification; raw wire message types do not advance state.
+ */
+const EXPECTED_CROSS_LAN_SESSION_TRANSITIONS = {
+  idle: {
+    'start-handshake': 'handshaking',
+    close: 'closed',
+  },
+  handshaking: {
+    'key-confirmed': 'established',
+    fail: 'failed',
+    close: 'closed',
+  },
+  established: {
+    'start-rekey': 'rekeying',
+    fail: 'failed',
+    close: 'closed',
+  },
+  rekeying: {
+    'rekey-confirmed': 'established',
+    fail: 'failed',
+    close: 'closed',
+  },
+  failed: {
+    close: 'closed',
+  },
+  closed: {},
+};
+
+describe('cross-LAN session state machine (T1.3)', () => {
+  it('pins the exact closed-set of 6 session states and transitions', () => {
+    assert.strictEqual(Object.keys(EXPECTED_CROSS_LAN_SESSION_TRANSITIONS).length, 6);
+    assert.strictEqual(Object.keys(protocol.CROSS_LAN_SESSION_TRANSITIONS).length, 6);
+    assert.deepStrictEqual(
+      protocol.CROSS_LAN_SESSION_TRANSITIONS,
+      EXPECTED_CROSS_LAN_SESSION_TRANSITIONS,
+    );
+  });
+
+  it('deep-freezes CROSS_LAN_SESSION_TRANSITIONS and every state row', () => {
+    assert.ok(Object.isFrozen(protocol.CROSS_LAN_SESSION_TRANSITIONS));
+    for (const state of Object.keys(protocol.CROSS_LAN_SESSION_TRANSITIONS)) {
+      assert.ok(
+        Object.isFrozen(protocol.CROSS_LAN_SESSION_TRANSITIONS[state]),
+        `state row frozen: ${state}`,
+      );
+    }
+  });
+
+  it('happy path: idle → handshaking → established → rekeying → established → closed', () => {
+    const next = protocol.getNextCrossLanSessionState;
+    assert.strictEqual(next('idle', 'start-handshake'), 'handshaking');
+    assert.strictEqual(next('handshaking', 'key-confirmed'), 'established');
+    assert.strictEqual(next('established', 'start-rekey'), 'rekeying');
+    assert.strictEqual(next('rekeying', 'rekey-confirmed'), 'established');
+    assert.strictEqual(next('established', 'close'), 'closed');
+  });
+
+  it('only verified confirmation advances; raw message events return null', () => {
+    const next = protocol.getNextCrossLanSessionState;
+    // Raw control-plane wire types must not advance the session FSM.
+    assert.strictEqual(next('handshaking', 'key-confirm-client'), null);
+    assert.strictEqual(next('handshaking', 'msg2-received'), null);
+    assert.strictEqual(next('handshaking', 'handshake-complete'), null);
+    assert.strictEqual(next('handshaking', 'noise-msg2-payload'), null);
+    // Cross-state confirmation events are invalid.
+    assert.strictEqual(next('handshaking', 'rekey-confirmed'), null);
+    assert.strictEqual(next('rekeying', 'key-confirmed'), null);
+    assert.strictEqual(next('established', 'key-confirmed'), null);
+    assert.strictEqual(next('established', 'rekey-confirmed'), null);
+    assert.strictEqual(next('idle', 'key-confirmed'), null);
+    assert.strictEqual(next('idle', 'rekey-confirmed'), null);
+  });
+
+  it('fail paths, failed only close, and closed is terminal', () => {
+    const next = protocol.getNextCrossLanSessionState;
+    assert.strictEqual(next('handshaking', 'fail'), 'failed');
+    assert.strictEqual(next('established', 'fail'), 'failed');
+    assert.strictEqual(next('rekeying', 'fail'), 'failed');
+    // failed may only close.
+    assert.strictEqual(next('failed', 'close'), 'closed');
+    assert.strictEqual(next('failed', 'fail'), null);
+    assert.strictEqual(next('failed', 'start-handshake'), null);
+    assert.strictEqual(next('failed', 'key-confirmed'), null);
+    assert.strictEqual(next('failed', 'start-rekey'), null);
+    assert.strictEqual(next('failed', 'rekey-confirmed'), null);
+    // closed is terminal — no transitions.
+    assert.strictEqual(next('closed', 'close'), null);
+    assert.strictEqual(next('closed', 'fail'), null);
+    assert.strictEqual(next('closed', 'start-handshake'), null);
+    assert.strictEqual(next('closed', 'key-confirmed'), null);
+    assert.strictEqual(next('closed', 'start-rekey'), null);
+    assert.strictEqual(next('closed', 'rekey-confirmed'), null);
+  });
+
+  it('invalid state/event/non-string/Object.prototype names return null without throwing', () => {
+    const next = protocol.getNextCrossLanSessionState;
+    assert.doesNotThrow(() => {
+      assert.strictEqual(next('no-such-state', 'close'), null);
+      assert.strictEqual(next('idle', 'no-such-event'), null);
+      assert.strictEqual(next(null, 'close'), null);
+      assert.strictEqual(next('idle', null), null);
+      assert.strictEqual(next(undefined, 'close'), null);
+      assert.strictEqual(next('idle', undefined), null);
+      assert.strictEqual(next(1, 'close'), null);
+      assert.strictEqual(next('idle', 1), null);
+      assert.strictEqual(next({}, 'close'), null);
+      assert.strictEqual(next('idle', {}), null);
+      assert.strictEqual(next('toString', 'close'), null);
+      assert.strictEqual(next('constructor', 'close'), null);
+      assert.strictEqual(next('__proto__', 'close'), null);
+      assert.strictEqual(next('hasOwnProperty', 'close'), null);
+      assert.strictEqual(next('idle', 'toString'), null);
+      assert.strictEqual(next('idle', 'constructor'), null);
+      assert.strictEqual(next('idle', '__proto__'), null);
+      assert.strictEqual(next('idle', 'hasOwnProperty'), null);
+    });
+  });
+
+  it('all targets are table own states; established entries are only the two verified confirms', () => {
+    const table = protocol.CROSS_LAN_SESSION_TRANSITIONS;
+    const ownStates = Object.keys(table);
+    assert.deepStrictEqual(ownStates.sort(), [
+      'closed',
+      'established',
+      'failed',
+      'handshaking',
+      'idle',
+      'rekeying',
+    ].sort());
+
+    /** @type {Array<[string, string, string]>} */
+    const edgesIntoEstablished = [];
+    for (const state of ownStates) {
+      const row = table[state];
+      for (const event of Object.keys(row)) {
+        const target = row[event];
+        assert.ok(
+          Object.hasOwn(table, target),
+          `target ${target} from ${state}/${event} must be an own table state`,
+        );
+        if (target === 'established') {
+          edgesIntoEstablished.push([state, event, target]);
+        }
+      }
+    }
+    assert.deepStrictEqual(edgesIntoEstablished, [
+      ['handshaking', 'key-confirmed', 'established'],
+      ['rekeying', 'rekey-confirmed', 'established'],
+    ]);
   });
 });
