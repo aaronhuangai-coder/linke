@@ -463,9 +463,16 @@ export function encodeCrossLanNoisePrologueBytes(protocolVersion) {
  * - `mutualAuthenticationRequired` and `independentE2eeRequired` are profile
  *   boolean requirements (self-declared), not proof that mutual auth or
  *   independent E2EE actually ran.
- * - Relay TLS (`relayTransport` / `tlsVersion` / `tcpPort`) is **not**
- *   independent E2EE; independent E2EE must be provided by a future
- *   independent Noise layer.
+ * - Relay is a transport-only opaque forwarder. It MUST NOT participate in
+ *   endpoint↔controller E2E KE/KDF, contribute/mix/store E2E secrets, or
+ *   reuse/export relay TLS session keys as payload E2EE. Relay TLS
+ *   (`relayTransport` / `tlsVersion` / `tcpPort` / WSS / TLS 1.3) protects
+ *   each hop only and never satisfies `independentE2eeRequired`; the
+ *   endpoint↔controller Noise layer remains required. T1.0 is currently
+ *   BLOCKED.
+ * - This predicate checks only an exact self-declared profile. A `true`
+ *   result does not prove the relay/runtime obeys those boundaries or that
+ *   Noise/E2EE ran.
  *
  * This function does **not** prove WSS framing, TLS/socket/443 liveness,
  * SPKI pin, Noise IK handshake, mutual authentication, key confirmation,

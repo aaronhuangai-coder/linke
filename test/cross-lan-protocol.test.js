@@ -899,6 +899,7 @@ describe('strictly-forward sequence predicate (T1.4)', () => {
  *   property; reject symbol / non-enumerable / accessor / missing / extra /
  *   type drift. Any throw trap or revoked Proxy → false without throwing.
  * - No cipher / authMode / e2eeLayer fields (those are extras → false).
+ * - T1.5 downgrade matrix also underpins T1.11 trust-boundary traceability.
  *
  * Unique true profile (literals hardcoded here, not from production constants):
  *   noiseSuite: 'Noise_IK_25519_ChaChaPoly_SHA256'
@@ -1128,6 +1129,22 @@ describe('protocol downgrade profile allowlist (T1.5)', () => {
       assert.strictEqual(fn(throwingProxy), false);
       assert.strictEqual(fn(revokedProxy), false);
     });
+  });
+
+  // T1.11: canonical behavior anchor only — does not prove the relay did not
+  // participate in endpoint↔controller KE/KDF at runtime.
+  it('T1.11: full canonical wss/TLS1.3/443/mutualAuth; independentE2ee false→false, true→true', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+    const canonical = {
+      noiseSuite: 'Noise_IK_25519_ChaChaPoly_SHA256',
+      mutualAuthenticationRequired: true,
+      independentE2eeRequired: false,
+      relayTransport: 'wss',
+      tlsVersion: '1.3',
+      tcpPort: 443,
+    };
+    assert.strictEqual(fn(canonical), false);
+    assert.strictEqual(fn({ ...canonical, independentE2eeRequired: true }), true);
   });
 });
 
