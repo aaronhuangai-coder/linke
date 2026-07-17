@@ -879,3 +879,247 @@ describe('strictly-forward sequence predicate (T1.4)', () => {
     });
   });
 });
+
+/**
+ * T1.5 pure profile allowlist: protocol.isAllowedCrossLanProtocolProfile(input).
+ *
+ * Honesty contract (profile shape only — not runtime/crypto readiness):
+ * - T1.0 Noise library selection remains BLOCKED; this predicate only pins
+ *   the single allowed cross-LAN protocol profile record shape + values.
+ * - Does NOT claim Noise runtime, E2EE crypto, TLS, WSS, or connection ready.
+ * - Valid input: ordinary object (prototype Object.prototype or null), own
+ *   keys exactly the six string fields below, each an enumerable data
+ *   property; reject symbol / non-enumerable / accessor / missing / extra /
+ *   type drift. Any throw trap or revoked Proxy → false without throwing.
+ * - No cipher / authMode / e2eeLayer fields (those are extras → false).
+ *
+ * Unique true profile (literals hardcoded here, not from production constants):
+ *   noiseSuite: 'Noise_IK_25519_ChaChaPoly_SHA256'
+ *   mutualAuthenticationRequired: true
+ *   independentE2eeRequired: true
+ *   relayTransport: 'wss'
+ *   tlsVersion: '1.3'
+ *   tcpPort: 443
+ */
+describe('protocol downgrade profile allowlist (T1.5)', () => {
+  /** Fresh exact valid profile — independent per call so tests never share state. */
+  function createValidProfile() {
+    return {
+      noiseSuite: 'Noise_IK_25519_ChaChaPoly_SHA256',
+      mutualAuthenticationRequired: true,
+      independentE2eeRequired: true,
+      relayTransport: 'wss',
+      tlsVersion: '1.3',
+      tcpPort: 443,
+    };
+  }
+
+  it('accepts exact ordinary, frozen, and null-prototype profiles; export is a function', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+    assert.strictEqual(typeof fn, 'function');
+
+    assert.strictEqual(fn(createValidProfile()), true);
+
+    const frozen = Object.freeze(createValidProfile());
+    assert.strictEqual(fn(frozen), true);
+
+    const nullProto = Object.assign(Object.create(null), createValidProfile());
+    assert.strictEqual(fn(nullProto), true);
+  });
+
+  it('rejects downgrade paths: suite/auth/e2ee/transport/tls/port variants', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+
+    // Null / alternate Noise suite and whitespace/case drift.
+    assert.strictEqual(fn({ ...createValidProfile(), noiseSuite: null }), false);
+    assert.strictEqual(
+      fn({ ...createValidProfile(), noiseSuite: 'Noise_XX_25519_ChaChaPoly_SHA256' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), noiseSuite: ' Noise_IK_25519_ChaChaPoly_SHA256' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), noiseSuite: 'Noise_IK_25519_ChaChaPoly_SHA256 ' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), noiseSuite: 'noise_ik_25519_chachapoly_sha256' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), noiseSuite: 'NOISE_IK_25519_CHACHAPOLY_SHA256' }),
+      false,
+    );
+
+    // Auth optional and TLS-only (independent E2EE off).
+    assert.strictEqual(
+      fn({ ...createValidProfile(), mutualAuthenticationRequired: false }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), independentE2eeRequired: false }),
+      false,
+    );
+
+    // Transport downgrades / case drift.
+    assert.strictEqual(fn({ ...createValidProfile(), relayTransport: 'raw' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), relayTransport: 'tls' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), relayTransport: 'ws' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), relayTransport: 'https' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), relayTransport: 'WSS' }), false);
+
+    // TLS version drift.
+    assert.strictEqual(fn({ ...createValidProfile(), tlsVersion: '1.2' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), tlsVersion: 1.3 }), false);
+
+    // Port type/value drift.
+    assert.strictEqual(fn({ ...createValidProfile(), tcpPort: 8443 }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), tcpPort: '443' }), false);
+    assert.strictEqual(fn({ ...createValidProfile(), tcpPort: 443n }), false);
+  });
+
+  it('rejects missing any of the six fields and known extra keys', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+    const keys = [
+      'noiseSuite',
+      'mutualAuthenticationRequired',
+      'independentE2eeRequired',
+      'relayTransport',
+      'tlsVersion',
+      'tcpPort',
+    ];
+
+    for (const key of keys) {
+      const missing = createValidProfile();
+      delete missing[key];
+      assert.strictEqual(fn(missing), false, `missing field: ${key}`);
+    }
+
+    const extras = [
+      'cipher',
+      'authMode',
+      'e2eeLayer',
+      'spkiPin',
+      'sni',
+      'fallback',
+      'allowInsecure',
+    ];
+    for (const extra of extras) {
+      assert.strictEqual(
+        fn({ ...createValidProfile(), [extra]: true }),
+        false,
+        `extra field: ${extra}`,
+      );
+    }
+  });
+
+  it('rejects non-strict records: symbol, non-enumerable, accessor, non-plain, type drift', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+
+    // Symbol own key (even with all six string fields present).
+    const withSymbol = createValidProfile();
+    Object.defineProperty(withSymbol, Symbol('s'), { value: 1, enumerable: true });
+    assert.strictEqual(fn(withSymbol), false);
+
+    // Non-enumerable required field.
+    const nonEnumField = createValidProfile();
+    Object.defineProperty(nonEnumField, 'tcpPort', {
+      value: 443,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumField), false);
+
+    // Non-enumerable extra key.
+    const nonEnumExtra = createValidProfile();
+    Object.defineProperty(nonEnumExtra, 'hidden', {
+      value: true,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumExtra), false);
+
+    // Accessor that returns the correct value must still fail.
+    const accessor = createValidProfile();
+    Object.defineProperty(accessor, 'noiseSuite', {
+      get() {
+        return 'Noise_IK_25519_ChaChaPoly_SHA256';
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(accessor), false);
+
+    // Non-plain / non-ordinary inputs.
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn(new Map()), false);
+    assert.strictEqual(fn(new Set()), false);
+    assert.strictEqual(fn(new Date()), false);
+    assert.strictEqual(fn(() => {}), false);
+    assert.strictEqual(fn(ExampleClass), false);
+    assert.strictEqual(fn(new ExampleClass()), false);
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn(true), false);
+    assert.strictEqual(fn(false), false);
+    assert.strictEqual(fn(0), false);
+    assert.strictEqual(fn(443), false);
+    assert.strictEqual(fn('wss'), false);
+    assert.strictEqual(fn(Object(true)), false);
+    assert.strictEqual(fn(Object(443)), false);
+    assert.strictEqual(fn(new String('wss')), false);
+
+    // Boolean type drift (truthy but not true).
+    assert.strictEqual(
+      fn({ ...createValidProfile(), mutualAuthenticationRequired: 1 }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), mutualAuthenticationRequired: 'true' }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), independentE2eeRequired: 1 }),
+      false,
+    );
+    assert.strictEqual(
+      fn({ ...createValidProfile(), independentE2eeRequired: 'true' }),
+      false,
+    );
+  });
+
+  it('returns false without throwing for throwing Proxy and revoked Proxy', () => {
+    const fn = protocol.isAllowedCrossLanProtocolProfile;
+
+    const throwingProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+
+    const base = createValidProfile();
+    const { proxy: revokedProxy, revoke } = Proxy.revocable(base, {});
+    revoke();
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(throwingProxy), false);
+      assert.strictEqual(fn(revokedProxy), false);
+    });
+  });
+});

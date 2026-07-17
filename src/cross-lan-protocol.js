@@ -1,9 +1,10 @@
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.4 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.5 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
  * T1.4: pure strictly-forward sequence predicate (no window / no state).
+ * T1.5: pure protocol profile allowlist (exact six-field shape + values only).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -315,6 +316,78 @@ export function isStrictlyForwardSequence(input) {
     if (sequence < 0n) return false;
 
     return sequence > highestAcceptedSequence;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * T1.5 pure profile allowlist only: is the input exactly the single allowed
+ * cross-LAN protocol profile record (shape + values)?
+ *
+ * Profile requirements / self-declared requirements — not runtime proof:
+ * - `mutualAuthenticationRequired` and `independentE2eeRequired` are profile
+ *   boolean requirements (self-declared), not proof that mutual auth or
+ *   independent E2EE actually ran.
+ * - Relay TLS (`relayTransport` / `tlsVersion` / `tcpPort`) is **not**
+ *   independent E2EE; independent E2EE must be provided by a future
+ *   independent Noise layer.
+ *
+ * This function does **not** prove WSS framing, TLS/socket/443 liveness,
+ * SPKI pin, Noise IK handshake, mutual authentication, key confirmation,
+ * or protocol_name / prologue / domain binding.
+ *
+ * T1.0 Noise library selection gate remains BLOCKED. Do not wire this
+ * predicate to production connection accept paths, and do not claim
+ * Noise / E2EE / cross-LAN / M1 readiness from a true result.
+ *
+ * Pure ECMAScript cannot reliably detect transparent Proxies. Throwing and
+ * revoked Proxies fail closed (return false, never throw). Transparent
+ * Proxies remain a residual risk: future callers past a trust boundary must
+ * still canonicalize/freeze profile data and must not keep using mutable
+ * original input after a true result.
+ *
+ * Suite / protocol_name / prologue / domain string constants are intentionally
+ * **not** extracted or exported here; the suite literal appears once in this
+ * function. T1.10 will migrate those constants to a shared constants surface.
+ *
+ * Implementation: ordinary object (prototype Object.prototype or null);
+ * own keys exactly six string enumerable data properties; exact value match
+ * via Object.is / strict equality only — no JSON.stringify, coercion, regex,
+ * or normalization. Fail-closed try/catch.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function isAllowedCrossLanProtocolProfile(input) {
+  try {
+    if (!isPlainRecord(input)) return false;
+
+    const keys = getExactOwnStringDataKeys(input);
+    if (keys === null || keys.length !== 6) return false;
+
+    const keySet = new Set(keys);
+    if (
+      !keySet.has('noiseSuite') ||
+      !keySet.has('mutualAuthenticationRequired') ||
+      !keySet.has('independentE2eeRequired') ||
+      !keySet.has('relayTransport') ||
+      !keySet.has('tlsVersion') ||
+      !keySet.has('tcpPort')
+    ) {
+      return false;
+    }
+
+    // Unique allowed profile values; suite literal appears only here (T1.10
+    // will extract suite / protocol_name / prologue / domain constants).
+    if (input.noiseSuite !== 'Noise_IK_25519_ChaChaPoly_SHA256') return false;
+    if (input.mutualAuthenticationRequired !== true) return false;
+    if (input.independentE2eeRequired !== true) return false;
+    if (input.relayTransport !== 'wss') return false;
+    if (input.tlsVersion !== '1.3') return false;
+    if (input.tcpPort !== 443) return false;
+
+    return true;
   } catch {
     return false;
   }
