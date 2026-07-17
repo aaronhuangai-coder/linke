@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.8 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.9 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -10,6 +10,10 @@ import { ERROR_CODES } from './error-codes.js';
  * T1.6: pure deviceId algebraic consistency (three caller-supplied strings only).
  * T1.7: pure clock-skew policy + configuration resolver + window predicate.
  * T1.8: declarative session-construction boundary (lifecycle execute/authorize hard-false only).
+ * T1.9: pure capacity / keepalive / data-resume policy constants + pure
+ *       configuration resolvers + pure liveness classification / timeout
+ *       decision only (no timers, sockets, random/jitter, sleep, persistence,
+ *       or runtime wiring).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -20,7 +24,7 @@ import { ERROR_CODES } from './error-codes.js';
  * This module does not claim Noise / E2EE / cross-LAN / M1 readiness.
  *
  * Keepalive types are Noise AEAD application-layer messages with empty
- * payloads — not RFC6455 WebSocket ping/pong (transport timing is T1.9/M3).
+ * payloads — not RFC6455 WebSocket ping/pong (transport timing is M3).
  *
  * `signature` fields (relay-pin-set-update, controller-noise-key-update)
  * are controller Ed25519 signatures over canonical TBS in later tasks;
@@ -708,3 +712,562 @@ export const CROSS_LAN_SESSION_CONSTRUCTION_BOUNDARY = Object.freeze({
   buildSupervisorLifecycleGuardedRunnerExecutionGateAllowed: false,
   authorizeSupervisorLifecycleGuardedRunnerCapabilityModeAllowed: false,
 });
+
+/**
+ * Deep-freeze a plain object graph (objects + arrays). Module-private helper
+ * for T1.9 policy constants — not a public export.
+ * @param {object} value
+ * @returns {object}
+ */
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      deepFreeze(item);
+    }
+    return Object.freeze(value);
+  }
+  for (const key of Object.keys(value)) {
+    deepFreeze(value[key]);
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * Frozen cross-LAN capacity and backpressure policy (T1.9 / §4.4).
+ *
+ * Single production source for control-queue, data-plane inflight, queue
+ * separation, per-device rate/session/connection limits, relay inbound
+ * connections, reconnect backoff strategy, and enrollment handshake rate.
+ * All error codes are taken from ERROR_CODES — not copied strings.
+ *
+ * **Honesty boundary:** numeric values and negative invariants (e.g. queues
+ * must not share offline structures, backup chunks must not enter the control
+ * queue, P0 must not share bulk queue, busy-loop forbidden) are a frozen
+ * contract that **future runtime** must honor. This constant does **not**
+ * prove that queues, token buckets, backoff schedulers, or connection
+ * limiters are wired. T1.9 freezes the strategy only.
+ *
+ * `reconnectBackoff.maximumDelayMs` is the final wall-clock upper bound;
+ * future jitter **must not** produce a delay above 60s. T1.9 does **not**
+ * implement a jitter algorithm or any backoff calculator (spec has not frozen
+ * cap/jitter composition order).
+ *
+ * T1.0 Noise library selection remains BLOCKED. No timer / socket / random /
+ * sleep / persistence / runtime wiring.
+ *
+ * @type {Readonly<{
+ *   controlQueue: Readonly<{
+ *     defaultMessageCountPerDevice: number,
+ *     hardCeilingMessageCountPerDevice: number,
+ *     defaultTotalBytesPerDevice: number,
+ *     hardCeilingTotalBytesPerDevice: number,
+ *     maximumMessageBytes: number,
+ *     overflowErrorCode: string,
+ *   }>,
+ *   dataPlaneInflight: Readonly<{
+ *     defaultBytesPerDevice: number,
+ *     hardCeilingBytesPerDevice: number,
+ *   }>,
+ *   queueSeparation: Readonly<{
+ *     priorityOrder: ReadonlyArray<string>,
+ *     p0PersistentRingDefaultMessageCount: number,
+ *     controlAndDataShareOfflineQueue: false,
+ *     backupChunksAllowedInControlQueue: false,
+ *     p0SharesBulkQueue: false,
+ *   }>,
+ *   perDeviceRate: Readonly<{
+ *     defaultMessagesPerSecond: number,
+ *     hardCeilingMessagesPerSecond: number,
+ *     defaultBurstMessages: number,
+ *     hardCeilingBurstMessages: number,
+ *     errorCode: string,
+ *   }>,
+ *   perDeviceSessions: Readonly<{
+ *     defaultConcurrentSessions: number,
+ *     defaultActiveSessions: number,
+ *     defaultDrainingSessions: number,
+ *     hardCeilingConcurrentSessions: number,
+ *     errorCode: string,
+ *   }>,
+ *   perDeviceConnections: Readonly<{
+ *     defaultConcurrentConnectionsIncludingHandshake: number,
+ *     hardCeilingConcurrentConnectionsIncludingHandshake: number,
+ *   }>,
+ *   relayInboundConnections: Readonly<{
+ *     defaultPerController: number,
+ *     hardCeilingPerController: number,
+ *   }>,
+ *   reconnectBackoff: Readonly<{
+ *     initialDelayMs: number,
+ *     multiplier: number,
+ *     maximumDelayMs: number,
+ *     jitterFraction: number,
+ *     busyLoopAllowed: false,
+ *     errorCode: string,
+ *   }>,
+ *   enrollmentHandshakeRate: Readonly<{
+ *     defaultAttemptsPerMinutePerSourceFingerprint: number,
+ *     hardCeilingAttemptsPerMinutePerSourceFingerprint: number,
+ *     errorCode: string,
+ *   }>,
+ * }>}
+ */
+export const CROSS_LAN_CAPACITY_POLICY = deepFreeze({
+  controlQueue: {
+    defaultMessageCountPerDevice: 256,
+    hardCeilingMessageCountPerDevice: 1024,
+    defaultTotalBytesPerDevice: 1_048_576,
+    hardCeilingTotalBytesPerDevice: 4_194_304,
+    maximumMessageBytes: 65_536,
+    overflowErrorCode: ERROR_CODES.CONTROL_QUEUE_OVERFLOW,
+  },
+  dataPlaneInflight: {
+    defaultBytesPerDevice: 67_108_864,
+    hardCeilingBytesPerDevice: 268_435_456,
+  },
+  queueSeparation: {
+    priorityOrder: [
+      'P0 revoke/security',
+      'P1 session-control',
+      'P2 status',
+      'P3 bulk-data-signal',
+    ],
+    p0PersistentRingDefaultMessageCount: 64,
+    controlAndDataShareOfflineQueue: false,
+    backupChunksAllowedInControlQueue: false,
+    p0SharesBulkQueue: false,
+  },
+  perDeviceRate: {
+    defaultMessagesPerSecond: 30,
+    hardCeilingMessagesPerSecond: 60,
+    defaultBurstMessages: 60,
+    hardCeilingBurstMessages: 120,
+    errorCode: ERROR_CODES.DEVICE_RATE_LIMITED,
+  },
+  perDeviceSessions: {
+    defaultConcurrentSessions: 2,
+    defaultActiveSessions: 1,
+    defaultDrainingSessions: 1,
+    hardCeilingConcurrentSessions: 4,
+    errorCode: ERROR_CODES.DEVICE_SESSION_LIMIT,
+  },
+  perDeviceConnections: {
+    defaultConcurrentConnectionsIncludingHandshake: 4,
+    hardCeilingConcurrentConnectionsIncludingHandshake: 8,
+  },
+  relayInboundConnections: {
+    defaultPerController: 512,
+    hardCeilingPerController: 2048,
+  },
+  reconnectBackoff: {
+    initialDelayMs: 1000,
+    multiplier: 2,
+    maximumDelayMs: 60_000,
+    jitterFraction: 0.2,
+    busyLoopAllowed: false,
+    errorCode: ERROR_CODES.RELAY_CONNECT_FAILED,
+  },
+  enrollmentHandshakeRate: {
+    defaultAttemptsPerMinutePerSourceFingerprint: 10,
+    hardCeilingAttemptsPerMinutePerSourceFingerprint: 30,
+    errorCode: ERROR_CODES.ENROLLMENT_RATE_LIMITED,
+  },
+});
+
+/**
+ * Frozen cross-LAN keepalive / session-liveness policy (T1.9 / §6.12 / A24).
+ *
+ * Single production source for default/min/max negotiated interval seconds,
+ * timeout multiplier, the **only** liveness-refresh closed-set map, and the
+ * timeout error code (from ERROR_CODES — not a copied string).
+ *
+ * Do **not** create a second liveness array/map/boolean registry. Callers
+ * must read refresh decisions only through
+ * `doesCrossLanLivenessSignalRefreshTimer`, which consults
+ * `livenessRefreshBySource` via `Object.hasOwn`.
+ *
+ * T1.0 Noise library selection remains BLOCKED. This constant does not
+ * implement timers, send pings, or wire session disconnect.
+ *
+ * @type {Readonly<{
+ *   defaultSeconds: number,
+ *   minSeconds: number,
+ *   maxSeconds: number,
+ *   timeoutMultiplier: number,
+ *   livenessRefreshBySource: Readonly<Record<string, boolean>>,
+ *   timeoutErrorCode: string,
+ * }>}
+ */
+export const CROSS_LAN_KEEPALIVE_POLICY = deepFreeze({
+  defaultSeconds: 30,
+  minSeconds: 5,
+  maxSeconds: 120,
+  timeoutMultiplier: 3,
+  livenessRefreshBySource: {
+    'application-pong': true,
+    'authenticated-control-traffic': true,
+    'authenticated-data-traffic': true,
+    'websocket-ping': false,
+    'websocket-pong': false,
+  },
+  timeoutErrorCode: ERROR_CODES.SESSION_KEEPALIVE_TIMEOUT,
+});
+
+/**
+ * Frozen cross-LAN data-plane automatic resume policy (T1.9 / §6.10).
+ *
+ * Single production source for default / min / max configurable automatic
+ * resume attempts, absolute hard ceiling, exhaustion semantics, and the
+ * error code (from ERROR_CODES — not a copied string).
+ *
+ * **Semantic distinction (even when numeric values currently match):**
+ * - `maxConfigurableAutomaticAttempts` is the upper bound of the currently
+ *   allowed configuration range.
+ * - `hardCeilingAutomaticAttempts` is the absolute implementation ceiling
+ *   that must never be exceeded. If a future spec revision lowers the
+ *   configurable max, the two fields remain distinguishable.
+ *
+ * T1.9 does **not** implement checkpoint / resume runtime, chunk ACK, or
+ * transfer state machines.
+ *
+ * @type {Readonly<{
+ *   defaultAutomaticAttempts: number,
+ *   minConfigurableAutomaticAttempts: number,
+ *   maxConfigurableAutomaticAttempts: number,
+ *   hardCeilingAutomaticAttempts: number,
+ *   explicitResumeRequiredAfterExhaustion: true,
+ *   silentRestartAllowed: false,
+ *   unboundedRetryAllowed: false,
+ *   errorCode: string,
+ * }>}
+ */
+export const CROSS_LAN_DATA_RESUME_POLICY = deepFreeze({
+  defaultAutomaticAttempts: 5,
+  minConfigurableAutomaticAttempts: 3,
+  maxConfigurableAutomaticAttempts: 10,
+  hardCeilingAutomaticAttempts: 10,
+  explicitResumeRequiredAfterExhaustion: true,
+  silentRestartAllowed: false,
+  unboundedRetryAllowed: false,
+  errorCode: ERROR_CODES.DATA_RESUME_EXHAUSTED,
+});
+
+/**
+ * Module-private decision freezer for resolveCrossLanKeepaliveConfiguration.
+ * Always returns a fresh frozen object; not a second policy/registry export.
+ *
+ * @param {boolean} configurationAccepted
+ * @param {boolean} usedDefault
+ * @param {number} negotiatedKeepaliveInterval
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   negotiatedKeepaliveInterval: number,
+ * }>}
+ */
+function freezeKeepaliveConfigurationDecision(
+  configurationAccepted,
+  usedDefault,
+  negotiatedKeepaliveInterval,
+) {
+  return Object.freeze({
+    configurationAccepted,
+    usedDefault,
+    negotiatedKeepaliveInterval,
+  });
+}
+
+/**
+ * Module-private decision freezer for resolveCrossLanDataResumeConfiguration.
+ * Always returns a fresh frozen object; not a second policy/registry export.
+ *
+ * @param {boolean} configurationAccepted
+ * @param {boolean} usedDefault
+ * @param {number} automaticResumeAttempts
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   automaticResumeAttempts: number,
+ * }>}
+ */
+function freezeDataResumeConfigurationDecision(
+  configurationAccepted,
+  usedDefault,
+  automaticResumeAttempts,
+) {
+  return Object.freeze({
+    configurationAccepted,
+    usedDefault,
+    automaticResumeAttempts,
+  });
+}
+
+/**
+ * Module-private decision freezer for evaluateCrossLanKeepaliveTimeout.
+ * Always returns a fresh frozen object; not a second policy/registry export.
+ *
+ * @param {boolean} inputAccepted
+ * @param {boolean} shouldDisconnect
+ * @param {number | null} timeoutAfterMs
+ * @returns {Readonly<{
+ *   inputAccepted: boolean,
+ *   shouldDisconnect: boolean,
+ *   timeoutAfterMs: number | null,
+ * }>}
+ */
+function freezeKeepaliveTimeoutDecision(inputAccepted, shouldDisconnect, timeoutAfterMs) {
+  return Object.freeze({
+    inputAccepted,
+    shouldDisconnect,
+    timeoutAfterMs,
+  });
+}
+
+/**
+ * Resolve a caller-supplied keepalive interval configuration into a frozen decision.
+ *
+ * Pure configuration gate only — no runtime reporting, no network, no I/O.
+ *
+ * Decision semantics:
+ * - `undefined` → accepted default path (`usedDefault: true`, 30s).
+ * - primitive Number safe integer in [5, 120] inclusive → accepted explicit
+ *   value (`usedDefault: false`, that value).
+ * - any other input (including objects / Proxies) → rejected fallback
+ *   (`configurationAccepted: false`, `usedDefault: true`, 30s). Properties
+ *   of objects/Proxies are never read; no coercion.
+ *
+ * **Honesty boundary:** `configurationAccepted: false` means the configured
+ * value was rejected. A future caller **must** report/reject that bad config
+ * before using the default; it must not treat `usedDefault: true` alone as
+ * silent acceptance. T1.9 freezes that responsibility but does not implement
+ * runtime reporting. No fallbackReason / error taxonomy is invented here.
+ *
+ * Never throws. Does not export a second policy or registry.
+ *
+ * @param {unknown} configuredSeconds
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   negotiatedKeepaliveInterval: number,
+ * }>}
+ */
+export function resolveCrossLanKeepaliveConfiguration(configuredSeconds) {
+  try {
+    if (configuredSeconds === undefined) {
+      return freezeKeepaliveConfigurationDecision(
+        true,
+        true,
+        CROSS_LAN_KEEPALIVE_POLICY.defaultSeconds,
+      );
+    }
+
+    // Primitive Number safe integer only — no coercion, no object unboxing.
+    if (
+      typeof configuredSeconds === 'number' &&
+      Number.isSafeInteger(configuredSeconds) &&
+      configuredSeconds >= CROSS_LAN_KEEPALIVE_POLICY.minSeconds &&
+      configuredSeconds <= CROSS_LAN_KEEPALIVE_POLICY.maxSeconds
+    ) {
+      return freezeKeepaliveConfigurationDecision(true, false, configuredSeconds);
+    }
+
+    return freezeKeepaliveConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_KEEPALIVE_POLICY.defaultSeconds,
+    );
+  } catch {
+    return freezeKeepaliveConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_KEEPALIVE_POLICY.defaultSeconds,
+    );
+  }
+}
+
+/**
+ * Resolve a caller-supplied data-resume automatic-attempt configuration into
+ * a frozen decision.
+ *
+ * Pure configuration gate only — no runtime reporting, no network, no I/O.
+ *
+ * Decision semantics:
+ * - `undefined` → accepted default path (`usedDefault: true`, 5 attempts).
+ * - primitive Number safe integer in [3, 10] inclusive → accepted explicit
+ *   value (`usedDefault: false`, that value).
+ * - any other input (including objects / Proxies) → rejected fallback
+ *   (`configurationAccepted: false`, `usedDefault: true`, 5). Properties
+ *   of objects/Proxies are never read; no coercion.
+ *
+ * **Honesty boundary:** `configurationAccepted: false` means the configured
+ * value was rejected. A future caller **must** report/reject that bad config
+ * before using the default; it must not treat `usedDefault: true` alone as
+ * silent acceptance. T1.9 freezes that responsibility but does not implement
+ * runtime reporting. No fallbackReason / error taxonomy is invented here.
+ *
+ * Never throws. Does not export a second policy or registry. Does not
+ * implement checkpoint / resume runtime.
+ *
+ * @param {unknown} configuredAttempts
+ * @returns {Readonly<{
+ *   configurationAccepted: boolean,
+ *   usedDefault: boolean,
+ *   automaticResumeAttempts: number,
+ * }>}
+ */
+export function resolveCrossLanDataResumeConfiguration(configuredAttempts) {
+  try {
+    if (configuredAttempts === undefined) {
+      return freezeDataResumeConfigurationDecision(
+        true,
+        true,
+        CROSS_LAN_DATA_RESUME_POLICY.defaultAutomaticAttempts,
+      );
+    }
+
+    // Primitive Number safe integer only — no coercion, no object unboxing.
+    if (
+      typeof configuredAttempts === 'number' &&
+      Number.isSafeInteger(configuredAttempts) &&
+      configuredAttempts >= CROSS_LAN_DATA_RESUME_POLICY.minConfigurableAutomaticAttempts &&
+      configuredAttempts <= CROSS_LAN_DATA_RESUME_POLICY.maxConfigurableAutomaticAttempts
+    ) {
+      return freezeDataResumeConfigurationDecision(true, false, configuredAttempts);
+    }
+
+    return freezeDataResumeConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_DATA_RESUME_POLICY.defaultAutomaticAttempts,
+    );
+  } catch {
+    return freezeDataResumeConfigurationDecision(
+      false,
+      true,
+      CROSS_LAN_DATA_RESUME_POLICY.defaultAutomaticAttempts,
+    );
+  }
+}
+
+/**
+ * Pure closed-set liveness classification (T1.9 / §6.12).
+ *
+ * Returns whether the named signal type is allowed to refresh the **security
+ * session** liveness timer, by reading the single policy map
+ * `CROSS_LAN_KEEPALIVE_POLICY.livenessRefreshBySource` via `Object.hasOwn`.
+ *
+ * **Precondition (caller responsibility):** the caller has already completed
+ * AEAD authentication and semantic classification of the traffic. This
+ * function performs **only** a closed-set boolean map lookup. It never
+ * authenticates input, never verifies AEAD, and never inspects wire bytes.
+ *
+ * Accepts only a primitive string. Unknown strings, empty string, case drift,
+ * symbols, numbers, objects, and non-strings return `false`. Never throws.
+ * RFC6455 WebSocket ping/pong are mapped to `false` and must not refresh
+ * the security timer.
+ *
+ * T1.0 Noise library selection remains BLOCKED. Does not create or refresh
+ * any actual timer.
+ *
+ * @param {unknown} signalType
+ * @returns {boolean}
+ */
+export function doesCrossLanLivenessSignalRefreshTimer(signalType) {
+  try {
+    if (typeof signalType !== 'string') return false;
+    if (!Object.hasOwn(CROSS_LAN_KEEPALIVE_POLICY.livenessRefreshBySource, signalType)) {
+      return false;
+    }
+    return CROSS_LAN_KEEPALIVE_POLICY.livenessRefreshBySource[signalType] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure keepalive timeout three-state decision (T1.9 / §6.12).
+ *
+ * Given an exact ordinary record of negotiated interval (seconds) and elapsed
+ * authenticated-liveness time (milliseconds), returns a fresh frozen decision:
+ * - legal input → `{ inputAccepted: true, shouldDisconnect, timeoutAfterMs }`
+ *   where `timeoutAfterMs = intervalSeconds * timeoutMultiplier * 1000` and
+ *   `shouldDisconnect = elapsedMs > timeoutAfterMs` (strict greater-than).
+ * - illegal / extra fields / accessor / non-plain / throwing or revoked Proxy
+ *   → `{ inputAccepted: false, shouldDisconnect: true, timeoutAfterMs: null }`.
+ *
+ * **Honesty boundary for future runtime:**
+ * - Only `inputAccepted: true && shouldDisconnect: true` may be mapped to
+ *   `CROSS_LAN_KEEPALIVE_POLICY.timeoutErrorCode` (`SESSION_KEEPALIVE_TIMEOUT`).
+ * - Invalid input conservatively disconnects but **must not** be disguised as
+ *   `session-keepalive-timeout`; future independent input/state error handling
+ *   owns that path. T1.9 invents no additional error code.
+ *
+ * Multiplier is always read from `CROSS_LAN_KEEPALIVE_POLICY.timeoutMultiplier`
+ * (never a second hard-coded `3`). Never reads `Date.now`, never reads signal
+ * types, never refreshes a timer. Never throws.
+ *
+ * Pure ECMAScript cannot reliably detect transparent Proxies. Throwing and
+ * revoked Proxies fail closed (invalid decision, never throw). Transparent
+ * Proxies remain a residual risk (same honesty note as T1.6/T1.7): future
+ * trust-boundary callers must still canonicalize/freeze inputs.
+ *
+ * Exact-record gate: ordinary object; own keys exactly the two named string
+ * enumerable data properties; values are primitive Number safe integers with
+ * `negotiatedKeepaliveInterval` in [5, 120] and
+ * `elapsedSinceAuthenticatedLivenessMs >= 0`.
+ *
+ * @param {unknown} input
+ * @returns {Readonly<{
+ *   inputAccepted: boolean,
+ *   shouldDisconnect: boolean,
+ *   timeoutAfterMs: number | null,
+ * }>}
+ */
+export function evaluateCrossLanKeepaliveTimeout(input) {
+  try {
+    if (!isPlainRecord(input)) {
+      return freezeKeepaliveTimeoutDecision(false, true, null);
+    }
+
+    const keys = getExactOwnStringDataKeys(input);
+    if (keys === null || keys.length !== 2) {
+      return freezeKeepaliveTimeoutDecision(false, true, null);
+    }
+
+    const keySet = new Set(keys);
+    if (
+      !keySet.has('negotiatedKeepaliveInterval') ||
+      !keySet.has('elapsedSinceAuthenticatedLivenessMs')
+    ) {
+      return freezeKeepaliveTimeoutDecision(false, true, null);
+    }
+
+    const negotiatedKeepaliveInterval = input.negotiatedKeepaliveInterval;
+    const elapsedSinceAuthenticatedLivenessMs = input.elapsedSinceAuthenticatedLivenessMs;
+
+    if (
+      typeof negotiatedKeepaliveInterval !== 'number' ||
+      !Number.isSafeInteger(negotiatedKeepaliveInterval) ||
+      negotiatedKeepaliveInterval < CROSS_LAN_KEEPALIVE_POLICY.minSeconds ||
+      negotiatedKeepaliveInterval > CROSS_LAN_KEEPALIVE_POLICY.maxSeconds
+    ) {
+      return freezeKeepaliveTimeoutDecision(false, true, null);
+    }
+
+    if (
+      typeof elapsedSinceAuthenticatedLivenessMs !== 'number' ||
+      !Number.isSafeInteger(elapsedSinceAuthenticatedLivenessMs) ||
+      elapsedSinceAuthenticatedLivenessMs < 0
+    ) {
+      return freezeKeepaliveTimeoutDecision(false, true, null);
+    }
+
+    const timeoutAfterMs =
+      negotiatedKeepaliveInterval * CROSS_LAN_KEEPALIVE_POLICY.timeoutMultiplier * 1000;
+    const shouldDisconnect = elapsedSinceAuthenticatedLivenessMs > timeoutAfterMs;
+    return freezeKeepaliveTimeoutDecision(true, shouldDisconnect, timeoutAfterMs);
+  } catch {
+    return freezeKeepaliveTimeoutDecision(false, true, null);
+  }
+}

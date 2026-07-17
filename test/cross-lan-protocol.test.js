@@ -2099,3 +2099,894 @@ describe('cross-LAN session construction lifecycle isolation (T1.8)', () => {
     );
   });
 });
+
+/**
+ * T1.9 pure capacity / keepalive / data-resume policy contracts only.
+ *
+ * Honesty / scope (PM final adjudication for M1 T1.9):
+ * - Pure frozen constants + pure configuration resolvers + pure liveness
+ *   classification / timeout decision only.
+ * - Does NOT implement timers, sockets, random/jitter scheduling, sleep,
+ *   persistence, token buckets, queue runtime, reconnect loops, or any
+ *   production session wiring.
+ * - T1.0 Noise library selection gate remains BLOCKED. These tests do not
+ *   claim Noise / E2EE / cross-LAN / M1 / session-runtime readiness.
+ * - `configurationAccepted: false` means the configured value was rejected;
+ *   a future caller MUST report/reject bad config before using the fallback.
+ * - For keepalive timeout: only `inputAccepted:true && shouldDisconnect:true`
+ *   may map to SESSION_KEEPALIVE_TIMEOUT in a future runtime. Invalid input
+ *   conservatively disconnects but must NOT be disguised as that error code.
+ * - Transparent Proxy residual risk is not required to return reject; pure
+ *   ECMAScript cannot reliably detect transparent Proxies.
+ *
+ * Expected numeric pins below are independent literals — never derived from
+ * the production policy exports (single-source production, dual-source test).
+ */
+describe('cross-LAN capacity / keepalive / data-resume policy (T1.9)', () => {
+  // --- Independent expected pins (literals only; not read from production) ---
+
+  const EXPECTED_CAPACITY_POLICY = Object.freeze({
+    controlQueue: Object.freeze({
+      defaultMessageCountPerDevice: 256,
+      hardCeilingMessageCountPerDevice: 1024,
+      defaultTotalBytesPerDevice: 1_048_576,
+      hardCeilingTotalBytesPerDevice: 4_194_304,
+      maximumMessageBytes: 65_536,
+      overflowErrorCode: ERROR_CODES.CONTROL_QUEUE_OVERFLOW,
+    }),
+    dataPlaneInflight: Object.freeze({
+      defaultBytesPerDevice: 67_108_864,
+      hardCeilingBytesPerDevice: 268_435_456,
+    }),
+    queueSeparation: Object.freeze({
+      priorityOrder: Object.freeze([
+        'P0 revoke/security',
+        'P1 session-control',
+        'P2 status',
+        'P3 bulk-data-signal',
+      ]),
+      p0PersistentRingDefaultMessageCount: 64,
+      controlAndDataShareOfflineQueue: false,
+      backupChunksAllowedInControlQueue: false,
+      p0SharesBulkQueue: false,
+    }),
+    perDeviceRate: Object.freeze({
+      defaultMessagesPerSecond: 30,
+      hardCeilingMessagesPerSecond: 60,
+      defaultBurstMessages: 60,
+      hardCeilingBurstMessages: 120,
+      errorCode: ERROR_CODES.DEVICE_RATE_LIMITED,
+    }),
+    perDeviceSessions: Object.freeze({
+      defaultConcurrentSessions: 2,
+      defaultActiveSessions: 1,
+      defaultDrainingSessions: 1,
+      hardCeilingConcurrentSessions: 4,
+      errorCode: ERROR_CODES.DEVICE_SESSION_LIMIT,
+    }),
+    perDeviceConnections: Object.freeze({
+      defaultConcurrentConnectionsIncludingHandshake: 4,
+      hardCeilingConcurrentConnectionsIncludingHandshake: 8,
+    }),
+    relayInboundConnections: Object.freeze({
+      defaultPerController: 512,
+      hardCeilingPerController: 2048,
+    }),
+    reconnectBackoff: Object.freeze({
+      initialDelayMs: 1000,
+      multiplier: 2,
+      maximumDelayMs: 60_000,
+      jitterFraction: 0.2,
+      busyLoopAllowed: false,
+      errorCode: ERROR_CODES.RELAY_CONNECT_FAILED,
+    }),
+    enrollmentHandshakeRate: Object.freeze({
+      defaultAttemptsPerMinutePerSourceFingerprint: 10,
+      hardCeilingAttemptsPerMinutePerSourceFingerprint: 30,
+      errorCode: ERROR_CODES.ENROLLMENT_RATE_LIMITED,
+    }),
+  });
+
+  const EXPECTED_KEEPALIVE_POLICY = Object.freeze({
+    defaultSeconds: 30,
+    minSeconds: 5,
+    maxSeconds: 120,
+    timeoutMultiplier: 3,
+    livenessRefreshBySource: Object.freeze({
+      'application-pong': true,
+      'authenticated-control-traffic': true,
+      'authenticated-data-traffic': true,
+      'websocket-ping': false,
+      'websocket-pong': false,
+    }),
+    timeoutErrorCode: ERROR_CODES.SESSION_KEEPALIVE_TIMEOUT,
+  });
+
+  const EXPECTED_DATA_RESUME_POLICY = Object.freeze({
+    defaultAutomaticAttempts: 5,
+    minConfigurableAutomaticAttempts: 3,
+    maxConfigurableAutomaticAttempts: 10,
+    hardCeilingAutomaticAttempts: 10,
+    explicitResumeRequiredAfterExhaustion: true,
+    silentRestartAllowed: false,
+    unboundedRetryAllowed: false,
+    errorCode: ERROR_CODES.DATA_RESUME_EXHAUSTED,
+  });
+
+  const EXPECTED_KEEPALIVE_DEFAULT_DECISION = Object.freeze({
+    configurationAccepted: true,
+    usedDefault: true,
+    negotiatedKeepaliveInterval: 30,
+  });
+
+  const EXPECTED_KEEPALIVE_INVALID_DECISION = Object.freeze({
+    configurationAccepted: false,
+    usedDefault: true,
+    negotiatedKeepaliveInterval: 30,
+  });
+
+  const EXPECTED_DATA_RESUME_DEFAULT_DECISION = Object.freeze({
+    configurationAccepted: true,
+    usedDefault: true,
+    automaticResumeAttempts: 5,
+  });
+
+  const EXPECTED_DATA_RESUME_INVALID_DECISION = Object.freeze({
+    configurationAccepted: false,
+    usedDefault: true,
+    automaticResumeAttempts: 5,
+  });
+
+  const EXPECTED_TIMEOUT_INVALID_DECISION = Object.freeze({
+    inputAccepted: false,
+    shouldDisconnect: true,
+    timeoutAfterMs: null,
+  });
+
+  /**
+   * Recursively assert Object.isFrozen on plain objects and arrays.
+   * @param {unknown} value
+   * @param {string} path
+   */
+  function assertDeepFrozen(value, path = 'root') {
+    if (value === null || typeof value !== 'object') return;
+    assert.ok(Object.isFrozen(value), `must be frozen: ${path}`);
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) {
+        assertDeepFrozen(value[i], `${path}[${i}]`);
+      }
+      return;
+    }
+    for (const key of Object.keys(value)) {
+      assertDeepFrozen(value[key], `${path}.${key}`);
+    }
+  }
+
+  /**
+   * Strict-mode mutation of every own data property (and nested) must throw.
+   * @param {object} root
+   * @param {string} path
+   */
+  function assertStrictModeMutationFails(root, path = 'root') {
+    if (root === null || typeof root !== 'object') return;
+    if (Array.isArray(root)) {
+      assert.throws(() => {
+        root.push('mutate');
+      }, TypeError, `array push must throw: ${path}`);
+      assert.throws(() => {
+        root[0] = typeof root[0] === 'string' ? `${root[0]}-mut` : 999;
+      }, TypeError, `array index assign must throw: ${path}`);
+      for (let i = 0; i < root.length; i += 1) {
+        assertStrictModeMutationFails(root[i], `${path}[${i}]`);
+      }
+      return;
+    }
+    for (const key of Object.keys(root)) {
+      const current = root[key];
+      assert.throws(() => {
+        root[key] = typeof current === 'boolean' ? !current : 999_999;
+      }, TypeError, `property assign must throw: ${path}.${key}`);
+      assertStrictModeMutationFails(current, `${path}.${key}`);
+    }
+  }
+
+  /**
+   * @param {{ configurationAccepted: boolean, usedDefault: boolean, negotiatedKeepaliveInterval?: number, automaticResumeAttempts?: number }} decision
+   * @param {Readonly<object>} expected
+   */
+  function assertExactFrozenConfigDecision(decision, expected) {
+    assert.deepStrictEqual(decision, expected);
+    assert.ok(Object.isFrozen(decision), 'config decision must be frozen');
+    if (decision.configurationAccepted === false) {
+      assert.strictEqual(decision.usedDefault, true);
+    }
+    assert.notDeepStrictEqual(
+      {
+        configurationAccepted: decision.configurationAccepted,
+        usedDefault: decision.usedDefault,
+      },
+      { configurationAccepted: false, usedDefault: false },
+    );
+  }
+
+  /**
+   * @param {{ inputAccepted: boolean, shouldDisconnect: boolean, timeoutAfterMs: number | null }} decision
+   * @param {Readonly<object>} expected
+   */
+  function assertExactFrozenTimeoutDecision(decision, expected) {
+    assert.deepStrictEqual(decision, expected);
+    assert.ok(Object.isFrozen(decision), 'timeout decision must be frozen');
+  }
+
+  /**
+   * Fresh exact valid timeout input.
+   * @param {{ negotiatedKeepaliveInterval?: number, elapsedSinceAuthenticatedLivenessMs?: number }} [overrides]
+   */
+  function createValidTimeoutInput(overrides = {}) {
+    return {
+      negotiatedKeepaliveInterval: 30,
+      elapsedSinceAuthenticatedLivenessMs: 0,
+      ...overrides,
+    };
+  }
+
+  it('pins CROSS_LAN_CAPACITY_POLICY exact §4.4 values, error codes, deep freeze, strict mutation fails', () => {
+    const policy = protocol.CROSS_LAN_CAPACITY_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'protocol.CROSS_LAN_CAPACITY_POLICY must be exported (T1.9 RED if missing)',
+    );
+    assert.deepStrictEqual(policy, EXPECTED_CAPACITY_POLICY);
+
+    // Error codes must be the registry values (not copied strings).
+    assert.strictEqual(
+      policy.controlQueue.overflowErrorCode,
+      ERROR_CODES.CONTROL_QUEUE_OVERFLOW,
+    );
+    assert.strictEqual(policy.perDeviceRate.errorCode, ERROR_CODES.DEVICE_RATE_LIMITED);
+    assert.strictEqual(policy.perDeviceSessions.errorCode, ERROR_CODES.DEVICE_SESSION_LIMIT);
+    assert.strictEqual(policy.reconnectBackoff.errorCode, ERROR_CODES.RELAY_CONNECT_FAILED);
+    assert.strictEqual(
+      policy.enrollmentHandshakeRate.errorCode,
+      ERROR_CODES.ENROLLMENT_RATE_LIMITED,
+    );
+
+    // Full §4.4 numeric + negative queue-separation invariants.
+    assert.strictEqual(policy.controlQueue.defaultMessageCountPerDevice, 256);
+    assert.strictEqual(policy.controlQueue.hardCeilingMessageCountPerDevice, 1024);
+    assert.strictEqual(policy.controlQueue.defaultTotalBytesPerDevice, 1_048_576);
+    assert.strictEqual(policy.controlQueue.hardCeilingTotalBytesPerDevice, 4_194_304);
+    assert.strictEqual(policy.controlQueue.maximumMessageBytes, 65_536);
+    assert.strictEqual(policy.dataPlaneInflight.defaultBytesPerDevice, 67_108_864);
+    assert.strictEqual(policy.dataPlaneInflight.hardCeilingBytesPerDevice, 268_435_456);
+    assert.deepStrictEqual(policy.queueSeparation.priorityOrder, [
+      'P0 revoke/security',
+      'P1 session-control',
+      'P2 status',
+      'P3 bulk-data-signal',
+    ]);
+    assert.strictEqual(policy.queueSeparation.p0PersistentRingDefaultMessageCount, 64);
+    assert.strictEqual(policy.queueSeparation.controlAndDataShareOfflineQueue, false);
+    assert.strictEqual(policy.queueSeparation.backupChunksAllowedInControlQueue, false);
+    assert.strictEqual(policy.queueSeparation.p0SharesBulkQueue, false);
+    assert.strictEqual(policy.perDeviceRate.defaultMessagesPerSecond, 30);
+    assert.strictEqual(policy.perDeviceRate.hardCeilingMessagesPerSecond, 60);
+    assert.strictEqual(policy.perDeviceRate.defaultBurstMessages, 60);
+    assert.strictEqual(policy.perDeviceRate.hardCeilingBurstMessages, 120);
+    assert.strictEqual(policy.perDeviceSessions.defaultConcurrentSessions, 2);
+    assert.strictEqual(policy.perDeviceSessions.defaultActiveSessions, 1);
+    assert.strictEqual(policy.perDeviceSessions.defaultDrainingSessions, 1);
+    assert.strictEqual(policy.perDeviceSessions.hardCeilingConcurrentSessions, 4);
+    assert.strictEqual(
+      policy.perDeviceConnections.defaultConcurrentConnectionsIncludingHandshake,
+      4,
+    );
+    assert.strictEqual(
+      policy.perDeviceConnections.hardCeilingConcurrentConnectionsIncludingHandshake,
+      8,
+    );
+    assert.strictEqual(policy.relayInboundConnections.defaultPerController, 512);
+    assert.strictEqual(policy.relayInboundConnections.hardCeilingPerController, 2048);
+    assert.strictEqual(policy.reconnectBackoff.initialDelayMs, 1000);
+    assert.strictEqual(policy.reconnectBackoff.multiplier, 2);
+    assert.strictEqual(policy.reconnectBackoff.maximumDelayMs, 60_000);
+    assert.strictEqual(policy.reconnectBackoff.jitterFraction, 0.2);
+    assert.strictEqual(policy.reconnectBackoff.busyLoopAllowed, false);
+    assert.strictEqual(
+      policy.enrollmentHandshakeRate.defaultAttemptsPerMinutePerSourceFingerprint,
+      10,
+    );
+    assert.strictEqual(
+      policy.enrollmentHandshakeRate.hardCeilingAttemptsPerMinutePerSourceFingerprint,
+      30,
+    );
+
+    assertDeepFrozen(policy);
+    assertStrictModeMutationFails(policy);
+    assert.deepStrictEqual(policy, EXPECTED_CAPACITY_POLICY);
+  });
+
+  it('pins CROSS_LAN_KEEPALIVE_POLICY exact §6.12 values, single liveness map, freeze, strict mutation fails', () => {
+    const policy = protocol.CROSS_LAN_KEEPALIVE_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'protocol.CROSS_LAN_KEEPALIVE_POLICY must be exported (T1.9 RED if missing)',
+    );
+    assert.deepStrictEqual(policy, EXPECTED_KEEPALIVE_POLICY);
+    assert.strictEqual(policy.timeoutErrorCode, ERROR_CODES.SESSION_KEEPALIVE_TIMEOUT);
+    assert.strictEqual(policy.defaultSeconds, 30);
+    assert.strictEqual(policy.minSeconds, 5);
+    assert.strictEqual(policy.maxSeconds, 120);
+    assert.strictEqual(policy.timeoutMultiplier, 3);
+
+    // Single source: five closed-set liveness keys only.
+    assert.deepStrictEqual(Object.keys(policy.livenessRefreshBySource).sort(), [
+      'application-pong',
+      'authenticated-control-traffic',
+      'authenticated-data-traffic',
+      'websocket-ping',
+      'websocket-pong',
+    ].sort());
+    assert.strictEqual(policy.livenessRefreshBySource['application-pong'], true);
+    assert.strictEqual(policy.livenessRefreshBySource['authenticated-control-traffic'], true);
+    assert.strictEqual(policy.livenessRefreshBySource['authenticated-data-traffic'], true);
+    assert.strictEqual(policy.livenessRefreshBySource['websocket-ping'], false);
+    assert.strictEqual(policy.livenessRefreshBySource['websocket-pong'], false);
+
+    assertDeepFrozen(policy);
+    assertStrictModeMutationFails(policy);
+    assert.deepStrictEqual(policy, EXPECTED_KEEPALIVE_POLICY);
+  });
+
+  it('pins CROSS_LAN_DATA_RESUME_POLICY exact §6.10 values, freeze, strict mutation fails', () => {
+    const policy = protocol.CROSS_LAN_DATA_RESUME_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'protocol.CROSS_LAN_DATA_RESUME_POLICY must be exported (T1.9 RED if missing)',
+    );
+    assert.deepStrictEqual(policy, EXPECTED_DATA_RESUME_POLICY);
+    assert.strictEqual(policy.errorCode, ERROR_CODES.DATA_RESUME_EXHAUSTED);
+    assert.strictEqual(policy.defaultAutomaticAttempts, 5);
+    assert.strictEqual(policy.minConfigurableAutomaticAttempts, 3);
+    assert.strictEqual(policy.maxConfigurableAutomaticAttempts, 10);
+    assert.strictEqual(policy.hardCeilingAutomaticAttempts, 10);
+    // Same numeric value, distinct semantics: configurable max vs absolute hard ceiling.
+    assert.strictEqual(
+      policy.maxConfigurableAutomaticAttempts,
+      policy.hardCeilingAutomaticAttempts,
+    );
+    assert.strictEqual(policy.explicitResumeRequiredAfterExhaustion, true);
+    assert.strictEqual(policy.silentRestartAllowed, false);
+    assert.strictEqual(policy.unboundedRetryAllowed, false);
+
+    assertDeepFrozen(policy);
+    assertStrictModeMutationFails(policy);
+    assert.deepStrictEqual(policy, EXPECTED_DATA_RESUME_POLICY);
+  });
+
+  it('resolveCrossLanKeepaliveConfiguration accepted triad + invalid fallback; fresh frozen; never throws', () => {
+    const resolve = protocol.resolveCrossLanKeepaliveConfiguration;
+    assert.strictEqual(typeof resolve, 'function');
+
+    const firstUndefined = resolve(undefined);
+    const secondUndefined = resolve(undefined);
+    assertExactFrozenConfigDecision(firstUndefined, EXPECTED_KEEPALIVE_DEFAULT_DECISION);
+    assertExactFrozenConfigDecision(secondUndefined, EXPECTED_KEEPALIVE_DEFAULT_DECISION);
+    assert.notStrictEqual(firstUndefined, secondUndefined);
+
+    assertExactFrozenConfigDecision(
+      resolve(5),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        negotiatedKeepaliveInterval: 5,
+      }),
+    );
+    assertExactFrozenConfigDecision(
+      resolve(120),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        negotiatedKeepaliveInterval: 120,
+      }),
+    );
+    assertExactFrozenConfigDecision(
+      resolve(30),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        negotiatedKeepaliveInterval: 30,
+      }),
+    );
+
+    const throwingNumberProxy = new Proxy(new Number(30), {
+      get() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getOwnPropertyDescriptor() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      ownKeys() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getPrototypeOf() {
+        throw new Error(SENTINEL_SECRET);
+      },
+    });
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({ valueOf: () => 30 }, {});
+    revoke();
+
+    const invalidInputs = [
+      4,
+      121,
+      4.5,
+      30.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      30n,
+      '30',
+      null,
+      true,
+      Symbol('30'),
+      { value: 30 },
+      [30],
+      new Number(30),
+      throwingNumberProxy,
+      revokedProxy,
+    ];
+
+    for (const bad of invalidInputs) {
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = resolve(bad);
+      }, 'keepalive resolve must not throw');
+      assertExactFrozenConfigDecision(decision, EXPECTED_KEEPALIVE_INVALID_DECISION);
+    }
+  });
+
+  it('resolveCrossLanDataResumeConfiguration accepted triad + invalid fallback; fresh frozen; never throws', () => {
+    const resolve = protocol.resolveCrossLanDataResumeConfiguration;
+    assert.strictEqual(typeof resolve, 'function');
+
+    const firstUndefined = resolve(undefined);
+    const secondUndefined = resolve(undefined);
+    assertExactFrozenConfigDecision(firstUndefined, EXPECTED_DATA_RESUME_DEFAULT_DECISION);
+    assertExactFrozenConfigDecision(secondUndefined, EXPECTED_DATA_RESUME_DEFAULT_DECISION);
+    assert.notStrictEqual(firstUndefined, secondUndefined);
+
+    assertExactFrozenConfigDecision(
+      resolve(3),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        automaticResumeAttempts: 3,
+      }),
+    );
+    assertExactFrozenConfigDecision(
+      resolve(10),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        automaticResumeAttempts: 10,
+      }),
+    );
+    assertExactFrozenConfigDecision(
+      resolve(5),
+      Object.freeze({
+        configurationAccepted: true,
+        usedDefault: false,
+        automaticResumeAttempts: 5,
+      }),
+    );
+
+    const throwingNumberProxy = new Proxy(new Number(5), {
+      get() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getOwnPropertyDescriptor() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      ownKeys() {
+        throw new Error(SENTINEL_SECRET);
+      },
+      getPrototypeOf() {
+        throw new Error(SENTINEL_SECRET);
+      },
+    });
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({ valueOf: () => 5 }, {});
+    revoke();
+
+    const invalidInputs = [
+      2,
+      11,
+      2.5,
+      5.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      5n,
+      '5',
+      null,
+      true,
+      Symbol('5'),
+      { value: 5 },
+      [5],
+      new Number(5),
+      throwingNumberProxy,
+      revokedProxy,
+    ];
+
+    for (const bad of invalidInputs) {
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = resolve(bad);
+      }, 'data-resume resolve must not throw');
+      assertExactFrozenConfigDecision(decision, EXPECTED_DATA_RESUME_INVALID_DECISION);
+    }
+  });
+
+  it('doesCrossLanLivenessSignalRefreshTimer closed-set map only; WS ping/pong never refresh; never throws', () => {
+    const fn = protocol.doesCrossLanLivenessSignalRefreshTimer;
+    assert.strictEqual(typeof fn, 'function');
+
+    const policy = protocol.CROSS_LAN_KEEPALIVE_POLICY;
+    const closedSet = [
+      'application-pong',
+      'authenticated-control-traffic',
+      'authenticated-data-traffic',
+      'websocket-ping',
+      'websocket-pong',
+    ];
+
+    // Each closed-set value must match the single policy map exactly.
+    for (const signal of closedSet) {
+      assert.strictEqual(
+        fn(signal),
+        policy.livenessRefreshBySource[signal],
+        `liveness map must be single source for ${signal}`,
+      );
+    }
+
+    // WS transport helpers must never refresh the security timer.
+    assert.strictEqual(fn('websocket-ping'), false);
+    assert.strictEqual(fn('websocket-pong'), false);
+
+    // Authentic application-layer signals refresh.
+    assert.strictEqual(fn('application-pong'), true);
+    assert.strictEqual(fn('authenticated-control-traffic'), true);
+    assert.strictEqual(fn('authenticated-data-traffic'), true);
+
+    const nonRefreshing = [
+      'unknown',
+      '',
+      'Application-Pong',
+      'APPLICATION-PONG',
+      'application_pong',
+      ' application-pong',
+      'application-pong ',
+      'ws-ping',
+      'ping',
+      'pong',
+      undefined,
+      null,
+      0,
+      1,
+      true,
+      false,
+      Symbol('application-pong'),
+      { type: 'application-pong' },
+      ['application-pong'],
+    ];
+
+    for (const bad of nonRefreshing) {
+      let result;
+      assert.doesNotThrow(() => {
+        result = fn(bad);
+      });
+      assert.strictEqual(result, false, `must not refresh for ${String(bad)}`);
+    }
+  });
+
+  it('evaluateCrossLanKeepaliveTimeout boundaries at 30/5/120; uses timeoutMultiplier; no Date.now', (t) => {
+    const fn = protocol.evaluateCrossLanKeepaliveTimeout;
+    assert.strictEqual(typeof fn, 'function');
+
+    // 30s → timeoutAfterMs = 90_000; 89_999/90_000 false; 90_001 true.
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 89_999,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: false,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 90_000,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: false,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 90_001,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: true,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+
+    // 5s → 15_000 false; 15_001 true.
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 5,
+        elapsedSinceAuthenticatedLivenessMs: 15_000,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: false,
+        timeoutAfterMs: 15_000,
+      }),
+    );
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 5,
+        elapsedSinceAuthenticatedLivenessMs: 15_001,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: true,
+        timeoutAfterMs: 15_000,
+      }),
+    );
+
+    // 120s → 360_000 false; 360_001 true.
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 120,
+        elapsedSinceAuthenticatedLivenessMs: 360_000,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: false,
+        timeoutAfterMs: 360_000,
+      }),
+    );
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 120,
+        elapsedSinceAuthenticatedLivenessMs: 360_001,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: true,
+        timeoutAfterMs: 360_000,
+      }),
+    );
+
+    // elapsed 0 is always not timed out.
+    assertExactFrozenTimeoutDecision(
+      fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 0,
+      })),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: false,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+
+    // timeoutAfterMs must come from policy.timeoutMultiplier (3), not a second hard-coded 3.
+    assert.strictEqual(protocol.CROSS_LAN_KEEPALIVE_POLICY.timeoutMultiplier, 3);
+    const mid = fn(createValidTimeoutInput({
+      negotiatedKeepaliveInterval: 10,
+      elapsedSinceAuthenticatedLivenessMs: 0,
+    }));
+    assert.strictEqual(
+      mid.timeoutAfterMs,
+      10 * protocol.CROSS_LAN_KEEPALIVE_POLICY.timeoutMultiplier * 1000,
+    );
+
+    // Fresh frozen references each call.
+    const a = fn(createValidTimeoutInput());
+    const b = fn(createValidTimeoutInput());
+    assert.notStrictEqual(a, b);
+    assert.ok(Object.isFrozen(a));
+    assert.ok(Object.isFrozen(b));
+
+    // null-prototype exact valid record accepted.
+    assertExactFrozenTimeoutDecision(
+      fn(Object.assign(Object.create(null), createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 90_001,
+      }))),
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: true,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+
+    // Prove no Date.now read.
+    t.mock.method(Date, 'now', () => {
+      throw new Error(SENTINEL_SECRET);
+    });
+    let validWhileMocked;
+    assert.doesNotThrow(() => {
+      validWhileMocked = fn(createValidTimeoutInput({
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: 90_001,
+      }));
+    });
+    assertExactFrozenTimeoutDecision(
+      validWhileMocked,
+      Object.freeze({
+        inputAccepted: true,
+        shouldDisconnect: true,
+        timeoutAfterMs: 90_000,
+      }),
+    );
+  });
+
+  it('evaluateCrossLanKeepaliveTimeout rejects invalid exact-record inputs conservatively; never throws', () => {
+    const fn = protocol.evaluateCrossLanKeepaliveTimeout;
+
+    // Missing each required field.
+    for (const key of ['negotiatedKeepaliveInterval', 'elapsedSinceAuthenticatedLivenessMs']) {
+      const missing = createValidTimeoutInput();
+      delete missing[key];
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = fn(missing);
+      });
+      assertExactFrozenTimeoutDecision(decision, EXPECTED_TIMEOUT_INVALID_DECISION);
+    }
+
+    // Extra own enumerable key.
+    assertExactFrozenTimeoutDecision(
+      fn({ ...createValidTimeoutInput(), extra: true }),
+      EXPECTED_TIMEOUT_INVALID_DECISION,
+    );
+
+    // Symbol own key.
+    const withSymbol = createValidTimeoutInput();
+    Object.defineProperty(withSymbol, Symbol('s'), { value: 1, enumerable: true });
+    assertExactFrozenTimeoutDecision(fn(withSymbol), EXPECTED_TIMEOUT_INVALID_DECISION);
+
+    // Non-enumerable required field.
+    const nonEnumRequired = createValidTimeoutInput();
+    Object.defineProperty(nonEnumRequired, 'elapsedSinceAuthenticatedLivenessMs', {
+      value: 0,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assertExactFrozenTimeoutDecision(fn(nonEnumRequired), EXPECTED_TIMEOUT_INVALID_DECISION);
+
+    // Non-enumerable extra key.
+    const nonEnumExtra = createValidTimeoutInput();
+    Object.defineProperty(nonEnumExtra, 'hidden', {
+      value: true,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assertExactFrozenTimeoutDecision(fn(nonEnumExtra), EXPECTED_TIMEOUT_INVALID_DECISION);
+
+    // Accessor returning a correct value must still fail.
+    const accessor = createValidTimeoutInput();
+    Object.defineProperty(accessor, 'negotiatedKeepaliveInterval', {
+      get() {
+        return 30;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    assertExactFrozenTimeoutDecision(fn(accessor), EXPECTED_TIMEOUT_INVALID_DECISION);
+
+    // Non-plain / non-ordinary inputs.
+    const nonPlain = [
+      null,
+      undefined,
+      true,
+      false,
+      0,
+      30,
+      'timeout',
+      [],
+      new Date(),
+      new Map(),
+      new Set(),
+      new ExampleClass(),
+      () => {},
+    ];
+    for (const bad of nonPlain) {
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = fn(bad);
+      });
+      assertExactFrozenTimeoutDecision(decision, EXPECTED_TIMEOUT_INVALID_DECISION);
+    }
+
+    // Type drift / out-of-range on fields.
+    const typeDrifts = [
+      { negotiatedKeepaliveInterval: 4, elapsedSinceAuthenticatedLivenessMs: 0 },
+      { negotiatedKeepaliveInterval: 121, elapsedSinceAuthenticatedLivenessMs: 0 },
+      { negotiatedKeepaliveInterval: 30.5, elapsedSinceAuthenticatedLivenessMs: 0 },
+      { negotiatedKeepaliveInterval: '30', elapsedSinceAuthenticatedLivenessMs: 0 },
+      { negotiatedKeepaliveInterval: 30n, elapsedSinceAuthenticatedLivenessMs: 0 },
+      { negotiatedKeepaliveInterval: Number.NaN, elapsedSinceAuthenticatedLivenessMs: 0 },
+      {
+        negotiatedKeepaliveInterval: Number.POSITIVE_INFINITY,
+        elapsedSinceAuthenticatedLivenessMs: 0,
+      },
+      {
+        negotiatedKeepaliveInterval: Number.NEGATIVE_INFINITY,
+        elapsedSinceAuthenticatedLivenessMs: 0,
+      },
+      { negotiatedKeepaliveInterval: 30, elapsedSinceAuthenticatedLivenessMs: -1 },
+      { negotiatedKeepaliveInterval: 30, elapsedSinceAuthenticatedLivenessMs: 1.5 },
+      { negotiatedKeepaliveInterval: 30, elapsedSinceAuthenticatedLivenessMs: '0' },
+      { negotiatedKeepaliveInterval: 30, elapsedSinceAuthenticatedLivenessMs: 0n },
+      { negotiatedKeepaliveInterval: 30, elapsedSinceAuthenticatedLivenessMs: Number.NaN },
+      {
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: Number.POSITIVE_INFINITY,
+      },
+      {
+        negotiatedKeepaliveInterval: 30,
+        elapsedSinceAuthenticatedLivenessMs: Number.NEGATIVE_INFINITY,
+      },
+    ];
+    for (const bad of typeDrifts) {
+      let decision;
+      assert.doesNotThrow(() => {
+        decision = fn(bad);
+      });
+      assertExactFrozenTimeoutDecision(decision, EXPECTED_TIMEOUT_INVALID_DECISION);
+    }
+
+    // Throwing Proxy + revoked Proxy → invalid disconnect without throw.
+    const throwingProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+    const base = createValidTimeoutInput();
+    const { proxy: revokedProxy, revoke } = Proxy.revocable(base, {});
+    revoke();
+
+    assert.doesNotThrow(() => {
+      assertExactFrozenTimeoutDecision(fn(throwingProxy), EXPECTED_TIMEOUT_INVALID_DECISION);
+      assertExactFrozenTimeoutDecision(fn(revokedProxy), EXPECTED_TIMEOUT_INVALID_DECISION);
+    });
+    // Transparent Proxy residual risk is not required to reject.
+  });
+});
