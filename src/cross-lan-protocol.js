@@ -1,10 +1,11 @@
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.5 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.6 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
  * T1.4: pure strictly-forward sequence predicate (no window / no state).
  * T1.5: pure protocol profile allowlist (exact six-field shape + values only).
+ * T1.6: pure deviceId algebraic consistency (three caller-supplied strings only).
  *
  * NOT a security, crypto, wire-encoding, or semantic validator.
  * Does not verify nonces, MACs/signatures, times, uint64 ranges,
@@ -388,6 +389,86 @@ export function isAllowedCrossLanProtocolProfile(input) {
     if (input.tcpPort !== 443) return false;
 
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * T1.6 pure deviceId algebraic consistency only: are the three caller-supplied
+ * deviceId strings exactly equal as primitive non-empty code-unit strings?
+ *
+ * Proves **only** algebraic equality of the three values the caller provided.
+ * It does **not** verify provenance. If a caller copies the same unverified
+ * payload into all three fields, this function still returns true — that is
+ * never a security proof of identity, authentication, or authorization.
+ *
+ * Provenance contract (caller's responsibility; this function does not check):
+ * - `authenticatedDeviceId` — from a future verified token + enrollment binding
+ * - `sessionDeviceId` — from a future session key/context
+ * - `messageDeviceId` — extracted only after decryption from transcript/AAD/payload
+ *
+ * Do **not** call during early handshake stages that lack `messageDeviceId`.
+ *
+ * This function does **not** check enrollmentEpoch / revokeGeneration /
+ * trustEpoch, resource ACL/permissions, or token/Noise/AAD material itself.
+ * `resourceDeviceId` is intentionally absent from this API; full A15 resource
+ * authorization remains M3 follow-on.
+ *
+ * T1.0 Noise library selection gate remains BLOCKED. Do not wire this
+ * predicate to production accept / authorization / data-visibility paths, and
+ * do not claim complete A15 / Noise / E2EE / cross-LAN / M1 / runtime readiness
+ * from a true result.
+ *
+ * Pure ECMAScript cannot reliably detect transparent Proxies. Throwing and
+ * revoked Proxies fail closed (return false, never throw). Transparent Proxies
+ * remain a residual risk: future callers past a trust boundary must still
+ * canonicalize/freeze the three IDs and must not keep trusting mutable
+ * original input after a true result.
+ *
+ * Implementation: ordinary object (prototype Object.prototype or null); own
+ * keys exactly three string enumerable data properties named
+ * authenticatedDeviceId / sessionDeviceId / messageDeviceId; each value a
+ * primitive string with length > 0; all three compared with strict `===` only
+ * — no trim, normalize, case-fold, coerce, JSON, or stringify. Fail-closed
+ * try/catch.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function hasConsistentCrossLanDeviceIds(input) {
+  try {
+    if (!isPlainRecord(input)) return false;
+
+    const keys = getExactOwnStringDataKeys(input);
+    if (keys === null || keys.length !== 3) return false;
+
+    const keySet = new Set(keys);
+    if (
+      !keySet.has('authenticatedDeviceId') ||
+      !keySet.has('sessionDeviceId') ||
+      !keySet.has('messageDeviceId')
+    ) {
+      return false;
+    }
+
+    const authenticatedDeviceId = input.authenticatedDeviceId;
+    const sessionDeviceId = input.sessionDeviceId;
+    const messageDeviceId = input.messageDeviceId;
+
+    if (typeof authenticatedDeviceId !== 'string') return false;
+    if (typeof sessionDeviceId !== 'string') return false;
+    if (typeof messageDeviceId !== 'string') return false;
+
+    if (authenticatedDeviceId.length === 0) return false;
+    if (sessionDeviceId.length === 0) return false;
+    if (messageDeviceId.length === 0) return false;
+
+    // Exact code-unit equality only — no trim/normalize/case-fold/coerce.
+    return (
+      authenticatedDeviceId === sessionDeviceId &&
+      sessionDeviceId === messageDeviceId
+    );
   } catch {
     return false;
   }

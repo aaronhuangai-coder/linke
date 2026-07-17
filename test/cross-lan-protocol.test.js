@@ -1123,3 +1123,294 @@ describe('protocol downgrade profile allowlist (T1.5)', () => {
     });
   });
 });
+
+/**
+ * T1.6 pure deviceId algebraic consistency: protocol.hasConsistentCrossLanDeviceIds(input).
+ *
+ * Honesty contract (algebra only — not identity/auth/runtime proof):
+ * - T1.0 Noise library selection remains BLOCKED; this predicate only compares
+ *   three caller-supplied strings for exact code-unit equality.
+ * - Does NOT verify provenance: if a caller copies the same unverified payload
+ *   thrice, the result is true but is never a security proof.
+ * - Call only after the message is decrypted and messageDeviceId has been
+ *   extracted from transcript/AAD/payload; do not call in early handshake
+ *   stages that lack messageDeviceId.
+ * - Does NOT check enrollmentEpoch / revokeGeneration / trustEpoch, resource
+ *   ACL/permissions, or Noise/token/AAD material; not wired to production paths.
+ * - resourceDeviceId is intentionally absent; full cross-device resource
+ *   authorization remains M3/A15 follow-on.
+ * - Transparent Proxy is residual ES risk and is not required to return false.
+ *
+ * Unique true input: plain record (Object.prototype or null), own enumerable
+ * data fields exactly authenticatedDeviceId / sessionDeviceId / messageDeviceId,
+ * each a primitive non-empty string, all three exact-equal (no trim/normalize/
+ * case-fold/coerce). Otherwise false without throwing.
+ */
+describe('cross-LAN deviceId consistency contract (T1.6)', () => {
+  /** Fresh exact valid triple — independent per call so tests never share state. */
+  function createValidDeviceIdRecord() {
+    return {
+      authenticatedDeviceId: 'device-A',
+      sessionDeviceId: 'device-A',
+      messageDeviceId: 'device-A',
+    };
+  }
+
+  it('export is function; ordinary, frozen, null-proto exact records true; no trim/normalize', () => {
+    const fn = protocol.hasConsistentCrossLanDeviceIds;
+    assert.strictEqual(typeof fn, 'function');
+
+    assert.strictEqual(fn(createValidDeviceIdRecord()), true);
+
+    const frozen = Object.freeze(createValidDeviceIdRecord());
+    assert.strictEqual(fn(frozen), true);
+
+    const nullProto = Object.assign(Object.create(null), createValidDeviceIdRecord());
+    assert.strictEqual(fn(nullProto), true);
+
+    // Identical non-empty Unicode + surrounding spaces: exact equality only; no trim/normalize.
+    const spacedUnicode = '  device-\u03b1  ';
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: spacedUnicode,
+        sessionDeviceId: spacedUnicode,
+        messageDeviceId: spacedUnicode,
+      }),
+      true,
+    );
+  });
+
+  it('rejects A15 dual-fixture mismatches and case/space/Unicode drifts', () => {
+    const fn = protocol.hasConsistentCrossLanDeviceIds;
+
+    // Dual-fixture A15: each single field swapped to device-B → false.
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-B',
+        sessionDeviceId: 'device-A',
+        messageDeviceId: 'device-A',
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-A',
+        sessionDeviceId: 'device-B',
+        messageDeviceId: 'device-A',
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-A',
+        sessionDeviceId: 'device-A',
+        messageDeviceId: 'device-B',
+      }),
+      false,
+    );
+
+    // Case drift (no case-fold).
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-A',
+        sessionDeviceId: 'device-A',
+        messageDeviceId: 'Device-A',
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-A',
+        sessionDeviceId: 'DEVICE-A',
+        messageDeviceId: 'device-A',
+      }),
+      false,
+    );
+
+    // Trailing / surrounding space drift (no trim).
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: 'device-A',
+        sessionDeviceId: 'device-A',
+        messageDeviceId: 'device-A ',
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: ' device-A',
+        sessionDeviceId: 'device-A',
+        messageDeviceId: 'device-A',
+      }),
+      false,
+    );
+
+    // Unicode composed vs decomposed (no NFC/NFD normalize).
+    const composed = 'device-\u00e9'; // e acute precomposed
+    const decomposed = 'device-e\u0301'; // e + combining acute
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: composed,
+        sessionDeviceId: composed,
+        messageDeviceId: decomposed,
+      }),
+      false,
+    );
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: decomposed,
+        sessionDeviceId: composed,
+        messageDeviceId: composed,
+      }),
+      false,
+    );
+  });
+
+  it('rejects empty strings and type drift on any of the three fields', () => {
+    const fn = protocol.hasConsistentCrossLanDeviceIds;
+
+    // Any single field empty string.
+    for (const key of ['authenticatedDeviceId', 'sessionDeviceId', 'messageDeviceId']) {
+      const emptyOne = createValidDeviceIdRecord();
+      emptyOne[key] = '';
+      assert.strictEqual(fn(emptyOne), false, `empty string field: ${key}`);
+    }
+
+    // All three empty still false (not "consistent empties").
+    assert.strictEqual(
+      fn({
+        authenticatedDeviceId: '',
+        sessionDeviceId: '',
+        messageDeviceId: '',
+      }),
+      false,
+    );
+
+    // Type drift per field: undefined/null/number/boolean/String object/array/object.
+    const drifts = [
+      undefined,
+      null,
+      0,
+      1,
+      true,
+      false,
+      new String('device-A'),
+      ['device-A'],
+      { id: 'device-A' },
+    ];
+    for (const key of ['authenticatedDeviceId', 'sessionDeviceId', 'messageDeviceId']) {
+      for (const bad of drifts) {
+        const rec = createValidDeviceIdRecord();
+        rec[key] = bad;
+        assert.strictEqual(
+          fn(rec),
+          false,
+          `type drift on ${key}: ${Object.prototype.toString.call(bad)}`,
+        );
+      }
+    }
+  });
+
+  it('rejects non-exact records: missing, extra, symbol, non-enumerable, accessor, non-plain', () => {
+    const fn = protocol.hasConsistentCrossLanDeviceIds;
+
+    // Missing each required field.
+    for (const key of ['authenticatedDeviceId', 'sessionDeviceId', 'messageDeviceId']) {
+      const missing = createValidDeviceIdRecord();
+      delete missing[key];
+      assert.strictEqual(fn(missing), false, `missing field: ${key}`);
+    }
+
+    // Extra own enumerable key.
+    assert.strictEqual(
+      fn({ ...createValidDeviceIdRecord(), resourceDeviceId: 'device-A' }),
+      false,
+    );
+    assert.strictEqual(fn({ ...createValidDeviceIdRecord(), extra: true }), false);
+
+    // Symbol own key (even with all three string fields present).
+    const withSymbol = createValidDeviceIdRecord();
+    Object.defineProperty(withSymbol, Symbol('s'), { value: 1, enumerable: true });
+    assert.strictEqual(fn(withSymbol), false);
+
+    // Required field non-enumerable.
+    const nonEnumField = createValidDeviceIdRecord();
+    Object.defineProperty(nonEnumField, 'messageDeviceId', {
+      value: 'device-A',
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumField), false);
+
+    // Non-enumerable extra key.
+    const nonEnumExtra = createValidDeviceIdRecord();
+    Object.defineProperty(nonEnumExtra, 'hidden', {
+      value: true,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    assert.strictEqual(fn(nonEnumExtra), false);
+
+    // Accessor returning the correct value must still fail.
+    const accessor = createValidDeviceIdRecord();
+    Object.defineProperty(accessor, 'authenticatedDeviceId', {
+      get() {
+        return 'device-A';
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(accessor), false);
+
+    // Non-plain / non-ordinary inputs.
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn(new Map()), false);
+    assert.strictEqual(fn(new Set()), false);
+    assert.strictEqual(fn(new Date()), false);
+    assert.strictEqual(fn(() => {}), false);
+    assert.strictEqual(fn(ExampleClass), false);
+    assert.strictEqual(fn(new ExampleClass()), false);
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn(true), false);
+    assert.strictEqual(fn(false), false);
+    assert.strictEqual(fn(0), false);
+    assert.strictEqual(fn(1), false);
+    assert.strictEqual(fn('device-A'), false);
+    assert.strictEqual(fn(Object(true)), false);
+    assert.strictEqual(fn(new String('device-A')), false);
+  });
+
+  it('returns false without throwing for throwing Proxy and revoked Proxy', () => {
+    const fn = protocol.hasConsistentCrossLanDeviceIds;
+
+    const throwingProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+
+    const base = createValidDeviceIdRecord();
+    const { proxy: revokedProxy, revoke } = Proxy.revocable(base, {});
+    revoke();
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(throwingProxy), false);
+      assert.strictEqual(fn(revokedProxy), false);
+    });
+  });
+});
