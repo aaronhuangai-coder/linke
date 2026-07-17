@@ -1,12 +1,14 @@
 /**
- * Honesty scope (Gold ADR §6.5): tests cover T1.13a + T1.13b only
- * (code policy / digest-record fields / canonical validator /
- * timingSafeEqual digest compare / tombstone FSM /
- * secret policy + bootstrap/rotate pure contract).
+ * Honesty scope (Gold ADR §6.5): T1.13 M1 contract slices (a+b+c).
+ * Covers code policy / digest-record / canonical validator /
+ * timingSafeEqual / tombstone FSM / secret lifecycle pure contract /
+ * delivery pure contract (display plan / clipboard plan / QR shape).
  * T1.0 Noise library gate = BLOCKED (not M1 crypto PASS).
- * T1.13 complete = NOT COMPLETE; A25 = NOT READY.
- * T1.13b pure contract only — does NOT prove Keychain I/O, CSPRNG,
- * HMAC, or code issue/verify. T1.13c (delivery) = NOT COMPLETE.
+ * T1.13 M1 contract coverage = COMPLETE (contract task only).
+ * T1.13 runtime delivery / Keychain / CSPRNG / HMAC = NOT IMPLEMENTED.
+ * A25 runtime = NOT READY.
+ * Pure contract only — does NOT prove real UI/CLI/clipboard/QR I/O,
+ * Keychain, CSPRNG, HMAC, or durable storage.
  */
 
 import { describe, it } from 'node:test';
@@ -828,5 +830,659 @@ describe('cross-lan enrollment contract (T1.13b: secret lifecycle pure contract)
     });
     assert.strictEqual(Object.hasOwn(committed, 'secretBytes'), false);
     assert.strictEqual(Object.hasOwn(committed, 'hmac'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T1.13c — delivery pure contract (display / clipboard / QR shape only)
+// ---------------------------------------------------------------------------
+
+/** Independent literal pin of delivery policy (14 keys; object literal is authoritative). */
+const EXPECTED_DELIVERY_POLICY = {
+  displayTransportBindings: ['verified-loopback', 'same-process-cli'],
+  intendedMaximumPlaintextDisplays: 1,
+  atomicConsumeEnforcement: 'deferred-to-M3-single-writer-state',
+  plaintextPersistenceAllowed: false,
+  forbiddenPlaintextDestinations: [
+    'dataDir',
+    'logs',
+    'audit',
+    'crash-report',
+    'evidence',
+    'remote-management',
+    'non-loopback-interface',
+  ],
+  automaticClipboardCopyAllowed: false,
+  clipboardRequiresExplicitUserAction: true,
+  clipboardRiskWarningRequired: true,
+  clipboardClearingPromise: 'advisory-only',
+  qrSchemaIdentifier: 'enrollmentQr/v1',
+  qrEccPolicy: 'implementation-selected',
+  qrEccValidationStage: 'not-in-M1',
+  implementationStage: 'contract-only-no-delivery-io',
+  a25RuntimeStatus: 'not-ready',
+};
+
+const EXPECTED_DISPLAY_TRANSITIONS = {
+  undelivered: {
+    'verified-loopback': 'delivered',
+    'same-process-cli': 'delivered',
+  },
+  delivered: {},
+};
+
+const DISPLAY_RESULT_KEYS = [
+  'status',
+  'reasonCode',
+  'displayReceiptState',
+  'nextDisplayState',
+  'plaintextPersistenceAllowed',
+  'automaticClipboardWriteAllowed',
+  'enforcementNote',
+];
+
+const CLIPBOARD_RESULT_KEYS = [
+  'status',
+  'reasonCode',
+  'clipboardWriteAllowed',
+  'automaticCopyAllowed',
+  'clearingAdvisoryOnly',
+  'implementationStage',
+];
+
+const EXPECTED_QR_SCHEMA = {
+  identifier: 'enrollmentQr/v1',
+  topLevelFields: [
+    'schema',
+    'codeId',
+    'code',
+    'expiry',
+    'controllerPublicMetadata',
+    'relayPublicMetadata',
+  ],
+  topLevelFieldNamesStatus: 'implementation-stable-not-spec-frozen',
+  nestedWireSchemaStatus: 'deferred-to-M2',
+  valueProvenanceValidationStage: 'deferred-to-M3-A25-runtime',
+  eccValidationStage: 'not-in-M1',
+  shapeMatcherLimit: 'does-not-detect-secrets-embedded-in-public-string-values',
+};
+
+/** Canonical 16B zero code for QR fixtures (not a real secret). */
+const CANONICAL_CODE = 'AAAAAAAAAAAAAAAAAAAAAA';
+
+const FORBIDDEN_SECRET_OUTPUT_FIELDS = [
+  'code',
+  'plaintext',
+  'secret',
+  'secretBytes',
+  'hmac',
+  'enrollmentHmacSecret',
+  'privateKey',
+  'deviceToken',
+  'proxyAuthorizationSecret',
+  'sessionKey',
+];
+
+/**
+ * @param {object} result
+ */
+function assertNoSecretFields(result) {
+  for (const name of FORBIDDEN_SECRET_OUTPUT_FIELDS) {
+    assert.strictEqual(Object.hasOwn(result, name), false, `must not expose ${name}`);
+  }
+}
+
+/**
+ * Structurally valid allow-display-plan (fresh plain object).
+ * @returns {object}
+ */
+function makeAllowDisplayPlan() {
+  return {
+    status: 'allow-display-plan',
+    reasonCode: null,
+    displayReceiptState: 'display-authorized',
+    nextDisplayState: 'delivered',
+    plaintextPersistenceAllowed: false,
+    automaticClipboardWriteAllowed: false,
+    enforcementNote: 'atomic-consume-deferred-to-M3',
+  };
+}
+
+/**
+ * Minimal valid QR payload fixture.
+ * @param {Partial<object>} [overrides]
+ */
+function makeValidQrPayload(overrides = {}) {
+  return {
+    schema: 'enrollmentQr/v1',
+    codeId: 'code-id-1',
+    code: CANONICAL_CODE,
+    expiry: '2026-01-01T00:00:00.000Z',
+    controllerPublicMetadata: { identityDigest: 'public-digest' },
+    relayPublicMetadata: {},
+    ...overrides,
+  };
+}
+
+describe('cross-lan enrollment contract (T1.13c: delivery pure contract)', () => {
+  it('DELIVERY_POLICY exact 14 + deep freeze; DISPLAY_TRANSITIONS exact/deep freeze/no back edge', () => {
+    const policy = enrollment.CROSS_LAN_ENROLLMENT_DELIVERY_POLICY;
+    assert.deepStrictEqual(policy, EXPECTED_DELIVERY_POLICY);
+    assert.strictEqual(Object.keys(policy).length, 14);
+    assert.deepStrictEqual(Object.keys(policy).sort(), Object.keys(EXPECTED_DELIVERY_POLICY).sort());
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.displayTransportBindings));
+    assert.ok(Object.isFrozen(policy.forbiddenPlaintextDestinations));
+    assert.strictEqual(policy.implementationStage, 'contract-only-no-delivery-io');
+    assert.strictEqual(policy.a25RuntimeStatus, 'not-ready');
+    assert.strictEqual(policy.plaintextPersistenceAllowed, false);
+    assert.strictEqual(policy.automaticClipboardCopyAllowed, false);
+    assert.strictEqual(policy.clipboardClearingPromise, 'advisory-only');
+
+    const fsm = enrollment.CROSS_LAN_ENROLLMENT_DISPLAY_TRANSITIONS;
+    assert.deepStrictEqual(fsm, EXPECTED_DISPLAY_TRANSITIONS);
+    assert.ok(Object.isFrozen(fsm));
+    assert.ok(Object.isFrozen(fsm.undelivered));
+    assert.ok(Object.isFrozen(fsm.delivered));
+    assert.deepStrictEqual(Object.keys(fsm.delivered), []);
+    for (const state of Object.keys(fsm)) {
+      for (const binding of Object.keys(fsm[state])) {
+        assert.notStrictEqual(
+          fsm[state][binding],
+          'undelivered',
+          `no path back to undelivered: ${state}/${binding}`,
+        );
+      }
+    }
+  });
+
+  it('display plan: two bindings allow; delivered/null/legacy/invalid blocked; exact frozen no secrets', () => {
+    const decide = enrollment.decideCrossLanEnrollmentDisplayPlan;
+
+    for (const binding of ['verified-loopback', 'same-process-cli']) {
+      const allow = decide({
+        transportBinding: binding,
+        priorDisplayState: 'undelivered',
+      });
+      assertExactFrozenKeys(allow, DISPLAY_RESULT_KEYS);
+      assert.strictEqual(allow.status, 'allow-display-plan');
+      assert.strictEqual(allow.reasonCode, null);
+      assert.strictEqual(allow.displayReceiptState, 'display-authorized');
+      assert.strictEqual(allow.nextDisplayState, 'delivered');
+      assert.strictEqual(allow.plaintextPersistenceAllowed, false);
+      assert.strictEqual(allow.automaticClipboardWriteAllowed, false);
+      assert.strictEqual(allow.enforcementNote, 'atomic-consume-deferred-to-M3');
+      assertNoSecretFields(allow);
+    }
+
+    /** @param {unknown} input @param {string} code */
+    function assertBlocked(input, code) {
+      assert.doesNotThrow(() => {
+        const r = decide(input);
+        assertExactFrozenKeys(r, DISPLAY_RESULT_KEYS);
+        assert.strictEqual(r.status, 'blocked');
+        assert.strictEqual(r.reasonCode, code);
+        assert.strictEqual(r.displayReceiptState, 'not-authorized');
+        assert.strictEqual(r.nextDisplayState, null);
+        assert.strictEqual(r.plaintextPersistenceAllowed, false);
+        assert.strictEqual(r.automaticClipboardWriteAllowed, false);
+        assert.strictEqual(r.enforcementNote, 'atomic-consume-deferred-to-M3');
+        assertNoSecretFields(r);
+      });
+    }
+
+    // already-delivered wins over binding null.
+    assertBlocked(
+      { transportBinding: null, priorDisplayState: 'delivered' },
+      'already-delivered',
+    );
+    assertBlocked(
+      { transportBinding: 'verified-loopback', priorDisplayState: 'delivered' },
+      'already-delivered',
+    );
+    assertBlocked(
+      { transportBinding: null, priorDisplayState: 'undelivered' },
+      'transport-not-verified',
+    );
+
+    // null state / unknown enum / exact-schema violations → invalid-input.
+    assertBlocked(
+      { transportBinding: 'verified-loopback', priorDisplayState: null },
+      'invalid-input',
+    );
+    assertBlocked(
+      { transportBinding: 'other', priorDisplayState: 'undelivered' },
+      'invalid-input',
+    );
+    assertBlocked(
+      { transportBinding: 'verified-loopback', priorDisplayState: 'pending' },
+      'invalid-input',
+    );
+    // Legacy fields must fail exact schema (not channel/loopbackVerified/priorDisplayCount).
+    assertBlocked(
+      { channel: 'cli', priorDisplayState: 'undelivered' },
+      'invalid-input',
+    );
+    assertBlocked(
+      {
+        transportBinding: 'verified-loopback',
+        priorDisplayState: 'undelivered',
+        loopbackVerified: true,
+      },
+      'invalid-input',
+    );
+    assertBlocked(
+      {
+        transportBinding: 'verified-loopback',
+        priorDisplayState: 'undelivered',
+        priorDisplayCount: 0,
+      },
+      'invalid-input',
+    );
+    assertBlocked(
+      {
+        transportBinding: 'verified-loopback',
+        priorDisplayState: 'undelivered',
+        code: CANONICAL_CODE,
+      },
+      'invalid-input',
+    );
+    assertBlocked(null, 'invalid-input');
+    assertBlocked(undefined, 'invalid-input');
+    assertBlocked([], 'invalid-input');
+    class DisplayCls {
+      constructor() {
+        this.transportBinding = 'verified-loopback';
+        this.priorDisplayState = 'undelivered';
+      }
+    }
+    assertBlocked(new DisplayCls(), 'invalid-input');
+
+    const withAccessor = {};
+    Object.defineProperty(withAccessor, 'transportBinding', {
+      enumerable: true,
+      get: () => 'verified-loopback',
+    });
+    Object.defineProperty(withAccessor, 'priorDisplayState', {
+      enumerable: true,
+      value: 'undelivered',
+      writable: true,
+      configurable: true,
+    });
+    assertBlocked(withAccessor, 'invalid-input');
+
+    const withSymbol = {
+      transportBinding: 'verified-loopback',
+      priorDisplayState: 'undelivered',
+      [Symbol('x')]: 1,
+    };
+    assertBlocked(withSymbol, 'invalid-input');
+
+    const proxy = new Proxy(
+      {
+        transportBinding: 'verified-loopback',
+        priorDisplayState: 'undelivered',
+      },
+      {
+        get() {
+          throw new Error('trap');
+        },
+        ownKeys() {
+          throw new Error('trap');
+        },
+      },
+    );
+    assertBlocked(proxy, 'invalid-input');
+
+    const target = {
+      transportBinding: 'verified-loopback',
+      priorDisplayState: 'undelivered',
+    };
+    const revoked = Proxy.revocable(target, {});
+    revoked.revoke();
+    assertBlocked(revoked.proxy, 'invalid-input');
+
+    // null-prototype exact record still allowed when valid.
+    const fromNull = decide(
+      Object.assign(Object.create(null), {
+        transportBinding: 'same-process-cli',
+        priorDisplayState: 'undelivered',
+      }),
+    );
+    assert.strictEqual(fromNull.status, 'allow-display-plan');
+  });
+
+  it('clipboard plan: structured allow display + warning + user action only; no plaintext', () => {
+    const decide = enrollment.decideCrossLanEnrollmentClipboardPlan;
+
+    const allow = decide({
+      displayPlan: makeAllowDisplayPlan(),
+      riskWarningDisplayed: true,
+      userInitiatedAction: true,
+    });
+    assertExactFrozenKeys(allow, CLIPBOARD_RESULT_KEYS);
+    assert.strictEqual(allow.status, 'allow-manual-clipboard-write');
+    assert.strictEqual(allow.reasonCode, null);
+    assert.strictEqual(allow.clipboardWriteAllowed, true);
+    assert.strictEqual(allow.automaticCopyAllowed, false);
+    assert.strictEqual(allow.clearingAdvisoryOnly, true);
+    assert.strictEqual(allow.implementationStage, 'contract-only-no-clipboard-io');
+    assertNoSecretFields(allow);
+
+    // Real decide() output accepted structurally.
+    const displayPlan = enrollment.decideCrossLanEnrollmentDisplayPlan({
+      transportBinding: 'verified-loopback',
+      priorDisplayState: 'undelivered',
+    });
+    const allow2 = decide({
+      displayPlan,
+      riskWarningDisplayed: true,
+      userInitiatedAction: true,
+    });
+    assert.strictEqual(allow2.status, 'allow-manual-clipboard-write');
+
+    /** @param {unknown} input @param {string} code */
+    function assertClipBlocked(input, code) {
+      assert.doesNotThrow(() => {
+        const r = decide(input);
+        assertExactFrozenKeys(r, CLIPBOARD_RESULT_KEYS);
+        assert.strictEqual(r.status, 'blocked');
+        assert.strictEqual(r.reasonCode, code);
+        assert.strictEqual(r.clipboardWriteAllowed, false);
+        assert.strictEqual(r.automaticCopyAllowed, false);
+        assert.strictEqual(r.clearingAdvisoryOnly, true);
+        assert.strictEqual(r.implementationStage, 'contract-only-no-clipboard-io');
+        assertNoSecretFields(r);
+      });
+    }
+
+    assertClipBlocked(
+      {
+        displayPlan: {
+          ...makeAllowDisplayPlan(),
+          status: 'blocked',
+          reasonCode: 'already-delivered',
+          displayReceiptState: 'not-authorized',
+          nextDisplayState: null,
+        },
+        riskWarningDisplayed: true,
+        userInitiatedAction: true,
+      },
+      'no-authorized-display',
+    );
+    // Forged invariants (boolean flag only, wrong enforcement).
+    assertClipBlocked(
+      {
+        displayPlan: {
+          ...makeAllowDisplayPlan(),
+          plaintextPersistenceAllowed: true,
+        },
+        riskWarningDisplayed: true,
+        userInitiatedAction: true,
+      },
+      'no-authorized-display',
+    );
+    assertClipBlocked(
+      {
+        displayPlan: {
+          displayAuthorized: true,
+        },
+        riskWarningDisplayed: true,
+        userInitiatedAction: true,
+      },
+      'no-authorized-display',
+    );
+    assertClipBlocked(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: false,
+        userInitiatedAction: true,
+      },
+      'risk-warning-not-displayed',
+    );
+    assertClipBlocked(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: true,
+        userInitiatedAction: false,
+      },
+      'not-user-initiated',
+    );
+    // Non-boolean → invalid-input (not risk/user reason codes).
+    assertClipBlocked(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: 'true',
+        userInitiatedAction: true,
+      },
+      'invalid-input',
+    );
+    assertClipBlocked(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: true,
+        userInitiatedAction: 1,
+      },
+      'invalid-input',
+    );
+    assertClipBlocked(null, 'invalid-input');
+    assertClipBlocked(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: true,
+        userInitiatedAction: true,
+        code: CANONICAL_CODE,
+      },
+      'invalid-input',
+    );
+    const clipProxy = new Proxy(
+      {
+        displayPlan: makeAllowDisplayPlan(),
+        riskWarningDisplayed: true,
+        userInitiatedAction: true,
+      },
+      {
+        get() {
+          throw new Error('trap');
+        },
+        ownKeys() {
+          throw new Error('trap');
+        },
+      },
+    );
+    assertClipBlocked(clipProxy, 'invalid-input');
+  });
+
+  it('CROSS_LAN_ENROLLMENT_QR_SCHEMA: exact 7 keys deep-frozen', () => {
+    const schema = enrollment.CROSS_LAN_ENROLLMENT_QR_SCHEMA;
+    assert.deepStrictEqual(schema, EXPECTED_QR_SCHEMA);
+    assert.strictEqual(Object.keys(schema).length, 7);
+    assert.ok(Object.isFrozen(schema));
+    assert.ok(Object.isFrozen(schema.topLevelFields));
+    assert.strictEqual(schema.identifier, 'enrollmentQr/v1');
+    assert.strictEqual(schema.eccValidationStage, 'not-in-M1');
+    assert.strictEqual(
+      schema.shapeMatcherLimit,
+      'does-not-detect-secrets-embedded-in-public-string-values',
+    );
+  });
+
+  it('matchesCrossLanEnrollmentQrPayloadShape: valid synthetic fixtures (string/int expiry, empty relay)', () => {
+    const match = enrollment.matchesCrossLanEnrollmentQrPayloadShape;
+    assert.strictEqual(match(makeValidQrPayload()), true);
+    assert.strictEqual(
+      match(
+        makeValidQrPayload({
+          expiry: 1_700_000_000_000,
+          relayPublicMetadata: { relayEndpoints: [], relayPinDigests: [] },
+        }),
+      ),
+      true,
+    );
+    assert.strictEqual(
+      match(
+        Object.assign(Object.create(null), {
+          schema: 'enrollmentQr/v1',
+          codeId: 'id-2',
+          code: '_____________________w',
+          expiry: 0,
+          controllerPublicMetadata: Object.assign(Object.create(null), {
+            identityDigest: 'public-digest',
+          }),
+          relayPublicMetadata: Object.assign(Object.create(null), {}),
+        }),
+      ),
+      true,
+    );
+    assert.strictEqual(
+      match(
+        makeValidQrPayload({
+          controllerPublicMetadata: {
+            nested: { a: true, b: null, c: [1, 'x', false] },
+          },
+        }),
+      ),
+      true,
+    );
+    assert.doesNotThrow(() => match(null));
+  });
+
+  it('matchesCrossLanEnrollmentQrPayloadShape: wrong schema/code/extra/forbidden/sparse/cycle/depth/proxy false', () => {
+    const match = enrollment.matchesCrossLanEnrollmentQrPayloadShape;
+
+    /** @param {unknown} payload */
+    function assertFalse(payload) {
+      assert.doesNotThrow(() => {
+        assert.strictEqual(match(payload), false);
+      });
+    }
+
+    assertFalse(makeValidQrPayload({ schema: 'enrollmentQr/v0' }));
+    assertFalse(makeValidQrPayload({ code: 'AAAAAAAAAAAAAAAAAAAAAB' })); // non-canonical
+    assertFalse(makeValidQrPayload({ code: 'short' }));
+    assertFalse({
+      ...makeValidQrPayload(),
+      extra: true,
+    });
+    assertFalse(makeValidQrPayload({ expiry: -1 }));
+    assertFalse(makeValidQrPayload({ expiry: 1.5 }));
+    assertFalse(makeValidQrPayload({ expiry: '' }));
+    assertFalse(makeValidQrPayload({ codeId: '' }));
+    assertFalse(makeValidQrPayload({ controllerPublicMetadata: {} })); // empty forbidden
+    assertFalse(
+      makeValidQrPayload({
+        controllerPublicMetadata: { enrollmentHmacSecret: 'x' },
+      }),
+    );
+    assertFalse(
+      makeValidQrPayload({
+        relayPublicMetadata: { privateKey: 'x' },
+      }),
+    );
+    assertFalse(
+      makeValidQrPayload({
+        controllerPublicMetadata: { nested: { deviceToken: 'x' } },
+      }),
+    );
+    assertFalse(
+      makeValidQrPayload({
+        controllerPublicMetadata: { sessionKey: 'x' },
+      }),
+    );
+    assertFalse(
+      makeValidQrPayload({
+        relayPublicMetadata: { proxyAuthorizationSecret: 'x' },
+      }),
+    );
+
+    const withAccessor = makeValidQrPayload();
+    Object.defineProperty(withAccessor, 'codeId', {
+      enumerable: true,
+      get: () => 'code-id-1',
+    });
+    assertFalse(withAccessor);
+
+    const withSymbol = {
+      ...makeValidQrPayload(),
+      [Symbol('x')]: 1,
+    };
+    assertFalse(withSymbol);
+
+    // Sparse array in nested metadata.
+    const sparse = [];
+    sparse[1] = 'x';
+    assertFalse(
+      makeValidQrPayload({
+        controllerPublicMetadata: { identityDigest: 'd', holes: sparse },
+      }),
+    );
+
+    // Cycle.
+    const cycleMeta = { identityDigest: 'd' };
+    cycleMeta.self = cycleMeta;
+    assertFalse(makeValidQrPayload({ controllerPublicMetadata: cycleMeta }));
+
+    // Too deep (max depth 4).
+    assertFalse(
+      makeValidQrPayload({
+        controllerPublicMetadata: {
+          a: { b: { c: { d: { e: 'too-deep' } } } },
+        },
+      }),
+    );
+
+    const qrProxy = new Proxy(makeValidQrPayload(), {
+      get() {
+        throw new Error('trap');
+      },
+      ownKeys() {
+        throw new Error('trap');
+      },
+    });
+    assertFalse(qrProxy);
+
+    const rev = Proxy.revocable(makeValidQrPayload(), {});
+    rev.revoke();
+    assertFalse(rev.proxy);
+
+    assertFalse(null);
+    assertFalse(undefined);
+    assertFalse([]);
+    assertFalse('enrollmentQr/v1');
+  });
+
+  it('T1.13c honesty: M1 contract coverage complete; runtime delivery/A25 NOT READY', () => {
+    assert.strictEqual(typeof enrollment.decideCrossLanEnrollmentDisplayPlan, 'function');
+    assert.strictEqual(typeof enrollment.decideCrossLanEnrollmentClipboardPlan, 'function');
+    assert.strictEqual(typeof enrollment.matchesCrossLanEnrollmentQrPayloadShape, 'function');
+    assert.strictEqual(
+      enrollment.CROSS_LAN_ENROLLMENT_DELIVERY_POLICY.implementationStage,
+      'contract-only-no-delivery-io',
+    );
+    assert.strictEqual(
+      enrollment.CROSS_LAN_ENROLLMENT_DELIVERY_POLICY.a25RuntimeStatus,
+      'not-ready',
+    );
+    assert.strictEqual(
+      enrollment.CROSS_LAN_ENROLLMENT_DELIVERY_POLICY.atomicConsumeEnforcement,
+      'deferred-to-M3-single-writer-state',
+    );
+    // Plans never carry plaintext code fields.
+    const d = enrollment.decideCrossLanEnrollmentDisplayPlan({
+      transportBinding: 'verified-loopback',
+      priorDisplayState: 'undelivered',
+    });
+    assertNoSecretFields(d);
+    const c = enrollment.decideCrossLanEnrollmentClipboardPlan({
+      displayPlan: d,
+      riskWarningDisplayed: true,
+      userInitiatedAction: true,
+    });
+    assertNoSecretFields(c);
+    // Shape matcher only — does not generate QR images / I/O.
+    assert.strictEqual(
+      enrollment.CROSS_LAN_ENROLLMENT_QR_SCHEMA.eccValidationStage,
+      'not-in-M1',
+    );
   });
 });

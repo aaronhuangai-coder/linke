@@ -1,11 +1,12 @@
 /**
  * Cross-LAN enrollment contract — code representation/policy, digest-record
  * field allowlist, fixed-length constant-time digest compare, tombstone FSM
- * (T1.13a), and enrollment-secret lifecycle pure contract (T1.13b / §6.3.x).
+ * (T1.13a), enrollment-secret lifecycle pure contract (T1.13b / §6.3.x), and
+ * code-delivery pure contract (T1.13c: display plan / clipboard plan / QR shape).
  *
  * --- honesty (Gold ADR §6.5) ---
  * [status] T1.0 Noise library gate = BLOCKED (not M1 crypto PASS)
- * [scope] T1.13a + T1.13b only —
+ * [scope] T1.13 M1 contract slices (a+b+c) —
  *   code policy constants,
  *   digest-record field allowlist,
  *   canonical code-shape validator,
@@ -13,16 +14,23 @@
  *   tombstone FSM,
  *   secret policy constants,
  *   secret bootstrap decision pure contract,
- *   secret rotation authorize/commit pure contract
- * [not ready] T1.13 complete = NOT COMPLETE; A25 = NOT READY
- *   T1.13b proves pure planning only — NOT Keychain I/O, CSPRNG generation,
- *   HMAC issue/verify, or durable version advance
- *   T1.13c (code delivery: clipboard / QR / UI) = NOT COMPLETE
+ *   secret rotation authorize/commit pure contract,
+ *   delivery policy constants,
+ *   display FSM + display plan pure contract,
+ *   clipboard plan pure contract,
+ *   QR schema identifier + payload shape matcher
+ * [coverage] T1.13 M1 contract coverage = COMPLETE (contract task only)
+ * [not ready] T1.13 runtime delivery / Keychain / CSPRNG / HMAC = NOT IMPLEMENTED
+ *   A25 runtime = NOT READY
+ *   Pure planners only — NOT Keychain I/O, CSPRNG generation, HMAC issue/verify,
+ *   durable version advance, real UI/CLI, clipboard write, QR image render,
+ *   dataDir/log/audit fixtures, or atomic single-writer consume
  *
  * This module does **not** generate codes/salts/secrets, compute HMAC, read
  * secrets, write storage/Keychain, or deliver codes (clipboard/QR/UI).
- * Policy numeric constants and rotation plans do **not** prove CSPRNG quality,
- * HMAC correctness, Keychain durability, or that a secret was issued/rotated.
+ * It does **not** accept or return code plaintext on plan paths.
+ * Policy numeric constants and plans do **not** prove CSPRNG quality,
+ * HMAC correctness, Keychain durability, or that a secret/code was delivered.
  */
 
 import { timingSafeEqual } from 'node:crypto';
@@ -676,5 +684,464 @@ export function commitCrossLanEnrollmentSecretRotation(input) {
     });
   } catch {
     return denyCommit('invalid-input', false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T1.13c — delivery pure contract (display / clipboard / QR shape; no I/O)
+// ---------------------------------------------------------------------------
+
+/**
+ * Frozen enrollment-code delivery policy (contract-only).
+ *
+ * Pins intended transport bindings, single-display intent, forbidden
+ * plaintext destinations, clipboard/QR honesty stages. Does **not** prove
+ * real UI/CLI, clipboard, QR I/O, atomic consume, or A25 runtime readiness.
+ *
+ * M1 does **not** claim atomic one-shot consumption
+ * (`atomicConsumeEnforcement` defers to M3 single-writer state).
+ * `verified-loopback` / `same-process-cli` are adapter **claims** only —
+ * real socket/process binding is M3.
+ *
+ * @type {Readonly<{
+ *   displayTransportBindings: ReadonlyArray<string>,
+ *   intendedMaximumPlaintextDisplays: number,
+ *   atomicConsumeEnforcement: string,
+ *   plaintextPersistenceAllowed: boolean,
+ *   forbiddenPlaintextDestinations: ReadonlyArray<string>,
+ *   automaticClipboardCopyAllowed: boolean,
+ *   clipboardRequiresExplicitUserAction: boolean,
+ *   clipboardRiskWarningRequired: boolean,
+ *   clipboardClearingPromise: string,
+ *   qrSchemaIdentifier: string,
+ *   qrEccPolicy: string,
+ *   qrEccValidationStage: string,
+ *   implementationStage: string,
+ *   a25RuntimeStatus: string,
+ * }>}
+ */
+export const CROSS_LAN_ENROLLMENT_DELIVERY_POLICY = Object.freeze({
+  displayTransportBindings: Object.freeze(['verified-loopback', 'same-process-cli']),
+  intendedMaximumPlaintextDisplays: 1,
+  atomicConsumeEnforcement: 'deferred-to-M3-single-writer-state',
+  plaintextPersistenceAllowed: false,
+  forbiddenPlaintextDestinations: Object.freeze([
+    'dataDir',
+    'logs',
+    'audit',
+    'crash-report',
+    'evidence',
+    'remote-management',
+    'non-loopback-interface',
+  ]),
+  automaticClipboardCopyAllowed: false,
+  clipboardRequiresExplicitUserAction: true,
+  clipboardRiskWarningRequired: true,
+  clipboardClearingPromise: 'advisory-only',
+  qrSchemaIdentifier: 'enrollmentQr/v1',
+  qrEccPolicy: 'implementation-selected',
+  qrEccValidationStage: 'not-in-M1',
+  implementationStage: 'contract-only-no-delivery-io',
+  a25RuntimeStatus: 'not-ready',
+});
+
+/**
+ * Display delivery FSM: typed transport-binding claims only.
+ *
+ * One-way: undelivered → delivered via verified-loopback or same-process-cli.
+ * No path returns to undelivered. M1 does not enforce atomic consume.
+ *
+ * @type {Readonly<{
+ *   undelivered: Readonly<Record<string, string>>,
+ *   delivered: Readonly<Record<string, never>>,
+ * }>}
+ */
+export const CROSS_LAN_ENROLLMENT_DISPLAY_TRANSITIONS = Object.freeze({
+  undelivered: Object.freeze({
+    'verified-loopback': 'delivered',
+    'same-process-cli': 'delivered',
+  }),
+  delivered: Object.freeze({}),
+});
+
+const DISPLAY_INPUT_KEYS = Object.freeze(['transportBinding', 'priorDisplayState']);
+
+/**
+ * @param {{
+ *   status: 'allow-display-plan' | 'blocked',
+ *   reasonCode: null | 'invalid-input' | 'transport-not-verified' | 'already-delivered',
+ *   displayReceiptState: 'display-authorized' | 'not-authorized',
+ *   nextDisplayState: 'delivered' | null,
+ * }} fields
+ */
+function freezeDisplayPlan(fields) {
+  return Object.freeze({
+    status: fields.status,
+    reasonCode: fields.reasonCode,
+    displayReceiptState: fields.displayReceiptState,
+    nextDisplayState: fields.nextDisplayState,
+    plaintextPersistenceAllowed: false,
+    automaticClipboardWriteAllowed: false,
+    enforcementNote: 'atomic-consume-deferred-to-M3',
+  });
+}
+
+/**
+ * Fail-closed display plan denial (no plaintext, no throw).
+ * @param {'invalid-input' | 'transport-not-verified' | 'already-delivered'} reasonCode
+ */
+function blockDisplayPlan(reasonCode) {
+  return freezeDisplayPlan({
+    status: 'blocked',
+    reasonCode,
+    displayReceiptState: 'not-authorized',
+    nextDisplayState: null,
+  });
+}
+
+/**
+ * Pure display planner: typed binding claim + one-way FSM.
+ *
+ * Returns a structural plan only — not an unforgeable receipt, not real UI/CLI
+ * I/O, and not atomic single-writer consume (deferred to M3).
+ * Never accepts or returns code plaintext.
+ *
+ * @param {unknown} input
+ * @returns {Readonly<{
+ *   status: 'allow-display-plan' | 'blocked',
+ *   reasonCode: null | 'invalid-input' | 'transport-not-verified' | 'already-delivered',
+ *   displayReceiptState: 'display-authorized' | 'not-authorized',
+ *   nextDisplayState: 'delivered' | null,
+ *   plaintextPersistenceAllowed: false,
+ *   automaticClipboardWriteAllowed: false,
+ *   enforcementNote: 'atomic-consume-deferred-to-M3',
+ * }>}
+ */
+export function decideCrossLanEnrollmentDisplayPlan(input) {
+  try {
+    const record = readExactPlainRecord(input, DISPLAY_INPUT_KEYS);
+    if (record === null) return blockDisplayPlan('invalid-input');
+
+    const binding = record.transportBinding;
+    const prior = record.priorDisplayState;
+
+    // Exact allowed enums only (null is a typed value for binding; state null = invalid).
+    const bindingOk =
+      binding === null || binding === 'verified-loopback' || binding === 'same-process-cli';
+    const stateOk = prior === 'undelivered' || prior === 'delivered';
+    if (!bindingOk || !stateOk) return blockDisplayPlan('invalid-input');
+
+    // already-delivered has priority over transport-not-verified.
+    if (prior === 'delivered') return blockDisplayPlan('already-delivered');
+    if (binding === null) return blockDisplayPlan('transport-not-verified');
+
+    // undelivered + allowed binding claim → allow plan (adapter claim only).
+    return freezeDisplayPlan({
+      status: 'allow-display-plan',
+      reasonCode: null,
+      displayReceiptState: 'display-authorized',
+      nextDisplayState: 'delivered',
+    });
+  } catch {
+    return blockDisplayPlan('invalid-input');
+  }
+}
+
+const CLIPBOARD_INPUT_KEYS = Object.freeze([
+  'displayPlan',
+  'riskWarningDisplayed',
+  'userInitiatedAction',
+]);
+
+const DISPLAY_PLAN_KEYS = Object.freeze([
+  'status',
+  'reasonCode',
+  'displayReceiptState',
+  'nextDisplayState',
+  'plaintextPersistenceAllowed',
+  'automaticClipboardWriteAllowed',
+  'enforcementNote',
+]);
+
+/**
+ * Structural validation of an allow-display-plan (shape + invariants).
+ * Structural data only — not object-identity branding / capability.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isAuthorizedDisplayPlan(value) {
+  const record = readExactPlainRecord(value, DISPLAY_PLAN_KEYS);
+  if (record === null) return false;
+  return (
+    record.status === 'allow-display-plan' &&
+    record.reasonCode === null &&
+    record.displayReceiptState === 'display-authorized' &&
+    record.nextDisplayState === 'delivered' &&
+    record.plaintextPersistenceAllowed === false &&
+    record.automaticClipboardWriteAllowed === false &&
+    record.enforcementNote === 'atomic-consume-deferred-to-M3'
+  );
+}
+
+/**
+ * @param {{
+ *   status: 'allow-manual-clipboard-write' | 'blocked',
+ *   reasonCode: null | 'invalid-input' | 'no-authorized-display' | 'risk-warning-not-displayed' | 'not-user-initiated',
+ *   clipboardWriteAllowed: boolean,
+ * }} fields
+ */
+function freezeClipboardPlan(fields) {
+  return Object.freeze({
+    status: fields.status,
+    reasonCode: fields.reasonCode,
+    clipboardWriteAllowed: fields.clipboardWriteAllowed,
+    automaticCopyAllowed: false,
+    clearingAdvisoryOnly: true,
+    implementationStage: 'contract-only-no-clipboard-io',
+  });
+}
+
+/**
+ * Fail-closed clipboard plan denial.
+ * @param {'invalid-input' | 'no-authorized-display' | 'risk-warning-not-displayed' | 'not-user-initiated'} reasonCode
+ */
+function blockClipboardPlan(reasonCode) {
+  return freezeClipboardPlan({
+    status: 'blocked',
+    reasonCode,
+    clipboardWriteAllowed: false,
+  });
+}
+
+/**
+ * Pure clipboard planner: requires structured allow-display-plan + risk warning
+ * displayed + explicit user action. Plan only — does not write clipboard and
+ * never carries code plaintext. `riskWarningDisplayed` means displayed, not
+ * acknowledged. Clearing remains advisory-only.
+ *
+ * @param {unknown} input
+ * @returns {Readonly<{
+ *   status: 'allow-manual-clipboard-write' | 'blocked',
+ *   reasonCode: null | 'invalid-input' | 'no-authorized-display' | 'risk-warning-not-displayed' | 'not-user-initiated',
+ *   clipboardWriteAllowed: boolean,
+ *   automaticCopyAllowed: false,
+ *   clearingAdvisoryOnly: true,
+ *   implementationStage: 'contract-only-no-clipboard-io',
+ * }>}
+ */
+export function decideCrossLanEnrollmentClipboardPlan(input) {
+  try {
+    const record = readExactPlainRecord(input, CLIPBOARD_INPUT_KEYS);
+    if (record === null) return blockClipboardPlan('invalid-input');
+
+    const risk = record.riskWarningDisplayed;
+    const user = record.userInitiatedAction;
+    if (typeof risk !== 'boolean' || typeof user !== 'boolean') {
+      return blockClipboardPlan('invalid-input');
+    }
+
+    if (!isAuthorizedDisplayPlan(record.displayPlan)) {
+      return blockClipboardPlan('no-authorized-display');
+    }
+    if (risk !== true) return blockClipboardPlan('risk-warning-not-displayed');
+    if (user !== true) return blockClipboardPlan('not-user-initiated');
+
+    return freezeClipboardPlan({
+      status: 'allow-manual-clipboard-write',
+      reasonCode: null,
+      clipboardWriteAllowed: true,
+    });
+  } catch {
+    return blockClipboardPlan('invalid-input');
+  }
+}
+
+/**
+ * QR payload schema freeze (identifier + top-level field allowlist only).
+ *
+ * Nested wire schema, ECC, and value provenance are deferred.
+ * `shapeMatcherLimit` honestly states this matcher does not detect secrets
+ * embedded inside legitimate public string values or renamed fields.
+ *
+ * @type {Readonly<{
+ *   identifier: string,
+ *   topLevelFields: ReadonlyArray<string>,
+ *   topLevelFieldNamesStatus: string,
+ *   nestedWireSchemaStatus: string,
+ *   valueProvenanceValidationStage: string,
+ *   eccValidationStage: string,
+ *   shapeMatcherLimit: string,
+ * }>}
+ */
+export const CROSS_LAN_ENROLLMENT_QR_SCHEMA = Object.freeze({
+  identifier: 'enrollmentQr/v1',
+  topLevelFields: Object.freeze([
+    'schema',
+    'codeId',
+    'code',
+    'expiry',
+    'controllerPublicMetadata',
+    'relayPublicMetadata',
+  ]),
+  topLevelFieldNamesStatus: 'implementation-stable-not-spec-frozen',
+  nestedWireSchemaStatus: 'deferred-to-M2',
+  valueProvenanceValidationStage: 'deferred-to-M3-A25-runtime',
+  eccValidationStage: 'not-in-M1',
+  shapeMatcherLimit: 'does-not-detect-secrets-embedded-in-public-string-values',
+});
+
+const QR_TOP_LEVEL_KEYS = CROSS_LAN_ENROLLMENT_QR_SCHEMA.topLevelFields;
+
+/** Nested key names rejected exactly (no substring scan). */
+const QR_FORBIDDEN_NESTED_KEYS = Object.freeze([
+  'enrollmentHmacSecret',
+  'privateKey',
+  'deviceToken',
+  'proxyAuthorizationSecret',
+  'sessionKey',
+]);
+
+const QR_METADATA_MAX_DEPTH = 4;
+
+/**
+ * Dense array: own keys must be exactly `0..length-1` + `length`.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isDenseArray(value) {
+  try {
+    if (!Array.isArray(value)) return false;
+    const keys = Reflect.ownKeys(value);
+    const expected = [];
+    for (let i = 0; i < value.length; i += 1) expected.push(String(i));
+    expected.push('length');
+    if (keys.length !== expected.length) return false;
+    for (let i = 0; i < expected.length; i += 1) {
+      if (keys[i] !== expected[i]) return false;
+    }
+    for (let i = 0; i < value.length; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(value, String(i));
+      if (!desc || desc.enumerable !== true) return false;
+      if (desc.get !== undefined || desc.set !== undefined) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * JSON-like public metadata leaf/container validator (limited depth).
+ * Allows string/boolean/null/non-negative safe integer, dense arrays,
+ * plain/null-prototype records. Rejects accessor/symbol/non-enumerable,
+ * sparse arrays, Proxy/revoked, cycles, over-depth, and exact forbidden keys.
+ *
+ * Does **not** scan string values for embedded secrets
+ * (see CROSS_LAN_ENROLLMENT_QR_SCHEMA.shapeMatcherLimit).
+ *
+ * @param {unknown} value
+ * @param {number} depth
+ * @param {WeakSet<object>} seen
+ * @param {boolean} allowEmptyRecord
+ * @returns {boolean}
+ */
+function isJsonLikePublicData(value, depth, seen, allowEmptyRecord) {
+  try {
+    if (depth > QR_METADATA_MAX_DEPTH) return false;
+
+    if (value === null) return true;
+    if (typeof value === 'boolean') return true;
+    if (typeof value === 'string') return true;
+    if (typeof value === 'number') {
+      return Number.isSafeInteger(value) && value >= 0;
+    }
+
+    if (Array.isArray(value)) {
+      if (!isDenseArray(value)) return false;
+      if (seen.has(value)) return false;
+      seen.add(value);
+      for (let i = 0; i < value.length; i += 1) {
+        if (!isJsonLikePublicData(value[i], depth + 1, seen, true)) return false;
+      }
+      return true;
+    }
+
+    if (!isPlainRecord(value)) return false;
+    if (seen.has(value)) return false;
+    seen.add(value);
+
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.length === 0) return allowEmptyRecord === true;
+
+    for (const key of ownKeys) {
+      if (typeof key === 'symbol') return false;
+      if (QR_FORBIDDEN_NESTED_KEYS.includes(key)) return false;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || desc.enumerable !== true) return false;
+      if (desc.get !== undefined || desc.set !== undefined) return false;
+      if (!isJsonLikePublicData(desc.value, depth + 1, seen, true)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Shape-only QR payload matcher. Never throws; never generates QR images.
+ *
+ * Top-level exact six fields; `code` reuses canonical 16B/22-char validator.
+ * Nested metadata is limited-depth JSON-like public data only.
+ * Does **not** detect secrets embedded in public string values or renamed
+ * fields (honest limit in CROSS_LAN_ENROLLMENT_QR_SCHEMA.shapeMatcherLimit).
+ *
+ * @param {unknown} payload
+ * @returns {boolean}
+ */
+export function matchesCrossLanEnrollmentQrPayloadShape(payload) {
+  try {
+    const record = readExactPlainRecord(payload, QR_TOP_LEVEL_KEYS);
+    if (record === null) return false;
+
+    if (record.schema !== CROSS_LAN_ENROLLMENT_QR_SCHEMA.identifier) return false;
+
+    if (typeof record.codeId !== 'string' || record.codeId.length === 0) return false;
+    if (!isCanonicalCrossLanEnrollmentCode(record.code)) return false;
+
+    const expiry = record.expiry;
+    if (typeof expiry === 'string') {
+      if (expiry.length === 0) return false;
+    } else if (typeof expiry === 'number') {
+      if (!Number.isSafeInteger(expiry) || expiry < 0) return false;
+    } else {
+      return false;
+    }
+
+    // controller: non-empty plain/null-prototype data record
+    if (!isPlainRecord(record.controllerPublicMetadata)) return false;
+    if (Reflect.ownKeys(record.controllerPublicMetadata).length === 0) return false;
+    if (
+      !isJsonLikePublicData(
+        record.controllerPublicMetadata,
+        0,
+        new WeakSet(),
+        false,
+      )
+    ) {
+      return false;
+    }
+
+    // relay: plain/null-prototype data record; empty allowed (direct/LAN-only)
+    if (!isPlainRecord(record.relayPublicMetadata)) return false;
+    if (
+      !isJsonLikePublicData(record.relayPublicMetadata, 0, new WeakSet(), true)
+    ) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
   }
 }
