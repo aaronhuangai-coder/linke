@@ -4,8 +4,14 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 45 = 17 existing + 28 new T1.1 codes
- * (T1.1 lists 30 values; device-rate-limited and device-revoked already exist).
+ * Count: 51 = existing 45 + 6 new V1.35 integrity-journal codes.
+ *
+ * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
+ *   it is NOT counted as a new registration in this bump.
+ * - AUDIT_INTEGRITY_BOUNDS_EXCEEDED is lines/per-line only (NOT chain corruption;
+ *   NOT file size / maxBytes — size overlimit maps to AUDIT_INTEGRITY_IO_ERROR).
+ * - AUDIT_INTEGRITY_IO_ERROR covers root/read/write/permission/size maxBytes /
+ *   other SafeDataFileError mappings.
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -26,7 +32,7 @@ const EXPECTED_ERROR_CODES = {
   DEVICE_TLS_SAN_MISMATCH: 'device-tls-san-mismatch',
   KEYCHAIN_ITEM_MISSING: 'keychain-item-missing',
   KEYCHAIN_UNAVAILABLE: 'keychain-unavailable',
-  // --- new 28 (T1.1 minus 2 overlaps) ---
+  // --- prior 28 (T1.1 minus 2 overlaps) ---
   DEVICE_REPLAY_DETECTED: 'device-replay-detected',
   DEVICE_CLOCK_SKEW: 'device-clock-skew',
   DEVICE_COUNTER_ROLLBACK: 'device-counter-rollback',
@@ -49,31 +55,72 @@ const EXPECTED_ERROR_CODES = {
   PROXY_PAC_UNSUPPORTED: 'proxy-pac-unsupported',
   PROXY_CHAIN_UNSUPPORTED: 'proxy-chain-unsupported',
   DATA_RESUME_EXHAUSTED: 'data-resume-exhausted',
+  // Existing structure-chain code (already in 45; not a new integrity-journal code)
   AUDIT_CHAIN_BROKEN: 'audit-chain-broken',
   CONTROLLER_STATE_UNTRUSTED: 'controller-state-untrusted',
   REVOKE_PROPAGATION_DEGRADED: 'revoke-propagation-degraded',
   SESSION_KEEPALIVE_TIMEOUT: 'session-keepalive-timeout',
   EVIDENCE_ARTIFACT_MISSING: 'evidence-artifact-missing',
   EVIDENCE_ARTIFACT_DIGEST_MISMATCH: 'evidence-artifact-digest-mismatch',
+  // --- new 6 (V1.35 audit integrity journal; chain-broken already above) ---
+  // bounds: lines / per-line UTF-8 only — NEVER file size / maxBytes (that is io-error)
+  AUDIT_INTEGRITY_BOUNDS_EXCEEDED: 'audit-integrity-bounds-exceeded',
+  AUDIT_INTEGRITY_NOT_INITIALIZED: 'audit-integrity-not-initialized',
+  AUDIT_INTEGRITY_ALREADY_INITIALIZED: 'audit-integrity-already-initialized',
+  // io: size maxBytes overlimit + SafeDataFileError/root/read/write/permission
+  AUDIT_INTEGRITY_IO_ERROR: 'audit-integrity-io-error',
+  AUDIT_INTEGRITY_EVENT_INVALID: 'audit-integrity-event-invalid',
+  AUDIT_INTEGRITY_GENERATION_ID_INVALID: 'audit-integrity-generation-id-invalid',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
   /^(auth|device|upload|snapshot|smb|restore|retention|scheduler|lifecycle|keychain|audit|upgrade|handshake|protocol|e2ee|enrollment|control|stale|relay|proxy|data|controller|revoke|session|evidence)-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+const NEW_INTEGRITY_JOURNAL_CODES = [
+  ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED,
+  ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED,
+  ERROR_CODES.AUDIT_INTEGRITY_ALREADY_INITIALIZED,
+  ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR,
+  ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID,
+  ERROR_CODES.AUDIT_INTEGRITY_GENERATION_ID_INVALID,
+];
+
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (45 entries)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 45);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 45);
+  it('matches the exact closed-set ERROR_CODES registry (51 entries = existing 45 + 6)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 51);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 51);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
+    // Existing chain-broken remains; bounds is independent of chain and of size io.
+    assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
+    assert.notStrictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED,
+      ERROR_CODES.AUDIT_CHAIN_BROKEN,
+    );
+    assert.notStrictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED,
+      ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR,
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
+    assert.strictEqual(values.length, 51);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
+    }
+  });
+
+  it('registers the six new integrity-journal codes with LinkeError message===code', () => {
+    assert.strictEqual(NEW_INTEGRITY_JOURNAL_CODES.length, 6);
+    for (const code of NEW_INTEGRITY_JOURNAL_CODES) {
+      assert.strictEqual(assertRegisteredErrorCode(code), code);
+      const error = new LinkeError(code);
+      assert.strictEqual(error.message, code);
+      assert.strictEqual(error.code, code);
+      assert.strictEqual(error.name, 'LinkeError');
     }
   });
 

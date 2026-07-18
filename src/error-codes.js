@@ -48,6 +48,14 @@ export const ERROR_CODES = Object.freeze({
   SESSION_KEEPALIVE_TIMEOUT: 'session-keepalive-timeout',
   EVIDENCE_ARTIFACT_MISSING: 'evidence-artifact-missing',
   EVIDENCE_ARTIFACT_DIGEST_MISMATCH: 'evidence-artifact-digest-mismatch',
+  // V1.35 audit integrity journal (+6). AUDIT_CHAIN_BROKEN above is pre-existing (not new).
+  // bounds-exceeded: lines / per-line UTF-8 only — size/maxBytes overlimit uses io-error.
+  AUDIT_INTEGRITY_BOUNDS_EXCEEDED: 'audit-integrity-bounds-exceeded',
+  AUDIT_INTEGRITY_NOT_INITIALIZED: 'audit-integrity-not-initialized',
+  AUDIT_INTEGRITY_ALREADY_INITIALIZED: 'audit-integrity-already-initialized',
+  AUDIT_INTEGRITY_IO_ERROR: 'audit-integrity-io-error',
+  AUDIT_INTEGRITY_EVENT_INVALID: 'audit-integrity-event-invalid',
+  AUDIT_INTEGRITY_GENERATION_ID_INVALID: 'audit-integrity-generation-id-invalid',
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));
