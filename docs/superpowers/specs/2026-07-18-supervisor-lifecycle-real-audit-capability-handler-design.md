@@ -197,7 +197,7 @@ audit: Object.freeze(Object.keys(CODE_OWNED_ACTION_PRIMARY_CAPABILITY_MAP))  // 
 | --- | --- | --- |
 | `assertSafeDataRoot(root)` | root 必须已存在；`lstat` 非 symlink 且为 directory；返回 **resolved absolute root**；失败 → `SafeDataFileError`（path-free） | invoke 在 pure request/context shape 校验后、任何 fingerprint/Set/sink 前调用；**dataDir 必须已存在**（不 `ensureSafeDataRoot` 创建 root） |
 | `safeAppendText(root, rel, text)` | 安全确保 **缺失 parent 段**（non-recursive mkdir + re-lstat）；`O_APPEND\|O_CREAT\|O_WRONLY\|O_NOFOLLOW`；fd **mode 0600** + `chmod(0600)`；**若 FileHandle 提供 `sync` 方法则实现总是 `await handle.sync()`**（调用方无关闭开关） | 文档只承诺：**no-symlink parent** + **file 0600** + **有 sync 则总是 await**；**不**虚构 directory **0700**；**不**夸大没有 `sync` 方法的测试 seam（无 `sync` 时仅跳过该调用，非 durability claim） |
-| `safeReadText(root, rel, {maxBytes})` | parent 安全；leaf 非 symlink 常规文件；size ≤ maxBytes；ENOENT 原样抛 | sink **queue 内** pre-read 使用 **max 1 MiB** bound；missing → 允许 create |
+| `safeReadText(root, rel, {maxBytes})` | parent 安全；leaf 非 symlink 常规文件；size ≤ maxBytes；ENOENT 原样抛 | sink **queue 内** pre-read 使用 **max 1.5 MiB (1_572_864 bytes / 1536 * 1024)** bound；missing → 允许 create |
 | `SafeDataFileError` | path-free；不嵌入 path/content/system message | receipt 永不回显底层 error message/stack/path |
 
 ### 0.6 `hostSideEffect` / `hostMutation` 历史定义（不得重定义）
@@ -879,8 +879,29 @@ JSON.stringify(eventObjectWithExactKeyOrder) + '\n'
 
 | bound | 值 | 语义 |
 | --- | --- | --- |
-| max pre-read bytes | **1 MiB**（`1 * 1024 * 1024`） | existing-file 读取上限 |
+| max pre-read bytes | **1.5 MiB**（`1_572_864` / `1536 * 1024`） | existing-file 读取上限（UTF-8 **file-size bytes**） |
 | max **existing** event lines | **4096** | **existing-file validation bound only** — **不是** retention/cap/rotation |
+
+**Bound 语义与 contract correction（强制明写）：**
+
+```text
+CAPABILITY_REAL_AUDIT_MAX_PRE_READ_BYTES = 1_572_864  // 1.5 MiB = 1536 * 1024
+  = safeReadText({ maxBytes }) / file stat.size 的 UTF-8 file-size bytes
+  ≠ JS string.length（code units）
+
+为何不是 1 MiB：
+  冻结 contract 的 1 MiB 与「真实 4096 条完整合法 canonical 行」不可同时满足
+  这是 design 内部不可满足矛盾的 formal correction，不是功能扩张
+
+为何 1.5 MiB 足够且安全：
+  accepted operation/actionId 不是任意字符串，而是
+  SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS 的精确枚举 SoT
+  unknown / cross-op / 超长字符串 fail-closed
+  当前所有 SoT pair 中 canonical UTF-8 JSONL 最大行 = 328 bytes
+  328 * 4097 = 1_343_816 < 1_572_864
+  → 能真实读入 4096 后 append 4097，并能在下一次完整读入 4097 后按 line count 拒绝
+  → 比 2 MiB 更紧，无 residual-risk / 实现偏离文档措辞
+```
 
 超 bound → fixed sink-invalid；**不** append / truncate / delete / compact / rotate。
 
@@ -901,7 +922,7 @@ existing lines.length === 4097（或 > 4096）
 
 ### 8.2 JSONL 算法（design 与 plan 同步冻结；exact）
 
-对 `safeReadText` 得到的 `raw`（UTF-8 string；size 已受 1 MiB bound）：
+对 `safeReadText` 得到的 `raw`（UTF-8 string；file size 已受 1.5 MiB / `1_572_864` bytes bound，按 `stat.size` 而非 JS `string.length`）：
 
 ```text
 if raw.length === 0 => empty allow
@@ -1268,7 +1289,7 @@ CHANGE (runtime assertions only in test file):
 | T14 | missing final newline | sink-invalid |
 | T15 | internal blank line / bad JSON / wrong keys / wrong order | sink-invalid |
 | T15b | 尾部 newline 不当 blank/off-by-one（`body===''` → lines=[]） | allow |
-| T16 | oversize >1MiB | sink-invalid |
+| T16 | oversize >1.5 MiB（`bound + 1` byte / `1_572_864 + 1`） | sink-invalid |
 | T16b | existing 恰好 4096 合法行 | validation pass；允许 append 第 4097 行（非 retention） |
 | T16c | existing 4097 行（或 >4096） | 下次 preflight sink-invalid |
 | T16d | same-fingerprint concurrent barrier | 第二 deny；零第二写；双方 64hex fingerprint |
@@ -1379,7 +1400,7 @@ V1.34 real-audit proof (this)
 | HTTP audit（禁止复用） | `src/audit-log.js` |
 | dual registry / proof pattern | `src/supervisor-lifecycle.js` V1.32/V1.33 |
 | sink 合同 | 本 design §6–§9；API = `appendCapabilityRealAuditProofEvent(resolvedDataRoot, event)`；**唯一 queue SoT** |
-| JSONL preflight | 本 design §8.2 算法（1 MiB + **existing** 4096-line validation bound；非 retention） |
+| JSONL preflight | 本 design §8.2 算法（1.5 MiB / `1_572_864` file-size bytes + **existing** 4096-line validation bound；非 retention） |
 | incoming event | 本 design §8.5（与 §8.3 同级；无 raw preimage 重算） |
 | fingerprint 时序 | 本 design §4.5/§6.4/§10.4 Option A：shape → assert root → fingerprint → inFlight → sink |
 | inFlight 时序 | 本 design §9：fingerprint 先算；同步段 `has→deny / add` + finally delete |
