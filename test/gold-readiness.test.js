@@ -14,6 +14,63 @@ function evidenceText(item) {
   return item.evidence.join(' ');
 }
 
+/** Exact negative boundary phrase for production-hardening honesty. */
+const NOT_PRODUCTION_HARDENING_READY = 'not production-hardening ready';
+const PRODUCTION_HARDENING_READY = 'production-hardening ready';
+
+/**
+ * Pure helper: every phrase-bearing clause that mentions production-hardening ready
+ * must also contain the negative "not production-hardening ready" (case-insensitive).
+ * Split on `;` / fullwidth `；` / Chinese period `。` / English comma `,` /
+ * Chinese comma `，` / English period only when followed by whitespace (`\.(?=\s)`,
+ * so version tokens like `T6d.3` stay intact) / emdash `—` / endash `–` / `--`.
+ * Each clause is lowercased before comparing the two phrase constants.
+ * Returns true when no un-negated positive claim exists.
+ */
+function productionHardeningReadyClausesAreNegated(text) {
+  const positive = PRODUCTION_HARDENING_READY.toLowerCase();
+  const negative = NOT_PRODUCTION_HARDENING_READY.toLowerCase();
+  const clauses = String(text)
+    .split(/[;；。,，—–]|--|\.(?=\s)/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+  for (const clause of clauses) {
+    const lower = clause.toLowerCase();
+    if (lower.includes(positive) && !lower.includes(negative)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Assert evidence array elements that mention production-hardening ready each
+ * contain the exact negative phrase (element-level, not joined-text regex).
+ */
+function assertEvidenceProductionHardeningReadyNegated(evidence, label = 'evidence') {
+  assert.ok(Array.isArray(evidence), `${label} must be an array`);
+  for (const element of evidence) {
+    if (String(element).includes(PRODUCTION_HARDENING_READY)) {
+      assert.ok(
+        String(element).includes(NOT_PRODUCTION_HARDENING_READY),
+        `${label} element mentioning "${PRODUCTION_HARDENING_READY}" must include exact "${NOT_PRODUCTION_HARDENING_READY}": ${JSON.stringify(element)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Assert nextStep / free text: every clause (same split as
+ * productionHardeningReadyClausesAreNegated) that bears the phrase must include
+ * the negative (case-insensitive match).
+ */
+function assertTextProductionHardeningReadyNegated(text, label = 'text') {
+  assert.ok(
+    productionHardeningReadyClausesAreNegated(text),
+    `${label} has a clause claiming "${PRODUCTION_HARDENING_READY}" without exact "${NOT_PRODUCTION_HARDENING_READY}"`,
+  );
+}
+
 function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerExecutionPreview'));
   assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-preview.test.js'));
@@ -127,13 +184,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.35', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.35');
+  it('expects LINKE_RELEASE_VERSION to be V1.36', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.36');
   });
 
-  it('expects report.version to be V1.35', () => {
+  it('expects report.version to be V1.36', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.35');
+    assert.strictEqual(report.version, 'V1.36');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -642,10 +699,28 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.35 honesty: unkeyed audit hash-chain structural consistency foundation (T6d.3 partial only)
+    // V1.36 honesty: read-only events↔journal cross-store structural consistency verifier (T6d.3 still partial)
+    assert.ok(
+      hardeningEvidence.includes('V1.36 audit event/journal cross-store structural consistency verifier implementation'),
+      'production-hardening evidence must include V1.36 exact signature ceiling',
+    );
+    assert.ok(hardeningEvidence.includes('src/audit-integrity-cross-store.js'));
+    assert.ok(hardeningEvidence.includes('test/audit-integrity-cross-store.test.js'));
+    assert.ok(hardeningEvidence.includes('test/audit-integrity-cross-store-scans.test.js'));
+    assert.ok(hardeningEvidence.includes('verifyAuditIntegrityAgainstEventStore'));
+    assert.ok(
+      /read-only|readonly/i.test(hardeningEvidence)
+        && /(events.?journal|journal.?events|J.?E|E.?J|cross-store).*(structural|structure)|structural.*(relationship|consistency)/i.test(hardeningEvidence),
+      'production-hardening evidence must prove read-only J↔E structural relationship',
+    );
+    assert.ok(
+      /retention-aware|retention.?aware|retention suffix/i.test(hardeningEvidence),
+      'production-hardening evidence must mention retention-aware structural relationship',
+    );
+    // V1.35 historical journal foundation base (must remain)
     assert.ok(
       hardeningEvidence.includes('V1.35 unkeyed audit hash-chain structural consistency foundation implementation'),
-      'production-hardening evidence must include V1.35 signature ceiling',
+      'production-hardening evidence must retain V1.35 journal foundation signature',
     );
     assert.ok(hardeningEvidence.includes('audit/integrity-journal.jsonl'));
     assert.ok(hardeningEvidence.includes('src/audit-integrity-journal.js'));
@@ -659,10 +734,37 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('auditIntegrityJournalQueues'));
     assert.ok(hardeningEvidence.includes('audit-integrity-bounds-exceeded'));
     assert.ok(hardeningEvidence.includes('audit-integrity-io-error'));
-    assert.ok(hardeningEvidence.includes('T6d.3 partial foundation only'));
+    assert.ok(
+      hardeningEvidence.includes('T6d.3 still partial') || hardeningEvidence.includes('T6d.3 partial foundation only'),
+      'production-hardening evidence must state T6d.3 still partial / partial foundation only',
+    );
+    assert.ok(hardeningEvidence.includes('partial foundation only'));
     assert.ok(
       hardeningEvidence.includes('no production dual-write') || hardeningEvidence.includes('not dual-write'),
       'production-hardening evidence must deny production dual-write',
+    );
+    assert.ok(
+      /no production caller|not production caller|without production caller|explicit verifier only|no production wiring|not production wiring|not production integration/i.test(hardeningEvidence),
+      'production-hardening evidence must deny production caller/wiring/integration',
+    );
+    assert.ok(
+      /not production detects|no production detects|does not (?:claim )?production detects/i.test(hardeningEvidence),
+      'production-hardening evidence must deny production detects',
+    );
+    assert.ok(
+      /not M6d Exit|no M6d Exit|不是 M6d Exit/i.test(hardeningEvidence),
+      'production-hardening evidence must deny M6d Exit',
+    );
+    // Explicit independent negative evidence element (exact includes lock)
+    assert.ok(
+      hardeningItem.evidence.includes(NOT_PRODUCTION_HARDENING_READY),
+      'production-hardening evidence array must include exact independent "not production-hardening ready"',
+    );
+    // Phrase-bearing evidence elements must carry the exact negative (no bare !/production-hardening ready/)
+    assertEvidenceProductionHardeningReadyNegated(hardeningItem.evidence, 'production-hardening evidence');
+    assert.ok(
+      /not Gold|no Gold ready|Gold remains blocked|Gold 依旧 blocked/i.test(hardeningEvidence),
+      'production-hardening evidence must deny Gold ready',
     );
     assert.ok(
       /no external trusted anchor|not external trusted anchor|no external trusted anchor\/HMAC|no external trusted anchor \/ HMAC/i.test(hardeningEvidence)
@@ -701,16 +803,23 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realAttemptAuditImplementationReady:false'));
     assert.ok(hardeningEvidence.includes('realCapabilityImplementationsReady:false'));
     assert.ok(hardeningEvidence.includes('executeCapabilityAuthorized:false'));
-    // V1.35 nextStep leads with structural foundation honesty
-    assert.ok(hardeningItem.nextStep.startsWith('V1.35') || hardeningItem.nextStep.includes('V1.35'),
-      'production-hardening nextStep must lead with / include V1.35');
-    assert.ok(hardeningItem.nextStep.includes('audit/integrity-journal.jsonl'));
+    // V1.36 nextStep leads with cross-store verifier honesty + exact signature
+    assert.ok(hardeningItem.nextStep.startsWith('V1.36') || hardeningItem.nextStep.includes('V1.36'),
+      'production-hardening nextStep must lead with / include V1.36');
     assert.ok(
-      hardeningItem.nextStep.includes('unkeyed hash-chain structural consistency foundation')
-        || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
-      'production-hardening nextStep must name unkeyed structural consistency foundation',
+      hardeningItem.nextStep.includes('V1.36 audit event/journal cross-store structural consistency verifier implementation'),
+      'production-hardening nextStep must include V1.36 exact signature',
     );
-    assert.ok(hardeningItem.nextStep.includes('T6d.3 partial foundation only'));
+    assert.ok(
+      hardeningItem.nextStep.includes('verifyAuditIntegrityAgainstEventStore')
+        || hardeningItem.nextStep.includes('src/audit-integrity-cross-store.js'),
+      'production-hardening nextStep must name cross-store verifier API or module',
+    );
+    assert.ok(
+      /T6d\.3 still partial|T6d\.3 partial foundation only/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must state T6d.3 still partial / partial foundation only',
+    );
+    assert.ok(hardeningItem.nextStep.includes('partial foundation only'));
     assert.ok(
       /not T6d\.3 complete|not.*T6d\.3 complete/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny T6d.3 complete on same negative clause',
@@ -727,7 +836,70 @@ describe('Gold Readiness Report', () => {
       /not production integration|without production integration/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny production integration on negative clause',
     );
+    assert.ok(
+      /not production detects|no production detects|does not (?:claim )?production detects/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny production detects',
+    );
+    assert.ok(
+      /no production caller|not production caller|explicit verifier only|without production caller/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny production caller (explicit verifier only)',
+    );
     assert.ok(hardeningItem.nextStep.includes('production-hardening remains partial'));
+    // Exact negative inside V1.36 capability-boundary parentheses
+    assert.ok(
+      hardeningItem.nextStep.includes(NOT_PRODUCTION_HARDENING_READY),
+      'production-hardening nextStep must include exact "not production-hardening ready"',
+    );
+    // Phrase-bearing nextStep clauses must carry the exact negative (no bare !/production-hardening ready/)
+    assertTextProductionHardeningReadyNegated(hardeningItem.nextStep, 'production-hardening nextStep');
+    // Hostile canaries: pure helper must fail on bare positive, pass on exact negative
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('production-hardening ready'),
+      false,
+      'hostile canary: bare positive "production-hardening ready" must fail',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated(NOT_PRODUCTION_HARDENING_READY),
+      true,
+      'hostile canary: exact "not production-hardening ready" must pass',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('partial only; no claim'),
+      true,
+      'hostile canary: text without the phrase must pass',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('foo; production-hardening ready; bar'),
+      false,
+      'hostile canary: positive clause among siblings must fail',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated(`foo; ${NOT_PRODUCTION_HARDENING_READY}; bar`),
+      true,
+      'hostile canary: negated clause among siblings must pass',
+    );
+    // Hostile canaries: period / comma split and case-insensitive positive must fail (P2 anti-false-green)
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('not production-hardening ready. production-hardening ready'),
+      false,
+      'hostile canary: period-split positive after negative must fail',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('not production-hardening ready, production-hardening ready'),
+      false,
+      'hostile canary: comma-split positive after negative must fail',
+    );
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('not production-hardening ready; Production-hardening ready'),
+      false,
+      'hostile canary: case-variant positive clause after negative must fail',
+    );
+    // Positive control: English period after version-like token must not false-split T6d.3
+    assert.equal(
+      productionHardeningReadyClausesAreNegated('not production-hardening ready. T6d.3 still partial'),
+      true,
+      'positive control: period+space after negative with T6d.3 must pass (no false split on version dot)',
+    );
     assert.ok(
       /Gold remains blocked 4 ready \/ 4 partial \/ 1 blocked \/ total 9|4 ready \/ 4 partial \/ 1 blocked \/ total 9/.test(hardeningItem.nextStep),
       'production-hardening nextStep must keep Gold blocked 4/4/1/9',
@@ -740,26 +912,39 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('realRunnerWiringReady:false'));
     assert.ok(hardeningItem.nextStep.includes('runnerWiringContractReady:false'));
     assert.ok(hardeningItem.nextStep.includes('executionEligible:false'));
+    // V1.36 honest cross-store limitations
     assert.ok(
-      /suffix rewrite/i.test(hardeningItem.nextStep)
-        && /tail truncation/i.test(hardeningItem.nextStep)
-        && /(external-event-store-only|events-only|event-store-only)/i.test(hardeningItem.nextStep)
-        && /full-file replacement/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must document honest limitations',
+      /retention suffix/i.test(hardeningItem.nextStep)
+        && /structure only|structural only|structure-only/i.test(hardeningItem.nextStep)
+        && /not deletion authorization|no deletion authorization|does not prove deletion authorization|not.*deletion authorization/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must say retention suffix is structure only, not deletion authorization',
     );
     assert.ok(
-      /without external anchor|no external anchor|cannot be detected without external/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must say honest limitations need external anchor',
+      /paired rewrite|consistent dual-suffix|dual.?suffix/i.test(hardeningItem.nextStep)
+        && /may (?:still )?verify|can (?:still )?verify|still (?:may |can )?pass|可能通过/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must admit paired rewrite / consistent dual-suffix may still verify',
+    );
+    assert.ok(
+      /E\s*=\s*J\+J|E=J\+J|journal-suffix|occurrence ambigu/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must document E=J+J / occurrence ambiguity',
+    );
+    assert.ok(
+      /no (?:writer )?cursor|without (?:writer )?cursor|no occurrence binding|without occurrence binding|no writer cursor or occurrence binding/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must document no writer cursor / occurrence binding',
     );
     assert.ok(
       /no public HTTP\/CLI\/Web|not.*HTTP\/CLI\/Web|无.*HTTP\/CLI\/Web/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny public HTTP/CLI/Web wiring',
     );
+    // V1.35 historical journal foundation pointer (must not erase base)
+    assert.ok(hardeningItem.nextStep.includes('V1.35'));
     assert.ok(
-      /no recovery|not recovery|无 recovery|no new generation|not.*new generation/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must deny recovery/new generation',
+      hardeningItem.nextStep.includes('audit/integrity-journal.jsonl')
+        || hardeningItem.nextStep.includes('unkeyed hash-chain structural consistency foundation')
+        || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
+      'production-hardening nextStep must retain V1.35 journal foundation pointer',
     );
-    // V1.34 historical real-audit pointer (must not jump V1.35 → V1.33)
+    // V1.34 historical real-audit pointer (must not jump V1.36 → V1.33)
     assert.ok(hardeningItem.nextStep.includes('V1.34'));
     assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
     assert.ok(
