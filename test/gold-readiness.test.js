@@ -127,19 +127,20 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.33', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.33');
+  it('expects LINKE_RELEASE_VERSION to be V1.34', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.34');
   });
 
-  it('expects report.version to be V1.33', () => {
+  it('expects report.version to be V1.34', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.33');
+    assert.strictEqual(report.version, 'V1.34');
   });
 
   it('expects status blocked and correct summary count', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     assert.strictEqual(report.status, 'blocked');
     assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
+    assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
   it('verifies generatedAt timestamp is parsed from options.now', () => {
@@ -641,6 +642,57 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
+    // V1.34 honesty: third real capability audit proof + independent sink (M6d-prep only)
+    assert.ok(hardeningEvidence.includes('realAuditCapabilityImplementationReady:true'));
+    assert.ok(hardeningEvidence.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(hardeningEvidence.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(hardeningEvidence.includes('audit/capability-proof-attempts.jsonl'));
+    assert.ok(hardeningEvidence.includes('src/capability-audit-sink.js'));
+    // Live-success path tokens (valid invoke → independent sink write)
+    assert.ok(
+      hardeningEvidence.includes('capability-real-audit-persisted'),
+      'production-hardening evidence must record live-success outcomeCode capability-real-audit-persisted',
+    );
+    assert.ok(
+      hardeningEvidence.includes('auditPersistOccurred:true'),
+      'production-hardening evidence must record live-success auditPersistOccurred:true',
+    );
+    assert.ok(
+      hardeningEvidence.includes('hostSideEffectOccurred:true'),
+      'production-hardening evidence must record live-success hostSideEffectOccurred:true',
+    );
+    assert.ok(
+      hardeningEvidence.includes('hostMutationOccurred:true'),
+      'production-hardening evidence must record live-success hostMutationOccurred:true',
+    );
+    // Auth / non-live path remains hostSideEffectOccurred:false (dual-state honesty)
+    assert.ok(
+      hardeningEvidence.includes('hostSideEffectOccurred:false'),
+      'production-hardening evidence must retain hostSideEffectOccurred:false for auth/non-live paths',
+    );
+    assert.ok(hardeningEvidence.includes('realAttemptAuditImplementationReady:false'));
+    assert.ok(hardeningEvidence.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(hardeningEvidence.includes('executeCapabilityAuthorized:false'));
+    assert.ok(hardeningItem.nextStep.includes('V1.34'));
+    assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
+    assert.ok(
+      /third real|第三个/.test(hardeningItem.nextStep) ||
+        hardeningItem.nextStep.includes('real audit') ||
+        hardeningItem.nextStep.includes('real-audit'),
+    );
+    assert.ok(hardeningItem.nextStep.includes('capability-proof-attempts.jsonl') || hardeningEvidence.includes('audit/capability-proof-attempts.jsonl'));
+    // V1.33 historical real-status pointer (must not jump V1.34 → V1.32)
+    assert.ok(
+      hardeningItem.nextStep.includes('V1.33'),
+      'production-hardening nextStep must include V1.33 historical real-status pointer',
+    );
+    assert.ok(
+      /real status|real-status|status observational|observational metadata/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must briefly point at V1.33 real status / status observational history',
+    );
+    assert.ok(!/M6d Exit complete|M6d Exit 完成|M6d complete|M6d 完成/i.test(hardeningItem.nextStep));
+    assert.ok(!/\bWORM\b|tamper-proof (?:ready|complete|enabled)|chain integrity (?:ready|complete)|Gold ready|GA ready|cross-lan-connectivity/i.test(`${hardeningItem.nextStep} ${hardeningEvidence}`));
+    assert.notEqual(hardeningItem.status, 'ready');
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
     assert.ok(hardeningItem.nextStep.includes('rollback'));

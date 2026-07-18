@@ -1868,10 +1868,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.33 Real status observational capability handler', () => {
-  it('title and badge claim V1.33 as current', () => {
-    assertReadmeContains(/# Linke V1\.33/, 'README title should mention V1.33');
-    assertReadmeContains(/\*\*当前版本：V1\.33\*\*/, 'README badge should mention V1.33');
+describe('README — V1.34 Real audit capability M6d-prep', () => {
+  it('title and badge claim V1.34 as current', () => {
+    assertReadmeContains(/# Linke V1\.34/, 'README title should mention V1.34');
+    assertReadmeContains(/\*\*当前版本：V1\.34\*\*/, 'README badge should mention V1.34');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.33\*\*/, 'README badge must not still claim V1.33 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.33$/m, 'README title must not still claim V1.33 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.32\*\*/, 'README badge must not still claim V1.32 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.32$/m, 'README title must not still claim V1.32 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.31\*\*/, 'README badge must not still claim V1.31 as current');
@@ -1924,22 +1926,33 @@ describe('README — V1.33 Real status observational capability handler', () => 
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions second real status observational metadata proof boundary', () => {
-    assertReadmeContains(/second real capability handler|observational metadata|real status/i, 'badge second real status');
-    assertReadmeContains(/真实宿主元数据观测非 stub/, 'badge observational terminology');
-    assertReadmeContains(/realStatusCapabilityImplementationReady:true/, 'badge realStatus ready local');
-    assertReadmeContains(/invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof/, 'badge RealStatusProof');
-    assertReadmeContains(/executeCapabilityAuthorized:false/, 'badge execute authorized false');
+  it('badge mentions third real audit proof, independent sink, and M6d-prep honesty', () => {
+    assertReadmeContains(/third real capability|第三个.*real capability|real audit capability/i, 'badge third real audit capability');
+    assertReadmeContains(/M6d-prep/, 'badge M6d-prep only');
+    assertReadmeContains(/realAuditCapabilityImplementationReady:true/, 'badge local realAudit true');
+    assertReadmeContains(/capability-proof-attempts\.jsonl/, 'badge independent capability proof sink path');
+    assertReadmeContains(/invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof/, 'badge RealAuditProof');
     assertReadmeContains(/realCapabilityImplementationsReady:false/, 'badge global real capability false');
+    assertReadmeContains(/3\/7/, 'badge global real kinds 3/7');
+    assertReadmeContains(/realAttemptAuditImplementationReady:false/, 'badge realAttemptAudit still false');
+    assertReadmeContains(/executeCapabilityAuthorized:false/, 'badge execute authorized false');
     assertReadmeContains(/realRunnerWiringReady:false/, 'badge real wiring false');
     assertReadmeContains(/executionEligible:false/, 'badge executionEligible false');
-    assertReadmeContains(/Gold 依旧 blocked/, 'badge Gold blocked');
-    assertReadmeContains(/不[\s\S]*宣称[\s\S]*V2\.0 Gold|不宣称 V2\.0 Gold|跨局域网/, 'badge no V2.0 Gold/cross-LAN claim');
+    assertReadmeContains(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked/i, 'badge Gold still blocked honesty');
+    assertReadmeContains(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i, 'badge not M6d Exit');
+    assertReadmeContains(/不[\s\S]*宣称[\s\S]*V2\.0 Gold|不宣称 V2\.0 Gold|跨局域网|not.*cross-LAN|不是.*跨局域网/i, 'badge no V2.0 Gold/cross-LAN claim');
+    assertReadmeDoesNotContain(/\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
+    assert.doesNotMatch(
+      readme.split('\n').slice(0, 20).join('\n'),
+      /production-hardening ready/i,
+      'current badge/table must not claim production-hardening ready',
+    );
   });
 
-  it('version table marks V1.33 current and keeps V1.32/V1.31 historical', () => {
-    assertReadmeContains(/\| V1\.33 \| 当前版本 \|[^|]*real status[^|]*realStatusCapabilityImplementationReady:true[^|]*PROOF ONLY[^|]*capability-real-status-completed[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.33 should be current real status observational milestone');
-    assertReadmeContains(/\| V1\.32 \| 历史版本 \|[^|]*real render[^|]*realRenderCapabilityImplementationReady:true[^|]*capability-real-implementation-receipt[^|]*PROOF ONLY[^|]*execute[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.32 should become historical first real render milestone');
+  it('version table marks V1.34 current and keeps V1.33/V1.32 historical', () => {
+    assertReadmeContains(/\| V1\.34 \| 当前版本 \|[^|]*(real audit|RealAudit|capability-proof-attempts|M6d-prep)[^|]*realAuditCapabilityImplementationReady:true[^|]*realCapabilityImplementationsReady:false[^|]*(3\/7|realAttemptAuditImplementationReady:false)[^|]*(executeCapabilityAuthorized:false|realRunnerWiringReady:false|executionEligible:false)[^|]*Gold 依旧 blocked/i, 'V1.34 should be current third real audit M6d-prep milestone');
+    assertReadmeContains(/\| V1\.33 \| 历史版本 \|[^|]*real status[^|]*realStatusCapabilityImplementationReady:true[^|]*PROOF ONLY[^|]*capability-real-status-completed[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.33 should become historical second real status milestone');
+    assertReadmeContains(/\| V1\.32 \| 历史版本 \|[^|]*real render[^|]*realRenderCapabilityImplementationReady:true[^|]*capability-real-implementation-receipt[^|]*PROOF ONLY[^|]*execute[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.32 should remain historical first real render milestone');
     assertReadmeContains(/\| V1\.31 \| 历史版本 \|[^|]*capability injection[^|]*CapabilityInjection[^|]*executeCapabilityAuthorized:false[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*readyCount:6[^|]*blockedCount:0[^|]*real-guarded-runner-execution-wiring-missing[^|]*Gold 依旧 blocked/i, 'V1.31 should become historical capability injection milestone');
     assertReadmeContains(/\| V1\.30 \| 历史版本 \|[^|]*buildSupervisorLifecycleGuardedRunnerRealWiringPlan/i, 'V1.30 should become historical real-wiring orchestrator milestone');
     assertReadmeContains(/\| V1\.29 \| 历史版本 \|[^|]*resolveSupervisorLifecycleGuardedRunnerOperatorRecovery[^|]*operatorRecoveryReadiness\.state:ready[^|]*operatorRecoveryReady:true[^|]*codeOwnedRecoveryResolverReady:true[^|]*realOperatorRecoveryImplementationReady:false[^|]*readyCount:6[^|]*blockedCount:0[^|]*recoveryDecision[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.29 should become historical operator recovery milestone');
@@ -2010,6 +2023,8 @@ describe('README — V1.33 Real status observational capability handler', () => 
     assertReadmeDoesNotContain(/\| V1\.28 \| 当前版本 \|/i, 'V1.28 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.29 \| 当前版本 \|/i, 'V1.29 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.30 \| 当前版本 \|/i, 'V1.30 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.33 \| 当前版本 \|/i, 'V1.33 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.32 \| 当前版本 \|/i, 'V1.32 must not remain marked as current');
   });
 
   it('documents supervisor-lifecycle-apply as dry-run/blocked without --apply', () => {
