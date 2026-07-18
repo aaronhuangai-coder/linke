@@ -1,7 +1,7 @@
 import { ERROR_CODES } from './error-codes.js';
 
 /**
- * Linke V2 control-plane protocol scaffold (T1.2–T1.14 / M1).
+ * Linke V2 control-plane protocol scaffold (T1.2–T1.14 / T1.16 / M1).
  *
  * T1.2: field-level + nested field-shape only (control-plane message schemas).
  * T1.3: pure session-state transition table + reducer (no side effects).
@@ -28,6 +28,15 @@ import { ERROR_CODES } from './error-codes.js';
  *        (BigInt uint64 semantic constants + pure decision/predicate; no
  *        dataDir, fsync, reservation execution, session, ack, signature /
  *        authority verification, or wire encoding).
+ * T1.16: pure relay pin-set update message semantic contract + fail-closed
+ *        preserve-old-pin predicate (A21/A22 contract-level only). Reuses
+ *        T1.2 frozen requiredFields and T1.14 trustEpoch reject predicate.
+ *        Caller claims (E2EE / signature / time window / old-set match /
+ *        persistence) are **not** runtime proof. Does **not** perform real
+ *        signature verification, E2EE verification, wall-clock / Date.parse,
+ *        current-old-set lookup, persistence, ack emission, grace expiry, or
+ *        TLS/pin I/O. Does **not** implement `revokeOldImmediately` (exact
+ *        matcher rejects it). A21/A22 runtime remains not-ready.
  *
  * NOT a security, crypto, wire-encoding, or full semantic validator.
  * Does not verify nonces, MACs/signatures, times, binary encodings, trust
@@ -43,13 +52,16 @@ import { ERROR_CODES } from './error-codes.js';
  * Noise library, or execute DH/AEAD/hash/handshake.
  * T1.14 does not claim A18 / counter persistence / authority verification /
  * M1 crypto readiness.
+ * T1.16 does not claim A21/A22 runtime readiness or pin-set apply/ack side
+ * effects.
  *
  * Keepalive types are Noise AEAD application-layer messages with empty
  * payloads — not RFC6455 WebSocket ping/pong (transport timing is M3).
  *
  * `signature` fields (relay-pin-set-update, controller-noise-key-update)
  * are controller Ed25519 signatures over canonical TBS in later tasks;
- * this module only checks field presence/shape.
+ * T1.2 only checks field presence/shape; T1.16 checks nonempty string shape
+ * for `signature` but still does **not** verify Ed25519.
  *
  * `keyConfirmClient` is the frozen camelCase mirror of spec `keyConfirmServer`
  * (design §6.7.2.5 client confirm transport message payload field name).
@@ -1542,9 +1554,11 @@ function matchesNoiseIkTokenRow(row, expected) {
 
 /**
  * Exact plain/null-prototype record reader: only enumerable own string data
- * fields, no symbols, no accessors, no non-enumerable own keys. Values are
- * taken from property descriptors (`desc.value`) so accessor / get traps are
- * never invoked. Rejects class instances, arrays, Date, Proxy throw/revoke
+ * fields, no symbols, no accessors, no non-enumerable own keys. Single
+ * snapshot — `Reflect.ownKeys` once, and each own string key's
+ * `Object.getOwnPropertyDescriptor` exactly once; that same descriptor both
+ * validates enumerable/data shape and supplies `desc.value` (no second pass,
+ * no ordinary get). Rejects class instances, arrays, Date, Proxy throw/revoke
  * (via try/catch), and extra/missing fields vs `expectedKeys`.
  *
  * @param {unknown} value
@@ -1554,19 +1568,23 @@ function matchesNoiseIkTokenRow(row, expected) {
 function readExactOwnDataRecord(value, expectedKeys) {
   try {
     if (!isPlainRecord(value)) return null;
-    const keys = getExactOwnStringDataKeys(value);
-    if (keys === null || keys.length !== expectedKeys.length) return null;
+    const ownKeys = Reflect.ownKeys(value);
     /** @type {Set<string>} */
     const expected = new Set(expectedKeys);
     /** @type {Record<string, unknown>} */
     const out = Object.create(null);
-    for (const key of keys) {
+    let stringKeyCount = 0;
+    for (const key of ownKeys) {
+      if (typeof key === 'symbol') return null;
+      stringKeyCount += 1;
       if (!expected.has(key)) return null;
+      // Single descriptor snapshot: validate shape + capture value together.
       const desc = Object.getOwnPropertyDescriptor(value, key);
       if (!desc || desc.enumerable !== true) return null;
       if (desc.get !== undefined || desc.set !== undefined) return null;
       out[key] = desc.value;
     }
+    if (stringKeyCount !== expectedKeys.length) return null;
     for (const k of expectedKeys) {
       if (!Object.hasOwn(out, k)) return null;
     }
@@ -1885,6 +1903,290 @@ export function shouldRejectCrossLanTrustEpoch(input) {
     if (!isPositiveUint64BigInt(rec.trustEpoch)) return true;
     if (!isUint64BigInt(rec.lastAcceptedTrustEpoch)) return true;
     if (rec.trustEpoch <= rec.lastAcceptedTrustEpoch) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T1.16 — pure relay pin-set update semantic contract + preserve-old predicate
+// (A21/A22 contract-level only; no signature/E2EE/time/persist/ack side effects)
+// ---------------------------------------------------------------------------
+
+/** @type {ReadonlyArray<string>} */
+const RELAY_PIN_SET_UPDATE_REQUIRED_FIELDS =
+  CONTROL_PLANE_MESSAGE_SCHEMAS['relay-pin-set-update'].requiredFields;
+
+/** @type {ReadonlyArray<string>} */
+const RELAY_PIN_SET_ACK_REQUIRED_FIELDS =
+  CONTROL_PLANE_MESSAGE_SCHEMAS['relay-pin-set-ack'].requiredFields;
+
+/** Nonempty string fields of relay-pin-set-update (excludes pin arrays + epoch). */
+const RELAY_PIN_SET_UPDATE_NONEMPTY_STRING_FIELDS = Object.freeze([
+  'relayId',
+  'notBefore',
+  'graceUntil',
+  'updateId',
+  'signature',
+]);
+
+/** Wrapper fields for preserve-old-pin predicate (exact shape). */
+const RELAY_PIN_SET_PRESERVE_WRAPPER_FIELDS = Object.freeze([
+  'message',
+  'lastAcceptedTrustEpoch',
+  'authenticatedE2eeEstablished',
+  'signatureVerified',
+  'timeWindowValidated',
+  'oldPinsMatchCurrentSet',
+  'persistenceSucceeded',
+]);
+
+/** Boolean claim fields that must be strictly `=== true` for apply path. */
+const RELAY_PIN_SET_PRESERVE_CLAIM_FIELDS = Object.freeze([
+  'authenticatedE2eeEstablished',
+  'signatureVerified',
+  'timeWindowValidated',
+  'oldPinsMatchCurrentSet',
+  'persistenceSucceeded',
+]);
+
+/**
+ * Frozen relay pin-set policy (T1.16 / §4.1.6 A21–A22 contract-level).
+ *
+ * Declares message types, required field lists (shared with T1.2 frozen
+ * arrays), delivery/signature/epoch rules, overlap/emergency policy flags,
+ * fail-closed preserve-on-failure, and M1 honesty (no sig/persist/ack).
+ * Does **not** execute rotation, verify signatures, parse clocks, or emit ack.
+ *
+ * @type {Readonly<{
+ *   updateMessageType: string,
+ *   ackMessageType: string,
+ *   requiredUpdateFields: ReadonlyArray<string>,
+ *   requiredAckFields: ReadonlyArray<string>,
+ *   deliveryChannel: string,
+ *   signatureAuthority: string,
+ *   trustEpochRule: string,
+ *   persistBeforeAckRequired: boolean,
+ *   oldAndNewPinsValidDuringInclusiveOverlap: boolean,
+ *   oldPinsRemovedAfterGrace: boolean,
+ *   emergencyRevokeEncoding: string,
+ *   preserveOldPinsOnAnyFailure: boolean,
+ *   tofuAllowed: boolean,
+ *   skipPinValidationAllowed: boolean,
+ *   m1PerformsSignatureVerification: boolean,
+ *   m1PerformsPersistence: boolean,
+ *   m1EmitsAck: boolean,
+ *   a21A22RuntimeStatus: string,
+ *   implementationStage: string,
+ * }>}
+ */
+export const CROSS_LAN_RELAY_PIN_SET_POLICY = Object.freeze({
+  updateMessageType: 'relay-pin-set-update',
+  ackMessageType: 'relay-pin-set-ack',
+  requiredUpdateFields: RELAY_PIN_SET_UPDATE_REQUIRED_FIELDS,
+  requiredAckFields: RELAY_PIN_SET_ACK_REQUIRED_FIELDS,
+  deliveryChannel: 'authenticated-e2ee-established-only',
+  signatureAuthority: 'controller-ed25519-canonical-tbs-all-required-fields',
+  trustEpochRule: 'positive-uint64-strictly-greater-than-last-accepted',
+  persistBeforeAckRequired: true,
+  oldAndNewPinsValidDuringInclusiveOverlap: true,
+  oldPinsRemovedAfterGrace: true,
+  emergencyRevokeEncoding: 'graceUntil-equals-notBefore',
+  preserveOldPinsOnAnyFailure: true,
+  tofuAllowed: false,
+  skipPinValidationAllowed: false,
+  m1PerformsSignatureVerification: false,
+  m1PerformsPersistence: false,
+  m1EmitsAck: false,
+  a21A22RuntimeStatus: 'not-ready',
+  implementationStage: 'T1.16-M1-contract-only',
+});
+
+/**
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isNonemptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/**
+ * Dense array snapshot from own data descriptors only. Own keys must be
+ * exactly `0..length-1` + `length` (length from its own data descriptor).
+ * Each index must be an enumerable data property. Returns descriptor values
+ * or null. Never invokes ordinary index get traps for values.
+ *
+ * @param {unknown} value
+ * @returns {unknown[] | null}
+ */
+function readDenseArrayDescriptorValues(value) {
+  try {
+    if (!Array.isArray(value)) return null;
+    const lengthDesc = Object.getOwnPropertyDescriptor(value, 'length');
+    if (
+      !lengthDesc ||
+      lengthDesc.get !== undefined ||
+      lengthDesc.set !== undefined
+    ) {
+      return null;
+    }
+    const length = lengthDesc.value;
+    if (
+      typeof length !== 'number' ||
+      !Number.isInteger(length) ||
+      length < 0
+    ) {
+      return null;
+    }
+    const keys = Reflect.ownKeys(value);
+    /** @type {string[]} */
+    const expected = [];
+    for (let i = 0; i < length; i += 1) expected.push(String(i));
+    expected.push('length');
+    if (keys.length !== expected.length) return null;
+    for (let i = 0; i < expected.length; i += 1) {
+      if (keys[i] !== expected[i]) return null;
+    }
+    /** @type {unknown[]} */
+    const out = [];
+    for (let i = 0; i < length; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(value, String(i));
+      if (!desc || desc.enumerable !== true) return null;
+      if (desc.get !== undefined || desc.set !== undefined) return null;
+      out.push(desc.value);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Nonempty dense array of unique nonempty strings via descriptor snapshot.
+ *
+ * @param {unknown} value
+ * @returns {string[] | null}
+ */
+function readDenseNonemptyUniqueStringArray(value) {
+  const items = readDenseArrayDescriptorValues(value);
+  if (items === null || items.length === 0) return null;
+  /** @type {string[]} */
+  const out = [];
+  /** @type {Set<string>} */
+  const seen = new Set();
+  for (const item of items) {
+    if (!isNonemptyString(item)) return null;
+    if (seen.has(item)) return null;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Validate a descriptor-value snapshot of a relay-pin-set-update record.
+ * Consumes only the provided snapshot object (and dense-array snapshots of
+ * pin array values already present on the snapshot). Does not re-read the
+ * original message via ordinary property get.
+ *
+ * @param {Record<string, unknown>} rec
+ * @returns {boolean}
+ */
+function isValidRelayPinSetUpdateRecordSnapshot(rec) {
+  for (const field of RELAY_PIN_SET_UPDATE_NONEMPTY_STRING_FIELDS) {
+    if (!isNonemptyString(rec[field])) return false;
+  }
+  if (readDenseNonemptyUniqueStringArray(rec.oldSpkiPins) === null) return false;
+  if (readDenseNonemptyUniqueStringArray(rec.newSpkiPins) === null) return false;
+  if (!isPositiveUint64BigInt(rec.trustEpoch)) return false;
+  return true;
+}
+
+/**
+ * Semantic matcher for raw `relay-pin-set-update` messages (T1.16).
+ *
+ * Accepts an unknown message (not a caller-supplied snapshot). Requires an
+ * exact ordinary / null-prototype record with exactly the T1.2 eight own
+ * enumerable string data fields. Values are taken from property descriptors
+ * so get traps cannot false-accept. Pin arrays must be nonempty dense Arrays
+ * of unique nonempty strings (internal uniqueness only; old/new intersection
+ * and identical sets are allowed). `trustEpoch` must be a positive uint64
+ * BigInt. String fields are nonempty only — no trim/normalize/regex/Date.parse.
+ *
+ * Total / no-throw. NOT a signature, time-window, or wire validator.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function matchesCrossLanRelayPinSetUpdateContract(input) {
+  try {
+    const rec = readExactOwnDataRecord(input, RELAY_PIN_SET_UPDATE_REQUIRED_FIELDS);
+    if (rec === null) return false;
+    return isValidRelayPinSetUpdateRecordSnapshot(rec);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fail-closed preserve-old-pin predicate after a pin-set update attempt (T1.16).
+ *
+ * Exact wrapper record with fields:
+ *   `message`, `lastAcceptedTrustEpoch`, `authenticatedE2eeEstablished`,
+ *   `signatureVerified`, `timeWindowValidated`, `oldPinsMatchCurrentSet`,
+ *   `persistenceSucceeded`.
+ *
+ * Wrapper and nested message/pin arrays are snapshotted once via property
+ * descriptors in a single call; decisions consume only that snapshot (no
+ * public matcher-then-re-read of the live message; no ordinary
+ * `message.field` / `array[i]` decisions). Any invalid shape / type /
+ * accessor / symbol / Proxy throw / revoked → `true` (preserve old pins =
+ * leave the existing persisted pin set unchanged).
+ *
+ * Returns `false` only when every gate passes: message is semantically valid,
+ * `lastAcceptedTrustEpoch` is a nonnegative uint64 BigInt, candidate epoch is
+ * strictly greater via `shouldRejectCrossLanTrustEpoch`, and all five claim
+ * flags are strictly `=== true`. `false` only allows the caller to enter
+ * subsequent apply/ack runtime (which may include inclusive old/new pin
+ * overlap); it does **not** mean immediately delete old pins. Caller claims
+ * are not runtime proof; this function never verifies signatures, E2EE,
+ * clocks, old-set membership, or persistence, and never emits ack / pins /
+ * alerts.
+ *
+ * @param {unknown} input
+ * @returns {boolean}
+ */
+export function shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt(input) {
+  try {
+    const wrapper = readExactOwnDataRecord(
+      input,
+      RELAY_PIN_SET_PRESERVE_WRAPPER_FIELDS,
+    );
+    if (wrapper === null) return true;
+
+    // Single message descriptor snapshot for this call — never re-read live.
+    const messageSnap = readExactOwnDataRecord(
+      wrapper.message,
+      RELAY_PIN_SET_UPDATE_REQUIRED_FIELDS,
+    );
+    if (messageSnap === null) return true;
+    if (!isValidRelayPinSetUpdateRecordSnapshot(messageSnap)) return true;
+
+    // Fresh epoch via existing T1.14 predicate on descriptor-snapshotted values.
+    if (
+      shouldRejectCrossLanTrustEpoch({
+        trustEpoch: messageSnap.trustEpoch,
+        lastAcceptedTrustEpoch: wrapper.lastAcceptedTrustEpoch,
+      })
+    ) {
+      return true;
+    }
+
+    for (const claim of RELAY_PIN_SET_PRESERVE_CLAIM_FIELDS) {
+      if (wrapper[claim] !== true) return true;
+    }
+
     return false;
   } catch {
     return true;

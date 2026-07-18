@@ -4333,3 +4333,1146 @@ describe('cross-LAN counter reservation + trustEpoch contract (T1.14)', () => {
     });
   });
 });
+
+/**
+ * T1.16 Relay pin-set update message field semantic contract (incl. trustEpoch)
+ * + fail-closed preserve-old-pin predicate (A21/A22 contract-level only).
+ *
+ * Honesty / scope (highest priority):
+ * - M1 pure contract only: policy constants + semantic matcher + preserve
+ *   predicate. Caller claims are **not** runtime proof.
+ * - Does NOT perform real signature verification, E2EE channel verification,
+ *   wall-clock / Date.parse of notBefore/graceUntil, current-old-set lookup,
+ *   persistence, ack emission, grace expiry, or TLS/pin I/O.
+ * - Does NOT implement revokeOldImmediately field (exact matcher rejects it).
+ * - T1.2 CONTROL_PLANE_MESSAGE_SCHEMAS content is unchanged; this suite only
+ *   references frozen requiredFields arrays.
+ * - T1.0 remains BLOCKED; A21/A22 runtime is not-ready.
+ */
+describe('cross-LAN relay pin-set update contract (T1.16)', () => {
+  const UINT64_MAX = (1n << 64n) - 1n;
+
+  const EXPECTED_PIN_SET_POLICY_KEYS = Object.freeze([
+    'updateMessageType',
+    'ackMessageType',
+    'requiredUpdateFields',
+    'requiredAckFields',
+    'deliveryChannel',
+    'signatureAuthority',
+    'trustEpochRule',
+    'persistBeforeAckRequired',
+    'oldAndNewPinsValidDuringInclusiveOverlap',
+    'oldPinsRemovedAfterGrace',
+    'emergencyRevokeEncoding',
+    'preserveOldPinsOnAnyFailure',
+    'tofuAllowed',
+    'skipPinValidationAllowed',
+    'm1PerformsSignatureVerification',
+    'm1PerformsPersistence',
+    'm1EmitsAck',
+    'a21A22RuntimeStatus',
+    'implementationStage',
+  ]);
+
+  function createThrowingProxy() {
+    return new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        get() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(SENTINEL_SECRET);
+        },
+        getPrototypeOf() {
+          throw new Error(SENTINEL_SECRET);
+        },
+      },
+    );
+  }
+
+  function createRevokedProxy(target) {
+    const { proxy, revoke } = Proxy.revocable(target, {});
+    revoke();
+    return proxy;
+  }
+
+  /**
+   * Own enumerable data fields: get trap returns `get` values while
+   * getOwnPropertyDescriptor reports independent `desc` values.
+   * @param {object} target
+   * @param {Record<string, { desc: unknown, get: unknown }>} splits
+   */
+  function splitGetVsDescriptor(target, splits) {
+    return new Proxy(target, {
+      get(t, prop, receiver) {
+        if (typeof prop === 'string' && Object.hasOwn(splits, prop)) {
+          return splits[prop].get;
+        }
+        return Reflect.get(t, prop, receiver);
+      },
+      getOwnPropertyDescriptor(t, prop) {
+        if (typeof prop === 'string' && Object.hasOwn(splits, prop)) {
+          return {
+            value: splits[prop].desc,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(t, prop);
+      },
+    });
+  }
+
+  /**
+   * Dense array Proxy: index descriptors report `descValues` while
+   * ordinary index get returns `getValues`.
+   * @param {unknown[]} descValues
+   * @param {unknown[]} getValues
+   */
+  function splitDenseArrayGetVsDescriptor(descValues, getValues) {
+    const target = getValues.slice();
+    return new Proxy(target, {
+      get(t, prop, receiver) {
+        if (prop === 'length') return getValues.length;
+        if (typeof prop === 'string' && /^[0-9]+$/.test(prop)) {
+          const i = Number(prop);
+          if (i >= 0 && i < getValues.length) return getValues[i];
+        }
+        return Reflect.get(t, prop, receiver);
+      },
+      getOwnPropertyDescriptor(t, prop) {
+        if (prop === 'length') {
+          return {
+            value: descValues.length,
+            writable: true,
+            enumerable: false,
+            configurable: false,
+          };
+        }
+        if (typeof prop === 'string' && /^[0-9]+$/.test(prop)) {
+          const i = Number(prop);
+          if (i >= 0 && i < descValues.length) {
+            return {
+              value: descValues[i],
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          }
+        }
+        return Reflect.getOwnPropertyDescriptor(t, prop);
+      },
+      ownKeys() {
+        /** @type {(string|symbol)[]} */
+        const keys = [];
+        for (let i = 0; i < descValues.length; i += 1) {
+          keys.push(String(i));
+        }
+        keys.push('length');
+        return keys;
+      },
+    });
+  }
+
+  /** Valid semantic relay-pin-set-update message (overlap dual-pin shape). */
+  function validUpdateMessage(overrides = {}) {
+    return {
+      relayId: 'relay-1',
+      oldSpkiPins: ['pin-old-a', 'pin-old-b'],
+      newSpkiPins: ['pin-new-a', 'pin-old-a'],
+      notBefore: '2026-07-17T00:00:00.000Z',
+      graceUntil: '2026-07-17T01:00:00.000Z',
+      updateId: 'upd-1',
+      trustEpoch: 2n,
+      signature: 'sig-dummy',
+      ...overrides,
+    };
+  }
+
+  /** Emergency shape only: graceUntil equals notBefore (no clock parse). */
+  function validEmergencyMessage(overrides = {}) {
+    return validUpdateMessage({
+      notBefore: '2026-07-17T12:00:00.000Z',
+      graceUntil: '2026-07-17T12:00:00.000Z',
+      oldSpkiPins: ['pin-old'],
+      newSpkiPins: ['pin-new'],
+      trustEpoch: 3n,
+      ...overrides,
+    });
+  }
+
+  function happyPreserveWrapper(overrides = {}) {
+    return {
+      message: validUpdateMessage(),
+      lastAcceptedTrustEpoch: 1n,
+      authenticatedE2eeEstablished: true,
+      signatureVerified: true,
+      timeWindowValidated: true,
+      oldPinsMatchCurrentSet: true,
+      persistenceSucceeded: true,
+      ...overrides,
+    };
+  }
+
+  it('1) CROSS_LAN_RELAY_PIN_SET_POLICY exact 19 keys / deep freeze / T1.2 field refs / runtime honesty', () => {
+    const policy = protocol.CROSS_LAN_RELAY_PIN_SET_POLICY;
+    assert.notStrictEqual(
+      policy,
+      undefined,
+      'CROSS_LAN_RELAY_PIN_SET_POLICY must be exported (T1.16 RED if missing)',
+    );
+    assert.strictEqual(Object.keys(policy).length, 19);
+    assert.deepStrictEqual(
+      Object.keys(policy).sort(),
+      [...EXPECTED_PIN_SET_POLICY_KEYS].sort(),
+    );
+
+    assert.strictEqual(policy.updateMessageType, 'relay-pin-set-update');
+    assert.strictEqual(policy.ackMessageType, 'relay-pin-set-ack');
+    assert.strictEqual(
+      policy.requiredUpdateFields,
+      CONTROL_PLANE_MESSAGE_SCHEMAS['relay-pin-set-update'].requiredFields,
+      'requiredUpdateFields must reuse T1.2 frozen requiredFields array',
+    );
+    assert.strictEqual(
+      policy.requiredAckFields,
+      CONTROL_PLANE_MESSAGE_SCHEMAS['relay-pin-set-ack'].requiredFields,
+      'requiredAckFields must reuse T1.2 frozen ack requiredFields array',
+    );
+    assert.deepStrictEqual(policy.requiredUpdateFields, [
+      'relayId',
+      'oldSpkiPins',
+      'newSpkiPins',
+      'notBefore',
+      'graceUntil',
+      'updateId',
+      'trustEpoch',
+      'signature',
+    ]);
+    assert.deepStrictEqual(policy.requiredAckFields, ['updateId']);
+
+    assert.strictEqual(
+      policy.deliveryChannel,
+      'authenticated-e2ee-established-only',
+    );
+    assert.strictEqual(
+      policy.signatureAuthority,
+      'controller-ed25519-canonical-tbs-all-required-fields',
+    );
+    assert.strictEqual(
+      policy.trustEpochRule,
+      'positive-uint64-strictly-greater-than-last-accepted',
+    );
+    assert.strictEqual(policy.persistBeforeAckRequired, true);
+    assert.strictEqual(policy.oldAndNewPinsValidDuringInclusiveOverlap, true);
+    assert.strictEqual(policy.oldPinsRemovedAfterGrace, true);
+    assert.strictEqual(
+      policy.emergencyRevokeEncoding,
+      'graceUntil-equals-notBefore',
+    );
+    assert.strictEqual(policy.preserveOldPinsOnAnyFailure, true);
+    assert.strictEqual(policy.tofuAllowed, false);
+    assert.strictEqual(policy.skipPinValidationAllowed, false);
+    assert.strictEqual(policy.m1PerformsSignatureVerification, false);
+    assert.strictEqual(policy.m1PerformsPersistence, false);
+    assert.strictEqual(policy.m1EmitsAck, false);
+    assert.strictEqual(policy.a21A22RuntimeStatus, 'not-ready');
+    assert.strictEqual(policy.implementationStage, 'T1.16-M1-contract-only');
+
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.requiredUpdateFields));
+    assert.ok(Object.isFrozen(policy.requiredAckFields));
+    assert.throws(() => {
+      policy.tofuAllowed = true;
+    }, TypeError);
+    assert.throws(() => {
+      policy.requiredUpdateFields.push('extra');
+    }, TypeError);
+  });
+
+  it('2) matchesCrossLanRelayPinSetUpdateContract: valid overlap / emergency / null-proto / frozen / uint64 bounds / pin intersection', () => {
+    const fn = protocol.matchesCrossLanRelayPinSetUpdateContract;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.16 RED)');
+
+    // Normal overlap dual-pin shape (no clock parse)
+    assert.strictEqual(fn(validUpdateMessage()), true);
+
+    // Emergency encoding shape: graceUntil === notBefore (declared only)
+    assert.strictEqual(fn(validEmergencyMessage()), true);
+
+    // null-prototype + frozen
+    const nullProto = Object.assign(Object.create(null), validUpdateMessage());
+    assert.strictEqual(fn(nullProto), true);
+    assert.strictEqual(fn(Object.freeze(validUpdateMessage())), true);
+
+    // trustEpoch uint64 bounds: 1n and max
+    assert.strictEqual(fn(validUpdateMessage({ trustEpoch: 1n })), true);
+    assert.strictEqual(fn(validUpdateMessage({ trustEpoch: UINT64_MAX })), true);
+
+    // old/new intersection allowed
+    assert.strictEqual(
+      fn(
+        validUpdateMessage({
+          oldSpkiPins: ['a', 'b'],
+          newSpkiPins: ['b', 'c'],
+        }),
+      ),
+      true,
+    );
+    // old/new identical sets allowed
+    assert.strictEqual(
+      fn(
+        validUpdateMessage({
+          oldSpkiPins: ['same-pin'],
+          newSpkiPins: ['same-pin'],
+        }),
+      ),
+      true,
+    );
+
+    // Single-element dense arrays
+    assert.strictEqual(
+      fn(
+        validUpdateMessage({
+          oldSpkiPins: ['only-old'],
+          newSpkiPins: ['only-new'],
+        }),
+      ),
+      true,
+    );
+  });
+
+  it('3) matcher invalid: epoch types/bounds, empty strings, pin arrays, extra revokeOldImmediately, shape/proxy', () => {
+    const fn = protocol.matchesCrossLanRelayPinSetUpdateContract;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.16 RED)');
+
+    // trustEpoch invalid
+    assert.strictEqual(fn(validUpdateMessage({ trustEpoch: 2 })), false, 'number epoch');
+    assert.strictEqual(fn(validUpdateMessage({ trustEpoch: 0n })), false, 'zero epoch');
+    assert.strictEqual(fn(validUpdateMessage({ trustEpoch: -1n })), false, 'negative epoch');
+    assert.strictEqual(
+      fn(validUpdateMessage({ trustEpoch: UINT64_MAX + 1n })),
+      false,
+      '>uint64 max epoch',
+    );
+
+    // empty required strings
+    for (const field of [
+      'relayId',
+      'notBefore',
+      'graceUntil',
+      'updateId',
+      'signature',
+    ]) {
+      assert.strictEqual(
+        fn(validUpdateMessage({ [field]: '' })),
+        false,
+        `empty ${field}`,
+      );
+      assert.strictEqual(
+        fn(validUpdateMessage({ [field]: 1 })),
+        false,
+        `non-string ${field}`,
+      );
+    }
+
+    // pin arrays: empty / sparse / duplicate / non-string / empty-string element
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: [], newSpkiPins: ['a'] })),
+      false,
+      'empty old pins',
+    );
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: ['a'], newSpkiPins: [] })),
+      false,
+      'empty new pins',
+    );
+
+    const sparse = [];
+    sparse[1] = 'pin-a';
+    sparse.length = 2;
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: sparse, newSpkiPins: ['b'] })),
+      false,
+      'sparse old pins',
+    );
+
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: ['dup', 'dup'], newSpkiPins: ['b'] })),
+      false,
+      'duplicate old pins',
+    );
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: ['a'], newSpkiPins: ['x', 'x'] })),
+      false,
+      'duplicate new pins',
+    );
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: [1], newSpkiPins: ['b'] })),
+      false,
+      'non-string pin',
+    );
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: [''], newSpkiPins: ['b'] })),
+      false,
+      'empty-string pin',
+    );
+    assert.strictEqual(
+      fn(validUpdateMessage({ oldSpkiPins: 'not-array', newSpkiPins: ['b'] })),
+      false,
+      'non-array pins',
+    );
+
+    // extra revokeOldImmediately rejected
+    assert.strictEqual(
+      fn(validUpdateMessage({ revokeOldImmediately: true })),
+      false,
+      'extra revokeOldImmediately',
+    );
+
+    // missing field
+    const missing = validUpdateMessage();
+    delete missing.signature;
+    assert.strictEqual(fn(missing), false);
+
+    // symbol / non-enum / accessor / class / array
+    const withSymbol = validUpdateMessage();
+    Object.defineProperty(withSymbol, Symbol('x'), {
+      value: 1,
+      enumerable: true,
+    });
+    assert.strictEqual(fn(withSymbol), false);
+
+    const nonEnum = validUpdateMessage();
+    Object.defineProperty(nonEnum, 'hidden', {
+      value: 1,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    // non-enum own key still present via Reflect.ownKeys → reject
+    assert.strictEqual(fn(nonEnum), false);
+
+    const withAccessor = validUpdateMessage();
+    Object.defineProperty(withAccessor, 'relayId', {
+      get() {
+        return 'relay-1';
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    assert.strictEqual(fn(withAccessor), false);
+
+    assert.strictEqual(fn(new ExampleClass()), false);
+    assert.strictEqual(fn([]), false);
+    assert.strictEqual(fn(null), false);
+    assert.strictEqual(fn(undefined), false);
+    assert.strictEqual(fn(new Date()), false);
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), false);
+      assert.strictEqual(fn(createRevokedProxy(validUpdateMessage())), false);
+    });
+  });
+
+  it('4) shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt happy: fresh epoch + five claims → false', () => {
+    const fn = protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.16 RED)');
+
+    // candidate 2n, last 1n, five claims true → do not preserve (false)
+    assert.strictEqual(fn(happyPreserveWrapper()), false);
+
+    // first accept: 1n vs last 0n
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ trustEpoch: 1n }),
+          lastAcceptedTrustEpoch: 0n,
+        }),
+      ),
+      false,
+    );
+
+    // max boundary
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ trustEpoch: UINT64_MAX }),
+          lastAcceptedTrustEpoch: UINT64_MAX - 1n,
+        }),
+      ),
+      false,
+    );
+
+    // emergency message shape with claims true
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validEmergencyMessage({ trustEpoch: 5n }),
+          lastAcceptedTrustEpoch: 4n,
+        }),
+      ),
+      false,
+    );
+  });
+
+  it('5) preserve predicate failures independently → true (fail-closed; persistence proves ack-before-persist)', () => {
+    const fn = protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.16 RED)');
+
+    // bad semantic message
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ trustEpoch: 0n }),
+        }),
+      ),
+      true,
+      'invalid epoch on message',
+    );
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ oldSpkiPins: [] }),
+        }),
+      ),
+      true,
+      'empty pins',
+    );
+
+    // stale / equal / invalid last epoch
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ trustEpoch: 1n }),
+          lastAcceptedTrustEpoch: 1n,
+        }),
+      ),
+      true,
+      'equal epoch stale',
+    );
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          message: validUpdateMessage({ trustEpoch: 1n }),
+          lastAcceptedTrustEpoch: 2n,
+        }),
+      ),
+      true,
+      'stale epoch',
+    );
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          lastAcceptedTrustEpoch: -1n,
+        }),
+      ),
+      true,
+      'invalid lastAcceptedTrustEpoch',
+    );
+    assert.strictEqual(
+      fn(
+        happyPreserveWrapper({
+          lastAcceptedTrustEpoch: 1,
+        }),
+      ),
+      true,
+      'number lastAcceptedTrustEpoch',
+    );
+
+    // each claim independently false → preserve
+    for (const claim of [
+      'authenticatedE2eeEstablished',
+      'signatureVerified',
+      'timeWindowValidated',
+      'oldPinsMatchCurrentSet',
+      'persistenceSucceeded',
+    ]) {
+      assert.strictEqual(
+        fn(happyPreserveWrapper({ [claim]: false })),
+        true,
+        `${claim}=false must preserve old pins`,
+      );
+      assert.strictEqual(
+        fn(happyPreserveWrapper({ [claim]: 'true' })),
+        true,
+        `${claim} non-boolean must preserve`,
+      );
+      assert.strictEqual(
+        fn(happyPreserveWrapper({ [claim]: 1 })),
+        true,
+        `${claim} number must preserve`,
+      );
+    }
+
+    // persistence false/missing proves ack-before-persist fail-closed
+    assert.strictEqual(
+      fn(happyPreserveWrapper({ persistenceSucceeded: false })),
+      true,
+      'persistence false → preserve (no ack path)',
+    );
+    const missingPersist = happyPreserveWrapper();
+    delete missingPersist.persistenceSucceeded;
+    assert.strictEqual(fn(missingPersist), true, 'missing persistence claim');
+  });
+
+  it('6) preserve predicate exact wrapper: extra/missing/accessor/symbol/proxy/revoked → true', () => {
+    const fn = protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt;
+    assert.strictEqual(typeof fn, 'function', 'export must exist (T1.16 RED)');
+
+    assert.strictEqual(
+      fn(happyPreserveWrapper({ extra: true })),
+      true,
+      'extra wrapper field',
+    );
+    assert.strictEqual(fn(null), true);
+    assert.strictEqual(fn(undefined), true);
+    assert.strictEqual(fn([]), true);
+    assert.strictEqual(fn(new ExampleClass()), true);
+
+    const missingMsg = happyPreserveWrapper();
+    delete missingMsg.message;
+    assert.strictEqual(fn(missingMsg), true);
+
+    const withSymbol = happyPreserveWrapper();
+    Object.defineProperty(withSymbol, Symbol('s'), {
+      value: 1,
+      enumerable: true,
+    });
+    assert.strictEqual(fn(withSymbol), true);
+
+    const withAccessor = {};
+    for (const [k, v] of Object.entries(happyPreserveWrapper())) {
+      if (k === 'signatureVerified') {
+        Object.defineProperty(withAccessor, k, {
+          get() {
+            return true;
+          },
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        Object.defineProperty(withAccessor, k, {
+          value: v,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      }
+    }
+    assert.strictEqual(fn(withAccessor), true, 'accessor claim rejects');
+
+    assert.doesNotThrow(() => {
+      assert.strictEqual(fn(createThrowingProxy()), true);
+      assert.strictEqual(fn(createRevokedProxy(happyPreserveWrapper())), true);
+    });
+  });
+
+  it('7) get-vs-descriptor adversarial: matcher/predicate follow descriptor snapshot, not get', () => {
+    const match = protocol.matchesCrossLanRelayPinSetUpdateContract;
+    const preserve = protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt;
+    assert.strictEqual(typeof match, 'function', 'export must exist (T1.16 RED)');
+    assert.strictEqual(typeof preserve, 'function', 'export must exist (T1.16 RED)');
+
+    // --- top-level trustEpoch: desc bad / get good → must NOT accept ---
+    {
+      const msg = splitGetVsDescriptor(validUpdateMessage(), {
+        trustEpoch: { desc: 0n, get: 2n },
+      });
+      assert.strictEqual(
+        match(msg),
+        false,
+        'desc bad trustEpoch must not false-accept via get',
+      );
+      assert.strictEqual(
+        preserve(happyPreserveWrapper({ message: msg })),
+        true,
+        'preserve must fail-closed on desc-bad epoch',
+      );
+    }
+
+    // --- top-level trustEpoch: desc good / get bad → accept by descriptor ---
+    {
+      const msg = splitGetVsDescriptor(validUpdateMessage({ trustEpoch: 2n }), {
+        trustEpoch: { desc: 2n, get: 0n },
+      });
+      assert.strictEqual(
+        match(msg),
+        true,
+        'desc good trustEpoch must accept despite bad get',
+      );
+      assert.strictEqual(
+        preserve(
+          happyPreserveWrapper({
+            message: msg,
+            lastAcceptedTrustEpoch: 1n,
+          }),
+        ),
+        false,
+        'preserve false (apply path) when descriptor snapshot is valid',
+      );
+    }
+
+    // --- top-level relayId: desc empty / get good ---
+    {
+      const msg = splitGetVsDescriptor(validUpdateMessage(), {
+        relayId: { desc: '', get: 'relay-1' },
+      });
+      assert.strictEqual(match(msg), false, 'empty desc relayId rejects');
+    }
+
+    // --- nested pin indexes: desc empty / get nonempty ---
+    {
+      const pins = splitDenseArrayGetVsDescriptor([''], ['pin-old-a']);
+      const msg = validUpdateMessage({
+        oldSpkiPins: /** @type {string[]} */ (pins),
+      });
+      assert.strictEqual(
+        match(msg),
+        false,
+        'pin index desc empty must not false-accept via get',
+      );
+    }
+
+    // --- nested pin indexes: desc good / get empty-string ---
+    {
+      const pins = splitDenseArrayGetVsDescriptor(
+        ['pin-old-a', 'pin-old-b'],
+        ['', ''],
+      );
+      const msg = validUpdateMessage({
+        oldSpkiPins: /** @type {string[]} */ (pins),
+      });
+      assert.strictEqual(
+        match(msg),
+        true,
+        'pin index desc good must accept despite bad get',
+      );
+    }
+
+    // --- wrapper claims: desc false / get true → preserve true ---
+    {
+      const wrapperTarget = happyPreserveWrapper();
+      const wrapper = splitGetVsDescriptor(wrapperTarget, {
+        persistenceSucceeded: { desc: false, get: true },
+      });
+      assert.strictEqual(
+        preserve(wrapper),
+        true,
+        'persistence claim get-vs-descriptor must not false-open apply path',
+      );
+    }
+
+    // --- wrapper lastAcceptedTrustEpoch: desc high (stale) / get low ---
+    {
+      const wrapper = splitGetVsDescriptor(happyPreserveWrapper(), {
+        lastAcceptedTrustEpoch: { desc: 99n, get: 1n },
+      });
+      assert.strictEqual(
+        preserve(wrapper),
+        true,
+        'stale lastAccepted desc must preserve despite good get',
+      );
+    }
+
+    // --- wrapper lastAcceptedTrustEpoch: desc good / get stale ---
+    {
+      const wrapper = splitGetVsDescriptor(happyPreserveWrapper(), {
+        lastAcceptedTrustEpoch: { desc: 1n, get: 99n },
+      });
+      assert.strictEqual(
+        preserve(wrapper),
+        false,
+        'descriptor-good lastAccepted must allow apply path',
+      );
+    }
+
+    // --- one-call descriptor count / throwing trap total no-throw ---
+    {
+      let descCount = 0;
+      const target = validUpdateMessage();
+      const counting = new Proxy(target, {
+        getOwnPropertyDescriptor(t, prop) {
+          descCount += 1;
+          return Reflect.getOwnPropertyDescriptor(t, prop);
+        },
+      });
+      assert.doesNotThrow(() => {
+        assert.strictEqual(typeof match(counting), 'boolean');
+      });
+      assert.ok(descCount > 0, 'matcher must introspect descriptors');
+
+      const throwDesc = new Proxy(validUpdateMessage(), {
+        getOwnPropertyDescriptor() {
+          throw new Error('desc-trap');
+        },
+      });
+      assert.doesNotThrow(() => {
+        assert.strictEqual(match(throwDesc), false);
+        assert.strictEqual(
+          preserve(happyPreserveWrapper({ message: throwDesc })),
+          true,
+        );
+      });
+
+      const throwOwnKeys = new Proxy(validUpdateMessage(), {
+        ownKeys() {
+          throw new Error('ownKeys-trap');
+        },
+      });
+      assert.doesNotThrow(() => {
+        assert.strictEqual(match(throwOwnKeys), false);
+        assert.strictEqual(
+          preserve({
+            message: throwOwnKeys,
+            lastAcceptedTrustEpoch: 1n,
+            authenticatedE2eeEstablished: true,
+            signatureVerified: true,
+            timeWindowValidated: true,
+            oldPinsMatchCurrentSet: true,
+            persistenceSucceeded: true,
+          }),
+          true,
+        );
+      });
+    }
+  });
+
+  it('7b) single-snapshot: exactly-once descriptors + flip Proxy cannot false-open apply', () => {
+    const match = protocol.matchesCrossLanRelayPinSetUpdateContract;
+    const preserve = protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt;
+    assert.strictEqual(typeof match, 'function', 'export must exist (T1.16 RED)');
+    assert.strictEqual(typeof preserve, 'function', 'export must exist (T1.16 RED)');
+
+    const MESSAGE_KEYS = [
+      'relayId',
+      'oldSpkiPins',
+      'newSpkiPins',
+      'notBefore',
+      'graceUntil',
+      'updateId',
+      'trustEpoch',
+      'signature',
+    ];
+    const WRAPPER_KEYS = [
+      'message',
+      'lastAcceptedTrustEpoch',
+      'authenticatedE2eeEstablished',
+      'signatureVerified',
+      'timeWindowValidated',
+      'oldPinsMatchCurrentSet',
+      'persistenceSucceeded',
+    ];
+
+    /**
+     * Count getOwnPropertyDescriptor hits per string key (and optional ownKeys).
+     * @param {object} target
+     * @param {{ trackOwnKeys?: boolean }} [opts]
+     */
+    function countingDescriptorProxy(target, opts = {}) {
+      /** @type {Record<string, number>} */
+      const descCounts = Object.create(null);
+      let ownKeysCount = 0;
+      const proxy = new Proxy(target, {
+        ownKeys(t) {
+          ownKeysCount += 1;
+          return Reflect.ownKeys(t);
+        },
+        getOwnPropertyDescriptor(t, prop) {
+          if (typeof prop === 'string') {
+            descCounts[prop] = (descCounts[prop] || 0) + 1;
+          }
+          return Reflect.getOwnPropertyDescriptor(t, prop);
+        },
+      });
+      return {
+        proxy,
+        descCounts,
+        ownKeysCount: () => ownKeysCount,
+      };
+    }
+
+    /**
+     * Flip: first getOwnPropertyDescriptor for `key` returns invalid value;
+     * any subsequent call would return valid. Proves double-read false-open.
+     * @param {object} target
+     * @param {string} key
+     * @param {unknown} firstValue
+     * @param {unknown} secondValue
+     */
+    function flipDescriptorProxy(target, key, firstValue, secondValue) {
+      let hits = 0;
+      const proxy = new Proxy(target, {
+        getOwnPropertyDescriptor(t, prop) {
+          if (prop === key) {
+            hits += 1;
+            return {
+              value: hits === 1 ? firstValue : secondValue,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(t, prop);
+        },
+      });
+      return { proxy, hits: () => hits };
+    }
+
+    // --- matcher: each of 8 top-level keys descriptor exactly once ---
+    {
+      const base = validUpdateMessage();
+      const { proxy, descCounts } = countingDescriptorProxy(base);
+      assert.strictEqual(match(proxy), true, 'valid counting message must match');
+      for (const key of MESSAGE_KEYS) {
+        assert.strictEqual(
+          descCounts[key],
+          1,
+          `matcher top-level key ${key} must be descriptor-read exactly once (got ${descCounts[key]})`,
+        );
+      }
+    }
+
+    // --- preserve: wrapper 7 + nested message 8 each exactly once; pin length/index not over-read ---
+    {
+      const msgBase = validUpdateMessage();
+      /** @type {Record<string, number>} */
+      const pinDescCounts = Object.create(null);
+      function countPinArray(arr) {
+        return new Proxy(arr, {
+          getOwnPropertyDescriptor(t, prop) {
+            const k = String(prop);
+            pinDescCounts[k] = (pinDescCounts[k] || 0) + 1;
+            return Reflect.getOwnPropertyDescriptor(t, prop);
+          },
+        });
+      }
+      const oldPins = countPinArray(['pin-old-a', 'pin-old-b']);
+      const newPins = countPinArray(['pin-new-a', 'pin-old-a']);
+      const msgTarget = {
+        ...msgBase,
+        oldSpkiPins: oldPins,
+        newSpkiPins: newPins,
+      };
+      const msgCounted = countingDescriptorProxy(msgTarget);
+      const wrapperTarget = happyPreserveWrapper({ message: msgCounted.proxy });
+      const wrapperCounted = countingDescriptorProxy(wrapperTarget);
+
+      assert.strictEqual(
+        preserve(wrapperCounted.proxy),
+        false,
+        'happy preserve path must return false (caller may enter apply/ack runtime)',
+      );
+
+      for (const key of WRAPPER_KEYS) {
+        assert.strictEqual(
+          wrapperCounted.descCounts[key],
+          1,
+          `preserve wrapper key ${key} must be descriptor-read exactly once (got ${wrapperCounted.descCounts[key]})`,
+        );
+      }
+      for (const key of MESSAGE_KEYS) {
+        assert.strictEqual(
+          msgCounted.descCounts[key],
+          1,
+          `preserve nested message key ${key} must be descriptor-read exactly once (got ${msgCounted.descCounts[key]})`,
+        );
+      }
+
+      // Dense pin arrays: length once + each index once (2-element arrays).
+      assert.strictEqual(
+        pinDescCounts.length,
+        2,
+        'old+new pin arrays: length descriptor exactly once each (total 2)',
+      );
+      assert.strictEqual(
+        pinDescCounts['0'],
+        2,
+        'old+new pin arrays: index 0 descriptor exactly once each (total 2)',
+      );
+      assert.strictEqual(
+        pinDescCounts['1'],
+        2,
+        'old+new pin arrays: index 1 descriptor exactly once each (total 2)',
+      );
+    }
+
+    // --- flip Proxy table: first invalid / second would be valid → reject; second never happens ---
+    // Each row uses a fresh flip proxy for a single call so hits are not shared across APIs.
+    {
+      /** @type {Array<{ name: string, run: () => void }>} */
+      const flipCases = [
+        {
+          name: 'trustEpoch 0n→2n on message via matcher',
+          run: () => {
+            const { proxy, hits } = flipDescriptorProxy(
+              validUpdateMessage({ trustEpoch: 2n }),
+              'trustEpoch',
+              0n,
+              2n,
+            );
+            assert.strictEqual(
+              match(proxy),
+              false,
+              'flip trustEpoch must not false-accept matcher',
+            );
+            assert.strictEqual(
+              hits(),
+              1,
+              'matcher flip trustEpoch: second valid desc must never be observed',
+            );
+          },
+        },
+        {
+          name: 'trustEpoch 0n→2n on nested message via preserve',
+          run: () => {
+            const { proxy, hits } = flipDescriptorProxy(
+              validUpdateMessage({ trustEpoch: 2n }),
+              'trustEpoch',
+              0n,
+              2n,
+            );
+            assert.strictEqual(
+              preserve(happyPreserveWrapper({ message: proxy })),
+              true,
+              'flip trustEpoch must preserve old pins (leave persisted set unchanged)',
+            );
+            assert.strictEqual(
+              hits(),
+              1,
+              'preserve flip trustEpoch: second valid desc must never be observed',
+            );
+          },
+        },
+        {
+          name: 'persistenceSucceeded false→true on wrapper',
+          run: () => {
+            const { proxy, hits } = flipDescriptorProxy(
+              happyPreserveWrapper(),
+              'persistenceSucceeded',
+              false,
+              true,
+            );
+            assert.strictEqual(
+              preserve(proxy),
+              true,
+              'flip persistenceSucceeded must preserve (not open apply path)',
+            );
+            assert.strictEqual(
+              hits(),
+              1,
+              'flip persistenceSucceeded: second valid desc must never be observed',
+            );
+          },
+        },
+        {
+          name: 'lastAcceptedTrustEpoch 99n→1n on wrapper',
+          run: () => {
+            const { proxy, hits } = flipDescriptorProxy(
+              happyPreserveWrapper({ lastAcceptedTrustEpoch: 1n }),
+              'lastAcceptedTrustEpoch',
+              99n,
+              1n,
+            );
+            assert.strictEqual(
+              preserve(proxy),
+              true,
+              'flip stale lastAcceptedTrustEpoch must preserve',
+            );
+            assert.strictEqual(
+              hits(),
+              1,
+              'flip lastAcceptedTrustEpoch: second valid desc must never be observed',
+            );
+          },
+        },
+        {
+          name: 'message reference null→valid on wrapper',
+          run: () => {
+            const goodMsg = validUpdateMessage();
+            const { proxy, hits } = flipDescriptorProxy(
+              happyPreserveWrapper({ message: goodMsg }),
+              'message',
+              null,
+              goodMsg,
+            );
+            assert.strictEqual(
+              preserve(proxy),
+              true,
+              'flip message reference must preserve when first desc is null',
+            );
+            assert.strictEqual(
+              hits(),
+              1,
+              'flip message reference: second valid desc must never be observed',
+            );
+          },
+        },
+      ];
+
+      for (const c of flipCases) {
+        c.run();
+      }
+    }
+  });
+
+  it('8) honesty: no new I/O/crypto/ack emitter; T1.0 BLOCKED; A21/A22 not-ready', () => {
+    const policy = protocol.CROSS_LAN_RELAY_PIN_SET_POLICY;
+    assert.strictEqual(policy.m1PerformsSignatureVerification, false);
+    assert.strictEqual(policy.m1PerformsPersistence, false);
+    assert.strictEqual(policy.m1EmitsAck, false);
+    assert.strictEqual(policy.a21A22RuntimeStatus, 'not-ready');
+    assert.strictEqual(policy.implementationStage, 'T1.16-M1-contract-only');
+    assert.strictEqual(policy.tofuAllowed, false);
+    assert.strictEqual(policy.skipPinValidationAllowed, false);
+
+    const names = Object.keys(protocol);
+    for (const required of [
+      'CROSS_LAN_RELAY_PIN_SET_POLICY',
+      'matchesCrossLanRelayPinSetUpdateContract',
+      'shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt',
+      'shouldRejectCrossLanTrustEpoch',
+      'CONTROL_PLANE_MESSAGE_SCHEMAS',
+    ]) {
+      assert.ok(names.includes(required), `missing export ${required}`);
+    }
+    for (const forbidden of [
+      'verifyRelayPinSetSignature',
+      'persistRelayPinSet',
+      'emitRelayPinSetAck',
+      'applyRelayPinSetUpdate',
+      'parseRelayPinSetTimeWindow',
+      'lookupCurrentOldSpkiPins',
+      'runA21RelayPinRotation',
+      'runA22RelayPinUpdateFailure',
+    ]) {
+      assert.ok(!names.includes(forbidden), `must not export runtime ${forbidden}`);
+    }
+
+    // Pure no-throw contract decisions only.
+    assert.doesNotThrow(() => {
+      assert.strictEqual(
+        protocol.matchesCrossLanRelayPinSetUpdateContract(validUpdateMessage()),
+        true,
+      );
+      assert.strictEqual(
+        protocol.shouldPreserveOldCrossLanRelayPinsAfterUpdateAttempt(
+          happyPreserveWrapper(),
+        ),
+        false,
+      );
+      assert.strictEqual(
+        protocol.shouldRejectCrossLanTrustEpoch({
+          trustEpoch: 2n,
+          lastAcceptedTrustEpoch: 1n,
+        }),
+        false,
+      );
+    });
+  });
+});
