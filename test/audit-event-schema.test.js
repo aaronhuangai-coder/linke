@@ -4,6 +4,8 @@ import {
   projectStrictCanonicalSanitizedEvent,
   sanitizeAuditEvent,
   stringifyStrictCanonicalSanitizedEvent,
+  parseStrictCanonicalAuditEventLinesText,
+  StrictCanonicalAuditEventLinesParseError,
 } from '../src/audit-event-schema.js';
 
 const FIXED_NOW = new Date('2026-07-06T12:00:00.000Z');
@@ -343,6 +345,135 @@ describe('stringifyStrictCanonicalSanitizedEvent', () => {
     assert.equal(
       stringifyStrictCanonicalSanitizedEvent(sanitizeAuditEvent(FIXED_RAW_EVENT, FIXED_NOW)),
       FIXED_JSON,
+    );
+  });
+});
+
+describe('parseStrictCanonicalAuditEventLinesText shared SoT', () => {
+  const BOUNDS = Object.freeze({ maxLineBytes: 16050, maxLines: 8192 });
+  const LINE = FIXED_JSON;
+
+  it('accepts empty raw as count 0 frozen copy', () => {
+    const out = parseStrictCanonicalAuditEventLinesText('', BOUNDS);
+    assert.equal(out.count, 0);
+    assert.deepEqual([...out.lines], []);
+    assert.deepEqual([...out.events], []);
+    assert.ok(Object.isFrozen(out));
+    assert.ok(Object.isFrozen(out.lines));
+    assert.ok(Object.isFrozen(out.events));
+  });
+
+  it('accepts exact canonical multi-line with trailing newline', () => {
+    const raw = `${LINE}\n${LINE}\n`;
+    const out = parseStrictCanonicalAuditEventLinesText(raw, BOUNDS);
+    assert.equal(out.count, 2);
+    assert.equal(out.lines[0], LINE);
+    assert.equal(out.events[0].id, FIXED_ID);
+    assert.ok(Object.isFrozen(out.events[0]));
+    // No getter leak: mutating returned event must not affect re-parse.
+    assert.throws(() => {
+      out.events[0].id = 'mutated';
+    });
+  });
+
+  it('rejects missing final newline as invalid', () => {
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(LINE, BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+  });
+
+  it('rejects blank / interior blank as invalid', () => {
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText('\n', BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(`${LINE}\n\n${LINE}\n`, BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+  });
+
+  it('rejects bad JSON / extra key / wrong order as invalid', () => {
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText('{not-json\n', BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+    const extra = `${LINE.slice(0, -1)},"hack":1}\n`;
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(extra, BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+    // Wrong field order (type before id) fails canonical re-stringify exactness.
+    const wrongOrder =
+      '{"type":"api.backup.created","id":"11111111-1111-1111-1111-111111111111","createdAt":"2026-07-06T12:00:00.000Z"}\n';
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(wrongOrder, BOUNDS),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'invalid',
+    );
+  });
+
+  it('bounds: line bytes 16050 ok / 16051 bounds; line count 8192 ok / 8193 bounds', () => {
+    // Frozen V1.36 max-line canary (NUL fill + extended date + ±MAX ints).
+    const EXTENDED_DATE = '+275760-09-13T00:00:00.000Z';
+    const STR_FIELDS = [
+      'type', 'method', 'path', 'outcome', 'requestId', 'deviceId', 'snapshotId',
+      'operation', 'message', 'targetName', 'attemptId', 'errorCode',
+    ];
+    const fill = '\u0000'.repeat(200);
+    /** @type {Record<string, unknown>} */
+    const maxEv = {
+      id: fill,
+      createdAt: EXTENDED_DATE,
+      statusCode: -Number.MAX_VALUE,
+      fileCount: Number.MAX_VALUE,
+      totalBytes: Number.MAX_VALUE,
+      verifiedFileCount: Number.MAX_VALUE,
+      retryCount: Number.MAX_VALUE,
+      wouldWrite: true,
+      executionRequired: true,
+    };
+    for (const k of STR_FIELDS) maxEv[k] = fill;
+    const okLine = stringifyStrictCanonicalSanitizedEvent(maxEv);
+    assert.equal(Buffer.byteLength(okLine, 'utf8'), 16050);
+    assert.equal(
+      parseStrictCanonicalAuditEventLinesText(`${okLine}\n`, {
+        maxLineBytes: 16050,
+        maxLines: 8192,
+      }).count,
+      1,
+    );
+    const overLine = `${okLine}y`;
+    assert.equal(Buffer.byteLength(overLine, 'utf8'), 16051);
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(`${overLine}\n`, {
+        maxLineBytes: 16050,
+        maxLines: 8192,
+      }),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'bounds',
+    );
+
+    // 8192 lines ok; 8193 bounds (use tiny events).
+    const tiny = stringifyStrictCanonicalSanitizedEvent({
+      id: FIXED_ID,
+      createdAt: FIXED_CREATED_AT,
+      type: 't',
+    });
+    const raw8192 = `${Array.from({ length: 8192 }, () => tiny).join('\n')}\n`;
+    assert.equal(
+      parseStrictCanonicalAuditEventLinesText(raw8192, {
+        maxLineBytes: 16050,
+        maxLines: 8192,
+      }).count,
+      8192,
+    );
+    const raw8193 = `${Array.from({ length: 8193 }, () => tiny).join('\n')}\n`;
+    assert.throws(
+      () => parseStrictCanonicalAuditEventLinesText(raw8193, {
+        maxLineBytes: 16050,
+        maxLines: 8192,
+      }),
+      (e) => e instanceof StrictCanonicalAuditEventLinesParseError && e.kind === 'bounds',
     );
   });
 });

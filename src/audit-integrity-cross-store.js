@@ -29,10 +29,13 @@ import {
   assertSafeDataRoot,
   safeReadText,
 } from './safe-data-files.js';
-import { stringifyStrictCanonicalSanitizedEvent } from './audit-event-schema.js';
+import {
+  computeAuditIntegrityEventPayloadDigest,
+  parseStrictCanonicalAuditEventLinesText,
+  StrictCanonicalAuditEventLinesParseError,
+} from './audit-event-schema.js';
 import {
   AuditIntegrityJournalError,
-  computeAuditIntegrityEventPayloadDigest,
   inspectAuditIntegrityJournalFile,
 } from './audit-integrity-journal.js';
 import { ERROR_CODES, assertRegisteredErrorCode } from './error-codes.js';
@@ -166,70 +169,35 @@ function classifyRelationship(J, E) {
 
 /**
  * Parse events raw UTF-8 into payloadDigest sequence E.
- * Priority after successful read:
- *   line count / per-line → bounds;
- *   final newline / interior blank / JSON / strict / raw canonical → event-invalid.
- * Does not call sanitize; does not skip bad lines.
+ * Line/shape validation is the shared strict-canonical parser SoT; digests use
+ * shared payloadDigest SoT. Error codes / priority stay cross-store contract.
  * @param {string} raw
  * @returns {string[]}
  */
 function parseEventsToPayloadDigests(raw) {
-  // Only missing/zero-byte raw is empty E=[]; any blank line (incl. sole '\n') is invalid.
-  if (raw === '') return [];
-
-  // Bounds checks first (design §5.2): strip at most one final newline, then always split.
-  // Non-empty raw must not collapse to E=[] via body==='' (e.g. raw='\n' → lines=['']).
-  const body = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
-  const lines = body.split('\n');
-
-  if (lines.length > AUDIT_CROSS_STORE_MAX_EVENT_LINES) {
-    throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED);
-  }
-  for (const line of lines) {
-    if (Buffer.byteLength(line, 'utf8') > AUDIT_CROSS_STORE_MAX_EVENT_LINE_BYTES) {
-      throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED);
-    }
-  }
-
-  // After bounds: final newline required for non-empty files.
-  if (!raw.endsWith('\n')) {
-    throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
-  }
-
-  // Interior / blank empty lines.
-  for (const line of lines) {
-    if (line === '') {
+  let parsed;
+  try {
+    parsed = parseStrictCanonicalAuditEventLinesText(raw, {
+      maxLineBytes: AUDIT_CROSS_STORE_MAX_EVENT_LINE_BYTES,
+      maxLines: AUDIT_CROSS_STORE_MAX_EVENT_LINES,
+    });
+  } catch (error) {
+    if (error instanceof StrictCanonicalAuditEventLinesParseError) {
+      if (error.kind === 'bounds') {
+        throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED);
+      }
       throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
     }
+    throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
   }
 
   /** @type {string[]} */
   const digests = [];
-  for (const line of lines) {
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
-    }
-
-    let canonical;
-    try {
-      // stringifyStrict projects first; rejects null/array/Proxy/extra keys/types.
-      canonical = stringifyStrictCanonicalSanitizedEvent(parsed);
-    } catch {
-      throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
-    }
-
-    // Raw line must already be exact strict canonical UTF-8 (no rewrite/sanitize).
-    if (canonical !== line) {
-      throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
-    }
-
-    // Digest SoT from journal C1 — never copy DOMAIN/formula here.
+  for (const event of parsed.events) {
     let digest;
     try {
-      digest = computeAuditIntegrityEventPayloadDigest(parsed);
+      // Digest SoT from audit-event-schema — never copy DOMAIN/formula here.
+      digest = computeAuditIntegrityEventPayloadDigest(event);
     } catch {
       throwCrossStoreError(ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID);
     }

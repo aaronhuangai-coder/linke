@@ -442,6 +442,104 @@ export async function safeReadText(root, relativePath, options = {}) {
 }
 
 /**
+ * Bounded safe raw-byte read under dataDir. Missing file rethrows ENOENT.
+ * Final symlink / non-regular → SafeDataFileError.
+ * Does NOT UTF-8 decode (returns Buffer snapshot).
+ *
+ * Same-fd contract:
+ *   1) initial fstat → regular; record dev/ino/size/mode; size ≤ maxBytes
+ *   2) exact offset-loop read of initial size (short reads ok; premature EOF fail)
+ *   3) second fstat on same fd → still regular; dev/ino/size/mode must match
+ *      (append/grow/truncate between fstats → SafeDataFileError)
+ *
+ * Atomic pathname rename during read may still return the open inode snapshot;
+ * callers that publish/repair must re-read the pathname against expected current.
+ *
+ * @param {string} root
+ * @param {string} relativePath
+ * @param {{ maxBytes?: number, deps?: SafeDataFileDeps }} [options]
+ * @returns {Promise<Buffer>}
+ */
+export async function safeReadBytes(root, relativePath, options = {}) {
+  const maxBytes = Number.isInteger(options.maxBytes) && options.maxBytes > 0
+    ? options.maxBytes
+    : DEFAULT_MAX_READ_BYTES;
+  const deps = options.deps || {};
+  const { lstat } = resolveDeps(deps);
+  let absolutePath;
+  let parentAbs;
+  let fileName;
+  try {
+    ({ absolutePath, parentAbs, fileName } = await resolveExistingParentForFile(
+      root,
+      relativePath,
+      deps,
+    ));
+  } catch (error) {
+    if (error && error.code === 'ENOENT') throw error;
+    if (error instanceof SafeDataFileError) throw error;
+    fail();
+  }
+  try {
+    const leaf = await lstat(join(parentAbs, fileName));
+    if (leaf.isSymbolicLink() || !leaf.isFile()) fail();
+  } catch (error) {
+    if (error instanceof SafeDataFileError) throw error;
+    if (error && error.code === 'ENOENT') {
+      // Fall through to open for consistent ENOENT.
+    } else {
+      fail();
+    }
+  }
+
+  let handle;
+  try {
+    handle = await openRegularNoFollow(
+      absolutePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+      undefined,
+      deps,
+    );
+    const st1 = await handle.stat();
+    if (!st1.isFile() || st1.isSymbolicLink()) fail();
+    const size = Number(st1.size);
+    if (!Number.isFinite(size) || size < 0 || size > maxBytes) fail();
+    const dev1 = st1.dev;
+    const ino1 = st1.ino;
+    const mode1 = st1.mode;
+
+    const buf = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const { bytesRead } = await handle.read(buf, offset, size - offset, offset);
+      if (bytesRead === 0) fail();
+      offset += bytesRead;
+    }
+
+    // Second same-fd fstat: reject size-race (append/grow/truncate) and type swap.
+    const st2 = await handle.stat();
+    if (!st2.isFile() || st2.isSymbolicLink()) fail();
+    if (
+      st2.dev !== dev1
+      || st2.ino !== ino1
+      || Number(st2.size) !== size
+      || st2.mode !== mode1
+    ) {
+      fail();
+    }
+
+    // Return a defensive copy so callers cannot observe later fd/buffer aliasing.
+    return Buffer.from(buf);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') throw error;
+    if (error instanceof SafeDataFileError) throw error;
+    fail();
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+/**
  * Exclusive create of a root-relative text file (O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW).
  * Returns {created:false} on EEXIST for any existing leaf (file/dir/symlink/malicious)
  * without distinguishing leaf type and without following/reading/writing the leaf.
@@ -594,12 +692,14 @@ async function revalidateBeforeRename(parentAbs, targetAbs, deps) {
 }
 
 /**
- * Same-directory atomic text publish under dataDir.
+ * Shared same-directory atomic publish under dataDir (text or raw bytes).
  * Temp uses O_EXCL|O_NOFOLLOW unless allowExistingTemp with fixed tempRelativePath
  * (registry stale `.new` compatibility), still requiring nofollow + fd regular-file checks.
+ * Caller payload is snapshotted before any await (TOCTOU-safe).
+ *
  * @param {string} root
  * @param {string} relativePath
- * @param {string} text
+ * @param {string|Buffer} payload
  * @param {{
  *   tempRelativePath?: string,
  *   allowExistingTemp?: boolean,
@@ -608,10 +708,19 @@ async function revalidateBeforeRename(parentAbs, targetAbs, deps) {
  * }} [options]
  * @returns {Promise<void>}
  */
-export async function safeAtomicWriteText(root, relativePath, text, options = {}) {
-  if (typeof text !== 'string') fail();
+async function safeAtomicWritePayload(root, relativePath, payload, options = {}) {
   const mode = options.mode === undefined ? 0o600 : options.mode;
   if (!Number.isInteger(mode) || mode < 0) fail();
+  // Snapshot before any await so hostile callers cannot mutate during I/O.
+  /** @type {string|Buffer} */
+  let snapshot;
+  if (typeof payload === 'string') {
+    snapshot = payload;
+  } else if (Buffer.isBuffer(payload)) {
+    snapshot = Buffer.from(payload);
+  } else {
+    fail();
+  }
   const deps = options.deps || {};
   const { open, rename, unlink, lstat } = resolveDeps(deps);
 
@@ -675,7 +784,11 @@ export async function safeAtomicWriteText(root, relativePath, text, options = {}
     const fdStat = await handle.stat();
     if (!fdStat.isFile() || fdStat.isSymbolicLink()) fail();
 
-    await handle.writeFile(text, { encoding: 'utf8' });
+    if (typeof snapshot === 'string') {
+      await handle.writeFile(snapshot, { encoding: 'utf8' });
+    } else {
+      await handle.writeFile(snapshot);
+    }
     if (typeof handle.sync === 'function') {
       await handle.sync();
     }
@@ -722,6 +835,49 @@ export async function safeAtomicWriteText(root, relativePath, text, options = {}
     if (error instanceof SafeDataFileError) throw error;
     fail();
   }
+}
+
+/**
+ * Same-directory atomic text publish under dataDir.
+ * Temp uses O_EXCL|O_NOFOLLOW unless allowExistingTemp with fixed tempRelativePath
+ * (registry stale `.new` compatibility), still requiring nofollow + fd regular-file checks.
+ * @param {string} root
+ * @param {string} relativePath
+ * @param {string} text
+ * @param {{
+ *   tempRelativePath?: string,
+ *   allowExistingTemp?: boolean,
+ *   mode?: number,
+ *   deps?: SafeDataFileDeps,
+ * }} [options]
+ * @returns {Promise<void>}
+ */
+export async function safeAtomicWriteText(root, relativePath, text, options = {}) {
+  if (typeof text !== 'string') fail();
+  await safeAtomicWritePayload(root, relativePath, text, options);
+}
+
+/**
+ * Same-directory atomic raw-byte publish under dataDir.
+ * Snapshots the caller Buffer before any await (await TOCTOU-safe).
+ * Reuses same-directory temp + O_EXCL|O_NOFOLLOW + fsync + rename contract.
+ * Does NOT provide truncate/ftruncate/safeTruncate.
+ *
+ * @param {string} root
+ * @param {string} relativePath
+ * @param {Buffer} buffer
+ * @param {{
+ *   tempRelativePath?: string,
+ *   allowExistingTemp?: boolean,
+ *   mode?: number,
+ *   deps?: SafeDataFileDeps,
+ * }} [options]
+ * @returns {Promise<void>}
+ */
+export async function safeAtomicWriteBytes(root, relativePath, buffer, options = {}) {
+  if (!Buffer.isBuffer(buffer)) fail();
+  const mode = options.mode === undefined ? 0o600 : options.mode;
+  await safeAtomicWritePayload(root, relativePath, buffer, { ...options, mode });
 }
 
 /**

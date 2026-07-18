@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   lstat,
@@ -23,9 +24,11 @@ import {
   ensureSafeRelativeDir,
   normalizeRelativeDataPath,
   safeAppendText,
+  safeAtomicWriteBytes,
   safeAtomicWriteText,
   safeCopyFileFromAbsoluteSource,
   safeCreateExclusiveText,
+  safeReadBytes,
   safeReadText,
 } from '../src/safe-data-files.js';
 
@@ -667,6 +670,280 @@ describe('ensureSafeDataRoot first-create', () => {
       assert.equal(outsideEntries.includes('nested'), false);
       assert.equal(outsideEntries.includes('data'), false);
       assert.equal(outsideEntries.length, 0);
+    });
+  });
+});
+
+describe('safeReadBytes / safeAtomicWriteBytes', () => {
+  it('safeReadBytes returns exact Buffer without UTF-8 decode', async () => {
+    await withPair('safe-read-bytes', async (root) => {
+      const payload = Buffer.from([0x00, 0xff, 0xfe, 0x41, 0x42]);
+      await writeFile(join(root, 'raw.bin'), payload, { mode: 0o600 });
+      const got = await safeReadBytes(root, 'raw.bin', { maxBytes: 1024 });
+      assert.ok(Buffer.isBuffer(got));
+      assert.deepEqual(got, payload);
+    });
+  });
+
+  it('safeReadBytes second fstat rejects append/grow between fstats', async () => {
+    await withPair('safe-read-bytes-grow', async (root) => {
+      await writeFile(join(root, 'grow.bin'), Buffer.from('abcd'), { mode: 0o600 });
+      await assert.rejects(
+        () => safeReadBytes(root, 'grow.bin', {
+          maxBytes: 1024,
+          deps: {
+            lstat,
+            open: async (path, flags, mode) => {
+              const handle = await fsOpen(path, flags, mode);
+              const originalStat = handle.stat.bind(handle);
+              let statCalls = 0;
+              handle.stat = async () => {
+                statCalls += 1;
+                const st = await originalStat();
+                // openRegularNoFollow does 1 stat; safeReadBytes first fstat is #2; mutate on #3.
+                if (statCalls < 3) return st;
+                return {
+                  ...st,
+                  size: Number(st.size) + 8,
+                  isFile: () => true,
+                  isSymbolicLink: () => false,
+                };
+              };
+              return handle;
+            },
+            mkdir,
+            rename,
+            unlink,
+          },
+        }),
+        (error) => {
+          assertNoLeak(error, root, 'grow.bin');
+          return true;
+        },
+      );
+    });
+  });
+
+  it('safeReadBytes second fstat rejects truncate between fstats', async () => {
+    await withPair('safe-read-bytes-trunc', async (root) => {
+      await writeFile(join(root, 'trunc.bin'), Buffer.from('abcdefgh'), { mode: 0o600 });
+      await assert.rejects(
+        () => safeReadBytes(root, 'trunc.bin', {
+          maxBytes: 1024,
+          deps: {
+            lstat,
+            open: async (path, flags, mode) => {
+              const handle = await fsOpen(path, flags, mode);
+              const originalStat = handle.stat.bind(handle);
+              let statCalls = 0;
+              handle.stat = async () => {
+                statCalls += 1;
+                const st = await originalStat();
+                // openRegularNoFollow #1; first fstat #2; second fstat #3 mutates.
+                if (statCalls < 3) return st;
+                return {
+                  ...st,
+                  size: Math.max(0, Number(st.size) - 3),
+                  isFile: () => true,
+                  isSymbolicLink: () => false,
+                };
+              };
+              return handle;
+            },
+            mkdir,
+            rename,
+            unlink,
+          },
+        }),
+        (error) => {
+          assertNoLeak(error, root);
+          return true;
+        },
+      );
+    });
+  });
+
+  it('safeReadBytes loops short reads and fails premature EOF', async () => {
+    await withPair('safe-read-bytes-short', async (root) => {
+      const payload = Buffer.from('abcdefghij');
+      await writeFile(join(root, 'short.bin'), payload, { mode: 0o600 });
+      let readCalls = 0;
+      const got = await safeReadBytes(root, 'short.bin', {
+        maxBytes: 1024,
+        deps: {
+          lstat,
+          open: async (path, flags, mode) => {
+            const handle = await fsOpen(path, flags, mode);
+            const originalRead = handle.read.bind(handle);
+            handle.read = async (buffer, offset, length, position) => {
+              readCalls += 1;
+              const capped = Math.min(3, length);
+              return originalRead(buffer, offset, capped, position);
+            };
+            return handle;
+          },
+          mkdir,
+          rename,
+          unlink,
+        },
+      });
+      assert.deepEqual(got, payload);
+      assert.ok(readCalls >= 2);
+
+      await assert.rejects(
+        () => safeReadBytes(root, 'short.bin', {
+          maxBytes: 1024,
+          deps: {
+            lstat,
+            open: async (path, flags, mode) => {
+              const handle = await fsOpen(path, flags, mode);
+              const originalRead = handle.read.bind(handle);
+              const originalStat = handle.stat.bind(handle);
+              handle.stat = async () => {
+                const st = await originalStat();
+                return {
+                  ...st,
+                  size: st.size + 8,
+                  isFile: () => true,
+                  isSymbolicLink: () => false,
+                };
+              };
+              let first = true;
+              handle.read = async (buffer, offset, length, position) => {
+                if (first) {
+                  first = false;
+                  return originalRead(buffer, offset, length, position);
+                }
+                return { bytesRead: 0, buffer };
+              };
+              return handle;
+            },
+            mkdir,
+            rename,
+            unlink,
+          },
+        }),
+        (error) => {
+          assertNoLeak(error, root);
+          return true;
+        },
+      );
+    });
+  });
+
+  it('safeReadBytes rejects symlink leaf', async () => {
+    await withPair('safe-read-bytes-sym', async (root, outside) => {
+      const real = join(outside, 'real.bin');
+      await writeFile(real, Buffer.from('x'), { mode: 0o600 });
+      await symlink(real, join(root, 'link.bin'), 'file');
+      await assert.rejects(
+        () => safeReadBytes(root, 'link.bin', { maxBytes: 1024 }),
+        (error) => {
+          assertNoLeak(error, root, outside);
+          return true;
+        },
+      );
+    });
+  });
+
+  it('safeAtomicWriteBytes publishes Buffer and rejects symlink final leaf', async () => {
+    await withPair('safe-write-bytes', async (root, outside) => {
+      const payload = Buffer.from([0x01, 0x02, 0xff, 0x00]);
+      await safeAtomicWriteBytes(root, 'out.bin', payload, { mode: 0o600 });
+      assert.deepEqual(await readFile(join(root, 'out.bin')), payload);
+      const st = await lstat(join(root, 'out.bin'));
+      assert.equal(st.mode & 0o777, 0o600);
+
+      await symlink(join(outside, 'x'), join(root, 'sym.bin'), 'file');
+      await assert.rejects(
+        () => safeAtomicWriteBytes(root, 'sym.bin', Buffer.from('nope'), { mode: 0o600 }),
+        (error) => {
+          assertNoLeak(error, root, outside);
+          return true;
+        },
+      );
+    });
+  });
+
+  it('safeAtomicWriteBytes snapshots buffer against await TOCTOU mutation', async () => {
+    await withPair('safe-write-bytes-snap', async (root) => {
+      const buf = Buffer.from('ORIGINAL');
+      const original = Buffer.from(buf);
+      await safeAtomicWriteBytes(root, 'snap.bin', buf, {
+        mode: 0o600,
+        deps: {
+          lstat,
+          mkdir,
+          open: async (path, flags, mode) => {
+            // Mutate caller buffer after first open await opportunity.
+            buf.fill(0x41);
+            return fsOpen(path, flags, mode);
+          },
+          rename,
+          unlink,
+        },
+      });
+      assert.deepEqual(await readFile(join(root, 'snap.bin')), original);
+    });
+  });
+
+  it('safeAtomicWriteBytes kill-before-rename leaves final pre image', async () => {
+    await withPair('safe-write-bytes-kill', async (root) => {
+      await writeFile(join(root, 'final.bin'), Buffer.from('PRE'), { mode: 0o600 });
+      await assert.rejects(
+        () => safeAtomicWriteBytes(root, 'final.bin', Buffer.from('POST'), {
+          mode: 0o600,
+          deps: {
+            lstat,
+            mkdir,
+            open: fsOpen,
+            rename: async () => {
+              throw new Error('injected-rename-fail');
+            },
+            unlink,
+          },
+        }),
+        (error) => {
+          assertNoLeak(error, root);
+          return true;
+        },
+      );
+      assert.deepEqual(await readFile(join(root, 'final.bin')), Buffer.from('PRE'));
+    });
+  });
+
+  it('safeAtomicWriteBytes kill-after-rename returns SafeDataFileError but final is exact post', async () => {
+    await withPair('safe-write-bytes-kill-after', async (root) => {
+      await writeFile(join(root, 'final.bin'), Buffer.from('PRE'), { mode: 0o600 });
+      const post = Buffer.from('POST-AFTER-RENAME');
+      await assert.rejects(
+        () => safeAtomicWriteBytes(root, 'final.bin', post, {
+          mode: 0o600,
+          deps: {
+            lstat,
+            mkdir,
+            open: fsOpen,
+            rename: async (...args) => {
+              await rename(...args);
+              throw new Error('kill-after-rename');
+            },
+            unlink,
+          },
+        }),
+        (error) => {
+          assert.equal(error.name, 'SafeDataFileError');
+          assert.equal(error.code, SAFE_DATA_FILE_ERROR);
+          assertNoLeak(error, root);
+          return true;
+        },
+      );
+      // Rename committed: final must be exact post despite thrown error.
+      assert.deepEqual(await readFile(join(root, 'final.bin')), post);
+      const again = await safeReadBytes(root, 'final.bin', { maxBytes: 64 });
+      assert.equal(
+        createHash('sha256').update(again).digest('hex'),
+        createHash('sha256').update(post).digest('hex'),
+      );
     });
   });
 });

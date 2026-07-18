@@ -44,10 +44,18 @@ function sleep(ms) {
 }
 
 describe('audit-integrity-write-queue exports and source contracts', () => {
-  it('7+18: exports enqueue+assert; source uses AsyncLocalStorage from node:async_hooks; sole Map; no npm deps', async () => {
+  it('7+18: exports only enqueue+assert (no bare peek); ALS; sole Map; no npm deps', async () => {
     const mod = await loadQueue();
     assert.equal(typeof mod.enqueueAuditIntegrityWriteTask, 'function');
     assert.equal(typeof mod.assertAuditIntegrityWriteLease, 'function');
+    // a. public surface restored to enqueue + assert only — no bare peek export.
+    assert.equal(typeof mod.peekAuditIntegrityWriteQueueTail, 'undefined');
+    assert.equal('peekAuditIntegrityWriteQueueTail' in mod, false);
+    assert.equal(typeof mod.createAuditIntegrityWriteQueueObserver, 'undefined');
+    assert.deepEqual(
+      Object.keys(mod).sort(),
+      ['assertAuditIntegrityWriteLease', 'enqueueAuditIntegrityWriteTask'],
+    );
 
     const source = await readFile(QUEUE_SRC, 'utf8');
     assert.match(source, /from\s+['"]node:async_hooks['"]/);
@@ -57,19 +65,192 @@ describe('audit-integrity-write-queue exports and source contracts', () => {
     assert.equal(/\bfrom\s+['"](?!node:|\.\/)/.test(source), false, 'no non-relative/non-node imports');
     // No package.json dependency introduction via bare specifier.
     assert.equal(/\brequire\s*\(/.test(source), false);
+    // No bare public peek export restored.
+    assert.equal(/export\s+function\s+peekAuditIntegrityWriteQueueTail\b/.test(source), false);
+    assert.equal(/export\s*\{[^}]*peekAuditIntegrityWriteQueueTail/.test(source), false);
   });
 
   it('19: lease settle only in queue finally; task has no settle API (source)', async () => {
     const source = await readFile(QUEUE_SRC, 'utf8');
-    // Public surface: only enqueue + assert.
-    assert.equal(typeof (await loadQueue()).enqueueAuditIntegrityWriteTask, 'function');
-    assert.equal(typeof (await loadQueue()).assertAuditIntegrityWriteLease, 'function');
+    const mod = await loadQueue();
+    // Public surface: enqueue + assert only (observer is lease-scoped, not exported).
+    assert.equal(typeof mod.enqueueAuditIntegrityWriteTask, 'function');
+    assert.equal(typeof mod.assertAuditIntegrityWriteLease, 'function');
+    assert.equal(typeof mod.peekAuditIntegrityWriteQueueTail, 'undefined');
     assert.equal(source.includes('export function expire'), false);
     assert.equal(source.includes('export function settle'), false);
     assert.equal(source.includes('export function release'), false);
-    // finally deletes / expires lease after await task
+    // finally deletes / expires lease after await task(lease, observer)
     assert.match(source, /finally\s*\{[\s\S]*?delete\s*\(/);
-    assert.match(source, /await\s+.*task\s*\(\s*lease\s*\)/);
+    assert.match(source, /await\s+.*task\s*\(\s*lease\s*,\s*observer\s*\)/);
+  });
+});
+
+describe('active-lease-scoped queue observer (peekTail)', () => {
+  it('b+c+d+e+j: hold observer frozen; hold/first/second identities; FIFO preserved', async () => {
+    await withTempRoot('obs-tail', async (root) => {
+      const { enqueueAuditIntegrityWriteTask } = await loadQueue();
+
+      let releaseHold;
+      const holdGate = new Promise((resolve) => { releaseHold = resolve; });
+      let holdEntered = false;
+      /** @type {{ peekTail: () => Promise<unknown> | null } | undefined} */
+      let holdObserver;
+      const hold = enqueueAuditIntegrityWriteTask(root, async (lease, observer) => {
+        // Timing: Map.set(cleanup) is sync before task body microtask; first peek must
+        // already see this hold's cleanup identity.
+        holdObserver = observer;
+        holdEntered = true;
+        // b. observer frozen; method set fixed; no schedule/cancel/reorder/settle/grant.
+        assert.ok(Object.isFrozen(observer));
+        assert.deepEqual(Object.keys(observer).sort(), ['peekTail']);
+        assert.equal(typeof observer.peekTail, 'function');
+        for (const banned of [
+          'schedule', 'cancel', 'reorder', 'settle', 'grant',
+          'enqueue', 'release', 'expire', 'setTail',
+        ]) {
+          assert.equal(banned in observer, false, `observer must not expose ${banned}`);
+        }
+        // c. hold active: first peekTail inside hold body returns hold cleanup identity.
+        const tailInside = observer.peekTail();
+        assert.ok(tailInside instanceof Promise);
+        assert.equal(observer.peekTail(), tailInside);
+        await holdGate;
+      });
+      while (!holdEntered) {
+        await new Promise((r) => setImmediate(r));
+      }
+      assert.ok(holdObserver);
+      // c. outside hold body but lease still active: same identity; repeatable.
+      const tailHold = holdObserver.peekTail();
+      assert.ok(tailHold instanceof Promise);
+      assert.equal(holdObserver.peekTail(), tailHold);
+      assert.equal(holdObserver.peekTail(), tailHold);
+
+      // j. two enqueues → strictly different cleanup identities.
+      const first = enqueueAuditIntegrityWriteTask(root, async () => 'first');
+      const tailFirst = holdObserver.peekTail();
+      assert.ok(tailFirst instanceof Promise);
+      assert.notEqual(tailFirst, tailHold);
+
+      const second = enqueueAuditIntegrityWriteTask(root, async () => 'second');
+      const tailSecond = holdObserver.peekTail();
+      assert.ok(tailSecond instanceof Promise);
+      // d. three identities strictly unequal.
+      assert.notEqual(tailSecond, tailFirst);
+      assert.notEqual(tailSecond, tailHold);
+      assert.notEqual(tailFirst, tailHold);
+
+      // e. observer must not release hold or change FIFO: first then second.
+      releaseHold();
+      assert.equal(await first, 'first');
+      assert.equal(await second, 'second');
+      await hold;
+    });
+  });
+
+  it('f: after lease settle, old observer.peekTail() path-free fail-closed', async () => {
+    await withTempRoot('obs-expire', async (root) => {
+      const { enqueueAuditIntegrityWriteTask } = await loadQueue();
+      /** @type {{ peekTail: () => Promise<unknown> | null } | undefined} */
+      let savedObserver;
+      await enqueueAuditIntegrityWriteTask(root, async (_lease, observer) => {
+        savedObserver = observer;
+        assert.ok(observer.peekTail() instanceof Promise);
+      });
+      assert.ok(savedObserver);
+      assert.throws(() => savedObserver.peekTail(), assertSafeDataFileError);
+      // Second settle still fail-closed; no path leakage.
+      assert.throws(() => savedObserver.peekTail(), assertSafeDataFileError);
+    });
+  });
+
+  it('g: root A observer isolated from root B enqueue/tail changes', async () => {
+    await withTempRoot('obs-a', async (rootA) => {
+      await withTempRoot('obs-b', async (rootB) => {
+        const { enqueueAuditIntegrityWriteTask } = await loadQueue();
+        let releaseA;
+        const gateA = new Promise((r) => { releaseA = r; });
+        /** @type {{ peekTail: () => Promise<unknown> | null } | undefined} */
+        let obsA;
+        /** @type {{ peekTail: () => Promise<unknown> | null } | undefined} */
+        let obsB;
+        let aEntered = false;
+        let bEntered = false;
+
+        const pA = enqueueAuditIntegrityWriteTask(rootA, async (_lease, observer) => {
+          obsA = observer;
+          aEntered = true;
+          await gateA;
+        });
+        while (!aEntered) {
+          await new Promise((r) => setImmediate(r));
+        }
+        const tailAHold = obsA.peekTail();
+        assert.ok(tailAHold instanceof Promise);
+
+        let releaseB;
+        const gateB = new Promise((r) => { releaseB = r; });
+        const pB = enqueueAuditIntegrityWriteTask(rootB, async (_lease, observer) => {
+          obsB = observer;
+          bEntered = true;
+          await gateB;
+        });
+        while (!bEntered) {
+          await new Promise((r) => setImmediate(r));
+        }
+        const tailBHold = obsB.peekTail();
+        assert.ok(tailBHold instanceof Promise);
+        // A still sees its own hold tail; B enqueue does not change A's identity.
+        assert.equal(obsA.peekTail(), tailAHold);
+        assert.notEqual(obsA.peekTail(), tailBHold);
+        assert.notEqual(obsB.peekTail(), tailAHold);
+
+        // Further enqueue on B advances only B's observer view.
+        const bNext = enqueueAuditIntegrityWriteTask(rootB, async () => 'b-next');
+        const tailBNext = obsB.peekTail();
+        assert.notEqual(tailBNext, tailBHold);
+        assert.equal(obsA.peekTail(), tailAHold, 'A observer must ignore B enqueue');
+
+        releaseA();
+        releaseB();
+        await pA;
+        assert.equal(await bNext, 'b-next');
+        await pB;
+        assert.throws(() => obsA.peekTail(), assertSafeDataFileError);
+        assert.throws(() => obsB.peekTail(), assertSafeDataFileError);
+      });
+    });
+  });
+
+  it('h: lease-only callbacks stay compatible; forged observer not required / not granted', async () => {
+    await withTempRoot('obs-compat', async (root) => {
+      const { enqueueAuditIntegrityWriteTask, assertAuditIntegrityWriteLease } = await loadQueue();
+      // Existing style: only lease param — must keep working.
+      const v1 = await enqueueAuditIntegrityWriteTask(root, async (lease) => {
+        assertAuditIntegrityWriteLease(root, lease);
+        return 'lease-only';
+      });
+      assert.equal(v1, 'lease-only');
+
+      // Zero-arg callback still works (ignores lease + observer).
+      const v0 = await enqueueAuditIntegrityWriteTask(root, async () => 'zero-arg');
+      assert.equal(v0, 'zero-arg');
+
+      // Passing extra args at call sites is not possible via public API; forged
+      // observer object is never accepted as a grant — only module-issued observer works.
+      let moduleObserver;
+      await enqueueAuditIntegrityWriteTask(root, async (lease, observer) => {
+        moduleObserver = observer;
+        assertAuditIntegrityWriteLease(root, lease);
+        // Caller-forged lookalike cannot replace capability (not consulted by queue).
+        const forged = Object.freeze({ peekTail() { return 'forged'; } });
+        assert.notEqual(observer, forged);
+        assert.ok(observer.peekTail() instanceof Promise);
+      });
+      assert.ok(moduleObserver);
+      assert.throws(() => moduleObserver.peekTail(), assertSafeDataFileError);
+    });
   });
 });
 

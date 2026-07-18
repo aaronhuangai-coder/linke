@@ -264,3 +264,132 @@ export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
     .update(AUDIT_INTEGRITY_EVENT_PAYLOAD_DOMAIN + canonicalEventUtf8)
     .digest('hex');
 }
+
+/**
+ * Path-free parse failure for multi-line strict canonical event JSONL text.
+ * kind is only 'bounds' | 'invalid'. Never embeds path, raw body, or cause.
+ */
+export class StrictCanonicalAuditEventLinesParseError extends Error {
+  /**
+   * @param {'bounds' | 'invalid'} kind
+   */
+  constructor(kind) {
+    if (kind !== 'bounds' && kind !== 'invalid') {
+      throw new TypeError('StrictCanonicalAuditEventLinesParseError kind must be bounds|invalid');
+    }
+    super(kind);
+    this.name = 'StrictCanonicalAuditEventLinesParseError';
+    this.kind = kind;
+  }
+}
+
+/**
+ * Single shared SoT for strict-canonical multi-line event JSONL text parsing.
+ *
+ * Priority (matches V1.36 cross-store design §5.2):
+ *   1. line-count / per-line UTF-8 byte bounds → kind 'bounds'
+ *   2. missing final newline / blank / interior blank / JSON / strict field
+ *      order / canonical re-stringify mismatch → kind 'invalid'
+ *
+ * Empty string is the only empty success (count 0). A sole '\\n' is invalid.
+ * Does not call sanitize. Does not produce digests (callers use payloadDigest SoT).
+ * Returned lines/events are frozen deep copies with no live getters.
+ *
+ * @param {string} raw
+ * @param {{ maxLineBytes: number, maxLines: number }} options
+ * @returns {{
+ *   lines: readonly string[],
+ *   events: readonly object[],
+ *   count: number,
+ * }}
+ */
+export function parseStrictCanonicalAuditEventLinesText(raw, options) {
+  if (typeof raw !== 'string') {
+    throw new StrictCanonicalAuditEventLinesParseError('invalid');
+  }
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new StrictCanonicalAuditEventLinesParseError('invalid');
+  }
+  const maxLineBytes = options.maxLineBytes;
+  const maxLines = options.maxLines;
+  if (!Number.isInteger(maxLineBytes) || maxLineBytes < 0) {
+    throw new StrictCanonicalAuditEventLinesParseError('invalid');
+  }
+  if (!Number.isInteger(maxLines) || maxLines < 0) {
+    throw new StrictCanonicalAuditEventLinesParseError('invalid');
+  }
+
+  // Only missing/zero-byte raw is empty; any blank line (incl. sole '\n') is invalid.
+  if (raw === '') {
+    return Object.freeze({
+      lines: Object.freeze([]),
+      events: Object.freeze([]),
+      count: 0,
+    });
+  }
+
+  // Bounds first: strip at most one final newline, then always split.
+  const body = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+  const splitLines = body.split('\n');
+
+  if (splitLines.length > maxLines) {
+    throw new StrictCanonicalAuditEventLinesParseError('bounds');
+  }
+  for (const line of splitLines) {
+    if (Buffer.byteLength(line, 'utf8') > maxLineBytes) {
+      throw new StrictCanonicalAuditEventLinesParseError('bounds');
+    }
+  }
+
+  // After bounds: final newline required for non-empty files.
+  if (!raw.endsWith('\n')) {
+    throw new StrictCanonicalAuditEventLinesParseError('invalid');
+  }
+
+  /** @type {string[]} */
+  const lines = [];
+  /** @type {object[]} */
+  const events = [];
+
+  for (const line of splitLines) {
+    if (line === '') {
+      throw new StrictCanonicalAuditEventLinesParseError('invalid');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new StrictCanonicalAuditEventLinesParseError('invalid');
+    }
+
+    let projected;
+    let canonical;
+    try {
+      projected = projectStrictCanonicalSanitizedEvent(parsed);
+      canonical = stringifyStrictCanonicalSanitizedEvent(projected);
+    } catch {
+      throw new StrictCanonicalAuditEventLinesParseError('invalid');
+    }
+
+    // Raw line must already be exact strict canonical UTF-8 (no rewrite/sanitize).
+    if (canonical !== line) {
+      throw new StrictCanonicalAuditEventLinesParseError('invalid');
+    }
+
+    // Freeze a plain copy so callers cannot observe live getters / mutate SoT.
+    /** @type {Record<string, unknown>} */
+    const frozenEvent = {};
+    for (const key of Object.keys(projected)) {
+      frozenEvent[key] = projected[key];
+    }
+    lines.push(line);
+    events.push(Object.freeze(frozenEvent));
+  }
+
+  return Object.freeze({
+    lines: Object.freeze(lines.slice()),
+    events: Object.freeze(events.slice()),
+    count: lines.length,
+  });
+}
