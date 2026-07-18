@@ -122,6 +122,19 @@ function assertStrictStringField(value) {
   return value;
 }
 
+/**
+ * Strict createdAt: same string constraints, then exact Date#toISOString() form.
+ * Does not normalize; rejects invalid / offset / missing-ms forms sanitize would rewrite.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function assertStrictCreatedAt(value) {
+  const text = assertStrictStringField(value);
+  const parsed = new Date(text);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== text) failStrict();
+  return text;
+}
+
 function assertStrictStatusCode(value) {
   if (!Number.isInteger(value)) failStrict();
   return value;
@@ -176,8 +189,13 @@ export function projectStrictCanonicalSanitizedEvent(event) {
     if (!Object.prototype.hasOwnProperty.call(event, field)) continue;
     const value = event[field];
 
-    if (field === 'id' || field === 'createdAt') {
+    if (field === 'id') {
       projected[field] = assertStrictStringField(value);
+      continue;
+    }
+
+    if (field === 'createdAt') {
+      projected[field] = assertStrictCreatedAt(value);
       continue;
     }
 

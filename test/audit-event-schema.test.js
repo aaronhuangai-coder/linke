@@ -195,6 +195,53 @@ describe('projectStrictCanonicalSanitizedEvent fail-closed', () => {
     }));
   });
 
+  it('rejects non-canonical createdAt; accepts Date#toISOString() form only', () => {
+    // Canonical form from sanitize / Date#toISOString() remains accepted.
+    assert.deepEqual(
+      projectStrictCanonicalSanitizedEvent({
+        id: FIXED_ID,
+        createdAt: FIXED_CREATED_AT,
+      }),
+      { id: FIXED_ID, createdAt: FIXED_CREATED_AT },
+    );
+    assert.equal(
+      projectStrictCanonicalSanitizedEvent({
+        id: FIXED_ID,
+        createdAt: '2026-07-06T12:00:00.000Z',
+      }).createdAt,
+      '2026-07-06T12:00:00.000Z',
+    );
+
+    // Extended-year boundary: Date#toISOString() can emit +YYYYYY-… form.
+    const extendedYear = '+010000-01-01T00:00:00.000Z';
+    assert.equal(new Date(extendedYear).toISOString(), extendedYear);
+    assert.equal(
+      projectStrictCanonicalSanitizedEvent({
+        id: FIXED_ID,
+        createdAt: extendedYear,
+      }).createdAt,
+      extendedYear,
+    );
+
+    // Invalid date string (sanitize would invent fallback now).
+    assert.throws(() => projectStrictCanonicalSanitizedEvent({
+      id: FIXED_ID,
+      createdAt: 'not-a-date',
+    }));
+
+    // Missing milliseconds — Date parses it but toISOString() rewrites to .000Z.
+    assert.throws(() => projectStrictCanonicalSanitizedEvent({
+      id: FIXED_ID,
+      createdAt: '2026-07-06T12:00:00Z',
+    }));
+
+    // Offset form is absolute-time-valid but not Date#toISOString() output.
+    assert.throws(() => projectStrictCanonicalSanitizedEvent({
+      id: FIXED_ID,
+      createdAt: '2026-07-06T20:00:00.000+08:00',
+    }));
+  });
+
   it('rejects hostile matrix: proxy, array, symbol, extra, non-enumerable, accessor, function, invalid values', () => {
     assert.throws(() => projectStrictCanonicalSanitizedEvent(null));
     assert.throws(() => projectStrictCanonicalSanitizedEvent(undefined));
