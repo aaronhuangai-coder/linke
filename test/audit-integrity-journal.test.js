@@ -1666,6 +1666,571 @@ describe('appendAuditIntegrityEvent', () => {
   });
 });
 
+describe('computeAuditIntegrityEventPayloadDigest + inspectAuditIntegrityJournalFile (V1.36 C1)', () => {
+  it('1: compute fixed strict event equals independent SHA256(domain+shared canonical)', async () => {
+    const { computeAuditIntegrityEventPayloadDigest } = await loadJournalModule();
+    const expected = independentPayloadDigest(EVENT_A);
+    const actual = computeAuditIntegrityEventPayloadDigest({ ...EVENT_A });
+    assert.equal(actual, expected);
+    assert.match(actual, /^[0-9a-f]{64}$/);
+  });
+
+  it('2: compute equals append receipt payloadDigest for same strict event', async () => {
+    await withTempRoot('c1-compute-append', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        computeAuditIntegrityEventPayloadDigest,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const computed = computeAuditIntegrityEventPayloadDigest({ ...EVENT_A });
+      const receipt = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      assert.equal(receipt.payloadDigest, computed);
+      assert.equal(computed, independentPayloadDigest(EVENT_A));
+    });
+  });
+
+  it('3: strict failures (missing id / Proxy / extra / accessor) → EVENT_INVALID message===code; no sanitize; no SECRET', async () => {
+    const {
+      computeAuditIntegrityEventPayloadDigest,
+      AuditIntegrityJournalError,
+    } = await loadJournalModule();
+
+    const assertEventInvalid = (error) => {
+      assert.ok(error instanceof AuditIntegrityJournalError);
+      assert.equal(error.name, 'AuditIntegrityJournalError');
+      assert.equal(error.code, ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+      assert.equal(error.message, ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+      assert.equal(error.message, error.code);
+      assert.ok(!error.message.includes('SECRET'));
+      assert.ok(!String(error.stack || '').split('\n')[0].includes('SECRET'));
+      assert.ok(!error.message.includes('ENOENT'));
+      assert.ok(!error.message.includes('/var/'));
+      return true;
+    };
+
+    // missing id — strict rejects; must not invent/sanitize id
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest({
+        createdAt: EVENT_A.createdAt,
+        type: 'api.test',
+        method: 'POST',
+        path: '/api/test',
+        outcome: 'success',
+      }),
+      assertEventInvalid,
+    );
+
+    // missing createdAt
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest({
+        id: EVENT_A.id,
+        type: 'api.test',
+        method: 'POST',
+        path: '/api/test',
+        outcome: 'success',
+      }),
+      assertEventInvalid,
+    );
+
+    // extra key
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest({ ...EVENT_A, extra: 'nope' }),
+      assertEventInvalid,
+    );
+
+    // noncanonical createdAt (sanitize would rewrite; strict rejects)
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest({
+        ...EVENT_A,
+        createdAt: '2026-07-18T00:00:00Z',
+      }),
+      assertEventInvalid,
+    );
+
+    // Proxy hostile
+    const proxyEvent = new Proxy({ ...EVENT_A }, {
+      get() {
+        throw new Error('SECRET-EVENT-PROXY');
+      },
+    });
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest(proxyEvent),
+      assertEventInvalid,
+    );
+
+    // accessor id
+    const accessorEvent = {};
+    Object.defineProperty(accessorEvent, 'id', {
+      enumerable: true,
+      get() {
+        return 'SECRET-ACCESSOR-ID';
+      },
+    });
+    Object.defineProperty(accessorEvent, 'createdAt', {
+      enumerable: true,
+      value: EVENT_A.createdAt,
+      writable: true,
+    });
+    assert.throws(
+      () => computeAuditIntegrityEventPayloadDigest(accessorEvent),
+      assertEventInvalid,
+    );
+  });
+
+  it('4: inspect after init+2append — exact allowlist snapshot matching verify/append digests', async () => {
+    await withTempRoot('c1-inspect-ok', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      const verified = await verifyAuditIntegrityJournalFile(root);
+      const snapshot = await inspectAuditIntegrityJournalFile(root);
+
+      assert.deepEqual(snapshot, {
+        generationId: GENERATION_ID,
+        headDigest: a2.headDigest,
+        recordCount: 3,
+        eventCount: 2,
+        payloadDigests: [a1.payloadDigest, a2.payloadDigest],
+      });
+      assert.equal(snapshot.generationId, verified.generationId);
+      assert.equal(snapshot.headDigest, verified.headDigest);
+      assert.equal(snapshot.recordCount, verified.recordCount);
+      assert.equal(snapshot.eventCount, 2);
+      assert.equal(snapshot.payloadDigests[0], a1.payloadDigest);
+      assert.equal(snapshot.payloadDigests[1], a2.payloadDigest);
+      assert.equal(snapshot.payloadDigests[0], independentPayloadDigest(EVENT_A));
+      assert.equal(snapshot.payloadDigests[1], independentPayloadDigest(EVENT_B));
+      assert.equal(
+        Object.keys(snapshot).join(','),
+        'generationId,headDigest,recordCount,eventCount,payloadDigests',
+      );
+    });
+  });
+
+  it('5: payloadDigests exclude generation-open null; order is event-link only', async () => {
+    await withTempRoot('c1-inspect-no-open-null', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      // open-only: eventCount 0, empty digests, no null from open
+      const openOnly = await inspectAuditIntegrityJournalFile(root);
+      assert.equal(openOnly.recordCount, 1);
+      assert.equal(openOnly.eventCount, 0);
+      assert.deepEqual(openOnly.payloadDigests, []);
+      assert.equal(openOnly.payloadDigests.length, 0);
+      assert.ok(!openOnly.payloadDigests.includes(null));
+
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      const snapshot = await inspectAuditIntegrityJournalFile(root);
+      assert.equal(snapshot.eventCount, 2);
+      assert.equal(snapshot.payloadDigests.length, 2);
+      assert.deepEqual([...snapshot.payloadDigests], [a1.payloadDigest, a2.payloadDigest]);
+      assert.ok(!snapshot.payloadDigests.includes(null));
+      assert.equal(snapshot.eventCount, snapshot.payloadDigests.length);
+    });
+  });
+
+  it('6: inspect missing journal → not-initialized (same code as verify)', async () => {
+    await withTempRoot('c1-inspect-missing', async (root) => {
+      const {
+        inspectAuditIntegrityJournalFile,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await assert.rejects(
+        () => inspectAuditIntegrityJournalFile(root),
+        (error) => assertIntegrityError(
+          error,
+          ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED,
+          root,
+        ),
+      );
+      await assert.rejects(
+        () => verifyAuditIntegrityJournalFile(root),
+        (error) => assertIntegrityError(
+          error,
+          ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED,
+          root,
+        ),
+      );
+    });
+  });
+
+  it('7: inspect chain-broken → no partial snapshot; same typed code as verify', async () => {
+    await withTempRoot('c1-inspect-broken', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const abs = journalAbs(root);
+      const raw = await readFile(abs, 'utf8');
+      const lines = raw.slice(0, -1).split('\n');
+      const rec = JSON.parse(lines[1]);
+      rec.linkDigest = (rec.linkDigest[0] === '0' ? '1' : '0') + rec.linkDigest.slice(1);
+      lines[1] = canonicalRecordLine(rec);
+      await writeFile(abs, `${lines.join('\n')}\n`, { mode: 0o600 });
+
+      let inspectResult = null;
+      await assert.rejects(
+        async () => {
+          inspectResult = await inspectAuditIntegrityJournalFile(root);
+        },
+        (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN, root),
+      );
+      assert.equal(inspectResult, null, 'must not assign partial snapshot on chain-broken');
+
+      await assert.rejects(
+        () => verifyAuditIntegrityJournalFile(root),
+        (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN, root),
+      );
+    });
+  });
+
+  it('8: payloadDigests is new frozen copy; push/index mutation cannot pollute next inspect', async () => {
+    await withTempRoot('c1-inspect-freeze-digests', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+
+      const snap1 = await inspectAuditIntegrityJournalFile(root);
+      assert.equal(Object.isFrozen(snap1.payloadDigests), true);
+      const originalDigests = [a1.payloadDigest, a2.payloadDigest];
+      assert.deepEqual([...snap1.payloadDigests], originalDigests);
+
+      // push on frozen array must throw in strict mode (node:test is ESM strict)
+      assert.throws(() => {
+        snap1.payloadDigests.push('f'.repeat(64));
+      }, TypeError);
+      assert.throws(() => {
+        snap1.payloadDigests[0] = '0'.repeat(64);
+      }, TypeError);
+
+      const snap2 = await inspectAuditIntegrityJournalFile(root);
+      assert.notEqual(snap2.payloadDigests, snap1.payloadDigests, 'must be a new array copy');
+      assert.deepEqual([...snap2.payloadDigests], originalDigests);
+      assert.equal(snap2.payloadDigests.length, 2);
+      assert.equal(Object.isFrozen(snap2.payloadDigests), true);
+    });
+  });
+
+  it('9: snapshot object itself frozen (or field mutation cannot pollute next inspect)', async () => {
+    await withTempRoot('c1-inspect-freeze-snapshot', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+
+      const snap1 = await inspectAuditIntegrityJournalFile(root);
+      const expected = {
+        generationId: GENERATION_ID,
+        headDigest: a2.headDigest,
+        recordCount: 3,
+        eventCount: 2,
+        payloadDigests: [a1.payloadDigest, a2.payloadDigest],
+      };
+      assert.deepEqual(
+        {
+          generationId: snap1.generationId,
+          headDigest: snap1.headDigest,
+          recordCount: snap1.recordCount,
+          eventCount: snap1.eventCount,
+          payloadDigests: [...snap1.payloadDigests],
+        },
+        expected,
+      );
+
+      // Prefer freeze; if frozen, assignment throws; either way next inspect is clean.
+      if (Object.isFrozen(snap1)) {
+        assert.throws(() => {
+          snap1.generationId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        }, TypeError);
+        assert.throws(() => {
+          snap1.recordCount = 999;
+        }, TypeError);
+        assert.throws(() => {
+          snap1.headDigest = 'e'.repeat(64);
+        }, TypeError);
+        assert.throws(() => {
+          snap1.eventCount = 0;
+        }, TypeError);
+      } else {
+        snap1.generationId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        snap1.recordCount = 999;
+        snap1.headDigest = 'e'.repeat(64);
+        snap1.eventCount = 0;
+      }
+
+      const snap2 = await inspectAuditIntegrityJournalFile(root);
+      assert.deepEqual(
+        {
+          generationId: snap2.generationId,
+          headDigest: snap2.headDigest,
+          recordCount: snap2.recordCount,
+          eventCount: snap2.eventCount,
+          payloadDigests: [...snap2.payloadDigests],
+        },
+        expected,
+      );
+      assert.notEqual(snap2, snap1);
+    });
+  });
+
+  it('10: hostile options getter/Proxy — zero property reads; exact snapshot; no pollute', async () => {
+    await withTempRoot('c1-inspect-hostile-opts', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+
+      // Inspect contract: root-only; options slot is reserved and must never touch properties.
+      // Counters lock zero reads — any future options getter/trap map-to-error would fail here.
+      let getterReadCount = 0;
+      const hostileGetter = Object.defineProperty({}, 'generationId', {
+        enumerable: true,
+        get() {
+          getterReadCount += 1;
+          throw new Error(`SECRET-GETTER path=${root} errno=ENOENT`);
+        },
+      });
+      Object.defineProperty(hostileGetter, 'deps', {
+        enumerable: true,
+        get() {
+          getterReadCount += 1;
+          throw new Error('SECRET-DEPS');
+        },
+      });
+
+      let proxyTrapCount = 0;
+      const hostileProxy = new Proxy({}, {
+        get(_t, prop) {
+          proxyTrapCount += 1;
+          throw new Error(`SECRET-PROXY prop=${String(prop)} path=${root}`);
+        },
+        ownKeys() {
+          proxyTrapCount += 1;
+          throw new Error('SECRET-PROXY-OWNKEYS');
+        },
+        getOwnPropertyDescriptor() {
+          proxyTrapCount += 1;
+          throw new Error('SECRET-PROXY-GOPD');
+        },
+        has() {
+          proxyTrapCount += 1;
+          throw new Error('SECRET-PROXY-HAS');
+        },
+      });
+
+      // Direct success path only — no try/catch fallback that would green on mapped typed errors.
+      const snapFromGetter = await inspectAuditIntegrityJournalFile(root, hostileGetter);
+      const snapFromProxy = await inspectAuditIntegrityJournalFile(root, hostileProxy);
+      assert.equal(getterReadCount, 0, 'inspect must not read hostile getter properties');
+      assert.equal(proxyTrapCount, 0, 'inspect must not trigger hostile Proxy traps');
+
+      const SNAPSHOT_KEYS = [
+        'generationId',
+        'headDigest',
+        'recordCount',
+        'eventCount',
+        'payloadDigests',
+      ];
+      const expectedValues = {
+        generationId: GENERATION_ID,
+        recordCount: 2,
+        eventCount: 1,
+        payloadDigests: [a1.payloadDigest],
+      };
+
+      // Both hostile-option snapshots: exact 5-key allowlist + value equality to clean inspect.
+      assert.deepEqual(Object.keys(snapFromGetter), SNAPSHOT_KEYS);
+      assert.deepEqual(Object.keys(snapFromProxy), SNAPSHOT_KEYS);
+      assert.equal(snapFromGetter.generationId, expectedValues.generationId);
+      assert.equal(snapFromGetter.recordCount, expectedValues.recordCount);
+      assert.equal(snapFromGetter.eventCount, expectedValues.eventCount);
+      assert.deepEqual([...snapFromGetter.payloadDigests], expectedValues.payloadDigests);
+      assert.equal(snapFromProxy.generationId, expectedValues.generationId);
+      assert.equal(snapFromProxy.recordCount, expectedValues.recordCount);
+      assert.equal(snapFromProxy.eventCount, expectedValues.eventCount);
+      assert.deepEqual([...snapFromProxy.payloadDigests], expectedValues.payloadDigests);
+
+      assert.equal(Object.isFrozen(snapFromGetter.payloadDigests), true);
+      assert.equal(Object.isFrozen(snapFromProxy.payloadDigests), true);
+      assert.notEqual(
+        snapFromGetter.payloadDigests,
+        snapFromProxy.payloadDigests,
+        'hostile paths must not share payloadDigests array refs',
+      );
+
+      // Module state / disk unchanged: verify + clean inspect still succeed with expected digests.
+      const verified = await verifyAuditIntegrityJournalFile(root);
+      assert.equal(verified.state, 'verified');
+      assert.equal(verified.recordCount, 2);
+      const clean = await inspectAuditIntegrityJournalFile(root);
+      assert.deepEqual(Object.keys(clean), SNAPSHOT_KEYS);
+      assert.equal(clean.generationId, GENERATION_ID);
+      assert.equal(clean.recordCount, 2);
+      assert.equal(clean.eventCount, 1);
+      assert.deepEqual([...clean.payloadDigests], [a1.payloadDigest]);
+      assert.equal(clean.headDigest, verified.headDigest);
+      assert.equal(snapFromGetter.headDigest, clean.headDigest);
+      assert.equal(snapFromProxy.headDigest, clean.headDigest);
+      assert.deepEqual(
+        {
+          generationId: snapFromGetter.generationId,
+          headDigest: snapFromGetter.headDigest,
+          recordCount: snapFromGetter.recordCount,
+          eventCount: snapFromGetter.eventCount,
+          payloadDigests: [...snapFromGetter.payloadDigests],
+        },
+        {
+          generationId: clean.generationId,
+          headDigest: clean.headDigest,
+          recordCount: clean.recordCount,
+          eventCount: clean.eventCount,
+          payloadDigests: [...clean.payloadDigests],
+        },
+      );
+      assert.deepEqual(
+        {
+          generationId: snapFromProxy.generationId,
+          headDigest: snapFromProxy.headDigest,
+          recordCount: snapFromProxy.recordCount,
+          eventCount: snapFromProxy.eventCount,
+          payloadDigests: [...snapFromProxy.payloadDigests],
+        },
+        {
+          generationId: clean.generationId,
+          headDigest: clean.headDigest,
+          recordCount: clean.recordCount,
+          eventCount: clean.eventCount,
+          payloadDigests: [...clean.payloadDigests],
+        },
+      );
+      assert.notEqual(snapFromGetter.payloadDigests, clean.payloadDigests);
+      assert.notEqual(snapFromProxy.payloadDigests, clean.payloadDigests);
+      assert.equal(Object.isFrozen(clean.payloadDigests), true);
+
+      // After hostile attempts, a subsequent inspect still returns a fresh clean snapshot.
+      const again = await inspectAuditIntegrityJournalFile(root);
+      assert.deepEqual([...again.payloadDigests], [a1.payloadDigest]);
+      assert.equal(again.headDigest, clean.headDigest);
+      assert.notEqual(again.payloadDigests, clean.payloadDigests);
+      assert.notEqual(again.payloadDigests, snapFromGetter.payloadDigests);
+      assert.notEqual(again.payloadDigests, snapFromProxy.payloadDigests);
+      // Counters remain zero after clean/again (no late options touch).
+      assert.equal(getterReadCount, 0);
+      assert.equal(proxyTrapCount, 0);
+    });
+  });
+
+  it('11: inspect snapshot exact key allowlist — no raw/path/body/linkDigest list/ok/state', async () => {
+    await withTempRoot('c1-inspect-allowlist', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const snapshot = await inspectAuditIntegrityJournalFile(root);
+      const keys = Object.keys(snapshot);
+      assert.deepEqual(keys, [
+        'generationId',
+        'headDigest',
+        'recordCount',
+        'eventCount',
+        'payloadDigests',
+      ]);
+      assert.equal(keys.join(','), 'generationId,headDigest,recordCount,eventCount,payloadDigests');
+
+      // Forbidden surface fields
+      assert.equal('records' in snapshot, false);
+      assert.equal('raw' in snapshot, false);
+      assert.equal('path' in snapshot, false);
+      assert.equal('relativePath' in snapshot, false);
+      assert.equal('events' in snapshot, false);
+      assert.equal('event' in snapshot, false);
+      assert.equal('body' in snapshot, false);
+      assert.equal('linkDigests' in snapshot, false);
+      assert.equal('linkDigest' in snapshot, false);
+      assert.equal('ok' in snapshot, false);
+      assert.equal('state' in snapshot, false);
+      assert.equal('previousLinkDigest' in snapshot, false);
+      assert.equal('sequence' in snapshot, false);
+
+      // payloadDigests hold digests only — not event body fields
+      const digestsJson = JSON.stringify(snapshot.payloadDigests);
+      assert.ok(!digestsJson.includes(EVENT_A.id));
+      assert.ok(!digestsJson.includes('/api/test'));
+      assert.ok(!digestsJson.includes('createdAt'));
+      assert.ok(!JSON.stringify(snapshot).includes(root));
+      assert.ok(!JSON.stringify(snapshot).includes('integrity-journal.jsonl'));
+    });
+  });
+});
+
 describe('honest limitations (verify must succeed — design §2.4 / §17)', () => {
   it('23: documents that suffix rewrite is not detected (verify succeeds after recompute-to-end)', async () => {
     // design §2.4 / §17: self-consistent suffix rewrite is NOT detected without external anchor.

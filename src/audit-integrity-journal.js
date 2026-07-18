@@ -345,13 +345,16 @@ function countExistingLinesForAppendPreflight(raw) {
 
 /**
  * Full structure verify on already-read UTF-8 raw (design §8).
- * Private fields headSequence / headLinkDigest support append; public receipt omits them.
+ * Private fields headSequence / eventCount / payloadDigests support append + inspect;
+ * public verify receipt must omit private digests array (never leak into old receipt).
  * @param {string} raw
  * @returns {{
  *   generationId: string,
  *   recordCount: number,
  *   headDigest: string,
  *   headSequence: number,
+ *   eventCount: number,
+ *   payloadDigests: string[],
  * }}
  */
 function verifyRawJournal(raw) {
@@ -408,6 +411,8 @@ function verifyRawJournal(raw) {
   }
 
   const generationId = open.generationId;
+  /** @type {string[]} event-link payloadDigest only (never open null) */
+  const payloadDigests = [];
   for (let i = 1; i < records.length; i += 1) {
     const rec = records[i];
     if (rec.recordKind !== RECORD_KIND_EVENT) {
@@ -433,6 +438,8 @@ function verifyRawJournal(raw) {
     if (rec.linkDigest !== expectedLink) {
       throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
     }
+    // event-link only; open payloadDigest is null and excluded.
+    payloadDigests.push(/** @type {string} */ (rec.payloadDigest));
   }
 
   const head = records[records.length - 1];
@@ -441,6 +448,8 @@ function verifyRawJournal(raw) {
     recordCount: records.length,
     headDigest: head.linkDigest,
     headSequence: head.sequence,
+    eventCount: payloadDigests.length,
+    payloadDigests,
   };
 }
 
@@ -502,6 +511,25 @@ export async function initializeAuditIntegrityJournal(root, options = {}) {
       headDigest: linkDigest,
     };
   });
+}
+
+/**
+ * @internal SoT — identical domain/canonical path as append write-time payloadDigest.
+ * Thin public wrapper over private eventPayloadDigest; no formula fork.
+ * Does not call sanitize; does not invent id/time.
+ *
+ * @param {unknown} strictEvent already strict-acceptable event (no sanitize defaults)
+ * @returns {string} 64 lowercase hex
+ * @throws {AuditIntegrityJournalError} AUDIT_INTEGRITY_EVENT_INVALID on strict failure
+ */
+export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
+  let canonicalEventUtf8;
+  try {
+    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(strictEvent);
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+  return eventPayloadDigest(canonicalEventUtf8);
 }
 
 /**
@@ -626,6 +654,8 @@ export async function appendAuditIntegrityEvent(root, options = {}) {
 /**
  * Read-only structural verify of the journal file (may run outside the write queue).
  * Success means internal structure self-consistency only — not authenticity.
+ * Receipt allowlist unchanged: state/generationId/recordCount/headDigest only
+ * (private payloadDigests from verifyRawJournal never enter this receipt).
  *
  * @param {string} root existing safe data root
  * @returns {Promise<{ state: 'verified', generationId: string, recordCount: number, headDigest: string }>}
@@ -662,4 +692,57 @@ export async function verifyAuditIntegrityJournalFile(root) {
     recordCount: result.recordCount,
     headDigest: result.headDigest,
   };
+}
+
+/**
+ * @internal read-only snapshot after full structure verify (same parser strength as verify).
+ * No write queue; no raw records/path/event body/linkDigest list.
+ * Snapshot fixed keys/order; payloadDigests deep-copied + frozen (event-link only).
+ *
+ * @param {string} root existing safe data root
+ * @param {object} [options] reserved; current contract does not read option keys
+ * @returns {Promise<{
+ *   generationId: string,
+ *   headDigest: string,
+ *   recordCount: number,
+ *   eventCount: number,
+ *   payloadDigests: readonly string[],
+ * }>}
+ */
+export async function inspectAuditIntegrityJournalFile(root, options = {}) {
+  // Reserved options slot; do not touch properties (hostile getter/Proxy must not run).
+  void options;
+
+  let resolvedRoot;
+  try {
+    resolvedRoot = await assertSafeDataRoot(root);
+  } catch (error) {
+    if (error instanceof AuditIntegrityJournalError) throw error;
+    mapIoError(error);
+  }
+
+  let raw;
+  try {
+    raw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
+      maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
+    });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED);
+    }
+    if (error instanceof AuditIntegrityJournalError) throw error;
+    if (error instanceof SafeDataFileError) {
+      mapIoError(error);
+    }
+    mapIoError(error);
+  }
+
+  const result = verifyRawJournal(raw);
+  return Object.freeze({
+    generationId: result.generationId,
+    headDigest: result.headDigest,
+    recordCount: result.recordCount,
+    eventCount: result.eventCount,
+    payloadDigests: Object.freeze(result.payloadDigests.slice()),
+  });
 }
