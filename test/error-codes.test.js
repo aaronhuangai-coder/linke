@@ -4,7 +4,7 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 51 = existing 45 + 6 new V1.35 integrity-journal codes.
+ * Count: 55 = existing 51 (45 + 6 V1.35 journal) + 4 new V1.36 cross-store codes.
  *
  * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
  *   it is NOT counted as a new registration in this bump.
@@ -12,6 +12,9 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
  *   NOT file size / maxBytes — size overlimit maps to AUDIT_INTEGRITY_IO_ERROR).
  * - AUDIT_INTEGRITY_IO_ERROR covers root/read/write/permission/size maxBytes /
  *   other SafeDataFileError mappings.
+ * - Cross-store size overlimit → AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR (≠ bounds).
+ * - Cross-store relationship failure → AUDIT_INTEGRITY_CROSS_STORE_BROKEN
+ *   (≠ AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID for newline/JSON/canonical).
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -71,6 +74,15 @@ const EXPECTED_ERROR_CODES = {
   AUDIT_INTEGRITY_IO_ERROR: 'audit-integrity-io-error',
   AUDIT_INTEGRITY_EVENT_INVALID: 'audit-integrity-event-invalid',
   AUDIT_INTEGRITY_GENERATION_ID_INVALID: 'audit-integrity-generation-id-invalid',
+  // --- new 4 (V1.36 cross-store verifier; only these four are new in this bump) ---
+  // broken: relationship 6/7 only — NOT event-invalid (newline/JSON/canonical)
+  AUDIT_INTEGRITY_CROSS_STORE_BROKEN: 'audit-integrity-cross-store-broken',
+  // io: events size maxBytes / root / permission / SafeDataFileError — NEVER bounds
+  AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR: 'audit-integrity-cross-store-io-error',
+  // bounds: events lines / per-line UTF-8 only — NEVER file size / maxBytes
+  AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED: 'audit-integrity-cross-store-bounds-exceeded',
+  // event-invalid: newline / interior blank / JSON / strict / raw canonical mismatch
+  AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID: 'audit-integrity-cross-store-event-invalid',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
@@ -85,10 +97,17 @@ const NEW_INTEGRITY_JOURNAL_CODES = [
   ERROR_CODES.AUDIT_INTEGRITY_GENERATION_ID_INVALID,
 ];
 
+const NEW_CROSS_STORE_CODES = [
+  ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+  ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR,
+  ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED,
+  ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID,
+];
+
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (51 entries = existing 45 + 6)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 51);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 51);
+  it('matches the exact closed-set ERROR_CODES registry (55 entries = existing 51 + 4)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 55);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 55);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -100,13 +119,38 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED,
       ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR,
     );
+    // Cross-store size≠bounds; broken≠event-invalid (distinct codes and semantics).
+    assert.notStrictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED,
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR,
+    );
+    assert.notStrictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID,
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+      'audit-integrity-cross-store-broken',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR,
+      'audit-integrity-cross-store-io-error',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED,
+      'audit-integrity-cross-store-bounds-exceeded',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID,
+      'audit-integrity-cross-store-event-invalid',
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 51);
+    assert.strictEqual(values.length, 55);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
@@ -122,6 +166,19 @@ describe('Gold error-code registry', () => {
       assert.strictEqual(error.code, code);
       assert.strictEqual(error.name, 'LinkeError');
     }
+  });
+
+  it('registers the four new cross-store codes with LinkeError message===code', () => {
+    assert.strictEqual(NEW_CROSS_STORE_CODES.length, 4);
+    for (const code of NEW_CROSS_STORE_CODES) {
+      assert.strictEqual(assertRegisteredErrorCode(code), code);
+      const error = new LinkeError(code);
+      assert.strictEqual(error.message, code);
+      assert.strictEqual(error.code, code);
+      assert.strictEqual(error.name, 'LinkeError');
+    }
+    // size≠bounds and broken≠event-invalid locks (values unique among the four).
+    assert.strictEqual(new Set(NEW_CROSS_STORE_CODES).size, 4);
   });
 
   it('rejects raw or unregistered error text', () => {

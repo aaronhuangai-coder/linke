@@ -56,6 +56,12 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_INTEGRITY_IO_ERROR: 'audit-integrity-io-error',
   AUDIT_INTEGRITY_EVENT_INVALID: 'audit-integrity-event-invalid',
   AUDIT_INTEGRITY_GENERATION_ID_INVALID: 'audit-integrity-generation-id-invalid',
+  // V1.36 cross-store verifier (+4). size overlimit → CROSS_STORE_IO_ERROR (≠ bounds).
+  // broken = relationship only; event-invalid = newline/JSON/strict/canonical only.
+  AUDIT_INTEGRITY_CROSS_STORE_BROKEN: 'audit-integrity-cross-store-broken',
+  AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR: 'audit-integrity-cross-store-io-error',
+  AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED: 'audit-integrity-cross-store-bounds-exceeded',
+  AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID: 'audit-integrity-cross-store-event-invalid',
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));
