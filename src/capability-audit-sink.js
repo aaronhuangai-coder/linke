@@ -11,6 +11,7 @@
  * Never imports/calls the generic HTTP audit append helper.
  */
 
+import { types as utilTypes } from 'node:util';
 import {
   SafeDataFileError,
   assertSafeDataRoot,
@@ -91,6 +92,16 @@ export class CapabilityRealAuditSinkError extends Error {
 const capabilityAuditSinkQueues = new Map();
 
 /**
+ * Module-private TEST ONLY hooks snapshot.
+ * Default null. Never a Map/queue; never replaces safeAppendText/fs/handler/registry.
+ * @type {{ beforeAppend?: () => (void|Promise<void>), afterAppend?: () => (void|Promise<void>) } | null}
+ */
+let capabilityRealAuditSinkHooksForTest = null;
+
+const SINK_HOOKS_SETTER_ERROR = 'capability-real-audit-sink-invalid';
+const SINK_HOOKS_ALLOWED_KEYS = Object.freeze(['beforeAppend', 'afterAppend']);
+
+/**
  * @param {string} code
  * @param {boolean} writeAttempted
  * @returns {never}
@@ -120,13 +131,15 @@ function enqueueCapabilityAuditSinkTask(resolvedRoot, task) {
 }
 
 /**
- * Plain object: Object.prototype or null prototype; not array/function/other.
+ * Plain object: Object.prototype or null prototype; not array/function/Proxy/other.
  * @param {unknown} value
  * @returns {boolean}
  */
 function isPlainRecord(value) {
   if (value === null || typeof value !== 'object') return false;
   if (Array.isArray(value)) return false;
+  // Transparent Proxy can faithfully mirror ownKeys/descriptors/proto — reject explicitly.
+  if (utilTypes.isProxy(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
@@ -315,6 +328,70 @@ function validateExistingRaw(raw) {
 }
 
 /**
+ * @internal TEST ONLY — never call from production bootstrap / server / agent / lifecycle.
+ * Install or clear module-private beforeAppend/afterAppend hooks for deterministic tests.
+ * Default null. null resets. Invalid input throws a fixed safe error and retains prior hooks.
+ * Hooks take no arguments and must not mutate event/root; they do not replace safe IO.
+ *
+ * @param {null | undefined | { beforeAppend?: Function, afterAppend?: Function }} hooks
+ */
+export function setCapabilityRealAuditSinkHooksForTest(hooks) {
+  if (hooks === null || hooks === undefined) {
+    capabilityRealAuditSinkHooksForTest = null;
+    return;
+  }
+  if (typeof hooks !== 'object' || Array.isArray(hooks) || utilTypes.isProxy(hooks)) {
+    throw new Error(SINK_HOOKS_SETTER_ERROR);
+  }
+  let proto;
+  try {
+    proto = Object.getPrototypeOf(hooks);
+  } catch {
+    throw new Error(SINK_HOOKS_SETTER_ERROR);
+  }
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error(SINK_HOOKS_SETTER_ERROR);
+  }
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(hooks);
+  } catch {
+    throw new Error(SINK_HOOKS_SETTER_ERROR);
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol' || !SINK_HOOKS_ALLOWED_KEYS.includes(key)) {
+      throw new Error(SINK_HOOKS_SETTER_ERROR);
+    }
+  }
+
+  /** @type {{ beforeAppend?: () => (void|Promise<void>), afterAppend?: () => (void|Promise<void>) }} */
+  const snapshot = Object.create(null);
+  for (const key of SINK_HOOKS_ALLOWED_KEYS) {
+    if (!Object.hasOwn(hooks, key) && !ownKeys.includes(key)) continue;
+    let desc;
+    try {
+      desc = Object.getOwnPropertyDescriptor(hooks, key);
+    } catch {
+      throw new Error(SINK_HOOKS_SETTER_ERROR);
+    }
+    if (
+      !desc ||
+      desc.enumerable !== true ||
+      desc.get !== undefined ||
+      desc.set !== undefined ||
+      !Object.prototype.hasOwnProperty.call(desc, 'value') ||
+      typeof desc.value !== 'function'
+    ) {
+      throw new Error(SINK_HOOKS_SETTER_ERROR);
+    }
+    snapshot[key] = desc.value;
+  }
+
+  // Atomic replace only after full validation succeeds.
+  capabilityRealAuditSinkHooksForTest = snapshot;
+}
+
+/**
  * One queue-task body: read → validate existing → validate incoming → append.
  * @param {string} resolvedRoot
  * @param {unknown} event
@@ -347,12 +424,34 @@ async function appendCapabilityRealAuditProofEventInQueue(resolvedRoot, event) {
     const canonical = validateCanonicalEvent(event, { requireKeyOrder: true });
     const line = `${stringifyCanonical(canonical)}\n`;
 
+    // Capture hooks snapshot after validation/canonical line, before safeAppendText.
+    const hooks = capabilityRealAuditSinkHooksForTest;
+    if (hooks && typeof hooks.beforeAppend === 'function') {
+      try {
+        await hooks.beforeAppend();
+      } catch (error) {
+        if (error instanceof CapabilityRealAuditSinkError) throw error;
+        // beforeAppend throw is pre-append invalid.
+        throwSinkError(CAPABILITY_REAL_AUDIT_SINK_INVALID, false);
+      }
+    }
+
     try {
       // Mutating call boundary: once invoked, failures map to persist-failed.
       await safeAppendText(resolvedRoot, CAPABILITY_REAL_AUDIT_RELATIVE_PATH, line);
     } catch (error) {
       if (error instanceof CapabilityRealAuditSinkError) throw error;
       throwSinkError(CAPABILITY_REAL_AUDIT_PERSIST_FAILED, true);
+    }
+
+    if (hooks && typeof hooks.afterAppend === 'function') {
+      try {
+        await hooks.afterAppend();
+      } catch (error) {
+        if (error instanceof CapabilityRealAuditSinkError) throw error;
+        // afterAppend throw is post-mutate persist-failed.
+        throwSinkError(CAPABILITY_REAL_AUDIT_PERSIST_FAILED, true);
+      }
     }
   } catch (error) {
     if (error instanceof CapabilityRealAuditSinkError) throw error;

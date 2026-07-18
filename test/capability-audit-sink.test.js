@@ -877,6 +877,97 @@ describe('capability-audit-sink incoming hostile matrix', () => {
       assert.equal(finalRaw.endsWith(canonicalLine(next)), true);
     });
   });
+
+  it('transparent Proxy around valid canonical target → sink-invalid; no create/append; next plain valid ok', async () => {
+    const {
+      appendCapabilityRealAuditProofEvent,
+      CAPABILITY_REAL_AUDIT_RELATIVE_PATH,
+      setCapabilityRealAuditSinkHooksForTest,
+    } = await import('../src/capability-audit-sink.js');
+
+    await withTempRoot(async (root) => {
+      const filePath = join(root, CAPABILITY_REAL_AUDIT_RELATIVE_PATH);
+      // Seed one plain valid line so we can prove no append on proxy rejection.
+      const seed = buildValidCanonicalEvent({
+        eventFingerprint: FIXED_HEX_A,
+        attemptRefFingerprint: FIXED_HEX_B,
+      });
+      await appendCapabilityRealAuditProofEvent(root, seed);
+      const before = await readFile(filePath, 'utf8');
+      assert.equal(await pathExists(filePath), true);
+
+      // Fully transparent Proxy: ownKeys/descriptors/proto all faithful to a valid target.
+      const plainTarget = buildValidCanonicalEvent({
+        eventFingerprint: FIXED_HEX_C,
+        attemptRefFingerprint: FIXED_HEX_D,
+      });
+      const transparentProxy = new Proxy(plainTarget, {
+        get(target, prop, receiver) {
+          return Reflect.get(target, prop, receiver);
+        },
+        has(target, prop) {
+          return Reflect.has(target, prop);
+        },
+        ownKeys(target) {
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(target, prop) {
+          return Reflect.getOwnPropertyDescriptor(target, prop);
+        },
+        getPrototypeOf(target) {
+          return Reflect.getPrototypeOf(target);
+        },
+      });
+      // Sanity: without utilTypes.isProxy this would look like a plain valid record.
+      assert.equal(typeof transparentProxy, 'object');
+      assert.equal(Array.isArray(transparentProxy), false);
+      assert.equal(Object.getPrototypeOf(transparentProxy), Object.prototype);
+      assert.deepEqual(Reflect.ownKeys(transparentProxy), Reflect.ownKeys(plainTarget));
+
+      let beforeAppendHits = 0;
+      setCapabilityRealAuditSinkHooksForTest({
+        beforeAppend: () => {
+          beforeAppendHits += 1;
+        },
+      });
+      try {
+        await assert.rejects(
+          () => appendCapabilityRealAuditProofEvent(root, transparentProxy),
+          (error) => {
+            assertSinkInvalid(error, root, filePath);
+            assert.equal(error.writeAttempted, false);
+            return true;
+          },
+        );
+        assert.equal(beforeAppendHits, 0, 'proxy reject must not enter beforeAppend/queue work');
+        assert.equal(await readFile(filePath, 'utf8'), before, 'must not append on transparent Proxy');
+
+        // Missing-file case: transparent Proxy must not create the file either.
+        await rm(filePath, { force: true });
+        await assert.rejects(
+          () => appendCapabilityRealAuditProofEvent(root, transparentProxy),
+          (error) => {
+            assertSinkInvalid(error, root);
+            assert.equal(error.writeAttempted, false);
+            return true;
+          },
+        );
+        assert.equal(await pathExists(filePath), false, 'must not create file for Proxy event');
+
+        // Subsequent plain valid succeeds — queue/hooks not polluted.
+        const nextPlain = buildValidCanonicalEvent({
+          eventFingerprint: FIXED_HEX_D,
+          attemptRefFingerprint: FIXED_HEX_A,
+        });
+        await appendCapabilityRealAuditProofEvent(root, nextPlain);
+        const after = await readFile(filePath, 'utf8');
+        assert.equal(after, canonicalLine(nextPlain));
+        assert.equal(beforeAppendHits, 1, 'plain valid must still run hooks after Proxy reject');
+      } finally {
+        setCapabilityRealAuditSinkHooksForTest(null);
+      }
+    });
+  });
 });
 
 describe('capability-audit-sink path/root fail-closed', () => {
@@ -953,13 +1044,14 @@ describe('capability-audit-sink path/root fail-closed', () => {
 });
 
 describe('capability-audit-sink error stage contract', () => {
-  it('pre-append fail → sink-invalid + writeAttempted:false; post-mutate → persist-failed + writeAttempted:true', async () => {
+  it('pre-append fail → sink-invalid + writeAttempted:false; post-append afterAppend throw → persist-failed + writeAttempted:true', async () => {
     const {
       appendCapabilityRealAuditProofEvent,
       CAPABILITY_REAL_AUDIT_RELATIVE_PATH,
       CAPABILITY_REAL_AUDIT_SINK_INVALID,
       CAPABILITY_REAL_AUDIT_PERSIST_FAILED,
       CapabilityRealAuditSinkError,
+      setCapabilityRealAuditSinkHooksForTest,
     } = await import('../src/capability-audit-sink.js');
 
     assert.equal(CAPABILITY_REAL_AUDIT_SINK_INVALID, 'capability-real-audit-sink-invalid');
@@ -975,29 +1067,126 @@ describe('capability-audit-sink error stage contract', () => {
         assertSinkInvalid(error, root, '/var', '/private', 'ENOENT', 'EACCES');
       }
 
-      // Successful write first so read path is valid
-      await appendCapabilityRealAuditProofEvent(root, buildValidCanonicalEvent());
-      const filePath = join(root, CAPABILITY_REAL_AUDIT_RELATIVE_PATH);
-
-      // Force append open failure after preflight (read ok, incoming ok) via chmod
-      await chmod(filePath, 0o444);
-      await chmod(join(root, 'audit'), 0o555);
+      // Deterministic post-append failure via afterAppend (primary stage contract; no chmod).
       try {
+        setCapabilityRealAuditSinkHooksForTest({
+          afterAppend: async () => {
+            throw new Error('FIXTURE_SINK_AFTER_SECRET');
+          },
+        });
         await assert.rejects(
           () => appendCapabilityRealAuditProofEvent(root, buildValidCanonicalEvent({
             eventFingerprint: FIXED_HEX_C,
           })),
           (error) => {
             assert.ok(error instanceof CapabilityRealAuditSinkError);
-            assertPersistFailed(error, root, filePath, 'EACCES', 'permission');
+            assert.equal(error.code, CAPABILITY_REAL_AUDIT_PERSIST_FAILED);
+            assert.equal(error.writeAttempted, true);
+            assert.ok(!String(error.message).includes('FIXTURE_SINK_AFTER_SECRET'));
             return true;
           },
         );
+        const filePath = join(root, CAPABILITY_REAL_AUDIT_RELATIVE_PATH);
+        const raw = await readFile(filePath, 'utf8');
+        assert.equal(raw.trimEnd().split('\n').length, 1);
+        assert.ok(raw.includes(FIXED_HEX_C));
       } finally {
-        await chmod(join(root, 'audit'), 0o700).catch(() => {});
-        await chmod(filePath, 0o600).catch(() => {});
+        setCapabilityRealAuditSinkHooksForTest(null);
       }
     });
+  });
+});
+
+describe('capability-audit-sink TEST ONLY hooks contract', () => {
+  it('setter rejects hostile inputs and preserves previous hooks on invalid', async () => {
+    const {
+      setCapabilityRealAuditSinkHooksForTest,
+    } = await import('../src/capability-audit-sink.js');
+
+    const goodBefore = async () => {};
+    const goodAfter = async () => {};
+    try {
+      setCapabilityRealAuditSinkHooksForTest({ beforeAppend: goodBefore, afterAppend: goodAfter });
+
+      const hostiles = [
+        { beforeAppend: 1 },
+        { extra: async () => {} },
+        'string',
+        [async () => {}],
+        new Proxy({ beforeAppend: goodBefore }, {}),
+        Object.defineProperty({}, 'beforeAppend', { enumerable: true, get: () => goodBefore }),
+        { beforeAppend: 'nope' },
+        { afterAppend: 42 },
+        Object.assign(Object.create({ x: 1 }), { beforeAppend: goodBefore }),
+      ];
+      for (const bad of hostiles) {
+        assert.throws(
+          () => setCapabilityRealAuditSinkHooksForTest(bad),
+          (error) => {
+            assert.ok(error instanceof Error);
+            assert.equal(error.message, 'capability-real-audit-sink-invalid');
+            return true;
+          },
+        );
+      }
+      // Old hooks retained across invalid attempts.
+      setCapabilityRealAuditSinkHooksForTest(null);
+      let hit = 0;
+      setCapabilityRealAuditSinkHooksForTest({
+        beforeAppend: async () => {
+          hit += 1;
+        },
+      });
+      assert.throws(
+        () => setCapabilityRealAuditSinkHooksForTest({ beforeAppend: 1 }),
+        (error) => error instanceof Error && error.message === 'capability-real-audit-sink-invalid',
+      );
+      // hit counter hook still installed after invalid setter throw.
+      const {
+        appendCapabilityRealAuditProofEvent,
+      } = await import('../src/capability-audit-sink.js');
+      await withTempRoot(async (root) => {
+        await appendCapabilityRealAuditProofEvent(root, buildValidCanonicalEvent({
+          eventFingerprint: FIXED_HEX_D,
+        }));
+        assert.equal(hit, 1, 'invalid setter must retain previous beforeAppend hook');
+      });
+    } finally {
+      setCapabilityRealAuditSinkHooksForTest(null);
+    }
+  });
+
+  it('beforeAppend throw is pre-append sink-invalid writeAttempted:false; no line', async () => {
+    const {
+      appendCapabilityRealAuditProofEvent,
+      CAPABILITY_REAL_AUDIT_RELATIVE_PATH,
+      CAPABILITY_REAL_AUDIT_SINK_INVALID,
+      CapabilityRealAuditSinkError,
+      setCapabilityRealAuditSinkHooksForTest,
+    } = await import('../src/capability-audit-sink.js');
+
+    try {
+      setCapabilityRealAuditSinkHooksForTest({
+        beforeAppend: async () => {
+          throw new Error('FIXTURE_BEFORE_SECRET');
+        },
+      });
+      await withTempRoot(async (root) => {
+        await assert.rejects(
+          () => appendCapabilityRealAuditProofEvent(root, buildValidCanonicalEvent()),
+          (error) => {
+            assert.ok(error instanceof CapabilityRealAuditSinkError);
+            assert.equal(error.code, CAPABILITY_REAL_AUDIT_SINK_INVALID);
+            assert.equal(error.writeAttempted, false);
+            assert.ok(!String(error.message).includes('FIXTURE_BEFORE_SECRET'));
+            return true;
+          },
+        );
+        assert.equal(await pathExists(join(root, CAPABILITY_REAL_AUDIT_RELATIVE_PATH)), false);
+      });
+    } finally {
+      setCapabilityRealAuditSinkHooksForTest(null);
+    }
   });
 });
 
@@ -1006,6 +1195,8 @@ describe('capability-audit-sink source architecture scans', () => {
     const sinkSrc = readFileSync(SINK_SRC, 'utf8');
     const lifecycleSrc = readFileSync(LIFECYCLE_SRC, 'utf8');
     const actionsSrc = readFileSync(ACTIONS_SRC, 'utf8');
+    const agentSrc = readFileSync(join(ROOT, 'src/agent.js'), 'utf8');
+    const serverSrc = readFileSync(join(ROOT, 'src/server.js'), 'utf8');
 
     // Sink must not import/call audit-log or lifecycle
     assert.equal(sinkSrc.includes('appendAuditEvent'), false);
@@ -1028,21 +1219,36 @@ describe('capability-audit-sink source architecture scans', () => {
     assert.equal(/from\s+['"]node:fs\/promises['"]/.test(sinkSrc), false);
     assert.equal(/writeFileSync|appendFileSync|\.writeFile\(/.test(sinkSrc), false);
 
-    // Sole queue Map in sink
+    // Sole queue Map in sink — hooks must not introduce a second Map/queue
     assert.equal(sinkSrc.includes('capabilityAuditSinkQueues'), true);
     const mapDecls = sinkSrc.match(/\bnew Map\s*\(/g) || [];
     assert.equal(mapDecls.length, 1, 'exactly one Map (sole queue) in sink');
+    assert.equal(/\bnew Set\s*\(/.test(sinkSrc), false);
 
     // SoT import for op/action
     assert.equal(sinkSrc.includes('isSupervisorLifecycleActionForOperation'), true);
     assert.equal(sinkSrc.includes('supervisor-lifecycle-actions.js'), true);
 
-    // Lifecycle must not own a second queue Map for this sink path
+    // Lifecycle may import/call exact sink API for RealAuditProof, but MUST NOT own a second queue Map.
     assert.equal(lifecycleSrc.includes('capabilityAuditSinkQueues'), false);
-    assert.equal(lifecycleSrc.includes('capability-audit-sink'), false);
-    assert.equal(lifecycleSrc.includes('appendCapabilityRealAuditProofEvent'), false);
-    // No nested sink queue naming patterns in lifecycle
-    assert.equal(lifecycleSrc.includes('capability-proof-attempts.jsonl'), false);
+    // V1.34 C3: lifecycle RealAuditProof calls exact sink API (sole queue remains in sink).
+    assert.equal(lifecycleSrc.includes("from './capability-audit-sink.js'"), true);
+    assert.equal(lifecycleSrc.includes('appendCapabilityRealAuditProofEvent'), true);
+    assert.equal(
+      /await\s+appendCapabilityRealAuditProofEvent\s*\(\s*resolvedDataRoot\s*,\s*canonicalEvent\s*\)/.test(
+        lifecycleSrc,
+      ),
+      true,
+    );
+    // RealAuditProof region must not hardcode sink path / import audit-log / call generic HTTP audit helper.
+    const auditProofSlice = lifecycleSrc.includes('// ── V1.34 Real audit capability sink persist')
+      ? lifecycleSrc.slice(lifecycleSrc.indexOf('// ── V1.34 Real audit capability sink persist'))
+      : '';
+    assert.ok(auditProofSlice.length > 100);
+    assert.equal(auditProofSlice.includes('capability-proof-attempts.jsonl'), false);
+    assert.equal(auditProofSlice.includes('appendAuditEvent'), false);
+    assert.equal(auditProofSlice.includes('audit/events.jsonl'), false);
+    assert.equal(/from\s+['"]\.\/audit-log/.test(lifecycleSrc), false);
 
     // Actions SoT imports neither lifecycle nor sink (comments may name them; ban import paths)
     assert.equal(/from\s+['"][^'"]*capability-audit-sink['"]/.test(actionsSrc), false);
@@ -1053,6 +1259,17 @@ describe('capability-audit-sink source architecture scans', () => {
     // JSDoc marks append-only / @internal
     assert.equal(sinkSrc.includes('@internal'), true);
     assert.equal(/append-only/i.test(sinkSrc), true);
+
+    // TEST ONLY setter: defined in sink; zero production references (agent/server/lifecycle).
+    assert.equal(sinkSrc.includes('export function setCapabilityRealAuditSinkHooksForTest'), true);
+    assert.equal(sinkSrc.includes('@internal TEST ONLY'), true);
+    assert.equal(lifecycleSrc.includes('setCapabilityRealAuditSinkHooksForTest'), false);
+    assert.equal(agentSrc.includes('setCapabilityRealAuditSinkHooksForTest'), false);
+    assert.equal(serverSrc.includes('setCapabilityRealAuditSinkHooksForTest'), false);
+    // Production bootstrap path must not call setter (default null).
+    assert.equal(/setCapabilityRealAuditSinkHooksForTest\s*\(/.test(
+      sinkSrc.replace(/export function setCapabilityRealAuditSinkHooksForTest[\s\S]*?\n\}/, ''),
+    ), false);
   });
 
   it('suite root from plan before/after is under tmpdir only', async () => {

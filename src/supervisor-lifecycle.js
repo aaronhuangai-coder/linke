@@ -6,8 +6,16 @@ import { join as pathJoin, resolve, sep } from 'node:path';
 import { types as utilTypes } from 'node:util';
 import {
   SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS,
+  isSupervisorLifecycleActionForOperation,
+  isSupervisorLifecycleOperation,
   listSupervisorLifecycleActionIds,
 } from './supervisor-lifecycle-actions.js';
+import { assertSafeDataRoot } from './safe-data-files.js';
+import {
+  appendCapabilityRealAuditProofEvent,
+  CapabilityRealAuditSinkError,
+  CAPABILITY_REAL_AUDIT_PERSIST_FAILED,
+} from './capability-audit-sink.js';
 
 const APPROVAL_MAX_WINDOW_MS = 60 * 60 * 1000;
 // Derived from pure shared SoT operations (insertion order of frozen map keys).
@@ -4230,6 +4238,37 @@ const CAPABILITY_STATUS_IO_INJECTION_KEYS = Object.freeze([
   'uid',
   'plist',
 ]);
+// V1.34 real-audit proof request: nested auditInput snapshotted independently.
+const CAPABILITY_REAL_AUDIT_PROOF_REQUEST_KEYS = Object.freeze([
+  'capabilityKind',
+  'actionId',
+  'operation',
+  'mode',
+  'idempotencyKey',
+  'attemptRef',
+  'anchorRef',
+  'auditInput',
+]);
+const CAPABILITY_AUDIT_INPUT_KEYS = Object.freeze(['schemaVersion']);
+// Forbidden keys on real-audit proof request (top or nested).
+const CAPABILITY_AUDIT_IO_INJECTION_KEYS = Object.freeze([
+  'dataDir',
+  'path',
+  'event',
+  'message',
+  'metadata',
+  'time',
+  'timestamp',
+  'token',
+  'handler',
+  'function',
+  'fs',
+  'reader',
+  'retention',
+  'home',
+  'homedir',
+  'cwd',
+]);
 const CAPABILITY_DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CAPABILITY_AUDIT_SEQUENCE = Object.freeze([
   'authorize',
@@ -4261,6 +4300,12 @@ const CAPABILITY_OUTCOME_CODES = Object.freeze([
   'capability-real-status-observation-failed',
   'capability-real-status-timeout',
   'capability-real-status-redaction-failed',
+  'capability-real-audit-persisted',
+  'capability-real-audit-input-invalid',
+  'capability-real-audit-context-invalid',
+  'capability-real-audit-in-flight-denied',
+  'capability-real-audit-sink-invalid',
+  'capability-real-audit-persist-failed',
 ]);
 const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-injection-input-invalid',
@@ -4287,6 +4332,11 @@ const CAPABILITY_BLOCKER_CODES = Object.freeze([
   'capability-real-status-observation-failed',
   'capability-real-status-timeout',
   'capability-real-status-redaction-failed',
+  'capability-real-audit-input-invalid',
+  'capability-real-audit-context-invalid',
+  'capability-real-audit-in-flight-denied',
+  'capability-real-audit-sink-invalid',
+  'capability-real-audit-persist-failed',
 ]);
 const CAPABILITY_BLOCKER_CODE_SET = new Set(CAPABILITY_BLOCKER_CODES);
 const CAPABILITY_INJECTION_READY_EVIDENCE = 'capability-injection-ready';
@@ -4294,6 +4344,7 @@ const CAPABILITY_INJECTION_PLAN_READY_EVIDENCE = 'capability-injection-plan-read
 const CAPABILITY_DRY_RUN_DESCRIPTOR_READY_EVIDENCE = 'capability-dry-run-descriptor-ready';
 const CAPABILITY_REAL_RENDER_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-render-implementation-ready';
 const CAPABILITY_REAL_STATUS_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-status-implementation-ready';
+const CAPABILITY_REAL_AUDIT_IMPLEMENTATION_READY_EVIDENCE = 'capability-real-audit-implementation-ready';
 const CAPABILITY_INJECTION_READINESS_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection-readiness';
 const CAPABILITY_INJECTION_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-injection';
 const CAPABILITY_RECEIPT_COMMAND = 'supervisor-lifecycle-guarded-runner-capability-receipt';
@@ -4355,6 +4406,30 @@ const REAL_STATUS_SIZE_CLASS_ENUM = Object.freeze([
   'oversize',
   'unknown',
 ]);
+// V1.34 real-audit constants (independent capability sink persist; not events.jsonl).
+// real audit = 真实 capability sink persist 非 stub；独立于 events.jsonl
+// 成功 write+sync：hostSideEffectOccurred=true 且 hostMutationOccurred=true
+//   且 auditPersistOccurred=true 且 mutationOutcome=persisted
+// append 已 invoke 后 throws：occurred true/true/false；mutationOutcome=unknown-after-write-attempt
+// wouldPersistAudit=false 仍表示非 future execute intent；live occurred 独立
+// 不得抬升 execute / 全局 real / wiring / realAttemptAudit / Gold / M6d Exit
+// 只称 append-only API behavior；禁止 immutable/WORM/tamper-proof 宣称
+const REAL_AUDIT_CAPABILITY_ID = 'real-audit';
+const REAL_AUDIT_SIDE_EFFECT_CLASS = 'audit-persist';
+const REAL_AUDIT_ATTEMPT_REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
+const REAL_AUDIT_ATTEMPT_REF_FP_PREFIX = 'linke:v1.34:real-audit-proof:attempt-ref:v1\x1f';
+const REAL_AUDIT_EVENT_FP_PREFIX = 'linke:v1.34:real-audit-proof:event:v1\x1f1\x1f';
+const REAL_AUDIT_MUTATION_OUTCOMES = Object.freeze([
+  'not-attempted',
+  'persisted',
+  'unknown-after-write-attempt',
+]);
+/** All 10 action IDs derived from pure shared SoT (operation map order). Not a second hardcode list. */
+const REAL_AUDIT_ACTION_IDS = Object.freeze(
+  Object.keys(SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS).flatMap((op) => [
+    ...SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS[op],
+  ]),
+);
 const EXECUTE_FORMULA_MISSING_PREREQUISITE_CODES = Object.freeze([
   'realCapabilityImplementationsReady',
   'executeCapabilityRegistryReady',
@@ -4410,12 +4485,11 @@ const GUARDED_RUNNER_READY_CAPABILITY_INJECTION_ENTRY = Object.freeze({
 
 /** Module-private dual-track registries. Not exported. Never accept caller injection. */
 const dryRunCapabilityRegistry = new Map();
-// realCapabilityRegistry: V1.33 = 'render' + 'status' (7 dry-run + 2 real).
+// realCapabilityRegistry: V1.34 = 'render' + 'status' + 'audit' (7 dry-run + 3 real).
 // real=真实产物非stub，与host side effect正交
 // real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
-// 真实 fs observation 开始后：hostObservationOccurred=true 且 hostSideEffectOccurred=true
-// （遵守 V1.32：读 host 受控资源 = side effect；不得重定义）
-// observational-read ≠ host mutation；不得抬升 execute / 全局 real / wiring / Gold
+// real audit = 真实 capability sink persist 非 stub；独立于 events.jsonl
+// 不得抬升 execute / 全局 real / wiring / realAttemptAudit / Gold / M6d Exit
 const realCapabilityRegistry = new Map();
 // Module-private status host reader binding. Production binds default async metadata reader.
 // TEST ONLY hook may swap; production bootstrap never calls the test hook.
@@ -4425,6 +4499,9 @@ let realStatusHostReaderOverrideForTest = null;
 let realStatusFsOpsOverrideForTest = null;
 let realStatusInFlightCount = 0;
 const realStatusInFlightByToken = new Map();
+// V1.34: same-fingerprint concurrent barrier ONLY (lifecycle). Not a queue Map.
+// Queue sole SoT remains the per-root Map inside the capability-audit-sink module.
+const realAuditInFlightFingerprints = new Set();
 
 /**
  * Resolve active fs-ops for observational reader.
@@ -4800,9 +4877,55 @@ function buildRealStatusCapabilityDescriptor() {
 }
 
 /**
- * Real status handler: observational metadata only via bound host reader.
- * Never reads content; never mutates host; never elevates execute/wiring/Gold.
+ * Real audit capability descriptor: capability sink persist (append-only API behavior).
+ * Independent from generic events journal. Never elevates execute/wiring/Gold/M6d Exit.
+ * Live hostSideEffect/hostMutation/auditPersist flags are receipt truths only — not readiness.
  */
+function buildRealAuditCapabilityDescriptor() {
+  // real audit = 真实 capability sink persist 非 stub；独立于 events.jsonl
+  // 成功 write+sync：hostSideEffectOccurred=true 且 hostMutationOccurred=true
+  //   且 auditPersistOccurred=true 且 mutationOutcome=persisted
+  // wouldPersistAudit=false 仍表示非 future execute intent；live occurred 独立
+  // 不得抬升 execute / 全局 real / wiring / realAttemptAudit / Gold / M6d Exit
+  // 只称 append-only API behavior；禁止 immutable/WORM/tamper-proof 宣称
+  return {
+    capabilityKind: 'audit',
+    capabilityId: REAL_AUDIT_CAPABILITY_ID,
+    implementationClass: REAL_IMPLEMENTATION_CLASS,
+    sideEffectClass: REAL_AUDIT_SIDE_EFFECT_CLASS,
+    supportsModes: ['real-proof'],
+    // All 10 action IDs from shared SoT only — no second hardcoded action list.
+    actionIds: [...REAL_AUDIT_ACTION_IDS],
+    realImplementationReady: true,
+    canPersistAuditInProof: true,
+    wouldMutateHost: false,
+    wouldPersistAudit: false,
+    wouldNotifyExternal: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    launchctlAllowed: false,
+    filesystemWriteAllowed: false,
+    processListReadAllowed: false,
+    networkAllowed: false,
+    metadataWriteAllowed: false,
+    auditWriteAllowed: false,
+    rollbackAnchorWriteAllowed: false,
+    evidenceCode: CAPABILITY_REAL_AUDIT_IMPLEMENTATION_READY_EVIDENCE,
+    blockerCode: null,
+  };
+}
+
+/**
+ * Registry handler identity for real-audit.
+ * Returns the imported sink function identity (not a wrapper/marker/bind/callback).
+ * RealAuditProof invoke is the sole production entry and calls
+ * appendCapabilityRealAuditProofEvent directly (not via registry dispatch).
+ */
+function createRealAuditCapabilityHandler() {
+  return appendCapabilityRealAuditProofEvent;
+}
+
 function createRealStatusCapabilityHandler(reader) {
   return async function realStatusCapabilityHandler(statusInputSnapshot) {
     if (!reader || typeof reader.observe !== 'function') {
@@ -4846,9 +4969,10 @@ function createRealStatusCapabilityHandler(reader) {
 /**
  * Module-private dual-track bootstrap:
  * - dry-run: all 7 kinds (V1.31 unchanged)
- * - real: render (V1.32) + status observational metadata (V1.33)
+ * - real: render (V1.32) + status observational metadata (V1.33) + audit persist (V1.34)
  * real=真实产物非stub，与host side effect正交
  * real status = 真实宿主元数据观测非 stub；hostMutationOccurred=false
+ * real audit = 真实 capability sink persist 非 stub；独立于 events.jsonl
  * Not exported. Not callable from request/CLI/Web.
  * Production bootstrap binds default async metadata reader and NEVER calls ForTest hooks.
  */
@@ -4992,13 +5116,68 @@ function trustedBootstrapCapabilityRegistry() {
     handler: createRealStatusCapabilityHandler(productionReader),
   });
 
-  if (realCapabilityRegistry.size !== 2) {
+  // V1.34: real-audit (capability sink persist). Production NEVER calls test-only hooks.
+  // real audit = 真实 capability sink persist 非 stub；独立于 events.jsonl
+  // 不得抬升 execute / 全局 real / wiring / realAttemptAudit / Gold / M6d Exit
+  const auditDescriptor = buildRealAuditCapabilityDescriptor();
+  if (auditDescriptor.implementationClass !== REAL_IMPLEMENTATION_CLASS) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (auditDescriptor.sideEffectClass !== REAL_AUDIT_SIDE_EFFECT_CLASS) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(auditDescriptor.supportsModes) ||
+    auditDescriptor.supportsModes.length !== 1 ||
+    auditDescriptor.supportsModes[0] !== 'real-proof'
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (auditDescriptor.realImplementationReady !== true) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (auditDescriptor.canPersistAuditInProof !== true) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    auditDescriptor.wouldMutateHost !== false ||
+    auditDescriptor.wouldPersistAudit !== false ||
+    auditDescriptor.wouldExecute !== false ||
+    auditDescriptor.wouldRun !== false ||
+    auditDescriptor.wouldWrite !== false ||
+    auditDescriptor.launchctlAllowed !== false ||
+    auditDescriptor.filesystemWriteAllowed !== false ||
+    auditDescriptor.processListReadAllowed !== false ||
+    auditDescriptor.networkAllowed !== false ||
+    auditDescriptor.metadataWriteAllowed !== false ||
+    auditDescriptor.auditWriteAllowed !== false ||
+    auditDescriptor.rollbackAnchorWriteAllowed !== false
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  if (
+    !Array.isArray(auditDescriptor.actionIds) ||
+    auditDescriptor.actionIds.length !== REAL_AUDIT_ACTION_IDS.length ||
+    REAL_AUDIT_ACTION_IDS.some((id, i) => auditDescriptor.actionIds[i] !== id)
+  ) {
+    throw new Error('capability-handler-class-invalid');
+  }
+  realCapabilityRegistry.set('audit', {
+    descriptor: auditDescriptor,
+    handler: createRealAuditCapabilityHandler(),
+  });
+
+  if (realCapabilityRegistry.size !== 3) {
     throw new Error('capability-registry-incomplete');
   }
-  if (!realCapabilityRegistry.has('render') || !realCapabilityRegistry.has('status')) {
+  if (
+    !realCapabilityRegistry.has('render') ||
+    !realCapabilityRegistry.has('status') ||
+    !realCapabilityRegistry.has('audit')
+  ) {
     throw new Error('capability-registry-incomplete');
   }
-  for (const forbidden of ['write', 'reload', 'rollback', 'audit', 'notify']) {
+  for (const forbidden of ['write', 'reload', 'rollback', 'notify']) {
     if (realCapabilityRegistry.has(forbidden)) {
       throw new Error('capability-registry-incomplete');
     }
@@ -5023,8 +5202,8 @@ function isDryRunCapabilityRegistryReady() {
 
 function isRealRenderCapabilityRegistryReady() {
   // Per-kind local readiness: render entry quality only.
-  // V1.33 dual real registry size is 2 (render + status); mutation kinds forbidden.
-  if (realCapabilityRegistry.size < 1 || realCapabilityRegistry.size > 2) return false;
+  // V1.34 dual real registry size is 3 (render + status + audit); mutation kinds forbidden.
+  if (realCapabilityRegistry.size < 1 || realCapabilityRegistry.size > 3) return false;
   const entry = realCapabilityRegistry.get('render');
   if (!entry || typeof entry.handler !== 'function') return false;
   const d = entry.descriptor;
@@ -5037,12 +5216,14 @@ function isRealRenderCapabilityRegistryReady() {
   if (d.wouldMutateHost !== false || d.launchctlAllowed !== false || d.filesystemWriteAllowed !== false) {
     return false;
   }
-  // Only render + status may be registered as real in V1.33.
+  // Only render + status + audit may be registered as real in V1.34.
   for (const kind of CAPABILITY_KIND_ALLOWLIST) {
-    if (kind === 'render' || kind === 'status') continue;
+    if (kind === 'render' || kind === 'status' || kind === 'audit') continue;
     if (realCapabilityRegistry.has(kind)) return false;
   }
-  if (realCapabilityRegistry.size === 2 && !realCapabilityRegistry.has('status')) return false;
+  if (realCapabilityRegistry.size >= 2 && !realCapabilityRegistry.has('status') && !realCapabilityRegistry.has('audit')) {
+    return false;
+  }
   return true;
 }
 
@@ -5051,10 +5232,16 @@ function isRealRenderCapabilityRegistryReady() {
  * realCapabilityImplementationsReady remains a separate global independent fact (false).
  */
 function isRealStatusCapabilityRegistryReady() {
-  if (realCapabilityRegistry.size !== 2) return false;
-  if (!realCapabilityRegistry.has('render') || !realCapabilityRegistry.has('status')) return false;
+  if (realCapabilityRegistry.size !== 3) return false;
+  if (
+    !realCapabilityRegistry.has('render') ||
+    !realCapabilityRegistry.has('status') ||
+    !realCapabilityRegistry.has('audit')
+  ) {
+    return false;
+  }
   for (const kind of CAPABILITY_KIND_ALLOWLIST) {
-    if (kind === 'render' || kind === 'status') continue;
+    if (kind === 'render' || kind === 'status' || kind === 'audit') continue;
     if (realCapabilityRegistry.has(kind)) return false;
   }
   const entry = realCapabilityRegistry.get('status');
@@ -5081,6 +5268,57 @@ function isRealStatusCapabilityRegistryReady() {
     !Array.isArray(d.actionIds) ||
     d.actionIds.length !== 1 ||
     d.actionIds[0] !== 'capture-current-state'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Per-kind local readiness for real-audit (independent from render/status probes).
+ * realCapabilityImplementationsReady remains a separate global independent fact (false, 3/7).
+ * realAttemptAuditImplementationReady remains false (not execute wiring).
+ */
+function isRealAuditCapabilityRegistryReady() {
+  if (realCapabilityRegistry.size !== 3) return false;
+  if (
+    !realCapabilityRegistry.has('render') ||
+    !realCapabilityRegistry.has('status') ||
+    !realCapabilityRegistry.has('audit')
+  ) {
+    return false;
+  }
+  for (const kind of CAPABILITY_KIND_ALLOWLIST) {
+    if (kind === 'render' || kind === 'status' || kind === 'audit') continue;
+    if (realCapabilityRegistry.has(kind)) return false;
+  }
+  const entry = realCapabilityRegistry.get('audit');
+  // Strict identity honesty: handler must be the imported sink function, not a wrapper.
+  if (!entry) return false;
+  if (!(entry.handler === appendCapabilityRealAuditProofEvent)) return false;
+  const d = entry.descriptor;
+  if (!d) return false;
+  if (d.capabilityId !== REAL_AUDIT_CAPABILITY_ID) return false;
+  if (d.implementationClass !== REAL_IMPLEMENTATION_CLASS) return false;
+  if (d.sideEffectClass !== REAL_AUDIT_SIDE_EFFECT_CLASS) return false;
+  if (!Array.isArray(d.supportsModes) || d.supportsModes[0] !== 'real-proof') return false;
+  if (d.realImplementationReady !== true) return false;
+  if (d.canPersistAuditInProof !== true) return false;
+  if (
+    d.wouldMutateHost !== false ||
+    d.wouldPersistAudit !== false ||
+    d.auditWriteAllowed !== false ||
+    d.filesystemWriteAllowed !== false ||
+    d.launchctlAllowed !== false ||
+    d.processListReadAllowed !== false ||
+    d.networkAllowed !== false
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(d.actionIds) ||
+    d.actionIds.length !== REAL_AUDIT_ACTION_IDS.length ||
+    REAL_AUDIT_ACTION_IDS.some((id, i) => d.actionIds[i] !== id)
   ) {
     return false;
   }
@@ -5122,12 +5360,35 @@ function buildRealImplementationEntrySummaries() {
       evidenceCode: d.evidenceCode,
     });
   }
+  const auditEntry = realCapabilityRegistry.get('audit');
+  if (auditEntry) {
+    const d = auditEntry.descriptor;
+    out.push({
+      capabilityKind: 'audit',
+      capabilityId: d.capabilityId,
+      implementationClass: d.implementationClass,
+      sideEffectClass: d.sideEffectClass,
+      supportsModes: [...d.supportsModes],
+      realImplementationReady: d.realImplementationReady === true,
+      canPersistAuditInProof: d.canPersistAuditInProof === true,
+      wouldPersistAudit: false,
+      auditWriteAllowed: false,
+      filesystemWriteAllowed: false,
+      wouldMutateHost: false,
+      // Non-live readiness summary: no live persist here.
+      hostSideEffectOccurred: false,
+      hostMutationOccurred: false,
+      auditPersistOccurred: false,
+      evidenceCode: d.evidenceCode,
+    });
+  }
   return out;
 }
 
 function buildCapabilityInjectionReadinessObject() {
   const realRenderReady = isRealRenderCapabilityRegistryReady() === true;
   const realStatusReady = isRealStatusCapabilityRegistryReady() === true;
+  const realAuditReady = isRealAuditCapabilityRegistryReady() === true;
   const realEntries = buildRealImplementationEntrySummaries();
   return {
     command: CAPABILITY_INJECTION_READINESS_COMMAND,
@@ -5137,10 +5398,14 @@ function buildCapabilityInjectionReadinessObject() {
     dryRunCapabilityRegistryReady: isDryRunCapabilityRegistryReady() === true,
     realRenderCapabilityImplementationReady: realRenderReady,
     realStatusCapabilityImplementationReady: realStatusReady,
-    // Global independent fact: 2/7 real kinds only — NOT a "ready success" input signal.
+    realAuditCapabilityImplementationReady: realAuditReady,
+    // Global independent fact: 3/7 real kinds only — NOT a "ready success" input signal.
     executeCapabilityRegistryReady: false,
     realCapabilityImplementationsReady: false,
+    realAttemptAuditImplementationReady: false,
     realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
     executeCapabilityAuthorized: false,
     readyCount: 1,
     blockedCount: 0,
@@ -5166,6 +5431,7 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       ready.dryRunCapabilityRegistryReady = false;
       ready.realRenderCapabilityImplementationReady = false;
       ready.realStatusCapabilityImplementationReady = false;
+      ready.realAuditCapabilityImplementationReady = false;
       ready.readyCount = 0;
       ready.blockedCount = 1;
       ready.blockers = ['capability-registry-incomplete'];
@@ -5191,12 +5457,22 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
           (e) => e.capabilityKind !== 'status',
         );
       }
+      if (ready.realAuditCapabilityImplementationReady !== true) {
+        ready.realAuditCapabilityImplementationReady = false;
+        ready.realImplementationEntries = ready.realImplementationEntries.filter(
+          (e) => e.capabilityKind !== 'audit',
+        );
+      }
     }
     // Never export handler/function fields
     ready.handler = undefined;
-    // Global independent fact always false (2/7); not elevated by local ready.
+    // Global independent fact always false (3/7); not elevated by local ready.
     ready.realCapabilityImplementationsReady = false;
+    ready.realAttemptAuditImplementationReady = false;
     ready.executeCapabilityAuthorized = false;
+    ready.realRunnerWiringReady = false;
+    ready.runnerWiringContractReady = false;
+    ready.executionEligible = false;
     return capabilityPublicDeepCopy(ready);
   } catch {
     return capabilityPublicDeepCopy({
@@ -5207,9 +5483,13 @@ export function buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadines
       dryRunCapabilityRegistryReady: false,
       realRenderCapabilityImplementationReady: false,
       realStatusCapabilityImplementationReady: false,
+      realAuditCapabilityImplementationReady: false,
       executeCapabilityRegistryReady: false,
       realCapabilityImplementationsReady: false,
+      realAttemptAuditImplementationReady: false,
       realRunnerWiringReady: false,
+      runnerWiringContractReady: false,
+      executionEligible: false,
       executeCapabilityAuthorized: false,
       readyCount: 0,
       blockedCount: 1,
@@ -7543,6 +7823,770 @@ export function setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest(opsOrN
   }
 
   realStatusFsOpsOverrideForTest = normalized;
+}
+
+// ── V1.34 Real audit capability sink persist + RealAuditProof ──
+// real audit = 真实 capability sink persist 非 stub；独立于 generic events journal
+// 成功 write+sync：hostSideEffectOccurred=true 且 hostMutationOccurred=true
+//   且 auditPersistOccurred=true 且 mutationOutcome=persisted
+// append 已 invoke 后 throws：occurred true/true/false；mutationOutcome=unknown-after-write-attempt
+// wouldPersistAudit=false 仍表示非 future execute intent；live occurred 独立
+// 不得抬升 execute / 全局 real / wiring / realAttemptAudit / Gold / M6d Exit
+// 只称 append-only API behavior；禁止 immutable/WORM/tamper-proof 宣称
+// invoke MUST NOT maintain/enqueue a second queue; MUST NOT pre-read sink file.
+// sole sink entry: await appendCapabilityRealAuditProofEvent(resolvedDataRoot, event)
+
+/**
+ * Private: attemptRefFingerprint = sha256_utf8(prefix + attemptRef) → 64 lowercase hex.
+ * Uses real unit-separator byte (U+001F), never the literal backslash-x-1-f sequence.
+ * @param {string} attemptRef
+ * @returns {string}
+ */
+function computeRealAuditAttemptRefFingerprint(attemptRef) {
+  return createHash('sha256')
+    .update(`${REAL_AUDIT_ATTEMPT_REF_FP_PREFIX}${attemptRef}`, 'utf8')
+    .digest('hex');
+}
+
+/**
+ * Private: eventFingerprint = sha256_utf8(prefix + operation + US + actionId + US + attemptRef).
+ * @param {string} operation
+ * @param {string} actionId
+ * @param {string} attemptRef
+ * @returns {string}
+ */
+function computeRealAuditEventFingerprint(operation, actionId, attemptRef) {
+  return createHash('sha256')
+    .update(
+      `${REAL_AUDIT_EVENT_FP_PREFIX}${operation}\x1f${actionId}\x1f${attemptRef}`,
+      'utf8',
+    )
+    .digest('hex');
+}
+
+/**
+ * Private: build canonical 7-key event with exact key order (no raw attemptRef).
+ * @param {{
+ *   eventFingerprint: string,
+ *   operation: string,
+ *   actionId: string,
+ *   attemptRefFingerprint: string,
+ * }} fields
+ */
+function buildRealAuditCanonicalEvent(fields) {
+  return {
+    schemaVersion: 1,
+    eventKind: 'capability-real-audit-proof',
+    eventFingerprint: fields.eventFingerprint,
+    operation: fields.operation,
+    actionId: fields.actionId,
+    attemptRefFingerprint: fields.attemptRefFingerprint,
+    proofMode: 'real-proof',
+  };
+}
+
+/**
+ * Exact plain object gate for real-audit snapshots (request / nested / context).
+ * Rejects Proxy, arrays, class instances, and any non-(Object.prototype|null) prototype.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isExactPlainRealAuditObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (utilTypes.isProxy(value)) return false;
+  let proto;
+  try {
+    proto = Object.getPrototypeOf(value);
+  } catch {
+    return false;
+  }
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Own enumerable data descriptor only (no getter/setter/function).
+ * Does NOT require writable/configurable — frozen plain data objects remain legal.
+ * @param {object} record
+ * @param {string} key
+ * @returns {{ ok: true, value: unknown } | { ok: false }}
+ */
+function readExactOwnEnumerableDataField(record, key) {
+  if (!Object.hasOwn(record, key)) return { ok: false };
+  let desc;
+  try {
+    desc = Object.getOwnPropertyDescriptor(record, key);
+  } catch {
+    return { ok: false };
+  }
+  if (
+    !desc ||
+    desc.enumerable !== true ||
+    desc.get !== undefined ||
+    desc.set !== undefined ||
+    !Object.prototype.hasOwnProperty.call(desc, 'value') ||
+    typeof desc.value === 'function'
+  ) {
+    return { ok: false };
+  }
+  return { ok: true, value: desc.value };
+}
+
+/**
+ * Nested exact snapshot for auditInput: only { schemaVersion } own enumerable data property.
+ * Structural hostility → null (caller-injection). Non-number schemaVersion snapshotted as null
+ * sentinel for semantics (capability-real-audit-input-invalid); never carries attacker objects.
+ * @param {unknown} rawAuditInput
+ * @returns {{ schemaVersion: number | null } | null}
+ */
+function snapshotAuditInput(rawAuditInput) {
+  if (!isExactPlainRealAuditObject(rawAuditInput)) {
+    return null;
+  }
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(rawAuditInput);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+    if (CAPABILITY_AUDIT_IO_INJECTION_KEYS.includes(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_AUDIT_INPUT_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+  const field = readExactOwnEnumerableDataField(/** @type {object} */ (rawAuditInput), 'schemaVersion');
+  if (!field.ok) return null;
+  // Structural OK: preserve number; non-number → internal invalid sentinel (no attacker object).
+  if (typeof field.value !== 'number') {
+    return { schemaVersion: null };
+  }
+  return { schemaVersion: field.value };
+}
+
+/**
+ * Top-level exact snapshot for real-audit proof request.
+ * Nested auditInput snapshotted independently. Never re-reads caller after return.
+ * @param {unknown} request
+ * @returns {object | null}
+ */
+function snapshotRealAuditProofRequest(request) {
+  if (!isExactPlainRealAuditObject(request)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(request);
+  } catch {
+    return null;
+  }
+  for (const key of ownKeys) {
+    if (typeof key === 'symbol') return null;
+    if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+    if (CAPABILITY_AUDIT_IO_INJECTION_KEYS.includes(key)) return null;
+  }
+  const expected = new Set(CAPABILITY_REAL_AUDIT_PROOF_REQUEST_KEYS);
+  if (ownKeys.length !== expected.size) return null;
+  for (const key of ownKeys) {
+    if (!expected.has(key)) return null;
+  }
+
+  const top = Object.create(null);
+  for (const key of CAPABILITY_REAL_AUDIT_PROOF_REQUEST_KEYS) {
+    const field = readExactOwnEnumerableDataField(/** @type {object} */ (request), key);
+    if (!field.ok) return null;
+    top[key] = field.value;
+  }
+
+  // Nested independent exact snapshot — never re-read fields from the caller object.
+  const auditInput = snapshotAuditInput(top.auditInput);
+  if (!auditInput) return null;
+
+  return {
+    capabilityKind: top.capabilityKind,
+    actionId: top.actionId,
+    operation: top.operation,
+    mode: top.mode,
+    idempotencyKey: top.idempotencyKey,
+    attemptRef: top.attemptRef,
+    anchorRef: top.anchorRef,
+    auditInput,
+  };
+}
+
+/**
+ * Exact context snapshot: plain own enumerable data { dataDir: string } only.
+ * @param {unknown} context
+ * @returns {{ dataDir: string } | null}
+ */
+function snapshotRealAuditProofContext(context) {
+  if (!isExactPlainRealAuditObject(context)) return null;
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(context);
+  } catch {
+    return null;
+  }
+  if (ownKeys.length !== 1) return null;
+  const key = ownKeys[0];
+  if (typeof key === 'symbol') return null;
+  if (key !== 'dataDir') return null;
+  if (CAPABILITY_DANGEROUS_KEYS.has(key)) return null;
+  const field = readExactOwnEnumerableDataField(/** @type {object} */ (context), 'dataDir');
+  if (!field.ok) return null;
+  if (typeof field.value !== 'string') return null;
+  if (field.value.length < 1) return null;
+  return { dataDir: field.value };
+}
+
+/**
+ * Validate snapshotted real-audit request fields (after exact shape snapshot).
+ * Mode priority is enforced by authorize/invoke callers before this helper.
+ * @param {object} snapshot
+ * @returns {{ ok: true } | { ok: false, blocker: string }}
+ */
+function validateRealAuditProofSemantics(snapshot) {
+  if (snapshot.idempotencyKey !== null) {
+    return { ok: false, blocker: 'capability-idempotency-key-invalid' };
+  }
+  if (snapshot.anchorRef !== null) {
+    return { ok: false, blocker: 'capability-real-audit-input-invalid' };
+  }
+  if (typeof snapshot.attemptRef !== 'string') {
+    return { ok: false, blocker: 'capability-real-audit-input-invalid' };
+  }
+  // Exact ASCII 16–128 via regex; reject control/whitespace/non-ASCII via pattern.
+  if (!REAL_AUDIT_ATTEMPT_REF_PATTERN.test(snapshot.attemptRef)) {
+    return { ok: false, blocker: 'capability-real-audit-input-invalid' };
+  }
+  if (
+    !snapshot.auditInput ||
+    snapshot.auditInput.schemaVersion !== 1
+  ) {
+    return { ok: false, blocker: 'capability-real-audit-input-invalid' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Mode allowlist shared by real-audit authorize + receipt builders.
+ * Only `real-proof|execute|dry-run` pass through; empty string / secret / object / etc. → `unknown`.
+ * Field omitted (`undefined`) is the sole internal happy default → `real-proof`.
+ * Never use `mode || 'real-proof'` — that would swallow `''` into real-proof.
+ * @param {unknown} mode
+ * @returns {'real-proof' | 'execute' | 'dry-run' | 'unknown'}
+ */
+function sanitizeRealAuditMode(mode) {
+  const modeRaw = mode === undefined ? 'real-proof' : mode;
+  return modeRaw === 'real-proof' || modeRaw === 'execute' || modeRaw === 'dry-run'
+    ? modeRaw
+    : 'unknown';
+}
+
+function buildRealAuditProofAuthorization(fields) {
+  return {
+    command: CAPABILITY_MODE_AUTH_COMMAND,
+    state: fields.state,
+    mode: sanitizeRealAuditMode(fields.mode),
+    realAuditProofAuthorized: fields.realAuditProofAuthorized === true,
+    dryRunCapabilityAuthorized: false,
+    executeCapabilityAuthorized: false,
+    hostMutationOccurred: false,
+    hostSideEffectOccurred: false,
+    auditPersistOccurred: false,
+    realAuditCapabilityImplementationReady: isRealAuditCapabilityRegistryReady() === true,
+    realRenderCapabilityImplementationReady: isRealRenderCapabilityRegistryReady() === true,
+    realStatusCapabilityImplementationReady: isRealStatusCapabilityRegistryReady() === true,
+    realCapabilityImplementationsReady: false,
+    realAttemptAuditImplementationReady: false,
+    realRunnerWiringReady: false,
+    runnerWiringContractReady: false,
+    executionEligible: false,
+    wouldExecute: false,
+    wouldRun: false,
+    wouldWrite: false,
+    wouldPersistAudit: false,
+    wouldMutateHost: false,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.primaryBlocker ? [fields.primaryBlocker] : [],
+    nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
+    safety: executionPreviewSafety(),
+  };
+}
+
+/**
+ * Centralized receipt sanitization: never echo attacker kind/action/operation/mode.
+ * - capabilityKind: only allowlisted 'audit', else 'unknown'
+ *   (undefined defaults to 'audit' for internal success/denied branches that omit the field)
+ * - operation: only shared SoT operation, else 'unknown'
+ * - actionId: only exact pairing with verified operation, else 'unknown'
+ * - mode: only real-proof|execute|dry-run, else 'unknown'
+ *   (undefined defaults to 'real-proof')
+ * @param {object} fields
+ */
+function sanitizeRealAuditReceiptPublicFields(fields) {
+  const mode = sanitizeRealAuditMode(fields.mode);
+  const kindRaw = fields.capabilityKind === undefined ? 'audit' : fields.capabilityKind;
+  const capabilityKind = kindRaw === 'audit' ? 'audit' : 'unknown';
+  const operation = isSupervisorLifecycleOperation(fields.operation) ? fields.operation : 'unknown';
+  const actionId =
+    operation !== 'unknown' &&
+    typeof fields.actionId === 'string' &&
+    isSupervisorLifecycleActionForOperation(operation, fields.actionId)
+      ? fields.actionId
+      : 'unknown';
+  return { mode, capabilityKind, operation, actionId };
+}
+
+function buildRealAuditReceiptBase(fields) {
+  const safe = sanitizeRealAuditReceiptPublicFields(fields);
+  const receipt = buildCapabilityReceiptBase({
+    receiptKind: fields.receiptKind || 'capability-real-implementation-receipt',
+    state: fields.state,
+    mode: safe.mode,
+    capabilityKind: safe.capabilityKind,
+    capabilityId: fields.capabilityId === undefined ? REAL_AUDIT_CAPABILITY_ID : fields.capabilityId,
+    actionId: safe.actionId,
+    operation: safe.operation,
+    outcomeCode: fields.outcomeCode,
+    errorClass: fields.errorClass,
+    plannedAction: fields.plannedAction === undefined ? null : fields.plannedAction,
+    evidenceCode: fields.evidenceCode === undefined ? null : fields.evidenceCode,
+    primaryBlocker: fields.primaryBlocker,
+    blockers: fields.blockers || (fields.primaryBlocker ? [fields.primaryBlocker] : []),
+  });
+  receipt.implementationClass = REAL_IMPLEMENTATION_CLASS;
+  receipt.sideEffectClass = REAL_AUDIT_SIDE_EFFECT_CLASS;
+  receipt.hostSideEffectOccurred = fields.hostSideEffectOccurred === true;
+  receipt.hostMutationOccurred = fields.hostMutationOccurred === true;
+  receipt.auditPersistOccurred = fields.auditPersistOccurred === true;
+  receipt.mutationOutcome = REAL_AUDIT_MUTATION_OUTCOMES.includes(fields.mutationOutcome)
+    ? fields.mutationOutcome
+    : 'not-attempted';
+  receipt.auditEventFingerprint =
+    typeof fields.auditEventFingerprint === 'string' &&
+    /^[0-9a-f]{64}$/.test(fields.auditEventFingerprint)
+      ? fields.auditEventFingerprint
+      : null;
+  receipt.wouldPersistAudit = false;
+  receipt.wouldMutateHost = false;
+  receipt.realAuditCapabilityImplementationReady = isRealAuditCapabilityRegistryReady() === true;
+  receipt.realRenderCapabilityImplementationReady = isRealRenderCapabilityRegistryReady() === true;
+  receipt.realStatusCapabilityImplementationReady = isRealStatusCapabilityRegistryReady() === true;
+  receipt.realCapabilityImplementationsReady = false;
+  receipt.realAttemptAuditImplementationReady = false;
+  receipt.executeCapabilityAuthorized = false;
+  receipt.realRunnerWiringReady = false;
+  receipt.runnerWiringContractReady = false;
+  receipt.executionEligible = false;
+  receipt.idempotencyKeyFingerprint = null;
+  return receipt;
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Authorize real-proof mode for **audit only**. Never authorizes execute.
+ * Audit-specific: do not reuse this API for other real kinds.
+ * Pure validation only — does not accept context; does not touch sink/fs.
+ */
+export function authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(request) {
+  try {
+    const snapshot = snapshotRealAuditProofRequest(request);
+    if (!snapshot) {
+      // Distinguish auditInput value invalid (exact shape but wrong schemaVersion handled in snapshot as null → injection)
+      // Extra keys / getters / symbols / dataDir → caller-injection-rejected
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        mode: 'unknown',
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-caller-injection-rejected',
+      }));
+    }
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        // Safe allowlisted token; sanitizer also accepts execute.
+        mode: 'execute',
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        // Never echo attacker snapshot.mode — sanitizer maps non-allowlist to unknown;
+        // dry-run remains dry-run; empty/secret/object/array/number → unknown.
+        mode: snapshot.mode,
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-mode-invalid',
+      }));
+    }
+    // Audit-specific: never expand kind range.
+    if (snapshot.capabilityKind !== 'audit') {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-kind-unknown',
+      }));
+    }
+    if (!isSupervisorLifecycleOperation(snapshot.operation)) {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-operation-invalid',
+      }));
+    }
+    if (!isSupervisorLifecycleActionForOperation(snapshot.operation, snapshot.actionId)) {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realAuditProofAuthorized: false,
+        primaryBlocker: 'capability-action-unmapped',
+      }));
+    }
+    const fieldCheck = validateRealAuditProofSemantics(snapshot);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+        state: 'denied',
+        mode: 'real-proof',
+        realAuditProofAuthorized: false,
+        primaryBlocker: fieldCheck.blocker,
+      }));
+    }
+
+    const entry = realCapabilityRegistry.get('audit');
+    const authorized =
+      isRealAuditCapabilityRegistryReady() === true &&
+      entry &&
+      entry.descriptor.implementationClass === REAL_IMPLEMENTATION_CLASS &&
+      entry.descriptor.sideEffectClass === REAL_AUDIT_SIDE_EFFECT_CLASS &&
+      entry.descriptor.supportsModes.includes('real-proof') &&
+      entry.descriptor.realImplementationReady === true &&
+      entry.descriptor.canPersistAuditInProof === true &&
+      entry.descriptor.wouldPersistAudit === false &&
+      entry.descriptor.auditWriteAllowed === false &&
+      entry.descriptor.filesystemWriteAllowed === false &&
+      entry.descriptor.wouldMutateHost === false;
+
+    return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+      state: authorized ? 'authorized' : 'denied',
+      mode: 'real-proof',
+      realAuditProofAuthorized: authorized === true,
+      primaryBlocker: authorized ? null : 'capability-registry-incomplete',
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildRealAuditProofAuthorization({
+      state: 'denied',
+      mode: 'unknown',
+      realAuditProofAuthorized: false,
+      primaryBlocker: 'capability-injection-input-invalid',
+    }));
+  }
+}
+
+/**
+ * @internal PROOF ONLY — do not expose via HTTP/CLI/Web endpoint
+ * Invoke real **audit** persist implementation proof (async).
+ * Writes only via appendCapabilityRealAuditProofEvent (independent capability sink module).
+ * Never calls the generic HTTP audit append helper. Never touches the generic events journal.
+ * Never accepts mode execute. Never returns dataDir/path/raw attemptRef/system error.
+ * Audit-specific proof API — do not expand kind range.
+ * Fingerprint Option A: null until request+context+assertSafeDataRoot all succeed.
+ * @param {object} request
+ * @param {object} context exact own keys: { dataDir } only
+ * @returns {Promise<object>} single settled receipt
+ */
+export async function invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(request, context) {
+  let ownsInFlight = false;
+  let eventFingerprint = null;
+  try {
+    // 1. pure request snapshot+validate (no IO)
+    const snapshot = snapshotRealAuditProofRequest(request);
+    if (!snapshot) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'denied',
+        mode: 'real-proof',
+        capabilityId: null,
+        actionId: 'unknown',
+        operation: 'unknown',
+        outcomeCode: 'capability-caller-injection-rejected',
+        errorClass: 'authorization',
+        primaryBlocker: 'capability-caller-injection-rejected',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+
+    if (snapshot.mode === 'execute') {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        receiptKind: 'capability-execute-denied-receipt',
+        state: 'denied',
+        mode: 'execute',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        capabilityId: null,
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+    if (snapshot.mode !== 'real-proof') {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: typeof snapshot.mode === 'string' ? snapshot.mode : 'unknown',
+        capabilityKind: typeof snapshot.capabilityKind === 'string' ? snapshot.capabilityKind : 'unknown',
+        capabilityId: null,
+        actionId: typeof snapshot.actionId === 'string' ? snapshot.actionId : 'unknown',
+        operation: typeof snapshot.operation === 'string' ? snapshot.operation : 'unknown',
+        outcomeCode: 'capability-mode-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-mode-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+    if (snapshot.capabilityKind !== 'audit') {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        capabilityKind: snapshot.capabilityKind,
+        capabilityId: null,
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-kind-unknown',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-kind-unknown',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+    if (!isSupervisorLifecycleOperation(snapshot.operation)) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-operation-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-operation-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+    if (!isSupervisorLifecycleActionForOperation(snapshot.operation, snapshot.actionId)) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-action-unmapped',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-action-unmapped',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+    const fieldCheck = validateRealAuditProofSemantics(snapshot);
+    if (!fieldCheck.ok) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: fieldCheck.blocker,
+        errorClass: 'validation',
+        primaryBlocker: fieldCheck.blocker,
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+
+    // 2. pure context snapshot+validate (no IO)
+    const contextSnapshot = snapshotRealAuditProofContext(context);
+    if (!contextSnapshot) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-audit-context-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-real-audit-context-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+
+    // 3. assertSafeDataRoot before fingerprint / inFlight / sink
+    let resolvedDataRoot;
+    try {
+      resolvedDataRoot = await assertSafeDataRoot(contextSnapshot.dataDir);
+    } catch {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId: snapshot.actionId,
+        operation: snapshot.operation,
+        outcomeCode: 'capability-real-audit-context-invalid',
+        errorClass: 'validation',
+        primaryBlocker: 'capability-real-audit-context-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: null,
+      }));
+    }
+
+    // 4. compute fingerprints in memory (raw attemptRef discarded after this)
+    const attemptRefFingerprint = computeRealAuditAttemptRefFingerprint(snapshot.attemptRef);
+    eventFingerprint = computeRealAuditEventFingerprint(
+      snapshot.operation,
+      snapshot.actionId,
+      snapshot.attemptRef,
+    );
+    // Drop raw attemptRef from further use (snapshot retained for op/action only).
+    const operation = snapshot.operation;
+    const actionId = snapshot.actionId;
+    const canonicalEvent = buildRealAuditCanonicalEvent({
+      eventFingerprint,
+      operation,
+      actionId,
+      attemptRefFingerprint,
+    });
+
+    // 5. same sync section: has → deny; else add. Before any await/sink.
+    if (realAuditInFlightFingerprints.has(eventFingerprint)) {
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'denied',
+        mode: 'real-proof',
+        actionId,
+        operation,
+        outcomeCode: 'capability-real-audit-in-flight-denied',
+        errorClass: 'authorization',
+        primaryBlocker: 'capability-real-audit-in-flight-denied',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: eventFingerprint,
+      }));
+    }
+    realAuditInFlightFingerprints.add(eventFingerprint);
+    ownsInFlight = true;
+
+    // 6. sole sink entry — no pre-read, no second queue
+    try {
+      await appendCapabilityRealAuditProofEvent(resolvedDataRoot, canonicalEvent);
+    } catch (error) {
+      const isSinkErr = error instanceof CapabilityRealAuditSinkError;
+      const code = isSinkErr && typeof error.code === 'string' ? error.code : '';
+      const writeAttempted = isSinkErr && error.writeAttempted === true;
+      if (writeAttempted || code === CAPABILITY_REAL_AUDIT_PERSIST_FAILED) {
+        return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+          state: 'error',
+          mode: 'real-proof',
+          actionId,
+          operation,
+          outcomeCode: 'capability-real-audit-persist-failed',
+          errorClass: 'internal',
+          primaryBlocker: 'capability-real-audit-persist-failed',
+          hostSideEffectOccurred: true,
+          hostMutationOccurred: true,
+          auditPersistOccurred: false,
+          mutationOutcome: 'unknown-after-write-attempt',
+          auditEventFingerprint: eventFingerprint,
+          evidenceCode: CAPABILITY_REAL_AUDIT_IMPLEMENTATION_READY_EVIDENCE,
+        }));
+      }
+      // pre-append fail (malformed existing / incoming / over bound / root recheck)
+      return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+        state: 'error',
+        mode: 'real-proof',
+        actionId,
+        operation,
+        outcomeCode: 'capability-real-audit-sink-invalid',
+        errorClass: 'internal',
+        primaryBlocker: 'capability-real-audit-sink-invalid',
+        hostSideEffectOccurred: false,
+        hostMutationOccurred: false,
+        auditPersistOccurred: false,
+        mutationOutcome: 'not-attempted',
+        auditEventFingerprint: eventFingerprint,
+        evidenceCode: CAPABILITY_REAL_AUDIT_IMPLEMENTATION_READY_EVIDENCE,
+      }));
+    }
+
+    // 7. success
+    return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+      state: 'completed',
+      mode: 'real-proof',
+      actionId,
+      operation,
+      outcomeCode: 'capability-real-audit-persisted',
+      errorClass: null,
+      plannedAction: 'audit-persist',
+      primaryBlocker: null,
+      blockers: [],
+      hostSideEffectOccurred: true,
+      hostMutationOccurred: true,
+      auditPersistOccurred: true,
+      mutationOutcome: 'persisted',
+      auditEventFingerprint: eventFingerprint,
+      evidenceCode: CAPABILITY_REAL_AUDIT_IMPLEMENTATION_READY_EVIDENCE,
+    }));
+  } catch {
+    return capabilityPublicDeepCopy(buildRealAuditReceiptBase({
+      state: 'error',
+      mode: 'real-proof',
+      outcomeCode: 'capability-real-audit-input-invalid',
+      errorClass: 'internal',
+      primaryBlocker: 'capability-real-audit-input-invalid',
+      hostSideEffectOccurred: false,
+      hostMutationOccurred: false,
+      auditPersistOccurred: false,
+      mutationOutcome: 'not-attempted',
+      auditEventFingerprint: eventFingerprint && /^[0-9a-f]{64}$/.test(eventFingerprint)
+        ? eventFingerprint
+        : null,
+    }));
+  } finally {
+    // Only the owner that added the Set entry may delete it.
+    // Denied concurrent callers must not delete the in-flight owner entry.
+    if (ownsInFlight && typeof eventFingerprint === 'string') {
+      realAuditInFlightFingerprints.delete(eventFingerprint);
+    }
+  }
 }
 
 /**

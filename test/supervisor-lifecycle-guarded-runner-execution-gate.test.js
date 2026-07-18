@@ -26,6 +26,8 @@ import {
   invokeSupervisorLifecycleGuardedRunnerCapabilityRealRenderProof,
   authorizeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof,
   invokeSupervisorLifecycleGuardedRunnerCapabilityRealStatusProof,
+  authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof,
+  invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof,
   setSupervisorLifecycleGuardedRunnerRealStatusHostReaderForTest,
   setSupervisorLifecycleGuardedRunnerRealStatusFsOpsForTest,
   recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest,
@@ -42,6 +44,29 @@ import {
   validateSupervisorLifecycleExecutorManifest,
 } from '../src/supervisor-lifecycle.js';
 import { buildSupervisorLifecycleApprovalRecord } from '../src/approval-store.js';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS,
+  listSupervisorLifecycleActionIds,
+} from '../src/supervisor-lifecycle-actions.js';
+import {
+  CAPABILITY_REAL_AUDIT_RELATIVE_PATH,
+  CAPABILITY_REAL_AUDIT_MAX_EVENT_LINES,
+  setCapabilityRealAuditSinkHooksForTest,
+} from '../src/capability-audit-sink.js';
 
 const NOW = new Date('2026-07-09T08:00:00.000Z');
 const BASE_CONFIG = Object.freeze({
@@ -5311,8 +5336,8 @@ describe('V1.32 real render capability readiness + dual registry', () => {
     assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
     assert.strictEqual(r.handler, undefined);
     assert.ok(Array.isArray(r.realImplementationEntries));
-    // V1.33: dual real registry size 2 (render + status)
-    assert.strictEqual(r.realImplementationEntries.length, 2);
+    // V1.34: real registry size 3 (render + status + audit); render entry still present.
+    assert.strictEqual(r.realImplementationEntries.length, 3);
     const entry = r.realImplementationEntries.find((e) => e.capabilityKind === 'render');
     assert.ok(entry);
     assert.strictEqual(entry.capabilityKind, 'render');
@@ -5324,12 +5349,12 @@ describe('V1.32 real render capability readiness + dual registry', () => {
     assert.strictEqual(entry.handler, undefined);
   });
 
-  it('T2: dual-track dry-run 7 + real render kept; write/reload have no real entry', () => {
+  it('T2: dual-track dry-run 7 + real render kept; write/reload/rollback/notify have no real entry', () => {
     const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
     assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
-    assert.strictEqual(r.realImplementationEntries.length, 2);
+    assert.strictEqual(r.realImplementationEntries.length, 3);
     assert.ok(r.realImplementationEntries.some((e) => e.capabilityKind === 'render'));
-    for (const kind of ['write', 'reload', 'rollback', 'audit', 'notify']) {
+    for (const kind of ['write', 'reload', 'rollback', 'notify']) {
       assert.ok(!r.realImplementationEntries.some((e) => e.capabilityKind === kind));
     }
   });
@@ -5936,9 +5961,10 @@ describe('V1.33 real status readiness + dual registry', () => {
     assert.strictEqual(r.realRunnerWiringReady, false);
     assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
     assert.strictEqual(r.handler, undefined);
-    assert.strictEqual(r.realImplementationEntries.length, 2);
+    // V1.34: 3 real entries; status still present with non-live observation flags.
+    assert.strictEqual(r.realImplementationEntries.length, 3);
     const kinds = r.realImplementationEntries.map((e) => e.capabilityKind).sort();
-    assert.deepStrictEqual(kinds, ['render', 'status']);
+    assert.deepStrictEqual(kinds, ['audit', 'render', 'status']);
     const statusEntry = r.realImplementationEntries.find((e) => e.capabilityKind === 'status');
     assert.strictEqual(statusEntry.capabilityId, 'real-status');
     assert.strictEqual(statusEntry.implementationClass, 'real-implementation');
@@ -5950,11 +5976,11 @@ describe('V1.33 real status readiness + dual registry', () => {
     assert.strictEqual(statusEntry.hostMutationOccurred, false);
   });
 
-  it('T2/T34: dual registry 7 dry-run + 2 real; no write/reload/rollback/audit/notify real', () => {
+  it('T2/T34: dual registry 7 dry-run + 3 real; no write/reload/rollback/notify real', () => {
     const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
     assert.deepStrictEqual(r.capabilityKinds, [...CAPABILITY_KINDS]);
-    assert.strictEqual(r.realImplementationEntries.length, 2);
-    for (const kind of ['write', 'reload', 'rollback', 'audit', 'notify']) {
+    assert.strictEqual(r.realImplementationEntries.length, 3);
+    for (const kind of ['write', 'reload', 'rollback', 'notify']) {
       assert.ok(!r.realImplementationEntries.some((e) => e.capabilityKind === kind));
     }
   });
@@ -6621,9 +6647,12 @@ describe('V1.33 real-status-proof invoke + failure matrix', () => {
     assert.ok(src.includes('O_NOFOLLOW'));
     assert.ok(src.includes("from 'node:fs/promises'") || src.includes('node:fs/promises'));
     // No writeFile/appendFile calls in observational status path (category: fs write).
+    // End before V1.34 RealAuditProof (which documents independence from HTTP audit helpers).
+    const statusStart = src.indexOf('// ── V1.33 Real status observational metadata reader');
+    const statusEnd = src.indexOf('// ── V1.34 Real audit capability sink persist');
     const statusSlice = src.slice(
-      src.indexOf('// ── V1.33 Real status observational metadata reader'),
-      src.indexOf('export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest'),
+      statusStart,
+      statusEnd > statusStart ? statusEnd : src.indexOf('export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest'),
     );
     assert.ok(statusSlice.length > 100);
     assert.ok(!statusSlice.includes('writeFile'));
@@ -7401,5 +7430,1063 @@ describe('V1.33 P1 fs-ops seam strict validation (no partial/Proxy/accessor fall
     assert.strictEqual(openHits, 1);
     assert.strictEqual(statHits, 1);
     assert.strictEqual(closeHits, 1);
+  });
+});
+
+// ── V1.34 Real audit capability proof (Tasks 3–6) ──
+
+const REAL_AUDIT_FIXED_ATTEMPT_REF = 'abcdef0123456789';
+const REAL_AUDIT_SINK_REL = CAPABILITY_REAL_AUDIT_RELATIVE_PATH;
+const REAL_AUDIT_CANONICAL_KEYS = Object.freeze([
+  'schemaVersion',
+  'eventKind',
+  'eventFingerprint',
+  'operation',
+  'actionId',
+  'attemptRefFingerprint',
+  'proofMode',
+]);
+
+function expectedRealAuditFingerprints(attemptRef, operation, actionId) {
+  const attemptPreimage = `linke:v1.34:real-audit-proof:attempt-ref:v1\x1f${attemptRef}`;
+  const eventPreimage = `linke:v1.34:real-audit-proof:event:v1\x1f1\x1f${operation}\x1f${actionId}\x1f${attemptRef}`;
+  return {
+    attemptRefFingerprint: createHash('sha256').update(attemptPreimage, 'utf8').digest('hex'),
+    eventFingerprint: createHash('sha256').update(eventPreimage, 'utf8').digest('hex'),
+  };
+}
+
+function validRealAuditAttemptRef(seed = 'a') {
+  return String(seed).padEnd(16, 'x').slice(0, 16);
+}
+
+function buildRealAuditProofRequest(overrides = {}) {
+  const auditInput = Object.hasOwn(overrides, 'auditInput')
+    ? overrides.auditInput
+    : { schemaVersion: 1 };
+  const { auditInput: _ignored, ...top } = overrides;
+  return {
+    capabilityKind: 'audit',
+    actionId: 'render-launch-agent-plist',
+    operation: 'install',
+    mode: 'real-proof',
+    idempotencyKey: null,
+    attemptRef: validRealAuditAttemptRef(),
+    anchorRef: null,
+    ...top,
+    auditInput,
+  };
+}
+
+function buildRealAuditContext(dir) {
+  return { dataDir: dir };
+}
+
+async function withTempAuditRoot(fn) {
+  const root = await mkdtemp(join(tmpdir(), 'linke-real-audit-'));
+  try {
+    return await fn(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function pathExists(p) {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertAuditGlobalsFalse(obj) {
+  assert.strictEqual(obj.realCapabilityImplementationsReady, false);
+  assert.strictEqual(obj.realAttemptAuditImplementationReady, false);
+  assert.strictEqual(obj.executeCapabilityAuthorized, false);
+  assert.strictEqual(obj.realRunnerWiringReady, false);
+  assert.strictEqual(obj.runnerWiringContractReady, false);
+  assert.strictEqual(obj.executionEligible, false);
+}
+
+function assertAuditPreAppendTruth(rc) {
+  assert.strictEqual(rc.hostSideEffectOccurred, false);
+  assert.strictEqual(rc.hostMutationOccurred, false);
+  assert.strictEqual(rc.auditPersistOccurred, false);
+  assert.strictEqual(rc.mutationOutcome, 'not-attempted');
+  assert.strictEqual(rc.wouldPersistAudit, false);
+  assert.strictEqual(rc.wouldMutateHost, false);
+  assertAuditGlobalsFalse(rc);
+}
+
+function assertNoAuditSensitiveLeak(rc, root, attemptRef, secrets = []) {
+  const json = JSON.stringify(rc);
+  const ownValues = [];
+  for (const key of Reflect.ownKeys(rc)) {
+    if (typeof key === 'symbol') continue;
+    ownValues.push(rc[key]);
+  }
+  const scanned = `${json}\n${ownValues.map((v) => String(v)).join('\n')}`;
+  assert.strictEqual(Object.hasOwn(rc, 'dataDir'), false);
+  assert.strictEqual(rc.dataDir, undefined);
+  assert.ok(!scanned.includes(root), 'must not leak dataDir');
+  if (attemptRef) {
+    assert.ok(!scanned.includes(attemptRef), 'must not leak raw attemptRef');
+  }
+  assert.ok(!/"ENOENT"/.test(scanned), 'must not leak ENOENT');
+  assert.ok(!/"EACCES"/.test(scanned), 'must not leak EACCES');
+  assert.ok(!scanned.includes('capability-proof-attempts.jsonl'), 'must not leak sink relative path');
+  assert.ok(!/stack/i.test(JSON.stringify(rc.primaryBlocker || '')), 'blocker not stack');
+  assert.ok(!scanned.includes('Error:'), 'must not leak Error messages');
+  for (const secret of secrets) {
+    if (secret == null) continue;
+    const token = typeof secret === 'string' ? secret : JSON.stringify(secret);
+    if (!token || token === 'unknown' || token === 'audit' || token === 'real-proof') continue;
+    assert.ok(!scanned.includes(token), `must not echo secret ${token}`);
+  }
+}
+
+/** Build exact own enumerable data request with optional top-level property overrides via descriptors. */
+function buildHostileRealAuditTop(mutator) {
+  const base = buildRealAuditProofRequest();
+  const req = {};
+  for (const [k, v] of Object.entries(base)) {
+    Object.defineProperty(req, k, {
+      value: v,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  mutator(req, base);
+  return req;
+}
+
+function buildCanonicalAuditLine(fields) {
+  return `${JSON.stringify({
+    schemaVersion: fields.schemaVersion,
+    eventKind: fields.eventKind,
+    eventFingerprint: fields.eventFingerprint,
+    operation: fields.operation,
+    actionId: fields.actionId,
+    attemptRefFingerprint: fields.attemptRefFingerprint,
+    proofMode: fields.proofMode,
+  })}\n`;
+}
+
+describe('V1.34 real audit readiness + dual registry', () => {
+  it('Task4: local realAudit true + 3 real entries + globals false', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(r.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(r.realAuditCapabilityImplementationReady, true);
+    assert.strictEqual(r.realCapabilityImplementationsReady, false);
+    assert.strictEqual(r.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(r.executeCapabilityAuthorized, false);
+    assert.strictEqual(r.realRunnerWiringReady, false);
+    assert.strictEqual(r.runnerWiringContractReady, false);
+    assert.strictEqual(r.executionEligible, false);
+    assert.strictEqual(r.realImplementationEntries.length, 3);
+    const kinds = r.realImplementationEntries.map((e) => e.capabilityKind).sort();
+    assert.deepStrictEqual(kinds, ['audit', 'render', 'status']);
+    const audit = r.realImplementationEntries.find((e) => e.capabilityKind === 'audit');
+    assert.strictEqual(audit.capabilityId, 'real-audit');
+    assert.strictEqual(audit.implementationClass, 'real-implementation');
+    assert.strictEqual(audit.sideEffectClass, 'audit-persist');
+    assert.deepStrictEqual(audit.supportsModes, ['real-proof']);
+    assert.strictEqual(audit.canPersistAuditInProof, true);
+    assert.strictEqual(audit.wouldPersistAudit, false);
+    assert.strictEqual(audit.auditWriteAllowed, false);
+    assert.strictEqual(audit.filesystemWriteAllowed, false);
+    assert.strictEqual(audit.wouldMutateHost, false);
+    assert.strictEqual(r.handler, undefined);
+    assert.deepStrictEqual(r.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+
+  it('Task4: audit actionIds derived from shared SoT (all 10); dry-run still 7', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
+    assert.strictEqual(r.capabilityKinds.length, 7);
+    const expected = [];
+    for (const op of Object.keys(SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS)) {
+      expected.push(...listSupervisorLifecycleActionIds(op));
+    }
+    assert.strictEqual(expected.length, 10);
+    // Descriptor actionIds live only on registry; readiness summary need not list them,
+    // but source must derive from SoT (architecture test below).
+    assert.ok(r.realImplementationEntries.some((e) => e.capabilityKind === 'audit'));
+  });
+
+  it('Task4: options/malicious injection cannot elevate readiness flags', () => {
+    const r = buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness({
+      realAuditCapabilityImplementationReady: false,
+      realCapabilityImplementationsReady: true,
+      executeCapabilityAuthorized: true,
+      handlers: { audit: () => {} },
+      realAttemptAuditImplementationReady: true,
+    });
+    assert.strictEqual(r.realAuditCapabilityImplementationReady, true);
+    assert.strictEqual(r.realCapabilityImplementationsReady, false);
+    assert.strictEqual(r.executeCapabilityAuthorized, false);
+    assert.strictEqual(r.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(r.handler, undefined);
+  });
+});
+
+describe('V1.34 RealAuditProof authorize matrix', () => {
+  it('authorize happy path + execute/dry-run false', () => {
+    const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+      buildRealAuditProofRequest(),
+    );
+    assert.strictEqual(auth.state, 'authorized');
+    assert.strictEqual(auth.realAuditProofAuthorized, true);
+    assert.strictEqual(auth.executeCapabilityAuthorized, false);
+    assert.strictEqual(auth.dryRunCapabilityAuthorized, false);
+    assert.strictEqual(auth.realAuditCapabilityImplementationReady, true);
+    assertAuditGlobalsFalse(auth);
+  });
+
+  it('authorize all 4 operations × all 10 exact actions; cross-op reject', () => {
+    for (const [operation, actionIds] of Object.entries(SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS)) {
+      for (const actionId of actionIds) {
+        const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+          buildRealAuditProofRequest({ operation, actionId }),
+        );
+        assert.strictEqual(auth.state, 'authorized', `${operation}/${actionId}`);
+        assert.strictEqual(auth.realAuditProofAuthorized, true);
+      }
+      // one cross-op reject per operation
+      const foreign = operation === 'install'
+        ? 'capture-current-state'
+        : 'render-launch-agent-plist';
+      const denied = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ operation, actionId: foreign }),
+      );
+      assert.strictEqual(denied.state, 'denied');
+      assert.strictEqual(denied.primaryBlocker, 'capability-action-unmapped');
+    }
+  });
+
+  it('authorize mode/kind/operation/action/idempotency/anchor/attempt/auditInput rejects', () => {
+    const cases = [
+      [{ mode: 'execute' }, 'capability-mode-invalid'],
+      [{ mode: 'dry-run' }, 'capability-mode-invalid'],
+      [{ capabilityKind: 'status' }, 'capability-kind-unknown'],
+      [{ operation: 'audit' }, 'capability-operation-invalid'],
+      [{ actionId: 'not-a-real-action' }, 'capability-action-unmapped'],
+      [{ idempotencyKey: 'x' }, 'capability-idempotency-key-invalid'],
+      [{ anchorRef: 'anchor' }, 'capability-real-audit-input-invalid'],
+      [{ attemptRef: 'short' }, 'capability-real-audit-input-invalid'],
+      [{ attemptRef: 'a'.repeat(129) }, 'capability-real-audit-input-invalid'],
+      [{ attemptRef: 'a'.repeat(15) + ' ' }, 'capability-real-audit-input-invalid'],
+      [{ attemptRef: 'a'.repeat(15) + '\n' }, 'capability-real-audit-input-invalid'],
+      [{ auditInput: { schemaVersion: 2 } }, 'capability-real-audit-input-invalid'],
+      [{ auditInput: { schemaVersion: 1, extra: true } }, 'capability-caller-injection-rejected'],
+    ];
+    for (const [override, blocker] of cases) {
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest(override),
+      );
+      assert.strictEqual(auth.state, 'denied', JSON.stringify(override));
+      assert.strictEqual(auth.realAuditProofAuthorized, false);
+      assert.strictEqual(auth.primaryBlocker, blocker, JSON.stringify(override));
+    }
+  });
+
+  it('authorize mode sanitizer: empty/secret/object/array/number → unknown; execute/dry-run safe; real-proof authorized', () => {
+    const MODE_SECRET = 'FIXTURE_MODE_SECRET';
+    const invalidModeCases = [
+      { mode: '' },
+      { mode: MODE_SECRET },
+      { mode: { evil: MODE_SECRET } },
+      { mode: [MODE_SECRET] },
+      { mode: 42 },
+    ];
+    for (const override of invalidModeCases) {
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest(override),
+      );
+      assert.strictEqual(auth.state, 'denied', JSON.stringify(override));
+      assert.strictEqual(auth.realAuditProofAuthorized, false);
+      assert.strictEqual(auth.primaryBlocker, 'capability-mode-invalid', JSON.stringify(override));
+      assert.strictEqual(auth.mode, 'unknown', `mode must sanitize, got ${JSON.stringify(auth.mode)}`);
+      // Empty string must NOT collapse to real-proof via || default.
+      assert.notStrictEqual(auth.mode, 'real-proof');
+      const text = JSON.stringify(auth);
+      assert.ok(!text.includes(MODE_SECRET), `authorize JSON must not echo secret: ${text}`);
+      assert.ok(!text.includes('"mode":""'), `authorize JSON must not echo empty mode: ${text}`);
+    }
+
+    // Allowlisted non-real-proof modes keep original safe tokens (still denied).
+    for (const mode of ['execute', 'dry-run']) {
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ mode }),
+      );
+      assert.strictEqual(auth.state, 'denied', mode);
+      assert.strictEqual(auth.primaryBlocker, 'capability-mode-invalid', mode);
+      assert.strictEqual(auth.mode, mode, mode);
+      assert.strictEqual(auth.realAuditProofAuthorized, false);
+    }
+
+    // Valid real-proof remains authorized.
+    const ok = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+      buildRealAuditProofRequest({ mode: 'real-proof' }),
+    );
+    assert.strictEqual(ok.state, 'authorized');
+    assert.strictEqual(ok.mode, 'real-proof');
+    assert.strictEqual(ok.realAuditProofAuthorized, true);
+  });
+
+  it('authorize hostile request: symbols/accessors/proxy/functions/dangerous/extra dataDir — no IO', async () => {
+    await withTempAuditRoot(async (root) => {
+      const base = buildRealAuditProofRequest();
+      const withSymbol = { ...base };
+      withSymbol[Symbol('x')] = 1;
+      const withGetter = {};
+      for (const [k, v] of Object.entries(base)) {
+        Object.defineProperty(withGetter, k, { enumerable: true, get: () => v });
+      }
+      const withFn = { ...base, handler: () => {} };
+      // Dead fixture previously unused — must enter the matrix.
+      const withProto = { ...base, __proto__: { polluted: true } };
+      const withCustomProto = Object.assign(Object.create({ polluted: true }), base);
+      class HostileAuditReq {
+        constructor() {
+          Object.assign(this, base);
+        }
+      }
+      const withClass = new HostileAuditReq();
+      const withNonEnumerable = buildHostileRealAuditTop((req) => {
+        Object.defineProperty(req, 'mode', {
+          value: 'real-proof',
+          enumerable: false,
+          writable: true,
+          configurable: true,
+        });
+      });
+      // __proto__ as own key via defineProperty
+      const dangerous = { ...base };
+      Object.defineProperty(dangerous, 'constructor', { value: Object, enumerable: true });
+      const withDataDir = { ...base, dataDir: root };
+      const proxy = new Proxy(base, {
+        get(t, p) { return t[p]; },
+        ownKeys(t) { return Reflect.ownKeys(t); },
+        getOwnPropertyDescriptor(t, p) { return Reflect.getOwnPropertyDescriptor(t, p); },
+      });
+
+      for (const req of [
+        withSymbol,
+        withGetter,
+        withFn,
+        withProto,
+        withCustomProto,
+        withClass,
+        withNonEnumerable,
+        dangerous,
+        withDataDir,
+        proxy,
+      ]) {
+        const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req);
+        assert.strictEqual(auth.state, 'denied', JSON.stringify(Object.keys(req || {})));
+        assert.strictEqual(
+          auth.primaryBlocker,
+          'capability-caller-injection-rejected',
+          `expected injection reject for hostile top, got ${auth.primaryBlocker}`,
+        );
+      }
+      // no IO side effects from authorize
+      assert.strictEqual(await pathExists(join(root, REAL_AUDIT_SINK_REL)), false);
+      assert.strictEqual(await pathExists(join(root, 'audit')), false);
+    });
+  });
+
+  it('C3 exact plain: nested auditInput Proxy/class/custom-proto/non-enum/accessor → injection; schemaVersion type → input-invalid', () => {
+    const base = buildRealAuditProofRequest();
+
+    const nestedProxy = {
+      ...base,
+      auditInput: new Proxy({ schemaVersion: 1 }, {
+        get(t, p) { return t[p]; },
+        ownKeys(t) { return Reflect.ownKeys(t); },
+        getOwnPropertyDescriptor(t, p) { return Reflect.getOwnPropertyDescriptor(t, p); },
+      }),
+    };
+    class NestedAuditInput {
+      constructor() {
+        this.schemaVersion = 1;
+      }
+    }
+    const nestedClass = { ...base, auditInput: new NestedAuditInput() };
+    const nestedCustomProto = {
+      ...base,
+      auditInput: Object.assign(Object.create({ polluted: true }), { schemaVersion: 1 }),
+    };
+    const nestedNonEnum = {
+      ...base,
+      auditInput: Object.defineProperty({}, 'schemaVersion', {
+        value: 1,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      }),
+    };
+    const nestedAccessor = {
+      ...base,
+      auditInput: Object.defineProperty({}, 'schemaVersion', {
+        enumerable: true,
+        get: () => 1,
+      }),
+    };
+    for (const req of [nestedProxy, nestedClass, nestedCustomProto, nestedNonEnum, nestedAccessor]) {
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req);
+      assert.strictEqual(auth.state, 'denied');
+      assert.strictEqual(auth.primaryBlocker, 'capability-caller-injection-rejected');
+    }
+
+    // Structurally valid auditInput but schemaVersion type/value not number 1 → input-invalid (no echo).
+    for (const badVersion of ['1', true, null, { x: 'FIXTURE_SCHEMA_SECRET' }, 2, NaN]) {
+      const req = buildRealAuditProofRequest({ auditInput: { schemaVersion: badVersion } });
+      const auth = authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req);
+      assert.strictEqual(auth.state, 'denied', String(badVersion));
+      assert.strictEqual(auth.primaryBlocker, 'capability-real-audit-input-invalid', String(badVersion));
+      const json = JSON.stringify(auth);
+      assert.ok(!json.includes('FIXTURE_SCHEMA_SECRET'));
+      if (badVersion && typeof badVersion === 'object') {
+        assert.ok(!json.includes('"x"'));
+      }
+    }
+  });
+
+  it('C3 exact plain: context Proxy/class/custom-proto/non-enum/accessor rejected; null-proto frozen still ok', async () => {
+    await withTempAuditRoot(async (root) => {
+      const req = buildRealAuditProofRequest();
+      class Ctx {
+        constructor() {
+          this.dataDir = root;
+        }
+      }
+      const hostileContexts = [
+        new Proxy({ dataDir: root }, {
+          get(t, p) { return t[p]; },
+          ownKeys(t) { return Reflect.ownKeys(t); },
+          getOwnPropertyDescriptor(t, p) { return Reflect.getOwnPropertyDescriptor(t, p); },
+        }),
+        new Ctx(),
+        Object.assign(Object.create({ polluted: true }), { dataDir: root }),
+        Object.defineProperty({}, 'dataDir', {
+          value: root,
+          enumerable: false,
+          writable: true,
+          configurable: true,
+        }),
+        Object.defineProperty({}, 'dataDir', {
+          enumerable: true,
+          get: () => root,
+        }),
+      ];
+      for (const ctx of hostileContexts) {
+        const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+        assert.strictEqual(rc.outcomeCode, 'capability-real-audit-context-invalid');
+        assert.strictEqual(rc.primaryBlocker, 'capability-real-audit-context-invalid');
+        assert.strictEqual(rc.auditEventFingerprint, null);
+        assertAuditPreAppendTruth(rc);
+      }
+
+      // null prototype + frozen enumerable data object remains usable
+      const nullProtoCtx = Object.freeze(Object.create(null, {
+        dataDir: {
+          value: root,
+          enumerable: true,
+          writable: false,
+          configurable: false,
+        },
+      }));
+      const frozenReq = Object.freeze({
+        capabilityKind: 'audit',
+        actionId: 'render-launch-agent-plist',
+        operation: 'install',
+        mode: 'real-proof',
+        idempotencyKey: null,
+        attemptRef: validRealAuditAttemptRef('fz'),
+        anchorRef: null,
+        auditInput: Object.freeze(Object.create(null, {
+          schemaVersion: {
+            value: 1,
+            enumerable: true,
+            writable: false,
+            configurable: false,
+          },
+        })),
+      });
+      const ok = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(frozenReq, nullProtoCtx);
+      assert.strictEqual(ok.state, 'completed');
+      assert.strictEqual(ok.outcomeCode, 'capability-real-audit-persisted');
+    });
+  });
+});
+
+describe('V1.34 RealAuditProof invoke happy + fingerprint vector', () => {
+  it('Task3/5: fixed fingerprint vector + exact canonical file line + mode 0600 + events.jsonl absent', async () => {
+    await withTempAuditRoot(async (root) => {
+      const attemptRef = REAL_AUDIT_FIXED_ATTEMPT_REF;
+      const operation = 'install';
+      const actionId = 'render-launch-agent-plist';
+      const expected = expectedRealAuditFingerprints(attemptRef, operation, actionId);
+      assert.match(expected.attemptRefFingerprint, /^[0-9a-f]{64}$/);
+      assert.match(expected.eventFingerprint, /^[0-9a-f]{64}$/);
+
+      const receipt = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef, operation, actionId }),
+        buildRealAuditContext(root),
+      );
+      assert.strictEqual(receipt.receiptKind, 'capability-real-implementation-receipt');
+      assert.strictEqual(receipt.state, 'completed');
+      assert.strictEqual(receipt.outcomeCode, 'capability-real-audit-persisted');
+      assert.strictEqual(receipt.capabilityId, 'real-audit');
+      assert.strictEqual(receipt.capabilityKind, 'audit');
+      assert.strictEqual(receipt.implementationClass, 'real-implementation');
+      assert.strictEqual(receipt.sideEffectClass, 'audit-persist');
+      assert.strictEqual(receipt.hostSideEffectOccurred, true);
+      assert.strictEqual(receipt.hostMutationOccurred, true);
+      assert.strictEqual(receipt.auditPersistOccurred, true);
+      assert.strictEqual(receipt.mutationOutcome, 'persisted');
+      assert.strictEqual(receipt.wouldPersistAudit, false);
+      assert.strictEqual(receipt.wouldMutateHost, false);
+      assert.strictEqual(receipt.auditEventFingerprint, expected.eventFingerprint);
+      assert.strictEqual(receipt.realAuditCapabilityImplementationReady, true);
+      assertAuditGlobalsFalse(receipt);
+      assertNoAuditSensitiveLeak(receipt, root, attemptRef);
+
+      const filePath = join(root, REAL_AUDIT_SINK_REL);
+      const raw = await readFile(filePath, 'utf8');
+      assert.ok(raw.endsWith('\n'));
+      const line = raw.slice(0, -1);
+      const parsed = JSON.parse(line);
+      assert.deepStrictEqual(Object.keys(parsed), [...REAL_AUDIT_CANONICAL_KEYS]);
+      assert.strictEqual(parsed.schemaVersion, 1);
+      assert.strictEqual(parsed.eventKind, 'capability-real-audit-proof');
+      assert.strictEqual(parsed.eventFingerprint, expected.eventFingerprint);
+      assert.strictEqual(parsed.operation, operation);
+      assert.strictEqual(parsed.actionId, actionId);
+      assert.strictEqual(parsed.attemptRefFingerprint, expected.attemptRefFingerprint);
+      assert.strictEqual(parsed.proofMode, 'real-proof');
+      assert.strictEqual(raw, buildCanonicalAuditLine(parsed));
+      assert.ok(!raw.includes(attemptRef), 'raw attemptRef never on disk');
+      const { mode } = await import('node:fs/promises').then((fs) => fs.stat(filePath));
+      assert.strictEqual(mode & 0o777, 0o600);
+      assert.strictEqual(await pathExists(join(root, 'audit/events.jsonl')), false);
+    });
+  });
+
+  it('Task5: all 10 actions under correct ops persist', async () => {
+    await withTempAuditRoot(async (root) => {
+      let i = 0;
+      for (const [operation, actionIds] of Object.entries(SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS)) {
+        for (const actionId of actionIds) {
+          i += 1;
+          const attemptRef = `op${String(i).padStart(2, '0')}${'a'.repeat(13)}`.slice(0, 16);
+          const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+            buildRealAuditProofRequest({ operation, actionId, attemptRef }),
+            buildRealAuditContext(root),
+          );
+          assert.strictEqual(rc.state, 'completed', `${operation}/${actionId}`);
+          assert.strictEqual(rc.outcomeCode, 'capability-real-audit-persisted');
+          assert.match(rc.auditEventFingerprint, /^[0-9a-f]{64}$/);
+        }
+      }
+      const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+      const lines = raw.trimEnd().split('\n');
+      assert.strictEqual(lines.length, 10);
+    });
+  });
+});
+
+describe('V1.34 RealAuditProof fail-closed + concurrency', () => {
+  it('invalid request → fingerprint null + zero write', async () => {
+    await withTempAuditRoot(async (root) => {
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ mode: 'execute' }),
+        buildRealAuditContext(root),
+      );
+      assert.ok(rc.state === 'denied' || rc.state === 'error');
+      assert.strictEqual(rc.auditEventFingerprint, null);
+      assertAuditPreAppendTruth(rc);
+      assert.strictEqual(await pathExists(join(root, REAL_AUDIT_SINK_REL)), false);
+    });
+  });
+
+  it('invalid context {} / extra key / getter → context-invalid + null fp + zero write', async () => {
+    await withTempAuditRoot(async (root) => {
+      const req = buildRealAuditProofRequest();
+      const cases = [
+        {},
+        { dataDir: root, extra: true },
+        (() => {
+          const o = {};
+          Object.defineProperty(o, 'dataDir', { enumerable: true, get: () => root });
+          return o;
+        })(),
+        { dataDir: 123 },
+        null,
+      ];
+      for (const ctx of cases) {
+        const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+        assert.strictEqual(rc.outcomeCode, 'capability-real-audit-context-invalid', JSON.stringify(ctx));
+        assert.strictEqual(rc.primaryBlocker, 'capability-real-audit-context-invalid');
+        assert.strictEqual(rc.auditEventFingerprint, null);
+        assertAuditPreAppendTruth(rc);
+      }
+      assert.strictEqual(await pathExists(join(root, REAL_AUDIT_SINK_REL)), false);
+    });
+  });
+
+  it('missing root / symlink root → context-invalid + null fp', async () => {
+    await withTempAuditRoot(async (root) => {
+      const missing = join(root, 'does-not-exist');
+      const rc1 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest(),
+        buildRealAuditContext(missing),
+      );
+      assert.strictEqual(rc1.outcomeCode, 'capability-real-audit-context-invalid');
+      assert.strictEqual(rc1.auditEventFingerprint, null);
+      assertAuditPreAppendTruth(rc1);
+
+      const target = await mkdtemp(join(tmpdir(), 'linke-audit-sym-'));
+      try {
+        const link = join(root, 'sym-root');
+        await symlink(target, link, 'dir');
+        const rc2 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+          buildRealAuditProofRequest(),
+          buildRealAuditContext(link),
+        );
+        assert.strictEqual(rc2.outcomeCode, 'capability-real-audit-context-invalid');
+        assert.strictEqual(rc2.auditEventFingerprint, null);
+        assertAuditPreAppendTruth(rc2);
+      } finally {
+        await rm(target, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('malformed existing / oversize / >4096 → sink-invalid with 64hex, no append', async () => {
+    await withTempAuditRoot(async (root) => {
+      await mkdir(join(root, 'audit'), { recursive: true });
+      const filePath = join(root, REAL_AUDIT_SINK_REL);
+      await writeFile(filePath, '{not-json\n', { mode: 0o600 });
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('m') }),
+        buildRealAuditContext(root),
+      );
+      assert.strictEqual(rc.outcomeCode, 'capability-real-audit-sink-invalid');
+      assert.match(rc.auditEventFingerprint, /^[0-9a-f]{64}$/);
+      assertAuditPreAppendTruth(rc);
+      assert.strictEqual(await readFile(filePath, 'utf8'), '{not-json\n');
+
+      // >4096 existing lines
+      const { eventFingerprint, attemptRefFingerprint } = expectedRealAuditFingerprints(
+        validRealAuditAttemptRef('q'),
+        'install',
+        'render-launch-agent-plist',
+      );
+      const validLine = buildCanonicalAuditLine({
+        schemaVersion: 1,
+        eventKind: 'capability-real-audit-proof',
+        eventFingerprint,
+        operation: 'install',
+        actionId: 'render-launch-agent-plist',
+        attemptRefFingerprint,
+        proofMode: 'real-proof',
+      });
+      // Build 4097 lines with unique fingerprints (hex variation)
+      let body = '';
+      for (let i = 0; i < CAPABILITY_REAL_AUDIT_MAX_EVENT_LINES + 1; i += 1) {
+        const fp = createHash('sha256').update(`line-${i}`, 'utf8').digest('hex');
+        const arp = createHash('sha256').update(`arp-${i}`, 'utf8').digest('hex');
+        body += buildCanonicalAuditLine({
+          schemaVersion: 1,
+          eventKind: 'capability-real-audit-proof',
+          eventFingerprint: fp,
+          operation: 'install',
+          actionId: 'render-launch-agent-plist',
+          attemptRefFingerprint: arp,
+          proofMode: 'real-proof',
+        });
+      }
+      await writeFile(filePath, body, { mode: 0o600 });
+      const before = await readFile(filePath, 'utf8');
+      const rc2 = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('n') }),
+        buildRealAuditContext(root),
+      );
+      assert.strictEqual(rc2.outcomeCode, 'capability-real-audit-sink-invalid');
+      assert.match(rc2.auditEventFingerprint, /^[0-9a-f]{64}$/);
+      assertAuditPreAppendTruth(rc2);
+      assert.strictEqual(await readFile(filePath, 'utf8'), before);
+    });
+  });
+
+  it('concurrent same fingerprint barrier: second+third deny while owner inflight; one write', async () => {
+    await withTempAuditRoot(async (root) => {
+      const req = buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('c') });
+      const ctx = buildRealAuditContext(root);
+      const p1 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      const p2 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      const p3 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      const results = await Promise.all([p1, p2, p3]);
+      const completed = results.filter((r) => r.state === 'completed');
+      const denied = results.filter((r) => r.outcomeCode === 'capability-real-audit-in-flight-denied');
+      assert.strictEqual(completed.length, 1);
+      assert.strictEqual(denied.length, 2);
+      const fp = completed[0].auditEventFingerprint;
+      assert.match(fp, /^[0-9a-f]{64}$/);
+      for (const r of results) {
+        assert.strictEqual(r.auditEventFingerprint, fp);
+      }
+      for (const r of denied) {
+        assertAuditPreAppendTruth(r);
+      }
+      const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+      assert.strictEqual(raw.trimEnd().split('\n').length, 1);
+    });
+  });
+
+  it('sequential same fingerprint twice both persisted (two lines)', async () => {
+    await withTempAuditRoot(async (root) => {
+      const req = buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('s') });
+      const ctx = buildRealAuditContext(root);
+      const a = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      const b = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      assert.strictEqual(a.state, 'completed');
+      assert.strictEqual(b.state, 'completed');
+      assert.strictEqual(a.auditEventFingerprint, b.auditEventFingerprint);
+      const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+      assert.strictEqual(raw.trimEnd().split('\n').length, 2);
+    });
+  });
+
+  it('different fingerprints concurrent both succeed; lifecycle has no second Map/queue', async () => {
+    await withTempAuditRoot(async (root) => {
+      const ctx = buildRealAuditContext(root);
+      const p1 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('d1') }),
+        ctx,
+      );
+      const p2 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('d2') }),
+        ctx,
+      );
+      const [a, b] = await Promise.all([p1, p2]);
+      assert.strictEqual(a.state, 'completed');
+      assert.strictEqual(b.state, 'completed');
+      assert.notStrictEqual(a.auditEventFingerprint, b.auditEventFingerprint);
+      const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+      assert.strictEqual(raw.trimEnd().split('\n').length, 2);
+    });
+  });
+
+  it('append afterAppend hook throw → persist-failed + line exists + unknown-after-write-attempt + 64hex', async () => {
+    await withTempAuditRoot(async (root) => {
+      try {
+        setCapabilityRealAuditSinkHooksForTest({
+          afterAppend: async () => {
+            throw new Error('FIXTURE_AFTER_APPEND_SECRET_do_not_echo');
+          },
+        });
+        const attemptRef = validRealAuditAttemptRef('f2');
+        const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+          buildRealAuditProofRequest({ attemptRef }),
+          buildRealAuditContext(root),
+        );
+        assert.strictEqual(rc.state, 'error');
+        assert.strictEqual(rc.outcomeCode, 'capability-real-audit-persist-failed');
+        assert.strictEqual(rc.primaryBlocker, 'capability-real-audit-persist-failed');
+        assert.match(rc.auditEventFingerprint, /^[0-9a-f]{64}$/);
+        assert.strictEqual(rc.hostSideEffectOccurred, true);
+        assert.strictEqual(rc.hostMutationOccurred, true);
+        assert.strictEqual(rc.auditPersistOccurred, false);
+        assert.strictEqual(rc.mutationOutcome, 'unknown-after-write-attempt');
+        assert.strictEqual(rc.wouldPersistAudit, false);
+        assertAuditGlobalsFalse(rc);
+        assertNoAuditSensitiveLeak(rc, root, attemptRef, ['FIXTURE_AFTER_APPEND_SECRET_do_not_echo']);
+        // Canonical line must have been produced before afterAppend throw.
+        const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+        assert.strictEqual(raw.trimEnd().split('\n').length, 1);
+        assert.ok(raw.endsWith('\n'));
+        const parsed = JSON.parse(raw.slice(0, -1));
+        assert.deepStrictEqual(Object.keys(parsed), [...REAL_AUDIT_CANONICAL_KEYS]);
+      } finally {
+        setCapabilityRealAuditSinkHooksForTest(null);
+      }
+    });
+  });
+
+  it('C3 deterministic beforeAppend latch concurrency: denied callers never clear owner inFlight', async () => {
+    await withTempAuditRoot(async (root) => {
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let entered = 0;
+      let signalEntered;
+      const enteredGate = new Promise((resolve) => {
+        signalEntered = resolve;
+      });
+      try {
+        setCapabilityRealAuditSinkHooksForTest({
+          beforeAppend: async () => {
+            entered += 1;
+            if (entered === 1) signalEntered();
+            await gate;
+          },
+        });
+        const req = buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('c3') });
+        const ctx = buildRealAuditContext(root);
+        const owner = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+        await enteredGate;
+        assert.strictEqual(entered, 1);
+
+        const denied = await Promise.all([
+          invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx),
+          invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx),
+        ]);
+        for (const rc of denied) {
+          assert.strictEqual(rc.outcomeCode, 'capability-real-audit-in-flight-denied');
+          assert.match(rc.auditEventFingerprint, /^[0-9a-f]{64}$/);
+          assertAuditPreAppendTruth(rc);
+        }
+        // Fourth still denied before owner release — proves denied callers did not delete owner entry.
+        const fourth = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+        assert.strictEqual(fourth.outcomeCode, 'capability-real-audit-in-flight-denied');
+        assert.match(fourth.auditEventFingerprint, /^[0-9a-f]{64}$/);
+
+        release();
+        const ownerRc = await owner;
+        assert.strictEqual(ownerRc.state, 'completed');
+        assert.strictEqual(ownerRc.outcomeCode, 'capability-real-audit-persisted');
+        const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+        assert.strictEqual(raw.trimEnd().split('\n').length, 1);
+      } finally {
+        release();
+        setCapabilityRealAuditSinkHooksForTest(null);
+      }
+    });
+  });
+
+  it('C3 receipt never echoes hostile kind/action/operation/mode strings or objects', async () => {
+    await withTempAuditRoot(async (root) => {
+      const secrets = [
+        'FIXTURE_KIND_SECRET',
+        'FIXTURE_ACTION_SECRET',
+        'FIXTURE_OP_SECRET',
+        'FIXTURE_MODE_SECRET',
+        'attacker-array-secret',
+      ];
+      const cases = [
+        { capabilityKind: 'FIXTURE_KIND_SECRET' },
+        { capabilityKind: { evil: 'FIXTURE_KIND_SECRET' } },
+        { capabilityKind: ['attacker-array-secret'] },
+        { actionId: 'FIXTURE_ACTION_SECRET' },
+        { actionId: { evil: 'FIXTURE_ACTION_SECRET' } },
+        { operation: 'FIXTURE_OP_SECRET' },
+        { operation: { evil: 'FIXTURE_OP_SECRET' } },
+        { mode: 'FIXTURE_MODE_SECRET' },
+        { mode: { evil: 'FIXTURE_MODE_SECRET' } },
+        { mode: ['attacker-array-secret'] },
+      ];
+      for (const override of cases) {
+        const attemptRef = validRealAuditAttemptRef('hx');
+        const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+          buildRealAuditProofRequest({ ...override, attemptRef }),
+          buildRealAuditContext(root),
+        );
+        assert.ok(rc.state === 'denied' || rc.state === 'error');
+        // Sanitized allowlist only.
+        assert.ok(
+          rc.capabilityKind === 'audit' || rc.capabilityKind === 'unknown',
+          JSON.stringify(rc.capabilityKind),
+        );
+        assert.ok(
+          rc.mode === 'real-proof' || rc.mode === 'execute' || rc.mode === 'dry-run' || rc.mode === 'unknown',
+          JSON.stringify(rc.mode),
+        );
+        if (override.capabilityKind !== undefined && override.capabilityKind !== 'audit') {
+          assert.strictEqual(rc.capabilityKind, 'unknown');
+        }
+        if (override.operation !== undefined) {
+          assert.strictEqual(rc.operation, 'unknown');
+        }
+        if (override.actionId !== undefined) {
+          assert.strictEqual(rc.actionId, 'unknown');
+        }
+        if (override.mode !== undefined && !['real-proof', 'execute', 'dry-run'].includes(override.mode)) {
+          assert.strictEqual(rc.mode, 'unknown');
+        }
+        assertNoAuditSensitiveLeak(rc, root, attemptRef, secrets);
+        // Enumerate + JSON stringify prove no secret echo.
+        for (const key of Object.keys(rc)) {
+          const val = rc[key];
+          const text = typeof val === 'string' ? val : JSON.stringify(val);
+          for (const secret of secrets) {
+            assert.ok(!String(text).includes(secret), `${key} leaked ${secret}`);
+          }
+        }
+      }
+      assert.strictEqual(await pathExists(join(root, REAL_AUDIT_SINK_REL)), false);
+    });
+  });
+
+  it('C3 valid op/action success receipt keeps allowlisted values', async () => {
+    await withTempAuditRoot(async (root) => {
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({
+          operation: 'install',
+          actionId: 'render-launch-agent-plist',
+          attemptRef: validRealAuditAttemptRef('ok'),
+        }),
+        buildRealAuditContext(root),
+      );
+      assert.strictEqual(rc.state, 'completed');
+      assert.strictEqual(rc.capabilityKind, 'audit');
+      assert.strictEqual(rc.operation, 'install');
+      assert.strictEqual(rc.actionId, 'render-launch-agent-plist');
+      assert.strictEqual(rc.mode, 'real-proof');
+    });
+  });
+
+  it('cleanup: after owner success/fail, same fingerprint can run again; denial leaves no pollution', async () => {
+    await withTempAuditRoot(async (root) => {
+      const req = buildRealAuditProofRequest({ attemptRef: validRealAuditAttemptRef('z') });
+      const ctx = buildRealAuditContext(root);
+      const p1 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      const p2 = invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      await Promise.all([p1, p2]);
+      const again = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(req, ctx);
+      assert.strictEqual(again.state, 'completed');
+      assert.match(again.auditEventFingerprint, /^[0-9a-f]{64}$/);
+    });
+  });
+
+  it('execute/dry-run existing paths zero sink write; agent/server zero RealAuditProof refs', async () => {
+    await withTempAuditRoot(async (root) => {
+      // dry-run audit plan-only
+      const dry = invokeSupervisorLifecycleGuardedRunnerCapabilityDryRun({
+        capabilityKind: 'audit',
+        actionId: 'render-launch-agent-plist',
+        operation: 'install',
+        mode: 'dry-run',
+        idempotencyKey: null,
+        attemptRef: null,
+        anchorRef: null,
+      });
+      assert.strictEqual(dry.receiptKind, 'capability-dry-run-receipt');
+      assert.strictEqual(dry.hostSideEffectOccurred, false);
+
+      const execAuth = authorizeSupervisorLifecycleGuardedRunnerCapabilityMode({
+        capabilityKind: 'audit',
+        actionId: 'render-launch-agent-plist',
+        operation: 'install',
+        mode: 'execute',
+        idempotencyKey: null,
+        attemptRef: null,
+        anchorRef: null,
+      });
+      assert.strictEqual(execAuth.executeCapabilityAuthorized, false);
+
+      assert.strictEqual(await pathExists(join(root, REAL_AUDIT_SINK_REL)), false);
+      assert.strictEqual(await pathExists(join(root, 'audit/events.jsonl')), false);
+    });
+
+    const agent = readFileSync(join(process.cwd(), 'src/agent.js'), 'utf8');
+    const server = readFileSync(join(process.cwd(), 'src/server.js'), 'utf8');
+    assert.ok(!agent.includes('RealAuditProof'));
+    assert.ok(!agent.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(!server.includes('RealAuditProof'));
+    assert.ok(!server.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(!agent.includes('capability-audit-sink'));
+    assert.ok(!server.includes('capability-audit-sink'));
+  });
+
+  it('source architecture: single inFlight Set; exact sink API; no second queue/pre-read/events.jsonl', () => {
+    const lifecycleSrc = readFileSync(join(process.cwd(), 'src/supervisor-lifecycle.js'), 'utf8');
+    const sinkSrc = readFileSync(join(process.cwd(), 'src/capability-audit-sink.js'), 'utf8');
+    const agent = readFileSync(join(process.cwd(), 'src/agent.js'), 'utf8');
+    const server = readFileSync(join(process.cwd(), 'src/server.js'), 'utf8');
+    const auditProofSlice = lifecycleSrc.slice(
+      lifecycleSrc.indexOf('// ── V1.34 Real audit capability sink persist'),
+    );
+
+    assert.ok(lifecycleSrc.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(lifecycleSrc.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(lifecycleSrc.includes('appendCapabilityRealAuditProofEvent'));
+    assert.ok(lifecycleSrc.includes("from './capability-audit-sink.js'"));
+    // sole sink call form — exact direct invoke, not registry dispatch / second queue
+    assert.ok(
+      /await\s+appendCapabilityRealAuditProofEvent\s*\(\s*resolvedDataRoot\s*,\s*canonicalEvent\s*\)/.test(
+        lifecycleSrc,
+      ),
+      'invoke must call sink with exact frozen-literal form',
+    );
+    // no second queue Map for audit in lifecycle
+    assert.ok(!lifecycleSrc.includes('capabilityAuditSinkQueues'));
+    assert.ok(!/new Map\s*\(\s*\).*audit/i.test(lifecycleSrc));
+    // one inFlight Set for audit fingerprints — exact 1
+    const setDecls = lifecycleSrc.match(/realAudit\w*InFlight\w*\s*=\s*new Set/g) || [];
+    assert.strictEqual(setDecls.length, 1, 'expected exactly one realAudit inFlight Set');
+    // RealAuditProof path: no hardcoded sink relative path / no pre-read / no generic HTTP audit append
+    assert.ok(!auditProofSlice.includes('capability-proof-attempts.jsonl'));
+    assert.ok(!auditProofSlice.includes('appendAuditEvent'));
+    assert.ok(!auditProofSlice.includes('audit/events.jsonl'));
+    assert.ok(!/safeReadText\s*\(/.test(auditProofSlice));
+    // sink does not callback proof APIs / import lifecycle module
+    assert.ok(!sinkSrc.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(!sinkSrc.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
+    assert.ok(!/from\s+['"]\.\/supervisor-lifecycle\.js['"]/.test(sinkSrc));
+    assert.ok(!sinkSrc.includes('supervisor-lifecycle.js'));
+
+    // Handler honesty: factory returns imported sink identity; readiness uses strict ===
+    assert.ok(
+      /function\s+createRealAuditCapabilityHandler\s*\(\s*\)\s*\{\s*return\s+appendCapabilityRealAuditProofEvent\s*;\s*\}/.test(
+        lifecycleSrc,
+      ),
+      'createRealAuditCapabilityHandler must return appendCapabilityRealAuditProofEvent identity',
+    );
+    assert.ok(
+      /entry\.handler\s*===\s*appendCapabilityRealAuditProofEvent/.test(lifecycleSrc),
+      'isRealAuditCapabilityRegistryReady must identity-check handler',
+    );
+    assert.ok(!/function\s+realAuditCapabilityHandler/.test(lifecycleSrc));
+
+    // TEST ONLY setter may exist in sink definition; production agent/server/lifecycle must not call it.
+    assert.ok(sinkSrc.includes('setCapabilityRealAuditSinkHooksForTest'));
+    assert.ok(!lifecycleSrc.includes('setCapabilityRealAuditSinkHooksForTest'));
+    assert.ok(!agent.includes('setCapabilityRealAuditSinkHooksForTest'));
+    assert.ok(!server.includes('setCapabilityRealAuditSinkHooksForTest'));
+    // Outer catch uses one fixed allowlisted code for outcome + primaryBlocker.
+    assert.ok(
+      /outcomeCode:\s*'capability-real-audit-input-invalid'[\s\S]{0,200}primaryBlocker:\s*'capability-real-audit-input-invalid'/.test(
+        auditProofSlice,
+      ),
+      'outer catch outcomeCode/primaryBlocker must share capability-real-audit-input-invalid',
+    );
+    // Empty semantics if must be gone; Real status JSDoc must not hang on audit descriptor.
+    assert.ok(!/if \(snapshot\.mode === 'execute' \|\| snapshot\.mode !== 'real-proof'\)/.test(lifecycleSrc));
+    assert.ok(
+      !/Real status handler: observational metadata only[\s\S]{0,120}function buildRealAuditCapabilityDescriptor/.test(
+        lifecycleSrc,
+      ),
+    );
+  });
+
+  it('public JSON stringify excludes fixture raw attemptRef/dataDir', async () => {
+    await withTempAuditRoot(async (root) => {
+      const attemptRef = REAL_AUDIT_FIXED_ATTEMPT_REF;
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef }),
+        buildRealAuditContext(root),
+      );
+      const json = JSON.stringify(rc);
+      assert.ok(!json.includes(attemptRef));
+      assert.ok(!json.includes(root));
+      assert.ok(!json.includes('BEGIN PRIVATE'));
+    });
   });
 });
