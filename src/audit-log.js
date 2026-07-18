@@ -1,55 +1,18 @@
-import { randomUUID } from 'node:crypto';
 import {
   SafeDataFileError,
   safeAppendText,
   safeAtomicWriteText,
   safeReadText,
 } from './safe-data-files.js';
+import { sanitizeAuditEvent } from './audit-event-schema.js';
+
+// Local binding for appendAuditEvent + public re-export (must not use export-from alone).
+export { sanitizeAuditEvent };
 
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 100;
 const auditFileQueues = new Map();
 const AUDIT_RELATIVE_PATH = 'audit/events.jsonl';
-const STRING_FIELDS = [
-  'id',
-  'createdAt',
-  'type',
-  'method',
-  'path',
-  'outcome',
-  'requestId',
-  'deviceId',
-  'snapshotId',
-  'operation',
-  'message',
-  'targetName',
-  'attemptId',
-  'errorCode',
-];
-
-const NON_NEGATIVE_INTEGER_FIELDS = [
-  'fileCount',
-  'totalBytes',
-  'verifiedFileCount',
-  'retryCount',
-];
-
-const BOOLEAN_FIELDS = [
-  'wouldWrite',
-  'executionRequired',
-];
-
-function toIsoString(value, fallback = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : fallback.toISOString();
-}
-
-function sanitizeString(value, maxLength = 200) {
-  if (typeof value !== 'string') return '';
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  return trimmed.slice(0, maxLength);
-}
 
 function normalizeLimit(limit) {
   const parsed = Number(limit);
@@ -136,36 +99,6 @@ async function compactAuditFile(dataDir, retention) {
     `${retained.join('\n')}\n`,
     { mode: 0o600 },
   );
-}
-
-export function sanitizeAuditEvent(event = {}, now = new Date()) {
-  const fallbackDate = now instanceof Date ? now : new Date(now);
-  const sanitized = {
-    id: sanitizeString(event.id) || randomUUID(),
-    createdAt: toIsoString(event.createdAt || fallbackDate, fallbackDate),
-  };
-
-  for (const field of STRING_FIELDS) {
-    if (field === 'id' || field === 'createdAt') continue;
-    const value = sanitizeString(event[field]);
-    if (value) sanitized[field] = value;
-  }
-
-  if (Number.isInteger(event.statusCode)) sanitized.statusCode = event.statusCode;
-
-  for (const field of NON_NEGATIVE_INTEGER_FIELDS) {
-    if (Number.isInteger(event[field]) && event[field] >= 0) {
-      sanitized[field] = event[field];
-    }
-  }
-
-  for (const field of BOOLEAN_FIELDS) {
-    if (typeof event[field] === 'boolean') {
-      sanitized[field] = event[field];
-    }
-  }
-
-  return sanitized;
 }
 
 export async function appendAuditEvent(dataDir, event, options = {}) {

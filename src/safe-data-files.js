@@ -442,6 +442,94 @@ export async function safeReadText(root, relativePath, options = {}) {
 }
 
 /**
+ * Exclusive create of a root-relative text file (O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW).
+ * Returns {created:false} on EEXIST for any existing leaf (file/dir/symlink/malicious)
+ * without distinguishing leaf type and without following/reading/writing the leaf.
+ * Must NOT reuse openRegularNoFollow (it maps EEXIST → SafeDataFileError).
+ * Must NOT rename/unlink the final path.
+ * @param {string} root
+ * @param {string} relativePath
+ * @param {string} text
+ * @param {{ mode?: number, deps?: SafeDataFileDeps }} [options]
+ * @returns {Promise<{ created: true } | { created: false }>}
+ */
+export async function safeCreateExclusiveText(root, relativePath, text, options = {}) {
+  if (typeof text !== 'string') fail();
+  const mode = options.mode === undefined ? 0o600 : options.mode;
+  if (!Number.isInteger(mode) || mode < 0) fail();
+  const deps = options.deps || {};
+  const { open } = resolveDeps(deps);
+  const { absolutePath, parentAbs } = await ensureParentForRelativeFile(root, relativePath, deps);
+
+  const flags =
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+
+  /** @type {import('node:fs/promises').FileHandle | undefined} */
+  let handle;
+  try {
+    try {
+      // Direct exclusive open of the final path — never openRegularNoFollow (swallows EEXIST).
+      handle = await open(absolutePath, flags, mode);
+    } catch (error) {
+      // Unified EEXIST for regular file / directory / symlink / malicious leaf.
+      // Do not stat/read/follow the leaf; do not leak path or errno details.
+      if (error && error.code === 'EEXIST') {
+        return { created: false };
+      }
+      fail();
+    }
+
+    try {
+      const st = await handle.stat();
+      if (!st.isFile() || st.isSymbolicLink()) fail();
+
+      await handle.writeFile(text, { encoding: 'utf8' });
+      if (typeof handle.sync === 'function') {
+        await handle.sync();
+      }
+    } catch (error) {
+      if (error instanceof SafeDataFileError) throw error;
+      fail();
+    }
+
+    // Close must succeed before parent sync; close failure is a hard SafeDataFileError.
+    const opened = handle;
+    handle = undefined;
+    try {
+      await opened.close();
+    } catch {
+      fail();
+    }
+
+    // Parent directory sync only after write+sync+close all succeed (best-effort).
+    let parentHandle;
+    try {
+      parentHandle = await open(parentAbs, constants.O_RDONLY);
+      if (typeof parentHandle.sync === 'function') {
+        await parentHandle.sync();
+      }
+    } catch {
+      // Parent sync is best-effort on platforms that disallow directory fsync.
+    } finally {
+      if (parentHandle) await parentHandle.close().catch(() => {});
+    }
+
+    return { created: true };
+  } catch (error) {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch {
+        // Primary failure already fail-closed; close failure still maps to SafeDataFileError.
+        fail();
+      }
+    }
+    if (error instanceof SafeDataFileError) throw error;
+    fail();
+  }
+}
+
+/**
  * Append text to a root-relative file using O_APPEND|O_CREAT|O_WRONLY|O_NOFOLLOW.
  * Ensures parent dirs safely; forces mode 0600 on the opened fd.
  * @param {string} root

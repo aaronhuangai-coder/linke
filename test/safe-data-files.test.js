@@ -25,6 +25,7 @@ import {
   safeAppendText,
   safeAtomicWriteText,
   safeCopyFileFromAbsoluteSource,
+  safeCreateExclusiveText,
   safeReadText,
 } from '../src/safe-data-files.js';
 
@@ -384,6 +385,227 @@ describe('safe-data-files read/append/atomic', () => {
       );
       await assert.rejects(() => readFile(join(root, 'dest', 'from-link.txt')));
     });
+  });
+});
+
+describe('safeCreateExclusiveText', () => {
+  it('creates a new 0600 regular file once and returns created:true with exact content', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-ok-'));
+    try {
+      const result = await safeCreateExclusiveText(root, 'audit/integrity-journal.jsonl', 'LINE-1\n');
+      assert.deepEqual(result, { created: true });
+      const abs = join(root, 'audit', 'integrity-journal.jsonl');
+      const st = await lstat(abs);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.mode & 0o777, 0o600);
+      assert.equal(await readFile(abs, 'utf8'), 'LINE-1\n');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns created:false on second create without changing content (no overwrite)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-again-'));
+    try {
+      await safeCreateExclusiveText(root, 'exclusive.txt', 'ORIGINAL\n');
+      const second = await safeCreateExclusiveText(root, 'exclusive.txt', 'REPLACED\n');
+      assert.deepEqual(second, { created: false });
+      assert.equal(await readFile(join(root, 'exclusive.txt'), 'utf8'), 'ORIGINAL\n');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('allows exactly one winner among 10 concurrent exclusive creates', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-conc-'));
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 10 }, (_, index) =>
+          safeCreateExclusiveText(root, 'race.txt', `winner-payload-${index}\n`),
+        ),
+      );
+      const createdTrue = results.filter((r) => r && r.created === true);
+      const createdFalse = results.filter((r) => r && r.created === false);
+      assert.equal(createdTrue.length, 1);
+      assert.equal(createdFalse.length, 9);
+      assert.equal(results.length, 10);
+      const body = await readFile(join(root, 'race.txt'), 'utf8');
+      assert.match(body, /^winner-payload-\d+\n$/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('creates missing parents safely then exclusive-creates the leaf', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-parent-'));
+    try {
+      const result = await safeCreateExclusiveText(root, 'a/b/c/journal.jsonl', 'NESTED\n');
+      assert.deepEqual(result, { created: true });
+      assert.equal(await readFile(join(root, 'a', 'b', 'c', 'journal.jsonl'), 'utf8'), 'NESTED\n');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns created:false for pre-existing external symlink without mutating outside probe', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-symlink-root-'));
+    const outside = await mkdtemp(join(tmpdir(), 'linke-safe-excl-symlink-out-'));
+    try {
+      // Dedicated outside probe with known bytes only — never touch sensitive files.
+      const probePath = join(outside, 'probe-only.txt');
+      const probeBytes = 'PROBE-BYTES-UNCHANGED\n';
+      await writeFile(probePath, probeBytes, { mode: 0o600 });
+      const before = await lstat(probePath);
+
+      await symlink(probePath, join(root, 'leaf.txt'), 'file');
+      const result = await safeCreateExclusiveText(root, 'leaf.txt', 'SHOULD-NOT-WRITE\n');
+      assert.deepEqual(result, { created: false });
+
+      const after = await lstat(probePath);
+      assert.equal(after.size, before.size);
+      assert.equal(after.mtimeMs, before.mtimeMs);
+      assert.equal(await readFile(probePath, 'utf8'), probeBytes);
+      assert.equal((await lstat(join(root, 'leaf.txt'))).isSymbolicLink(), true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('returns created:false when leaf path is an existing directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-dir-'));
+    try {
+      await mkdir(join(root, 'as-dir'));
+      const result = await safeCreateExclusiveText(root, 'as-dir', 'nope\n');
+      assert.deepEqual(result, { created: false });
+      const st = await lstat(join(root, 'as-dir'));
+      assert.equal(st.isDirectory(), true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not rename/unlink over an existing regular final file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-norename-'));
+    try {
+      await writeFile(join(root, 'final.txt'), 'KEEP\n', { mode: 0o600 });
+      const renameCalls = [];
+      const unlinkCalls = [];
+      const result = await safeCreateExclusiveText(root, 'final.txt', 'NEW\n', {
+        deps: {
+          lstat,
+          open: fsOpen,
+          mkdir,
+          rename: async (...args) => {
+            renameCalls.push(args);
+            return rename(...args);
+          },
+          unlink: async (...args) => {
+            unlinkCalls.push(args);
+            return unlink(...args);
+          },
+        },
+      });
+      assert.deepEqual(result, { created: false });
+      assert.equal(await readFile(join(root, 'final.txt'), 'utf8'), 'KEEP\n');
+      assert.equal(renameCalls.length, 0);
+      assert.equal(unlinkCalls.length, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects non-string text with SafeDataFileError', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-text-'));
+    try {
+      await assert.rejects(
+        () => safeCreateExclusiveText(root, 'x.txt', 123),
+        (error) => {
+          assertNoLeak(error, root, 'x.txt');
+          return true;
+        },
+      );
+      await assert.rejects(
+        () => safeCreateExclusiveText(root, 'x.txt', null),
+        (error) => {
+          assertNoLeak(error, root);
+          return true;
+        },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('opens final with O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW and never renames/unlinks final on success', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-safe-excl-flags-'));
+    try {
+      const opened = [];
+      const renameCalls = [];
+      const unlinkCalls = [];
+      const required =
+        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+
+      const result = await safeCreateExclusiveText(root, 'exclusive-flags.txt', 'FLAG\n', {
+        deps: {
+          lstat,
+          open: async (path, flags, mode) => {
+            opened.push({ path, flags, mode });
+            return fsOpen(path, flags, mode);
+          },
+          mkdir,
+          rename: async (...args) => {
+            renameCalls.push(args);
+            return rename(...args);
+          },
+          unlink: async (...args) => {
+            unlinkCalls.push(args);
+            return unlink(...args);
+          },
+        },
+      });
+      assert.deepEqual(result, { created: true });
+
+      const finalOpen = opened.find((entry) => String(entry.path).endsWith('exclusive-flags.txt'));
+      assert.ok(finalOpen, 'must open final path directly');
+      // Structural flag lock: exact exclusive create mask, not a fragile source includes check.
+      assert.equal((finalOpen.flags & required) === required, true);
+      assert.equal((finalOpen.flags & constants.O_EXCL) !== 0, true);
+      assert.equal((finalOpen.flags & constants.O_NOFOLLOW) !== 0, true);
+      assert.equal((finalOpen.flags & constants.O_TRUNC) === 0, true);
+      assert.equal((finalOpen.flags & constants.O_APPEND) === 0, true);
+      assert.equal(finalOpen.mode, 0o600);
+      assert.equal(renameCalls.length, 0);
+      assert.equal(unlinkCalls.length, 0);
+
+      // Second create must still report EEXIST path as created:false without rename/unlink.
+      opened.length = 0;
+      const second = await safeCreateExclusiveText(root, 'exclusive-flags.txt', 'OTHER\n', {
+        deps: {
+          lstat,
+          open: async (path, flags, mode) => {
+            opened.push({ path, flags, mode });
+            return fsOpen(path, flags, mode);
+          },
+          mkdir,
+          rename: async (...args) => {
+            renameCalls.push(args);
+            return rename(...args);
+          },
+          unlink: async (...args) => {
+            unlinkCalls.push(args);
+            return unlink(...args);
+          },
+        },
+      });
+      assert.deepEqual(second, { created: false });
+      assert.equal(await readFile(join(root, 'exclusive-flags.txt'), 'utf8'), 'FLAG\n');
+      assert.equal(renameCalls.length, 0);
+      assert.equal(unlinkCalls.length, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
