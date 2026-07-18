@@ -11,7 +11,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { watch, writeFileSync, readFileSync } from 'node:fs';
-import { readFile, writeFile, mkdir, lstat, symlink, rm } from 'node:fs/promises';
+import { access, readFile, writeFile, mkdir, lstat, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ERROR_CODES } from '../src/error-codes.js';
@@ -878,10 +878,11 @@ describe('shared write queue + plan/publish source contract (V1.37 C1)', () => {
     assert.ok(source.includes('auditIntegrityJournalPlanPayloads'));
     // Forbidden ambiguous publish(rawPre, recordLine).
     assert.equal(source.includes('publishAuditIntegrityEventLinkAtomicUnlocked'), false);
-    // C1: no state gate / dual-write stubs.
-    assert.equal(source.includes('assertDualWriteStateAbsent'), false);
-    assert.equal(source.includes('dual-write-state'), false);
+    // C2+: real state-absent gate inside shared queue callback (not stub/always-allow).
+    assert.ok(source.includes('assertDualWriteStateAbsentUnlocked'));
+    assert.ok(source.includes("from './audit-integrity-dual-write-state.js'"));
     assert.equal(source.includes('always-allow'), false);
+    assert.equal(source.includes('TODO'), false);
 
     assert.ok(
       source.includes("from './audit-event-schema.js'")
@@ -2944,6 +2945,528 @@ describe('V1.37 C1 plan/publish unique SoT + lease', () => {
         })
       ));
       assert.equal(receipt.state, 'appended');
+    });
+  });
+});
+
+// ── V1.37 C2: public journal-only state-absent gate ─────────────────────
+
+function dualWriteStateAbs(root) {
+  return join(root, 'audit', 'integrity-dual-write-state.json');
+}
+
+async function loadDualWriteStateModule() {
+  return import('../src/audit-integrity-dual-write-state.js');
+}
+
+function assertDualWriteBlocked(error, rootHint) {
+  assert.equal(error.name, 'AuditIntegrityDualWriteError');
+  assert.equal(error.code, ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED);
+  assert.equal(error.message, ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED);
+  if (rootHint) {
+    assert.ok(!error.message.includes(rootHint));
+  }
+  assert.ok(!error.message.includes('ENOENT'));
+  assert.ok(!error.message.includes('integrity-dual-write-state'));
+  return true;
+}
+
+function buildGateIdleState() {
+  const emptySha = createHash('sha256').update('').digest('hex');
+  return {
+    schemaVersion: 1,
+    status: 'idle',
+    generationId: GENERATION_ID,
+    journal: {
+      recordCount: 1,
+      headDigest: independentOpenLinkDigest(GENERATION_ID),
+      rawByteLength: 0,
+      rawSha256: emptySha,
+    },
+    events: {
+      present: false,
+      byteLength: 0,
+      sha256: emptySha,
+      strictRecordCount: 0,
+    },
+    lastTransactionId: null,
+    lastPayloadDigest: null,
+    lastSequence: null,
+  };
+}
+
+function buildGatePreparedState() {
+  const emptySha = createHash('sha256').update('').digest('hex');
+  const event = {
+    id: '22222222-2222-4222-8222-222222222222',
+    createdAt: '2026-07-19T00:00:00.000Z',
+    type: 'api.test',
+  };
+  const eventLineUtf8 = `${stringifyStrictCanonicalSanitizedEvent(event)}\n`;
+  // payloadDigest via independent domain formula matching shared SoT (tests may use either).
+  const payloadDigest = independentPayloadDigest(event);
+  const preHead = independentOpenLinkDigest(GENERATION_ID);
+  const postHead = 'c'.repeat(64);
+  return {
+    schemaVersion: 1,
+    status: 'prepared',
+    transactionId: '11111111-1111-4111-8111-111111111111',
+    generationId: GENERATION_ID,
+    retention: null,
+    event,
+    payloadDigest,
+    eventLineUtf8,
+    journal: {
+      pre: {
+        recordCount: 1,
+        headDigest: preHead,
+        rawByteLength: 240,
+        rawSha256: 'b'.repeat(64),
+      },
+      post: {
+        recordCount: 2,
+        headDigest: postHead,
+        rawByteLength: 480,
+        rawSha256: 'd'.repeat(64),
+        sequence: 1,
+        linkDigest: postHead,
+        previousLinkDigest: preHead,
+      },
+    },
+    events: {
+      pre: {
+        present: true,
+        byteLength: 10,
+        sha256: 'e'.repeat(64),
+        strictRecordCount: 1,
+      },
+      post: {
+        present: true,
+        byteLength: 80,
+        sha256: 'f'.repeat(64),
+        strictRecordCount: 2,
+      },
+    },
+  };
+}
+
+describe('V1.37 C2 public journal-only state-absent gate', () => {
+  async function withLease(root, fn) {
+    const { enqueueAuditIntegrityWriteTask } = await import('../src/audit-integrity-write-queue.js');
+    const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+    const resolvedRoot = await assertSafeDataRoot(root);
+    return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => fn(resolvedRoot, lease));
+  }
+
+  it('C2-1: state missing → public init still works (cold absent; no state create)', async () => {
+    await withTempRoot('c2-init-miss', async (root) => {
+      const { initializeAuditIntegrityJournal } = await loadJournalModule();
+      const receipt = await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      assert.equal(receipt.state, 'initialized');
+      await assert.rejects(() => access(dualWriteStateAbs(root)), { code: 'ENOENT' });
+    });
+  });
+
+  it('C2-2: state missing → public append still works (no state create)', async () => {
+    await withTempRoot('c2-app-miss', async (root) => {
+      const { initializeAuditIntegrityJournal, appendAuditIntegrityEvent } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const receipt = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      assert.equal(receipt.state, 'appended');
+      await assert.rejects(() => access(dualWriteStateAbs(root)), { code: 'ENOENT' });
+    });
+  });
+
+  it('C2-3: idle state → public init DIRECT_MUTATION_BLOCKED; journal bytes unchanged', async () => {
+    await withTempRoot('c2-init-idle', async (root) => {
+      const { initializeAuditIntegrityJournal } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+      });
+      const beforeState = await readFile(dualWriteStateAbs(root));
+      await assert.rejects(
+        () => initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
+      assert.deepEqual(await readFile(dualWriteStateAbs(root)), beforeState);
+    });
+  });
+
+  it('C2-4: idle state → public append blocked; journal bytes unchanged', async () => {
+    await withTempRoot('c2-app-idle', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const beforeJournal = await readFile(journalAbs(root));
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+      });
+      const beforeState = await readFile(dualWriteStateAbs(root));
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
+      assert.deepEqual(await readFile(dualWriteStateAbs(root)), beforeState);
+    });
+  });
+
+  it('C2-5: prepared state → public init blocked; no recover', async () => {
+    await withTempRoot('c2-init-prep', async (root) => {
+      const { initializeAuditIntegrityJournal } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGatePreparedState());
+      });
+      const beforeState = await readFile(dualWriteStateAbs(root), 'utf8');
+      assert.ok(beforeState.includes('"status":"prepared"'));
+      await assert.rejects(
+        () => initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.equal(await readFile(dualWriteStateAbs(root), 'utf8'), beforeState);
+      await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
+    });
+  });
+
+  it('C2-6: prepared state → public append blocked; no recover', async () => {
+    await withTempRoot('c2-app-prep', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const beforeJournal = await readFile(journalAbs(root));
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGatePreparedState());
+      });
+      const beforeState = await readFile(dualWriteStateAbs(root), 'utf8');
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
+      assert.equal(await readFile(dualWriteStateAbs(root), 'utf8'), beforeState);
+      assert.ok(beforeState.includes('"status":"prepared"'));
+    });
+  });
+
+  it('C2-7: invalid JSON state file → public init/append blocked; bytes unchanged', async () => {
+    await withTempRoot('c2-badjson', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const beforeJournal = await readFile(journalAbs(root));
+      await mkdir(join(root, 'audit'), { recursive: true });
+      await writeFile(dualWriteStateAbs(root), '{not-json', { mode: 0o600 });
+      const beforeState = await readFile(dualWriteStateAbs(root));
+      await assert.rejects(
+        () => initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID_ALT }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
+      assert.deepEqual(await readFile(dualWriteStateAbs(root)), beforeState);
+    });
+  });
+
+  it('C2-8: state symlink/dir → public init/append blocked; journal unchanged', async () => {
+    await withTempRoot('c2-symdir', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const beforeJournal = await readFile(journalAbs(root));
+
+      // Directory leaf.
+      await mkdir(dualWriteStateAbs(root), { recursive: true });
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
+      await rm(dualWriteStateAbs(root), { recursive: true, force: true });
+
+      // Symlink leaf.
+      const outside = await mkdtempSafe('c2-sym-out');
+      try {
+        const target = join(outside, 'state.json');
+        await writeFile(target, 'x', { mode: 0o600 });
+        await symlink(target, dualWriteStateAbs(root));
+        await assert.rejects(
+          () => appendAuditIntegrityEvent(root, {
+            generationId: GENERATION_ID,
+            event: { ...EVENT_A },
+          }),
+          (e) => assertDualWriteBlocked(e, root),
+        );
+        assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('C2-9: source/runtime public init/append enqueue→gate→unlocked (not gate-before-enqueue)', async () => {
+    const { readFile: rf } = await import('node:fs/promises');
+    const source = await rf(new URL('../src/audit-integrity-journal.js', import.meta.url), 'utf8');
+
+    const initIdx = source.indexOf('export async function initializeAuditIntegrityJournal');
+    const initBody = source.slice(initIdx, source.indexOf('export function computeAuditIntegrityEventPayloadDigest', initIdx));
+    assert.ok(initBody.includes('enqueueAuditIntegrityWriteTask'));
+    assert.ok(initBody.includes('assertDualWriteStateAbsentUnlocked'));
+    assert.ok(initBody.includes('initializeAuditIntegrityJournalUnlocked'));
+    // Gate must appear after enqueue callback start, not before return enqueue.
+    const enqueuePos = initBody.indexOf('return enqueueAuditIntegrityWriteTask');
+    const gatePos = initBody.indexOf('assertDualWriteStateAbsentUnlocked');
+    assert.ok(enqueuePos >= 0 && gatePos > enqueuePos, 'gate must be inside enqueue callback');
+
+    const appendIdx = source.indexOf('export async function appendAuditIntegrityEvent(');
+    const appendBody = source.slice(appendIdx, appendIdx + 2200);
+    const aEnq = appendBody.indexOf('return enqueueAuditIntegrityWriteTask');
+    const aGate = appendBody.indexOf('assertDualWriteStateAbsentUnlocked');
+    assert.ok(aEnq >= 0 && aGate > aEnq, 'append gate must be inside enqueue callback');
+    assert.ok(appendBody.includes('appendAuditIntegrityEventUnlocked'));
+
+    // Unlocked primitives must not gate.
+    const unlockedInitIdx = source.indexOf('export async function initializeAuditIntegrityJournalUnlocked');
+    const unlockedInitBody = source.slice(unlockedInitIdx, unlockedInitIdx + 1200);
+    assert.equal(unlockedInitBody.includes('assertDualWriteStateAbsentUnlocked'), false);
+    const unlockedAppendIdx = source.indexOf('export async function appendAuditIntegrityEventUnlocked');
+    const unlockedAppendBody = source.slice(unlockedAppendIdx, unlockedAppendIdx + 800);
+    assert.equal(unlockedAppendBody.includes('assertDualWriteStateAbsentUnlocked'), false);
+  });
+
+  it('C2-10: gate runs under active lease; lease proves critical section only', async () => {
+    await withTempRoot('c2-lease', async (root) => {
+      const { initializeAuditIntegrityJournal } = await loadJournalModule();
+      const { assertAuditIntegrityWriteLease } = await import('../src/audit-integrity-write-queue.js');
+      const stateMod = await loadDualWriteStateModule();
+      // Runtime: public init with missing state succeeds (lease acquired inside queue).
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      // Gate under lease with occupied rejects dual-write blocked (not SafeDataFileError).
+      await withLease(root, async (resolvedRoot, lease) => {
+        assertAuditIntegrityWriteLease(resolvedRoot, lease);
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+        await assert.rejects(
+          () => stateMod.assertDualWriteStateAbsentUnlocked(resolvedRoot, lease),
+          (e) => assertDualWriteBlocked(e, root),
+        );
+      });
+    });
+  });
+
+  it('C2-11: concurrency canary — occupied-first blocks; public-first then occupy; never journal write after occupied', async () => {
+    await withTempRoot('c2-canary', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      const { enqueueAuditIntegrityWriteTask } = await import('../src/audit-integrity-write-queue.js');
+      const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+      const resolvedRoot = await assertSafeDataRoot(root);
+
+      // Order A: occupy first via shared queue, then public append rejects; journal never created.
+      const occupyFirst = enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+      });
+      const publicAfter = occupyFirst.then(() => appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      }));
+      await assert.rejects(publicAfter, (e) => assertDualWriteBlocked(e, root));
+      await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
+
+      // Fresh root for order B.
+    });
+
+    await withTempRoot('c2-canary-b', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+      const { enqueueAuditIntegrityWriteTask } = await import('../src/audit-integrity-write-queue.js');
+      const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const before = await readFile(journalAbs(root));
+      const resolvedRoot = await assertSafeDataRoot(root);
+
+      // Hold queue: public append joins after block starts; then occupy after public completes.
+      let releaseBlock;
+      const blockP = new Promise((resolve) => { releaseBlock = resolve; });
+      const hold = enqueueAuditIntegrityWriteTask(resolvedRoot, async () => {
+        await blockP;
+      });
+
+      const publicP = appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      // Let public join the queue behind hold.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const occupyAfter = publicP.then(() => enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+      }));
+
+      releaseBlock();
+      await hold;
+      const receipt = await publicP;
+      assert.equal(receipt.state, 'appended');
+      await occupyAfter;
+      const afterJournal = await readFile(journalAbs(root));
+      assert.notDeepEqual(afterJournal, before);
+      // After occupied, further public mutation blocked; journal frozen.
+      const frozen = await readFile(journalAbs(root));
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_B },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), frozen);
+    });
+  });
+
+  it('C2-12: gate is real path occupancy (source bans always-allow/TODO/stub)', async () => {
+    const source = await readFile(
+      new URL('../src/audit-integrity-dual-write-state.js', import.meta.url),
+      'utf8',
+    );
+    assert.ok(source.includes('assertDualWriteStateAbsentUnlocked'));
+    assert.ok(source.includes('safeReadText') || source.includes('ENOENT'));
+    for (const ban of ['always-allow', 'alwaysAllow', 'TODO', 'skeleton', 'write-only']) {
+      assert.equal(source.includes(ban), false);
+    }
+  });
+
+  it('C2-13: any state file only from tests; C2 production path does not write state', async () => {
+    await withTempRoot('c2-no-create', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      await assert.rejects(() => access(dualWriteStateAbs(root)), { code: 'ENOENT' });
+    });
+  });
+
+  it('C2-14: hand publish idle|prepared|invalid|unsafe each block public init/append', async () => {
+    await withTempRoot('c2-matrix', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      const stateMod = await loadDualWriteStateModule();
+
+      async function expectBlocked(label) {
+        await assert.rejects(
+          () => initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID }),
+          (e) => assertDualWriteBlocked(e, root),
+          label,
+        );
+        await assert.rejects(
+          () => appendAuditIntegrityEvent(root, {
+            generationId: GENERATION_ID,
+            event: { ...EVENT_A },
+          }),
+          (e) => assertDualWriteBlocked(e, root),
+          label,
+        );
+      }
+
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGateIdleState());
+      });
+      await expectBlocked('idle');
+      await rm(dualWriteStateAbs(root), { force: true });
+
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, buildGatePreparedState());
+      });
+      await expectBlocked('prepared');
+      await rm(dualWriteStateAbs(root), { force: true });
+
+      await writeFile(dualWriteStateAbs(root), 'nope', { mode: 0o600 });
+      await expectBlocked('invalid');
+      await rm(dualWriteStateAbs(root), { force: true });
+
+      await mkdir(dualWriteStateAbs(root), { recursive: true });
+      await expectBlocked('dir');
+    });
+  });
+
+  it('C2-15: state module has full load/parse/publish (not write-only fake green)', async () => {
+    await withTempRoot('c2-full', async (root) => {
+      const stateMod = await loadDualWriteStateModule();
+      const idle = buildGateIdleState();
+      const parsed = stateMod.parseAuditIntegrityDualWriteStateText(`${JSON.stringify(idle)}\n`);
+      assert.equal(parsed.status, 'idle');
+      await withLease(root, async (resolvedRoot, lease) => {
+        await stateMod.publishDualWriteStateUnlocked(resolvedRoot, lease, idle);
+        const loaded = await stateMod.loadDualWriteStateUnlocked(resolvedRoot, lease);
+        assert.equal(loaded.status, 'idle');
+        await assert.rejects(
+          () => stateMod.assertDualWriteStateAbsentUnlocked(resolvedRoot, lease),
+          (e) => assertDualWriteBlocked(e, root),
+        );
+      });
+    });
+  });
+
+  it('C2-16: oversize state file blocks public mutation; journal unchanged', async () => {
+    await withTempRoot('c2-over', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const beforeJournal = await readFile(journalAbs(root));
+      await writeFile(dualWriteStateAbs(root), `${'z'.repeat(65537)}\n`, { mode: 0o600 });
+      await assert.rejects(
+        () => appendAuditIntegrityEvent(root, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => assertDualWriteBlocked(e, root),
+      );
+      assert.deepEqual(await readFile(journalAbs(root)), beforeJournal);
     });
   });
 });

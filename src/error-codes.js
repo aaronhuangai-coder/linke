@@ -62,6 +62,14 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR: 'audit-integrity-cross-store-io-error',
   AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED: 'audit-integrity-cross-store-bounds-exceeded',
   AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID: 'audit-integrity-cross-store-event-invalid',
+  // V1.37 dual-write state / coordinator (+5).
+  // state-invalid: schema/relationship; publish-preflight serialize >65536.
+  // io-error: state read size overlimit / SafeDataFileError (≠ state-invalid).
+  AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID: 'audit-integrity-dual-write-state-invalid',
+  AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR: 'audit-integrity-dual-write-io-error',
+  AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT: 'audit-integrity-dual-write-recovery-conflict',
+  AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH: 'audit-integrity-dual-write-cursor-mismatch',
+  AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED: 'audit-integrity-dual-write-direct-mutation-blocked',
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));

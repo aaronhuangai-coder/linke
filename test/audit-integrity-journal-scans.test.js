@@ -688,9 +688,10 @@ describe('C4 D: sensitive fields and path-free errors', () => {
 // ── E. import closed set + scan self-scope ───────────────────────────────
 
 describe('C4 E: import closed set and scan self-scope', () => {
-  it('17. journal production imports are closed: crypto, safe-data-files, error-codes, audit-event-schema, write-queue', async () => {
+  it('17. journal production imports are closed: crypto, safe-data-files, error-codes, audit-event-schema, write-queue, dual-write-state', async () => {
     const raw = await readText(PATHS.journal);
     // Closed set via raw static import extractor (not handwritten comment stripper).
+    // C2+: dual-write-state allowed for real public state-absent gate only.
     const imports = collectStaticImportSpecifiers(raw);
     const allowed = new Set([
       'node:crypto',
@@ -698,15 +699,16 @@ describe('C4 E: import closed set and scan self-scope', () => {
       './error-codes.js',
       './audit-event-schema.js',
       './audit-integrity-write-queue.js',
+      './audit-integrity-dual-write-state.js',
     ]);
-    assert.ok(imports.length >= 5, 'expected production imports');
+    assert.ok(imports.length >= 6, 'expected production imports');
     for (const spec of imports) {
       assert.ok(allowed.has(spec), `unexpected import: ${spec}`);
     }
     for (const need of allowed) {
       assert.ok(imports.includes(need), `missing required import: ${need}`);
     }
-    // Explicit bans (no audit-log/server/events/cross-store production wiring).
+    // Explicit bans (no audit-log/server/events/cross-store/coordinator production wiring).
     for (const ban of [
       './server.js',
       './agent.js',
@@ -715,7 +717,6 @@ describe('C4 E: import closed set and scan self-scope', () => {
       './gold-readiness.js',
       './audit-integrity-cross-store.js',
       './audit-integrity-dual-write.js',
-      './audit-integrity-dual-write-state.js',
       'node:fs',
       'node:fs/promises',
     ]) {

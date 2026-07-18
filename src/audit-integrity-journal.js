@@ -39,6 +39,7 @@ import {
 } from './safe-data-files.js';
 import { ERROR_CODES, assertRegisteredErrorCode } from './error-codes.js';
 import {
+  computeAuditIntegrityEventPayloadDigest as computeEventPayloadDigestSoT,
   projectStrictCanonicalSanitizedEvent,
   stringifyStrictCanonicalSanitizedEvent,
 } from './audit-event-schema.js';
@@ -46,6 +47,7 @@ import {
   assertAuditIntegrityWriteLease,
   enqueueAuditIntegrityWriteTask,
 } from './audit-integrity-write-queue.js';
+import { assertDualWriteStateAbsentUnlocked } from './audit-integrity-dual-write-state.js';
 
 /** Relative path under data root for the integrity journal; independent from legacy audit event storage. */
 export const AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH = 'audit/integrity-journal.jsonl';
@@ -67,7 +69,6 @@ const RECORD_KIND_OPEN = 'generation-open';
 const RECORD_KIND_EVENT = 'event-link';
 
 const DOMAIN_GENERATION_OPEN = 'linke.audit-integrity-journal.v1.generation-open\u0000';
-const DOMAIN_EVENT_PAYLOAD = 'linke.audit-integrity-journal.v1.event-payload\u0000';
 const DOMAIN_EVENT_LINK = 'linke.audit-integrity-journal.v1.event-link\u0000';
 
 const GENERATION_ID_RE = /^[0-9a-f]{32}$/;
@@ -142,16 +143,6 @@ function generationOpenLinkDigest(generationId) {
       + '\u0000'
       + 'null',
   );
-}
-
-/**
- * Write-time only: SHA256(DOMAIN_EVENT_PAYLOAD + canonicalEventUtf8).
- * Verify never recomputes this against events; format-check + link preimage only.
- * @param {string} canonicalEventUtf8
- * @returns {string}
- */
-function eventPayloadDigest(canonicalEventUtf8) {
-  return sha256Hex(DOMAIN_EVENT_PAYLOAD + canonicalEventUtf8);
 }
 
 /**
@@ -498,8 +489,9 @@ export async function initializeAuditIntegrityJournalUnlocked(resolvedRoot, leas
 
 /**
  * Exclusive create of generation-open (O_EXCL concurrent init only; not authenticity).
- * C1: resolve root → shared queue once → unlocked init (no state gate).
+ * C2+: resolve root → shared queue once → active lease → real state-absent gate → unlocked init.
  * Success receipt allowlist: state, generationId, recordCount:1, headDigest.
+ * Does not create dual-write state (bootstrap is C3).
  *
  * @param {string} root existing safe data root
  * @param {{ generationId: string }} options
@@ -516,28 +508,27 @@ export async function initializeAuditIntegrityJournal(root, options = {}) {
     mapIoError(error);
   }
 
-  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => (
-    initializeAuditIntegrityJournalUnlocked(resolvedRoot, lease, { generationId })
-  ));
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+    await assertDualWriteStateAbsentUnlocked(resolvedRoot, lease);
+    return initializeAuditIntegrityJournalUnlocked(resolvedRoot, lease, { generationId });
+  });
 }
 
 /**
- * @internal SoT — identical domain/canonical path as append write-time payloadDigest.
- * Thin public wrapper over private eventPayloadDigest; no formula fork.
- * Does not call sanitize; does not invent id/time.
+ * Compatibility export: thin wrapper over shared audit-event-schema SoT.
+ * Maps strict projection failures to AUDIT_INTEGRITY_EVENT_INVALID.
+ * Does not call sanitize; does not invent id/time; no formula fork.
  *
  * @param {unknown} strictEvent already strict-acceptable event (no sanitize defaults)
  * @returns {string} 64 lowercase hex
  * @throws {AuditIntegrityJournalError} AUDIT_INTEGRITY_EVENT_INVALID on strict failure
  */
 export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
-  let canonicalEventUtf8;
   try {
-    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(strictEvent);
+    return computeEventPayloadDigestSoT(strictEvent);
   } catch {
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
   }
-  return eventPayloadDigest(canonicalEventUtf8);
 }
 
 /**
@@ -562,9 +553,11 @@ export async function planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, o
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
   }
 
-  let canonicalEventUtf8;
+  // Shared payloadDigest SoT (audit-event-schema); validates strict projection too.
+  // Journal remains unique SoT for sequence / previous / link / raw post.
+  let payloadDigest;
   try {
-    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(event);
+    payloadDigest = computeEventPayloadDigestSoT(event);
   } catch {
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
   }
@@ -602,7 +595,6 @@ export async function planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, o
   // and verify forces sequence===line index; existing 4097 is already bounds-rejected.
   const sequence = verified.headSequence + 1;
   const previousLinkDigest = verified.headDigest;
-  const payloadDigest = eventPayloadDigest(canonicalEventUtf8);
   const linkDigest = eventLinkDigest({
     generationId,
     sequence,
@@ -810,9 +802,10 @@ export async function appendAuditIntegrityEventUnlocked(resolvedRoot, lease, opt
 
 /**
  * Append one event-link after full structure verify (shared write queue as initialize).
- * C1: resolve root → shared queue once → unlocked plan+publish (no state gate).
+ * C2+: resolve root → shared queue once → active lease → real state-absent gate → unlocked plan+publish.
  * Success receipt proves write-time post-sanitize projection digest + structural chain only —
  * not authenticity, not external audit event provenance.
+ * Does not create dual-write state (bootstrap is C3).
  *
  * Function signature semantics use only `{ generationId, event }`.
  * Plain options keys such as `sequence` / `previousLinkDigest` are ignored and must not be read.
@@ -861,12 +854,13 @@ export async function appendAuditIntegrityEvent(root, options = {}) {
     mapIoError(error);
   }
 
-  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => (
-    appendAuditIntegrityEventUnlocked(resolvedRoot, lease, {
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+    await assertDualWriteStateAbsentUnlocked(resolvedRoot, lease);
+    return appendAuditIntegrityEventUnlocked(resolvedRoot, lease, {
       generationId,
       event: eventSnapshot,
-    })
-  ));
+    });
+  });
 }
 
 /**

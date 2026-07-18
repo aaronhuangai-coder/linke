@@ -4,7 +4,7 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 55 = existing 51 (45 + 6 V1.35 journal) + 4 new V1.36 cross-store codes.
+ * Count: 60 = existing 55 (51 + 4 V1.36 cross-store) + 5 new V1.37 dual-write codes.
  *
  * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
  *   it is NOT counted as a new registration in this bump.
@@ -15,6 +15,9 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
  * - Cross-store size overlimit → AUDIT_INTEGRITY_CROSS_STORE_IO_ERROR (≠ bounds).
  * - Cross-store relationship failure → AUDIT_INTEGRITY_CROSS_STORE_BROKEN
  *   (≠ AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID for newline/JSON/canonical).
+ * - Dual-write size overlimit on *read* → AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR;
+ *   publish preflight serialize >65536 → AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID
+ *   (size≠bounds analogy preserved; dual-write has no bounds code).
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -83,6 +86,17 @@ const EXPECTED_ERROR_CODES = {
   AUDIT_INTEGRITY_CROSS_STORE_BOUNDS_EXCEEDED: 'audit-integrity-cross-store-bounds-exceeded',
   // event-invalid: newline / interior blank / JSON / strict / raw canonical mismatch
   AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID: 'audit-integrity-cross-store-event-invalid',
+  // --- new 5 (V1.37 dual-write state / coordinator; only these five are new in this bump) ---
+  // state-invalid: schema/key order/types/regex/relationship; publish-preflight serialize >65536
+  AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID: 'audit-integrity-dual-write-state-invalid',
+  // io: state read size overlimit / SafeDataFileError / root / permission — NEVER state-invalid
+  AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR: 'audit-integrity-dual-write-io-error',
+  // recovery: prepared store other / irrepar partial / post-check mismatch
+  AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT: 'audit-integrity-dual-write-recovery-conflict',
+  // cursor: idle exists but stores ≠ cursor preimage (external mutation)
+  AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH: 'audit-integrity-dual-write-cursor-mismatch',
+  // gate: state path occupied → public journal-only init/append blocked
+  AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED: 'audit-integrity-dual-write-direct-mutation-blocked',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
@@ -104,10 +118,18 @@ const NEW_CROSS_STORE_CODES = [
   ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID,
 ];
 
+const NEW_DUAL_WRITE_CODES = [
+  ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID,
+  ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+  ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT,
+  ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH,
+  ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED,
+];
+
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (55 entries = existing 51 + 4)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 55);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 55);
+  it('matches the exact closed-set ERROR_CODES registry (60 entries = existing 55 + 5)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 60);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 60);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -144,13 +166,38 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_EVENT_INVALID,
       'audit-integrity-cross-store-event-invalid',
     );
+    // Dual-write five codes exact values + size-read≠publish-invalid split.
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID,
+      'audit-integrity-dual-write-state-invalid',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+      'audit-integrity-dual-write-io-error',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT,
+      'audit-integrity-dual-write-recovery-conflict',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH,
+      'audit-integrity-dual-write-cursor-mismatch',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED,
+      'audit-integrity-dual-write-direct-mutation-blocked',
+    );
+    assert.notStrictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID,
+      ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 55);
+    assert.strictEqual(values.length, 60);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
@@ -179,6 +226,18 @@ describe('Gold error-code registry', () => {
     }
     // size≠bounds and broken≠event-invalid locks (values unique among the four).
     assert.strictEqual(new Set(NEW_CROSS_STORE_CODES).size, 4);
+  });
+
+  it('registers the five new dual-write codes with LinkeError message===code', () => {
+    assert.strictEqual(NEW_DUAL_WRITE_CODES.length, 5);
+    for (const code of NEW_DUAL_WRITE_CODES) {
+      assert.strictEqual(assertRegisteredErrorCode(code), code);
+      const error = new LinkeError(code);
+      assert.strictEqual(error.message, code);
+      assert.strictEqual(error.code, code);
+      assert.strictEqual(error.name, 'LinkeError');
+    }
+    assert.strictEqual(new Set(NEW_DUAL_WRITE_CODES).size, 5);
   });
 
   it('rejects raw or unregistered error text', () => {

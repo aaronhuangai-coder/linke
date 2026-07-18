@@ -1,5 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
+
+/**
+ * Unique SoT domain for audit integrity event payloadDigest.
+ * Shared by journal plan/public wrapper and dual-write state parser.
+ * Formula lives only here — do not copy into dual-write-state or coordinator.
+ */
+const AUDIT_INTEGRITY_EVENT_PAYLOAD_DOMAIN =
+  'linke.audit-integrity-journal.v1.event-payload\u0000';
 
 const STRING_FIELDS = [
   'id',
@@ -240,4 +248,19 @@ export function stringifyStrictCanonicalSanitizedEvent(event) {
     }
   }
   return JSON.stringify(ordered);
+}
+
+/**
+ * Unique SoT for event payloadDigest hex (journal domain + strict canonical UTF-8).
+ * Does not invent id/time; does not call sanitize.
+ * Throws the same strict projection Error on hostile shapes.
+ *
+ * @param {unknown} strictEvent already strict-acceptable event
+ * @returns {string} 64 lowercase hex
+ */
+export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
+  const canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(strictEvent);
+  return createHash('sha256')
+    .update(AUDIT_INTEGRITY_EVENT_PAYLOAD_DOMAIN + canonicalEventUtf8)
+    .digest('hex');
 }
