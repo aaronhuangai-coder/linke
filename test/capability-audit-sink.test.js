@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS } from '../src/supervisor-lifecycle-actions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1280,6 +1280,324 @@ describe('capability-audit-sink source architecture scans', () => {
     await appendCapabilityRealAuditProofEvent(
       suiteRoot,
       buildValidCanonicalEvent({ eventFingerprint: 'f'.repeat(64) }),
+    );
+  });
+});
+
+// ── V1.34 Task10: side-effect / sensitive / scope characterization scans ──
+// Forbidden forms assembled at runtime so this file does not self-trip scanners.
+
+const TASK10_KNOWN_JS = Object.freeze([
+  'src/supervisor-lifecycle.js',
+  'src/capability-audit-sink.js',
+  'src/supervisor-lifecycle-actions.js',
+  'src/agent.js',
+  'src/server.js',
+  'test/capability-audit-sink.test.js',
+  'test/supervisor-lifecycle-guarded-runner-execution-gate.test.js',
+  'test/supervisor-lifecycle-actions.test.js',
+]);
+
+function task10RelPath(absPath) {
+  const root = ROOT.replaceAll('\\', '/');
+  const full = String(absPath).replaceAll('\\', '/');
+  return full.startsWith(`${root}/`) ? full.slice(root.length + 1) : full;
+}
+
+/** Recursive collect; directory read failure throws with safe relative path (never silent). */
+function task10CollectFiles(dir, predicate, acc = []) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    const code = err && err.code ? ` (${err.code})` : '';
+    throw new Error(`task10CollectFiles failed to read directory: ${task10RelPath(dir)}${code}`);
+  }
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.superpowers') continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) task10CollectFiles(full, predicate, acc);
+    else if (entry.isFile() && predicate(full, entry.name)) acc.push(full);
+  }
+  return acc;
+}
+
+function task10AssertKnownPresent(files, required) {
+  const set = new Set(files.map(task10RelPath));
+  for (const req of required) assert.ok(set.has(req), `scan must include known file: ${req}`);
+}
+
+/** append*Line symbol ban (decl/arrow/method/alias all hit). Runtime-assembled. */
+function task10LegacyAppendLineSymbolPattern() {
+  return new RegExp(String.raw`\b` + ['ap', 'pend'].join('') + String.raw`\w*` + ['Li', 'ne'].join('') + String.raw`\b`);
+}
+
+function task10HostileLegacySamples() {
+  const s = ['ap', 'pend', 'LegacyAudit', 'Li', 'ne'].join('');
+  return {
+    call: `${s}(dataDir, rawLine)`,
+    arrow: `const ${s} = (dataDir) => {}`,
+    method: `const o = { ${s}(dataDir) {} }`,
+    aliasCall: `const alias = ${s}; alias(dataDir)`,
+  };
+}
+
+const TASK10_POSITIVE_CONTRACT_RES = Object.freeze([
+  /schema[\s_-]+agnostic/i,
+  /schema[\s_-]+indifferent/i,
+  /\bsink\s+accepts\s+(?:arbitrary|opaque|unvalidated)\b/i,
+  /\baccepts\s+(?:arbitrary|opaque|unvalidated)\s+events?\b/i,
+  /\b(?:arbitrary|unvalidated)\s+events?\b/i,
+]);
+
+/** Clause boundaries: ;；。 English/Chinese comma, English period + whitespace/end. */
+const TASK10_CLAUSE_SPLIT_RE = /[;；。,，]|\.(?=\s|$)/;
+
+/**
+ * Local negation for one positive match only (not whole-clause short-circuit).
+ * Pre: negation tightly targeting accept/schema phrase.
+ * Post: adjacent forbidden/rejected predicate of that phrase.
+ */
+function task10PositiveMatchNegated(clause, start, end) {
+  const match = clause.slice(start, end);
+  const before = clause.slice(0, start);
+  const after = clause.slice(end);
+  const preWindow = before.slice(-80);
+  const postWindow = after.slice(0, 80);
+
+  // Accept / arbitrary / unvalidated family — pre-negation on the claim.
+  if (/(?:accept|arbitrary|opaque|unvalidated)/i.test(match)) {
+    if (
+      /(?:MUST\s+NOT|must\s+not|do(?:es)?\s+not|don'?t|doesn'?t|cannot|can\s+not|never|不得|不要|不能|禁止|拒绝|不得存在)(?:\s+[\w./-]*){0,6}\s*$/i
+        .test(preWindow)
+    ) {
+      return true;
+    }
+  }
+
+  // Schema-agnostic / schema-indifferent family — pre-negation on the claim.
+  if (/schema/i.test(match)) {
+    if (
+      /(?:is\s+not|are\s+not|\bno\b|\bnot\b|non|不得|不要|不能|禁止|拒绝|非)(?:[\s\w./-]*){0,4}\s*$/i
+        .test(preWindow)
+    ) {
+      return true;
+    }
+  }
+
+  // Post: subject of the positive phrase is forbidden/rejected (not unrelated 不得 later).
+  if (/\b(?:is|are|was|were)\s+(?:forbidden|forbid(?:den)?|banned?|rejected)\b/i.test(postWindow)) {
+    return true;
+  }
+  if (/^\s*(?:forbidden|forbid(?:den)?|banned?|rejected)\b/i.test(postWindow)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Positive sink-contract hits with boundary split + per-match local negation.
+ * REJECTED token or line-leading R-* rejects the whole line (not mid-clause R-*).
+ */
+function task10FindPositiveSinkContractHits(text) {
+  const hits = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/\bREJECTED\b/.test(line)) continue;
+    const trimmedLine = line.trim();
+    if (/^(?:[-*•]\s*)?R-[A-Za-z][A-Za-z0-9]*\b/.test(trimmedLine)) continue;
+
+    for (const clause of line.split(TASK10_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean)) {
+      let hit = false;
+      for (const re of TASK10_POSITIVE_CONTRACT_RES) {
+        const gre = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+        let m;
+        while ((m = gre.exec(clause)) !== null) {
+          if (task10PositiveMatchNegated(clause, m.index, m.index + m[0].length)) continue;
+          hit = true;
+          break;
+        }
+        if (hit) break;
+      }
+      if (hit) hits.push(clause);
+    }
+  }
+  return hits;
+}
+
+function task10StripJsComments(src) {
+  return String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, (b) => b.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:\\])\/\/[^\n]*/g, '$1');
+}
+
+function task10StaticSpecifiers(src) {
+  const code = task10StripJsComments(src);
+  const out = [];
+  const re = /(?:\bfrom\s+|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)(['"])([^'"]+)\1/g;
+  let m;
+  while ((m = re.exec(code)) !== null) out.push(m[2]);
+  return out;
+}
+
+/** Basename/path exact module match at any relative depth (not lifecycle-actions as lifecycle). */
+function task10SpecMatchesModule(spec, name) {
+  const norm = String(spec).replaceAll('\\', '/');
+  const base = (norm.split('/').pop() || '').replace(/\.js$/i, '');
+  return base === name || norm === name || norm === `${name}.js`
+    || norm.endsWith(`/${name}`) || norm.endsWith(`/${name}.js`);
+}
+
+function task10ForbiddenSpecs(src, names) {
+  return task10StaticSpecifiers(src).flatMap((spec) => (
+    names.filter((n) => task10SpecMatchesModule(spec, n)).map((n) => `${n} via ${spec}`)
+  ));
+}
+
+function task10HasCall(src, symbol) {
+  return new RegExp(String.raw`\b${symbol}\s*\(`).test(task10StripJsComments(src));
+}
+
+function task10HasImportBinding(src, symbol) {
+  return new RegExp(String.raw`\bimport\s*\{[^}]*\b${symbol}\b`).test(task10StripJsComments(src));
+}
+
+describe('V1.34 Task10 side-effect / sensitive / scope scans (sink tree)', () => {
+  it('legacy append*Line symbol absent from src/**+test/** JS; rejects call/arrow/method/alias hostiles', () => {
+    const pat = task10LegacyAppendLineSymbolPattern();
+    for (const [kind, sample] of Object.entries(task10HostileLegacySamples())) {
+      assert.equal(pat.test(sample), true, `hostile ${kind}`);
+    }
+    assert.equal(pat.test('append\\w*Line'), false);
+
+    const jsFiles = [
+      ...task10CollectFiles(join(ROOT, 'src'), (_f, n) => n.endsWith('.js')),
+      ...task10CollectFiles(join(ROOT, 'test'), (_f, n) => n.endsWith('.js')),
+    ];
+    assert.ok(jsFiles.length > 20);
+    task10AssertKnownPresent(jsFiles, TASK10_KNOWN_JS);
+    const offenders = jsFiles.filter((f) => pat.test(readFileSync(f, 'utf8'))).map(task10RelPath);
+    assert.deepEqual(offenders, [], `append*Line symbol: ${offenders.join(', ')}`);
+  });
+
+  it('docs/**+src/** no positive sink-schema contract at clause level; pure+mixed hostiles detected', () => {
+    // Runtime-assembled so continuous positive phrases are not tree-scan self-hits.
+    const pure = ['sink accepts ', 'arbitrary ', 'unvalidated event ', 'with schema', '-agnostic ', 'and schema', '-indifferent validation'].join('');
+    assert.ok(task10FindPositiveSinkContractHits(pure).length >= 1, 'pure hostile');
+
+    // Boundary matrix: English period+ws, English/Chinese comma must expose positive half.
+    const boundaryPositives = [
+      ['do not validate', '. ', 'sink accepts ', 'arbitrary events'].join(''),
+      ['do not validate', ', ', 'sink accepts ', 'arbitrary events'].join(''),
+      ['不要校验', '，', 'sink accepts ', 'arbitrary events'].join(''),
+      ['do not validate', '; ', 'sink accepts ', 'arbitrary events'].join(''),
+    ];
+    for (const sample of boundaryPositives) {
+      assert.ok(
+        task10FindPositiveSinkContractHits(sample).some((h) => /sink accepts\s+arbitrary events/i.test(h)),
+        `boundary positive: ${sample}`,
+      );
+    }
+
+    // Local negation must not whole-clause short-circuit unrelated not/不得.
+    const localNotNegated = [
+      ['sink accepts ', 'arbitrary events', ' and is not coupled to HTTP'].join(''),
+      ['schema', '-indifferent sinks ', '不得写入 events.jsonl'].join(''),
+    ];
+    for (const sample of localNotNegated) {
+      assert.ok(
+        task10FindPositiveSinkContractHits(sample).length >= 1,
+        `local non-short-circuit: ${sample}`,
+      );
+    }
+
+    // Pure negatives / rejected rows must not hit.
+    const pureNegatives = [
+      'MUST NOT accept arbitrary events',
+      'do not accept arbitrary events',
+      "don't accept arbitrary events",
+      "doesn't accept arbitrary events",
+      'cannot accept arbitrary events',
+      'sink must not accept arbitrary events',
+      'sink is not schema-indifferent',
+      'schema-indifferent sinks are forbidden',
+      'REJECTED = second action-ID list / sink schema-indifferent / prefer-lifecycle-only validation',
+      '// - no sink-schema-indifferent contract language in docs/src',
+      '不得存在 sink accepts arbitrary unvalidated event',
+      'MUST NOT accept arbitrary events; sink is not schema-agnostic',
+      'R-SinkSchemaIndifferent is an explicit rejection row about schema-indifferent sinks',
+      '- R-ArbitraryEvents: accepts arbitrary events is rejected',
+      'event schema/op/action 非无关、必须校验',
+    ];
+    for (const line of pureNegatives) {
+      assert.deepEqual(task10FindPositiveSinkContractHits(line), [], line);
+    }
+    assert.ok(
+      task10FindPositiveSinkContractHits('note about R-SinkSchemaIndifferent; sink accepts arbitrary events').length >= 1,
+      'mid-clause R-* must not whole-line-allow later positive',
+    );
+
+    const targets = [
+      ...task10CollectFiles(join(ROOT, 'docs'), (_f, n) => n.endsWith('.md')),
+      ...task10CollectFiles(join(ROOT, 'src'), (_f, n) => n.endsWith('.js')),
+    ];
+    assert.ok(targets.length > 10);
+    task10AssertKnownPresent(targets, TASK10_KNOWN_JS.filter((p) => p.startsWith('src/')));
+    const offenders = [];
+    for (const file of targets) {
+      const hits = task10FindPositiveSinkContractHits(readFileSync(file, 'utf8'));
+      if (hits.length) offenders.push(`${task10RelPath(file)}: ${hits[0]}`);
+    }
+    assert.deepEqual(offenders, [], offenders.join(' | '));
+  });
+
+  it('import graph any relative depth (comment-stripped): lifecycle/sink/actions + cwd-stable agent/server', () => {
+    const lifecycleSrc = readFileSync(LIFECYCLE_SRC, 'utf8');
+    const sinkSrc = readFileSync(SINK_SRC, 'utf8');
+    const actionsSrc = readFileSync(ACTIONS_SRC, 'utf8');
+
+    assert.deepEqual(task10ForbiddenSpecs(lifecycleSrc, ['audit-log']), []);
+    assert.equal(task10HasCall(lifecycleSrc, 'appendAuditEvent'), false);
+    assert.equal(task10HasImportBinding(lifecycleSrc, 'appendAuditEvent'), false);
+
+    assert.deepEqual(task10ForbiddenSpecs(sinkSrc, ['audit-log', 'supervisor-lifecycle']), []);
+    assert.equal(task10HasCall(sinkSrc, 'appendAuditEvent'), false);
+
+    assert.deepEqual(
+      task10ForbiddenSpecs(actionsSrc, ['supervisor-lifecycle', 'capability-audit-sink', 'audit-log']),
+      [],
+    );
+    assert.equal(task10HasCall(actionsSrc, 'appendAuditEvent'), false);
+    assert.equal(task10HasCall(actionsSrc, 'appendCapabilityRealAuditProofEvent'), false);
+
+    for (const [label, src] of [
+      ['agent', readFileSync(join(ROOT, 'src/agent.js'), 'utf8')],
+      ['server', readFileSync(join(ROOT, 'src/server.js'), 'utf8')],
+    ]) {
+      for (const token of [
+        'RealAuditProof',
+        'capability-audit-sink',
+        'invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof',
+        'authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof',
+        'appendCapabilityRealAuditProofEvent',
+        'setCapabilityRealAuditSinkHooksForTest',
+      ]) {
+        assert.equal(src.includes(token), false, `${label} ${token}`);
+      }
+    }
+
+    const hostile = [
+      "import x from '../../lib/audit-log.js'",
+      "const m = require('../vendor/supervisor-lifecycle')",
+      "await import('../../../capability-audit-sink.js')",
+      "import './nested/audit-log'",
+    ].join('\n');
+    assert.ok(task10ForbiddenSpecs(hostile, ['audit-log']).length >= 2);
+    assert.ok(task10ForbiddenSpecs(hostile, ['supervisor-lifecycle']).length >= 1);
+    assert.ok(task10ForbiddenSpecs(hostile, ['capability-audit-sink']).length >= 1);
+    assert.deepEqual(
+      task10ForbiddenSpecs("import { x } from './supervisor-lifecycle-actions.js'", ['supervisor-lifecycle']),
+      [],
     );
   });
 });

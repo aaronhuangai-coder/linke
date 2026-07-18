@@ -57,7 +57,8 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS,
   listSupervisorLifecycleActionIds,
@@ -67,6 +68,8 @@ import {
   CAPABILITY_REAL_AUDIT_MAX_EVENT_LINES,
   setCapabilityRealAuditSinkHooksForTest,
 } from '../src/capability-audit-sink.js';
+
+const TASK10_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const NOW = new Date('2026-07-09T08:00:00.000Z');
 const BASE_CONFIG = Object.freeze({
@@ -8678,5 +8681,161 @@ describe('V1.34 C4 gate non-live realAudit honesty', () => {
         && /const realAuditCapabilityImplementationReady\s*=/.test(gateSlice),
       'gate must document realAudit local/non-live field semantics',
     );
+  });
+});
+
+// ── V1.34 Task10: side-effect / sensitive / scope scans (gate + package + receipt) ──
+
+const TASK10_RA_START = '// ── V1.34 Real audit capability sink persist + RealAuditProof ──';
+const TASK10_RA_INVOKE = 'export async function invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof';
+const TASK10_RA_END = 'export function recomputeSupervisorLifecycleGuardedRunnerRealRenderPlistForTest';
+const TASK10_RA_SINK_CALL = 'await appendCapabilityRealAuditProofEvent(resolvedDataRoot, canonicalEvent)';
+const TASK10_PKG_KEYS = Object.freeze([
+  'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies',
+  'bundledDependencies', 'bundleDependencies', 'overrides', 'resolutions',
+  'workspaces', 'packageManager',
+]);
+const TASK10_DIAG_KEYS = Object.freeze([
+  'dataDir', 'stack', 'errno', 'message', 'code', 'path', 'syscall', 'address', 'port', 'dest', 'filename',
+  // Raw attemptRef (not attemptRefFingerprint) is sensitive if echoed on receipts.
+  'attemptRef',
+]);
+const TASK10_ERRNO =
+  /\bE(?:NOENT|ACCES|PERM|EXIST|INVAL|IO|AGAIN|BUSY|FBIG|ISDIR|LOOP|NAMETOOLONG|NFILE|NODEV|NXIO|ROFS|TIMEDOUT|CONNRESET|CONNREFUSED|ADDRINUSE)\b/;
+
+function task10Count(hay, needle) {
+  let n = 0;
+  for (let i = 0; (i = hay.indexOf(needle, i)) !== -1; i += needle.length) n += 1;
+  return n;
+}
+
+/** Unique start/invoke/end markers, ordered; slice excludes next export (never EOF). */
+function task10SliceRealAuditProof(src) {
+  assert.strictEqual(task10Count(src, TASK10_RA_START), 1, 'start marker unique');
+  assert.strictEqual(task10Count(src, TASK10_RA_INVOKE), 1, 'invoke export unique');
+  assert.strictEqual(task10Count(src, TASK10_RA_END), 1, 'end marker unique');
+  const start = src.indexOf(TASK10_RA_START);
+  const invoke = src.indexOf(TASK10_RA_INVOKE);
+  const end = src.indexOf(TASK10_RA_END);
+  assert.ok(start >= 0 && invoke > start && end > invoke && end < src.length, 'start < invoke < end < EOF');
+  assert.ok(src.slice(end).startsWith(TASK10_RA_END));
+  const proofRegion = src.slice(start, end);
+  const invokeSlice = src.slice(invoke, end);
+  assert.ok(invokeSlice.startsWith(TASK10_RA_INVOKE));
+  assert.ok(invokeSlice.includes(TASK10_RA_SINK_CALL));
+  assert.ok(/await\s+appendCapabilityRealAuditProofEvent\s*\(\s*resolvedDataRoot\s*,\s*canonicalEvent\s*\)/.test(invokeSlice));
+  assert.ok(!proofRegion.includes(TASK10_RA_END) && !invokeSlice.includes(TASK10_RA_END));
+  assert.ok(!proofRegion.includes('export function buildSupervisorLifecycleGuardedRunnerExecutionGate'));
+  return { proofRegion, invokeSlice };
+}
+
+function task10CollectKeys(value, acc = new Set()) {
+  if (value == null || typeof value !== 'object') return acc;
+  if (Array.isArray(value)) {
+    for (const item of value) task10CollectKeys(item, acc);
+    return acc;
+  }
+  for (const [k, v] of Object.entries(value)) {
+    acc.add(k);
+    task10CollectKeys(v, acc);
+  }
+  return acc;
+}
+
+/** Recursive JSON keys + Node errno; does not false-kill outcomeCode/evidenceCode "Code". */
+function task10ReceiptDiagnosticLeak(rc) {
+  const keys = task10CollectKeys(rc);
+  for (const k of TASK10_DIAG_KEYS) {
+    if (keys.has(k)) return `key:${k}`;
+  }
+  const json = JSON.stringify(rc);
+  if (TASK10_ERRNO.test(json)) return 'node-errno';
+  if (/\bat\s+[A-Za-z_$][\w$]*\s+\([^)\n]+:\d+:\d+\)/.test(json)) return 'stack-frame';
+  if (/Error:\s+\S/.test(json)) return 'error-message';
+  return null;
+}
+
+describe('V1.34 Task10 side-effect / sensitive / scope scans (gate)', () => {
+  it('package.json has no install-affecting dependency surface keys', () => {
+    // JSON.parse surfaces corrupt package.json naturally (no try/catch).
+    const pkg = JSON.parse(readFileSync(join(TASK10_ROOT, 'package.json'), 'utf8'));
+    for (const key of TASK10_PKG_KEYS) {
+      assert.equal(Object.hasOwn(pkg, key), false, `absent ${key}`);
+      assert.equal(pkg[key], undefined, `undefined ${key}`);
+    }
+    assert.equal(typeof pkg.name, 'string');
+    assert.equal(pkg.type, 'module');
+  });
+
+  it('RealAuditProof slice markers unique+ordered; invoke has sink call; no second queue/pre-read', () => {
+    const src = readFileSync(join(TASK10_ROOT, 'src/supervisor-lifecycle.js'), 'utf8');
+    const { proofRegion, invokeSlice } = task10SliceRealAuditProof(src);
+    assert.equal(/\bnew Map\s*\(/.test(invokeSlice), false);
+    assert.equal(invokeSlice.includes('capabilityAuditSinkQueues'), false);
+    assert.equal(/enter[_-]?queue/i.test(invokeSlice), false);
+    assert.equal(/\benqueue\w*Queue\b/.test(invokeSlice), false);
+    assert.equal(/\bsafeReadText\s*\(/.test(invokeSlice), false);
+    assert.equal(/\bappendAuditEvent\s*\(/.test(invokeSlice), false);
+    assert.equal(invokeSlice.includes('capability-proof-attempts.jsonl'), false);
+    assert.equal(invokeSlice.includes('audit/events.jsonl'), false);
+    assert.equal(proofRegion.includes('capability-proof-attempts.jsonl'), false);
+    assert.equal(/\bsafeReadText\s*\(/.test(proofRegion), false);
+    assert.equal(/\bappendAuditEvent\s*\(/.test(proofRegion), false);
+  });
+
+  it('success RealAuditProof receipt: success truth + recursive key diagnostics + sink line canonical', async () => {
+    await withTempAuditRoot(async (root) => {
+      const attemptRef = REAL_AUDIT_FIXED_ATTEMPT_REF;
+      const rc = await invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof(
+        buildRealAuditProofRequest({ attemptRef }),
+        buildRealAuditContext(root),
+      );
+      assert.strictEqual(rc.state, 'completed');
+      assert.strictEqual(rc.outcomeCode, 'capability-real-audit-persisted');
+      assert.strictEqual(rc.hostSideEffectOccurred, true);
+      assert.strictEqual(rc.hostMutationOccurred, true);
+      assert.strictEqual(rc.auditPersistOccurred, true);
+      assert.strictEqual(rc.mutationOutcome, 'persisted');
+      assert.strictEqual(rc.primaryBlocker, null);
+      assert.match(rc.auditEventFingerprint, /^[0-9a-f]{64}$/);
+      assert.strictEqual(rc.evidenceCode, 'capability-real-audit-implementation-ready');
+
+      const json = JSON.stringify(rc);
+      assert.ok(!json.includes(root) && !json.includes(tmpdir()) && !json.includes(TASK10_ROOT));
+      assert.ok(!/\/(?:var\/folders|private\/var|tmp)\/[^"\\\s]+/.test(json));
+      assert.ok(!json.includes(attemptRef));
+      assert.ok(!json.includes('events.jsonl') && !json.includes('capability-proof-attempts.jsonl'));
+
+      assert.strictEqual(task10ReceiptDiagnosticLeak(rc), null, `diag: ${json.slice(0, 160)}`);
+      // outcomeCode / evidenceCode must not false-kill on the substring "code".
+      assert.ok(!task10ReceiptDiagnosticLeak({
+        outcomeCode: rc.outcomeCode,
+        evidenceCode: rc.evidenceCode,
+        primaryBlocker: rc.primaryBlocker,
+      }));
+      assert.ok(!Object.hasOwn(rc, 'attemptRef'), 'success receipt must not carry raw attemptRef');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ dataDir: '/tmp/x' }), 'key:dataDir');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ stack: 'Error\n    at x (f.js:1:1)' }), 'key:stack');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ errno: -2 }), 'key:errno');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ message: 'boom' }), 'key:message');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ nested: { code: 'ENOENT' } }), 'key:code');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ note: 'failed with ENOENT here' }), 'node-errno');
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ attemptRef: 'hostile-ref' }), 'key:attemptRef');
+      assert.strictEqual(
+        task10ReceiptDiagnosticLeak({ nested: { deeper: { attemptRef: 'nested-hostile-ref' } } }),
+        'key:attemptRef',
+      );
+      // Generic `events` key is not banned — freeze is events.jsonl path/content only.
+      assert.strictEqual(task10ReceiptDiagnosticLeak({ events: 1 }), null);
+
+      const raw = await readFile(join(root, REAL_AUDIT_SINK_REL), 'utf8');
+      assert.ok(raw.endsWith('\n'));
+      const parsed = JSON.parse(raw.slice(0, -1));
+      assert.deepStrictEqual(Object.keys(parsed), [...REAL_AUDIT_CANONICAL_KEYS]);
+      assert.strictEqual(parsed.eventFingerprint, rc.auditEventFingerprint);
+      assert.match(parsed.attemptRefFingerprint, /^[0-9a-f]{64}$/);
+      assert.ok(!raw.includes(attemptRef) && !raw.includes(root));
+      assert.strictEqual(await pathExists(join(root, 'audit/events.jsonl')), false);
+    });
   });
 });
