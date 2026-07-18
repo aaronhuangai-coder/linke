@@ -6,22 +6,22 @@
  * Does NOT provide authenticity or cryptographic anti-tamper resistance.
  * No external trusted anchor / HMAC / signature.
  * Cannot detect: self-consistent suffix rewrite; legal tail truncation;
- * events-only mutation; full-file / new-generation replacement.
+ * external-event-store-only mutation; full-file / new-generation replacement.
  * payloadDigest at verify: format check + link preimage input only;
  * does NOT recompute event payload preimage and does NOT look up events.
  *
  * BLOCKED (V1.35 — do not claim complete):
- * - T6d.3 complete / M6d Exit / production-hardening ready / production integration
- * - production dual-write (events.jsonl ↔ integrity-journal)
+ * - BLOCKED / not delivered: T6d.3 complete / M6d Exit / production-hardening ready / production integration
+ * - BLOCKED: production dual-write (external audit event store ↔ integrity journal)
  * - public surface (server/agent/Web/HTTP/CLI)
  * - external trusted anchor / HMAC / signature / head file / priorChainHeadDigest
- * - new generation after chain-break / automatic next generation / recovery / auto-repair / truncate
+ * - BLOCKED / not delivered: new generation after chain-break / automatic next generation / recovery / auto-repair / truncate
  * - retention / rotation / monitor / alert
  * - capability / approval binding
  * - multi-process exclusive writer lock
  * - missing trusted-recovery authorization model
  * - authenticity / tamper-resistance / cryptographic anti-tamper / compliance audit-chain complete
- * - detection of: suffix rewrite | tail truncation | events-only mutation | full-file replacement
+ * - detection of: suffix rewrite | tail truncation | external-event-store-only mutation | full-file replacement
  *   (no external anchor; honest limitation tests must PASS with verify success)
  *
  * ALLOWED capability name only:
@@ -40,7 +40,7 @@ import {
 import { ERROR_CODES, assertRegisteredErrorCode } from './error-codes.js';
 import { stringifyStrictCanonicalSanitizedEvent } from './audit-event-schema.js';
 
-/** Relative path under data root for the integrity journal (not events.jsonl). */
+/** Relative path under data root for the integrity journal; independent from legacy audit event storage. */
 export const AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH = 'audit/integrity-journal.jsonl';
 
 /** safeReadText maxBytes; size overlimit → io-error (never bounds-exceeded). */
@@ -507,7 +507,7 @@ export async function initializeAuditIntegrityJournal(root, options = {}) {
 /**
  * Append one event-link after full structure verify (same per-root write queue as initialize).
  * Success receipt proves write-time post-sanitize projection digest + structural chain only —
- * not authenticity, not events.jsonl provenance.
+ * not authenticity, not external audit event provenance.
  *
  * Function signature semantics use only `{ generationId, event }`.
  * Plain options keys such as `sequence` / `previousLinkDigest` are ignored and must not be read.
