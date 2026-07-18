@@ -1868,10 +1868,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.34 Real audit capability M6d-prep', () => {
-  it('title and badge claim V1.34 as current', () => {
-    assertReadmeContains(/# Linke V1\.34/, 'README title should mention V1.34');
-    assertReadmeContains(/\*\*当前版本：V1\.34\*\*/, 'README badge should mention V1.34');
+describe('README — V1.35 unkeyed audit hash-chain structural consistency foundation', () => {
+  it('title and badge claim V1.35 as current', () => {
+    assertReadmeContains(/# Linke V1\.35/, 'README title should mention V1.35');
+    assertReadmeContains(/\*\*当前版本：V1\.35\*\*/, 'README badge should mention V1.35');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.34\*\*/, 'README badge must not still claim V1.34 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.34$/m, 'README title must not still claim V1.34 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.33\*\*/, 'README badge must not still claim V1.33 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.33$/m, 'README title must not still claim V1.33 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.32\*\*/, 'README badge must not still claim V1.32 as current');
@@ -1926,32 +1928,59 @@ describe('README — V1.34 Real audit capability M6d-prep', () => {
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions third real audit proof, independent sink, and M6d-prep honesty', () => {
-    assertReadmeContains(/third real capability|第三个.*real capability|real audit capability/i, 'badge third real audit capability');
-    assertReadmeContains(/M6d-prep/, 'badge M6d-prep only');
-    assertReadmeContains(/realAuditCapabilityImplementationReady:true/, 'badge local realAudit true');
-    assertReadmeContains(/capability-proof-attempts\.jsonl/, 'badge independent capability proof sink path');
-    assertReadmeContains(/invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof/, 'badge RealAuditProof');
-    assertReadmeContains(/realCapabilityImplementationsReady:false/, 'badge global real capability false');
-    assertReadmeContains(/3\/7/, 'badge global real kinds 3/7');
-    assertReadmeContains(/realAttemptAuditImplementationReady:false/, 'badge realAttemptAudit still false');
-    assertReadmeContains(/executeCapabilityAuthorized:false/, 'badge execute authorized false');
-    assertReadmeContains(/realRunnerWiringReady:false/, 'badge real wiring false');
-    assertReadmeContains(/executionEligible:false/, 'badge executionEligible false');
-    assertReadmeContains(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked/i, 'badge Gold still blocked honesty');
-    assertReadmeContains(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i, 'badge not M6d Exit');
-    assertReadmeContains(/不[\s\S]*宣称[\s\S]*V2\.0 Gold|不宣称 V2\.0 Gold|跨局域网|not.*cross-LAN|不是.*跨局域网/i, 'badge no V2.0 Gold/cross-LAN claim');
-    assertReadmeDoesNotContain(/\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
-    assert.doesNotMatch(
-      readme.split('\n').slice(0, 20).join('\n'),
-      /production-hardening ready/i,
-      'current badge/table must not claim production-hardening ready',
+  it('badge mentions V1.35 structural foundation signature ceiling and honest boundaries', () => {
+    const top = readme.split('\n').slice(0, 20).join('\n');
+    assert.ok(
+      top.includes('V1.35 unkeyed audit hash-chain structural consistency foundation implementation')
+        || top.includes('无密钥哈希链结构一致性基座'),
+      'top badge must include signature ceiling or ZH equivalent',
     );
+    assert.ok(top.includes('audit/integrity-journal.jsonl'), 'top badge journal path');
+    assert.ok(
+      top.includes('unkeyed hash-chain structural consistency foundation')
+        || top.includes('无密钥哈希链结构一致性基座'),
+      'top badge unkeyed structural name',
+    );
+    assert.ok(/T6d\.3 partial foundation only|partial foundation only/i.test(top), 'top badge T6d.3 partial only');
+    assert.ok(/not dual-write|no production dual-write|不是 dual-write|不.*dual-write/i.test(top), 'top badge not dual-write');
+    assert.ok(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i.test(top), 'top badge not M6d Exit');
+    assert.ok(/not production integration|不是 production integration|无 production integration/i.test(top), 'top badge not production integration');
+    assert.ok(/not Gold|不是 Gold|Gold 依旧 blocked|Gold remains blocked/i.test(top), 'top badge not Gold');
+    assert.ok(/not production integration|production-hardening 仍 partial|production-hardening remains partial|不是.*production integration/i.test(top));
+    assert.ok(/4 ready[\s\S]*4 partial[\s\S]*1 blocked|4 ready \/ 4 partial \/ 1 blocked \/ total 9/i.test(top), 'top badge Gold 4/4/1/9');
+    assert.ok(/M1 route open|M1.*open/i.test(top), 'top badge M1 route open');
+    assert.ok(/M2 denied|M2.*denied/i.test(top), 'top badge M2 denied');
+    assert.ok(/realCapabilityImplementationsReady:false/.test(top), 'top badge global real false');
+    assert.ok(/realAttemptAuditImplementationReady:false/.test(top), 'top badge realAttemptAudit false');
+    assert.ok(/executeCapabilityAuthorized:false/.test(top), 'top badge execute false');
+    assert.ok(/realRunnerWiringReady:false/.test(top), 'top badge real wiring false');
+    assert.ok(/runnerWiringContractReady:false/.test(top), 'top badge runnerWiringContract false');
+    assert.ok(/executionEligible:false/.test(top), 'top badge executionEligible false');
+    assert.ok(
+      /suffix rewrite/i.test(top)
+        && /tail truncation/i.test(top)
+        && /(external-event-store-only|events-only|event-store-only)/i.test(top)
+        && /full-file replacement/i.test(top),
+      'top badge honest limitations',
+    );
+    assertReadmeContains(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked/i, 'badge Gold still blocked honesty');
+    assertReadmeDoesNotContain(/\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
+    assert.doesNotMatch(top, /production-hardening ready/i, 'current badge/table must not claim production-hardening ready');
+    // Forbidden compound assembled at runtime
+    const forbiddenCompound = ['tamper-', 'evident'].join('');
+    assert.equal(top.includes(forbiddenCompound), false, 'top badge must not embed forbidden tamper compound');
   });
 
-  it('version table marks V1.34 current and keeps V1.33/V1.32 historical', () => {
-    assertReadmeContains(/\| V1\.34 \| 当前版本 \|[^|]*(real audit|RealAudit|capability-proof-attempts|M6d-prep)[^|]*realAuditCapabilityImplementationReady:true[^|]*realCapabilityImplementationsReady:false[^|]*(3\/7|realAttemptAuditImplementationReady:false)[^|]*(executeCapabilityAuthorized:false|realRunnerWiringReady:false|executionEligible:false)[^|]*Gold 依旧 blocked/i, 'V1.34 should be current third real audit M6d-prep milestone');
-    assertReadmeContains(/\| V1\.33 \| 历史版本 \|[^|]*real status[^|]*realStatusCapabilityImplementationReady:true[^|]*PROOF ONLY[^|]*capability-real-status-completed[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.33 should become historical second real status milestone');
+  it('version table marks V1.35 current, V1.34 historical with real audit, keeps V1.33/V1.32', () => {
+    assertReadmeContains(
+      /\| V1\.35 \| 当前版本 \|[^|]*(integrity-journal|unkeyed hash-chain structural consistency|无密钥哈希链结构一致性基座|T6d\.3 partial)[^|]*(not dual-write|not M6d Exit|not production integration|partial foundation only)[^|]*Gold 依旧 blocked/i,
+      'V1.35 should be current unkeyed structural foundation milestone',
+    );
+    assertReadmeContains(
+      /\| V1\.34 \| 历史版本 \|[^|]*(real audit|RealAudit|capability-proof-attempts|M6d-prep)[^|]*realAuditCapabilityImplementationReady:true[^|]*realCapabilityImplementationsReady:false[^|]*(3\/7|realAttemptAuditImplementationReady:false)[^|]*(executeCapabilityAuthorized:false|realRunnerWiringReady:false|executionEligible:false)[^|]*Gold 依旧 blocked/i,
+      'V1.34 should become historical third real audit M6d-prep milestone',
+    );
+    assertReadmeContains(/\| V1\.33 \| 历史版本 \|[^|]*real status[^|]*realStatusCapabilityImplementationReady:true[^|]*PROOF ONLY[^|]*capability-real-status-completed[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.33 should remain historical second real status milestone');
     assertReadmeContains(/\| V1\.32 \| 历史版本 \|[^|]*real render[^|]*realRenderCapabilityImplementationReady:true[^|]*capability-real-implementation-receipt[^|]*PROOF ONLY[^|]*execute[^|]*hard-deny[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*Gold 依旧 blocked/i, 'V1.32 should remain historical first real render milestone');
     assertReadmeContains(/\| V1\.31 \| 历史版本 \|[^|]*capability injection[^|]*CapabilityInjection[^|]*executeCapabilityAuthorized:false[^|]*realCapabilityImplementationsReady:false[^|]*realRunnerWiringReady:false[^|]*executionEligible:false[^|]*readyCount:6[^|]*blockedCount:0[^|]*real-guarded-runner-execution-wiring-missing[^|]*Gold 依旧 blocked/i, 'V1.31 should become historical capability injection milestone');
     assertReadmeContains(/\| V1\.30 \| 历史版本 \|[^|]*buildSupervisorLifecycleGuardedRunnerRealWiringPlan/i, 'V1.30 should become historical real-wiring orchestrator milestone');
@@ -2023,6 +2052,7 @@ describe('README — V1.34 Real audit capability M6d-prep', () => {
     assertReadmeDoesNotContain(/\| V1\.28 \| 当前版本 \|/i, 'V1.28 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.29 \| 当前版本 \|/i, 'V1.29 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.30 \| 当前版本 \|/i, 'V1.30 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.34 \| 当前版本 \|/i, 'V1.34 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.33 \| 当前版本 \|/i, 'V1.33 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.32 \| 当前版本 \|/i, 'V1.32 must not remain marked as current');
   });

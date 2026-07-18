@@ -127,13 +127,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.34', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.34');
+  it('expects LINKE_RELEASE_VERSION to be V1.35', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.35');
   });
 
-  it('expects report.version to be V1.34', () => {
+  it('expects report.version to be V1.35', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.34');
+    assert.strictEqual(report.version, 'V1.35');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -642,7 +642,35 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.34 honesty: third real capability audit proof + independent sink (M6d-prep only)
+    // V1.35 honesty: unkeyed audit hash-chain structural consistency foundation (T6d.3 partial only)
+    assert.ok(
+      hardeningEvidence.includes('V1.35 unkeyed audit hash-chain structural consistency foundation implementation'),
+      'production-hardening evidence must include V1.35 signature ceiling',
+    );
+    assert.ok(hardeningEvidence.includes('audit/integrity-journal.jsonl'));
+    assert.ok(hardeningEvidence.includes('src/audit-integrity-journal.js'));
+    assert.ok(hardeningEvidence.includes('test/audit-integrity-journal.test.js'));
+    assert.ok(hardeningEvidence.includes('test/audit-integrity-journal-scans.test.js'));
+    assert.ok(hardeningEvidence.includes('generation-open'));
+    assert.ok(hardeningEvidence.includes('event-link'));
+    assert.ok(hardeningEvidence.includes('initializeAuditIntegrityJournal'));
+    assert.ok(hardeningEvidence.includes('appendAuditIntegrityEvent'));
+    assert.ok(hardeningEvidence.includes('verifyAuditIntegrityJournalFile'));
+    assert.ok(hardeningEvidence.includes('auditIntegrityJournalQueues'));
+    assert.ok(hardeningEvidence.includes('audit-integrity-bounds-exceeded'));
+    assert.ok(hardeningEvidence.includes('audit-integrity-io-error'));
+    assert.ok(hardeningEvidence.includes('T6d.3 partial foundation only'));
+    assert.ok(
+      hardeningEvidence.includes('no production dual-write') || hardeningEvidence.includes('not dual-write'),
+      'production-hardening evidence must deny production dual-write',
+    );
+    assert.ok(
+      /no external trusted anchor|not external trusted anchor|no external trusted anchor\/HMAC|no external trusted anchor \/ HMAC/i.test(hardeningEvidence)
+        || hardeningEvidence.includes('no external trusted anchor/HMAC/signature')
+        || hardeningEvidence.includes('no external trusted anchor / HMAC / signature'),
+      'production-hardening evidence must deny external trusted anchor/HMAC/signature',
+    );
+    // V1.34 historical pointer: third real capability audit proof + independent sink (M6d-prep only)
     assert.ok(hardeningEvidence.includes('realAuditCapabilityImplementationReady:true'));
     assert.ok(hardeningEvidence.includes('authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
     assert.ok(hardeningEvidence.includes('invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof'));
@@ -673,6 +701,65 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realAttemptAuditImplementationReady:false'));
     assert.ok(hardeningEvidence.includes('realCapabilityImplementationsReady:false'));
     assert.ok(hardeningEvidence.includes('executeCapabilityAuthorized:false'));
+    // V1.35 nextStep leads with structural foundation honesty
+    assert.ok(hardeningItem.nextStep.startsWith('V1.35') || hardeningItem.nextStep.includes('V1.35'),
+      'production-hardening nextStep must lead with / include V1.35');
+    assert.ok(hardeningItem.nextStep.includes('audit/integrity-journal.jsonl'));
+    assert.ok(
+      hardeningItem.nextStep.includes('unkeyed hash-chain structural consistency foundation')
+        || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
+      'production-hardening nextStep must name unkeyed structural consistency foundation',
+    );
+    assert.ok(hardeningItem.nextStep.includes('T6d.3 partial foundation only'));
+    assert.ok(
+      /not T6d\.3 complete|not.*T6d\.3 complete/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny T6d.3 complete on same negative clause',
+    );
+    assert.ok(
+      /not dual-write|no production dual-write|not.*dual-write/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny dual-write',
+    );
+    assert.ok(
+      /not M6d Exit|不是 M6d Exit|does not complete M6d Exit/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny M6d Exit',
+    );
+    assert.ok(
+      /not production integration|without production integration/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny production integration on negative clause',
+    );
+    assert.ok(hardeningItem.nextStep.includes('production-hardening remains partial'));
+    assert.ok(
+      /Gold remains blocked 4 ready \/ 4 partial \/ 1 blocked \/ total 9|4 ready \/ 4 partial \/ 1 blocked \/ total 9/.test(hardeningItem.nextStep),
+      'production-hardening nextStep must keep Gold blocked 4/4/1/9',
+    );
+    assert.ok(/M1 route open|M1.*open/i.test(hardeningItem.nextStep));
+    assert.ok(/M2 denied|M2.*denied/i.test(hardeningItem.nextStep));
+    assert.ok(hardeningItem.nextStep.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(hardeningItem.nextStep.includes('realAttemptAuditImplementationReady:false'));
+    assert.ok(hardeningItem.nextStep.includes('executeCapabilityAuthorized:false'));
+    assert.ok(hardeningItem.nextStep.includes('realRunnerWiringReady:false'));
+    assert.ok(hardeningItem.nextStep.includes('runnerWiringContractReady:false'));
+    assert.ok(hardeningItem.nextStep.includes('executionEligible:false'));
+    assert.ok(
+      /suffix rewrite/i.test(hardeningItem.nextStep)
+        && /tail truncation/i.test(hardeningItem.nextStep)
+        && /(external-event-store-only|events-only|event-store-only)/i.test(hardeningItem.nextStep)
+        && /full-file replacement/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must document honest limitations',
+    );
+    assert.ok(
+      /without external anchor|no external anchor|cannot be detected without external/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must say honest limitations need external anchor',
+    );
+    assert.ok(
+      /no public HTTP\/CLI\/Web|not.*HTTP\/CLI\/Web|无.*HTTP\/CLI\/Web/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny public HTTP/CLI/Web wiring',
+    );
+    assert.ok(
+      /no recovery|not recovery|无 recovery|no new generation|not.*new generation/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny recovery/new generation',
+    );
+    // V1.34 historical real-audit pointer (must not jump V1.35 → V1.33)
     assert.ok(hardeningItem.nextStep.includes('V1.34'));
     assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
     assert.ok(
@@ -692,6 +779,12 @@ describe('Gold Readiness Report', () => {
     );
     assert.ok(!/M6d Exit complete|M6d Exit 完成|M6d complete|M6d 完成/i.test(hardeningItem.nextStep));
     assert.ok(!/\bWORM\b|tamper-proof (?:ready|complete|enabled)|chain integrity (?:ready|complete)|Gold ready|GA ready|cross-lan-connectivity/i.test(`${hardeningItem.nextStep} ${hardeningEvidence}`));
+    // Forbidden positive compound: assemble needle at runtime (plan forbids embedding full literal)
+    const forbiddenCompound = ['tamper-', 'evident'].join('');
+    assert.ok(
+      !hardeningItem.nextStep.includes(forbiddenCompound) && !hardeningEvidence.includes(forbiddenCompound),
+      'production-hardening must not contain forbidden tamper compound',
+    );
     assert.notEqual(hardeningItem.status, 'ready');
     assert.ok(hardeningItem.nextStep.includes('preflight'));
     assert.ok(hardeningItem.nextStep.includes('approval'));
