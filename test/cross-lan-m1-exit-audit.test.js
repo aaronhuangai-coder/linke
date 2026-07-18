@@ -1,7 +1,10 @@
 /**
  * Linke V2 Gold M1 Exit audit static lock test.
  *
- * Locks the written M1 Exit audit record and runtime honesty snapshot.
+ * Locks the written M1 Exit audit record (audit-local historical snapshot at
+ * 47dcc2d / V1.33) and runtime honesty: blocked scorecard, no cross-LAN item,
+ * M1/M2 not elevated. Runtime version is not permanently locked to V1.33 —
+ * it must match LINKE_RELEASE_VERSION (V1.x pattern).
  * Does NOT claim M1 PASS/COMPLETE, crypto ready, fixed-vector execution,
  * cross-LAN ready, route selection, or scorecard/version mutation.
  */
@@ -345,9 +348,12 @@ describe('Linke V2 M1 Exit audit lock', () => {
     );
   });
 
-  it('scorecard/version snapshot frozen; audit mutates neither', () => {
+  it('M1 exit audit doc snapshot remains V1.33 @ 47dcc2d; VERSION_MUTATION NONE is audit-local', () => {
+    // Historical audit document snapshot only — does NOT require that the
+    // current runtime forever remain V1.33 (runtime contract is separate).
     const audit = readAuditOrFail();
 
+    assertContains(audit, '47dcc2d');
     assertContains(audit, 'V1.33');
     assertContains(audit, '4 ready');
     assertContains(audit, '4 partial');
@@ -355,8 +361,8 @@ describe('Linke V2 M1 Exit audit lock', () => {
     assertContains(audit, 'total: 9');
     assertContains(audit, 'cross-lan-connectivity');
     assertContains(audit, 'absent');
-    assertContains(audit, 'SCORECARD_MUTATION: NONE');
     assertContains(audit, 'VERSION_MUTATION: NONE');
+    assertContains(audit, 'SCORECARD_MUTATION: NONE');
     assertContains(audit, 'neither is changed by the audit');
   });
 
@@ -454,11 +460,13 @@ describe('Linke V2 M1 Exit audit lock', () => {
     );
   });
 
-  it('runtime gold readiness snapshot remains V1.33 / blocked / 9 items / no cross-lan-connectivity', () => {
-    assert.equal(LINKE_RELEASE_VERSION, 'V1.33');
+  it('runtime gold remains blocked without cross-lan-connectivity; M1/M2 not elevated', () => {
+    // Temporal: allow current runtime (V1.33 now; later V1.x after release bump).
+    // Do NOT permanently lock LINKE_RELEASE_VERSION / report.version to 'V1.33'.
+    assert.match(LINKE_RELEASE_VERSION, /^V1\.\d+$/);
 
     const report = buildGoldReadinessReport();
-    assert.equal(report.version, 'V1.33');
+    assert.equal(report.version, LINKE_RELEASE_VERSION);
     assert.equal(report.status, 'blocked');
     assert.deepEqual(report.summary, {
       ready: 4,
@@ -474,6 +482,34 @@ describe('Linke V2 M1 Exit audit lock', () => {
       report.items.some((item) => item.id === 'cross-lan-connectivity'),
       false,
     );
+
+    // M1/M2 honesty still recorded in the audit; do not invent runtime M1/M2 fields.
+    const audit = readAuditOrFail();
+    assertContains(audit, 'M1_MILESTONE_PASS: FALSE');
+    assertContains(audit, 'M1_CRYPTO_READY: FALSE');
+    assertContains(audit, 'M2_PRODUCTION_HANDSHAKE_ENTRY: DENIED');
+  });
+
+  it('this audit test must not permanently lock runtime version to V1.33', () => {
+    // Source-level guard: permanent runtime locks are forbidden; doc content
+    // assertions such as assertContains(audit, 'V1.33') remain required.
+    // Strip this guard test body so its own detection strings do not self-match.
+    const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const withoutThisGuard = source.replace(
+      /it\('this audit test must not permanently lock runtime version to V1\.33'[\s\S]*?\n  \}\);/,
+      '',
+    );
+    const forbiddenRuntimeLocks = [
+      /assert\.equal\s*\(\s*LINKE_RELEASE_VERSION\s*,\s*['"]V1\.33['"]\s*\)/,
+      /assert\.equal\s*\(\s*report\.version\s*,\s*['"]V1\.33['"]\s*\)/,
+    ];
+    for (const re of forbiddenRuntimeLocks) {
+      assert.equal(
+        re.test(withoutThisGuard),
+        false,
+        `forbidden permanent runtime version lock matched: ${re}`,
+      );
+    }
   });
 
   it('actual suite skip is gated real Keychain integration (skip: !enabled), unrelated to T1.12', () => {
