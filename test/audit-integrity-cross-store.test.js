@@ -1,7 +1,9 @@
 /**
- * V1.36 C2 core: audit event/journal cross-store structural consistency verifier.
- * Tests cover plan Task3 (≥28): bounds canaries, truth table 1a/1b/2–7,
- * events error priority, journal typed rethrow, receipt allowlist, options traps.
+ * V1.36 C2+C3 core: audit event/journal cross-store structural consistency verifier.
+ * C2: bounds canaries, truth table 1a/1b/2–7, events error priority, journal typed
+ * rethrow, receipt allowlist, options traps.
+ * C3: documents-* honest limitations (success/partial only) + hostile broken
+ * canaries + repeated-digest suffix truth canaries.
  * Forbidden capability compound is never written as a contiguous literal here
  * (C3 scans use runtime-concat needle).
  */
@@ -1051,5 +1053,522 @@ describe('cross-store receipt and options contracts', () => {
     assert.equal(mod.AUDIT_CROSS_STORE_EVENTS_MAX_PRE_READ_BYTES, 16_777_216);
     assert.equal(mod.AUDIT_CROSS_STORE_MAX_EVENT_LINES, 8192);
     assert.equal(mod.AUDIT_CROSS_STORE_MAX_EVENT_LINE_BYTES, 16050);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C3 / Task4.1 — honest limitations (PASS = verified|partial; never broken)
+// ---------------------------------------------------------------------------
+
+describe('cross-store documents-* honest limitations', () => {
+  it('documents-retention-suffix-is-verified-structure-only', async () => {
+    // Structure-only: retention-style E suffix of J is verified. This proves
+    // payloadDigest sequence compatibility only — NOT deletion authorization,
+    // retention policy compliance, or that dropped prefix events were approved.
+    await withTempRoot('doc-retention', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      const a3 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_C },
+      });
+      // E retains only the last 2 of 3 journaled events (retention compact shape).
+      await writeEventsLines(root, [{ ...EVENT_B }, { ...EVENT_C }]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'verified',
+        relationship: 'events-suffix-of-journal',
+        generationId: GENERATION_ID,
+        headDigest: a3.headDigest,
+        journalEventCount: 3,
+        retainedEventCount: 2,
+        matchedEventCount: 2,
+        uncoveredEventCount: 0,
+      });
+    });
+  });
+
+  it('documents-legacy-prefix-is-partial-not-broken', async () => {
+    // Legacy prefix on E with matching J suffix is partial (coverage gap), not broken.
+    await withTempRoot('doc-legacy', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      await writeEventsLines(root, [{ ...EVENT_0 }, { ...EVENT_A }, { ...EVENT_B }]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'partial',
+        relationship: 'journal-suffix-of-events',
+        generationId: GENERATION_ID,
+        headDigest: a2.headDigest,
+        journalEventCount: 2,
+        retainedEventCount: 3,
+        matchedEventCount: 2,
+        uncoveredEventCount: 1,
+      });
+    });
+  });
+
+  it('documents-uncovered-prefix-mutation-still-partial', async () => {
+    // Mutating only the uncovered E prefix (non-overlap) remains partial, not broken.
+    await withTempRoot('doc-prefix-mut', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      // Baseline: legacy prefix + matching suffix → partial.
+      await writeEventsLines(root, [{ ...EVENT_0 }, { ...EVENT_A }, { ...EVENT_B }]);
+      const before = await verifyAuditIntegrityAgainstEventStore(root);
+      assert.equal(before.state, 'partial');
+      assert.equal(before.relationship, 'journal-suffix-of-events');
+
+      // Mutate only the uncovered prefix event (overlap A,B unchanged).
+      await writeEventsLines(root, [
+        { ...EVENT_0, path: '/api/legacy-mutated' },
+        { ...EVENT_A },
+        { ...EVENT_B },
+      ]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'partial',
+        relationship: 'journal-suffix-of-events',
+        generationId: GENERATION_ID,
+        headDigest: a2.headDigest,
+        journalEventCount: 2,
+        retainedEventCount: 3,
+        matchedEventCount: 2,
+        uncoveredEventCount: 1,
+      });
+    });
+  });
+
+  it('documents-paired-rewrite-of-events-and-journal-may-verify', async () => {
+    // If both stores are rewritten together to a new equal sequence, verifier may
+    // still report verified equal (structural only; not authenticity).
+    await withTempRoot('doc-paired-rewrite', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_B }]);
+      const original = await verifyAuditIntegrityAgainstEventStore(root);
+      assert.equal(original.state, 'verified');
+      assert.equal(original.relationship, 'equal');
+
+      // Paired rewrite: replace both sides with a new equal sequence [C].
+      await rm(journalAbs(root), { force: true });
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const c1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_C },
+      });
+      await writeEventsLines(root, [{ ...EVENT_C }]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'verified',
+        relationship: 'equal',
+        generationId: GENERATION_ID,
+        headDigest: c1.headDigest,
+        journalEventCount: 1,
+        retainedEventCount: 1,
+        matchedEventCount: 1,
+        uncoveredEventCount: 0,
+      });
+    });
+  });
+
+  it('documents-consistent-dual-suffix-truncation-may-verify', async () => {
+    // Truncating both stores to the same remaining suffix may still verify.
+    await withTempRoot('doc-dual-trunc', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_C } });
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_B }, { ...EVENT_C }]);
+      const full = await verifyAuditIntegrityAgainstEventStore(root);
+      assert.equal(full.state, 'verified');
+      assert.equal(full.relationship, 'equal');
+
+      // Dual-suffix truncation: both sides keep only [B,C].
+      await rm(journalAbs(root), { force: true });
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      const c2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_C },
+      });
+      await writeEventsLines(root, [{ ...EVENT_B }, { ...EVENT_C }]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'verified',
+        relationship: 'equal',
+        generationId: GENERATION_ID,
+        headDigest: c2.headDigest,
+        journalEventCount: 2,
+        retainedEventCount: 2,
+        matchedEventCount: 2,
+        uncoveredEventCount: 0,
+      });
+    });
+  });
+
+  it('documents-journal-only-events-mutation-still-invisible-to-journal-verify', async () => {
+    // Events-only mutation: journal verify still succeeds; only explicit cross-store
+    // verifier reports broken. Proves V1.36 visibility is limited to this API call.
+    await withTempRoot('doc-ev-mut-invisible', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await writeEventsLines(root, [{ ...EVENT_A }]);
+
+      // Mutate events store only (overlap mismatch).
+      await writeEventsLines(root, [{ ...EVENT_A, path: '/api/a-mutated' }]);
+
+      const journalVerify = await verifyAuditIntegrityJournalFile(root);
+      assert.equal(journalVerify.state, 'verified');
+      assert.equal(typeof journalVerify.headDigest, 'string');
+      assert.equal(journalVerify.headDigest.length, 64);
+
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('documents-full-j-replay-shaped-tail-is-partial-not-broken', async () => {
+    // Forced shape: E = J + J (full unjournaled replay of entire J payloadDigest
+    // value sequence; no extra legacy prefix). Pure value comparison identifies the
+    // last J as a journal suffix → partial journal-suffix-of-events.
+    // V1.36 has no writer cursor / baseline / unique occurrence binding, so it cannot
+    // distinguish two identical occurrences and MUST NOT claim coverage of every
+    // unjournaled tail. Closing this ambiguity is V1.37+ cursor/idempotency work.
+    // This case must remain partial — never expect broken.
+    await withTempRoot('doc-j-replay', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const a1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const a2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      const snap = await inspectAuditIntegrityJournalFile(root);
+      const J = snap.payloadDigests;
+      assert.equal(J.length, 2);
+      assert.equal(J[0], a1.payloadDigest);
+      assert.equal(J[1], a2.payloadDigest);
+
+      // E = J + J via real events file (same strict events, twice).
+      await writeEventsLines(root, [
+        { ...EVENT_A },
+        { ...EVENT_B },
+        { ...EVENT_A },
+        { ...EVENT_B },
+      ]);
+
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'partial',
+        relationship: 'journal-suffix-of-events',
+        generationId: GENERATION_ID,
+        headDigest: a2.headDigest,
+        journalEventCount: J.length,
+        retainedEventCount: J.length * 2,
+        matchedEventCount: J.length,
+        uncoveredEventCount: J.length,
+      });
+      // Explicit count lock for E=J+J: matched=J.length, uncovered=J.length.
+      assert.equal(receipt.matchedEventCount, 2);
+      assert.equal(receipt.uncoveredEventCount, 2);
+      assert.equal(receipt.matchedEventCount + receipt.uncoveredEventCount, receipt.retainedEventCount);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C3 / Task4.2 — hostile broken canaries + positive repeated-digest suffix
+// ---------------------------------------------------------------------------
+
+describe('cross-store hostile canaries and repeated-digest suffix truth', () => {
+  it('hostile-prefix-not-suffix: E proper prefix of J is broken (not events-suffix)', async () => {
+    await withTempRoot('hostile-prefix', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_C } });
+      // E = proper prefix [A,B] of J=[A,B,C] — not a suffix.
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_B }]);
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('hostile-same-multiset-different-order: permutation is broken (not set-equal)', async () => {
+    await withTempRoot('hostile-multiset', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_C } });
+      // Same multiset, different order.
+      await writeEventsLines(root, [{ ...EVENT_C }, { ...EVENT_A }, { ...EVENT_B }]);
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('hostile-same-count-same-last-digest-middle-wrong: middle mismatch is broken', async () => {
+    await withTempRoot('hostile-middle', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        computeAuditIntegrityEventPayloadDigest,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_B } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_C } });
+
+      // Same length, same last digest (C), wrong middle (0 instead of B).
+      const lastOk = computeAuditIntegrityEventPayloadDigest({ ...EVENT_C });
+      const middleWrong = computeAuditIntegrityEventPayloadDigest({ ...EVENT_0 });
+      const middleRight = computeAuditIntegrityEventPayloadDigest({ ...EVENT_B });
+      assert.equal(lastOk, computeAuditIntegrityEventPayloadDigest({ ...EVENT_C }));
+      assert.notEqual(middleWrong, middleRight);
+
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_0 }, { ...EVENT_C }]);
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('hostile-repeated-digest-non-suffix: J=[x,y,x] E=[x,x] is broken (index-by-index)', async () => {
+    // Real non-suffix canary: J last two are [y,x], E is [x,x] → not a suffix.
+    // Must use real journal/events files + public verifier (not local array helpers).
+    // Repeat-append same strict event yields identical payloadDigest values.
+    await withTempRoot('hostile-rep-nonsuffix', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+        computeAuditIntegrityEventPayloadDigest,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      const digX = computeAuditIntegrityEventPayloadDigest({ ...EVENT_A });
+      const digY = computeAuditIntegrityEventPayloadDigest({ ...EVENT_B });
+      assert.notEqual(digX, digY);
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      // J = [x, y, x] via append x, y, x (same EVENT_A twice).
+      const r1 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const r2 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+      const r3 = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      assert.equal(r1.payloadDigest, digX);
+      assert.equal(r2.payloadDigest, digY);
+      assert.equal(r3.payloadDigest, digX);
+
+      const snap = await inspectAuditIntegrityJournalFile(root);
+      const J = snap.payloadDigests;
+      assert.equal(J.length, 3);
+      assert.equal(J[0], digX);
+      assert.equal(J[1], digY);
+      assert.equal(J[2], digX);
+      // Index-by-index: J tail of length 2 is [y,x], not [x,x].
+      assert.equal(J[J.length - 2], digY);
+      assert.equal(J[J.length - 1], digX);
+      assert.deepEqual([J[1], J[2]], [digY, digX]);
+      assert.notDeepEqual([J[1], J[2]], [digX, digX]);
+
+      // E = [x, x] via real events file (same strict event twice).
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_A }]);
+
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('hostile-empty-suffix-guard: J=[x] E=[] is broken (no empty-suffix loophole)', async () => {
+    await withTempRoot('hostile-empty-suffix', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      // Explicit empty events file (E=[]), journal non-empty.
+      await writeEventsRaw(root, '');
+      await assert.rejects(
+        () => verifyAuditIntegrityAgainstEventStore(root),
+        (error) => {
+          assertCrossStoreError(
+            error,
+            ERROR_CODES.AUDIT_INTEGRITY_CROSS_STORE_BROKEN,
+            root,
+          );
+          return true;
+        },
+      );
+    });
+  });
+
+  it('positive-repeated-digest-events-suffix: J=[x,x,y] E=[x,y] is verified events-suffix', async () => {
+    // True suffix canary: repeated digest values do NOT break index-by-index
+    // non-empty proper suffix. J last two [x,y] === E. MUST be verified, not broken.
+    await withTempRoot('pos-rep-suffix', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        inspectAuditIntegrityJournalFile,
+        computeAuditIntegrityEventPayloadDigest,
+      } = await loadJournal();
+      const { verifyAuditIntegrityAgainstEventStore } = await loadCrossStore();
+
+      const digX = computeAuditIntegrityEventPayloadDigest({ ...EVENT_A });
+      const digY = computeAuditIntegrityEventPayloadDigest({ ...EVENT_B });
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      // J = [x, x, y]
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      await appendAuditIntegrityEvent(root, { generationId: GENERATION_ID, event: { ...EVENT_A } });
+      const last = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_B },
+      });
+
+      const snap = await inspectAuditIntegrityJournalFile(root);
+      const J = snap.payloadDigests;
+      assert.equal(J.length, 3);
+      assert.equal(J[0], digX);
+      assert.equal(J[1], digX);
+      assert.equal(J[2], digY);
+      // Index-by-index: last two of J equal E = [x, y].
+      assert.equal(J[J.length - 2], digX);
+      assert.equal(J[J.length - 1], digY);
+      assert.deepEqual([J[1], J[2]], [digX, digY]);
+
+      await writeEventsLines(root, [{ ...EVENT_A }, { ...EVENT_B }]);
+      const receipt = await verifyAuditIntegrityAgainstEventStore(root);
+      assertReceipt(receipt, {
+        state: 'verified',
+        relationship: 'events-suffix-of-journal',
+        generationId: GENERATION_ID,
+        headDigest: last.headDigest,
+        journalEventCount: 3,
+        retainedEventCount: 2,
+        matchedEventCount: 2,
+        uncoveredEventCount: 0,
+      });
+    });
   });
 });
