@@ -33,12 +33,19 @@ import { createHash } from 'node:crypto';
 import {
   SafeDataFileError,
   assertSafeDataRoot,
-  safeAppendText,
+  safeAtomicWriteText,
   safeCreateExclusiveText,
   safeReadText,
 } from './safe-data-files.js';
 import { ERROR_CODES, assertRegisteredErrorCode } from './error-codes.js';
-import { stringifyStrictCanonicalSanitizedEvent } from './audit-event-schema.js';
+import {
+  projectStrictCanonicalSanitizedEvent,
+  stringifyStrictCanonicalSanitizedEvent,
+} from './audit-event-schema.js';
+import {
+  assertAuditIntegrityWriteLease,
+  enqueueAuditIntegrityWriteTask,
+} from './audit-integrity-write-queue.js';
 
 /** Relative path under data root for the integrity journal; independent from legacy audit event storage. */
 export const AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH = 'audit/integrity-journal.jsonl';
@@ -77,13 +84,16 @@ const RECORD_KEYS = Object.freeze([
 ]);
 
 /**
- * Sole per-resolved-root write queue (module-private).
- * Shared by initialize (now) and append (Task5) — do not rename to init-only
- * and do not create a second Map for append.
- * key = assertSafeDataRoot(resolvedRoot); value = cleanup Promise (identity pattern).
- * @type {Map<string, Promise<unknown>>}
+ * Module-private plan brand store (plan object identity → private raw payload).
+ * Caller must not read/write raw; only plan serializable metadata is returned.
+ * @type {WeakMap<object, {
+ *   resolvedRoot: string,
+ *   leaseIdentity: object,
+ *   rawPreText: string,
+ *   rawPostText: string,
+ * }>}
  */
-const auditIntegrityJournalQueues = new Map();
+const auditIntegrityJournalPlanPayloads = new WeakMap();
 
 /**
  * Path-free journal error: message === code; name fixed; code from registry only.
@@ -107,25 +117,6 @@ export class AuditIntegrityJournalError extends Error {
  */
 function throwJournalError(code) {
   throw new AuditIntegrityJournalError(code);
-}
-
-/**
- * Rejection-safe per-root enqueue (identity cleanup; rejections do not poison next).
- * @param {string} resolvedRoot
- * @param {() => Promise<unknown>} task
- * @returns {Promise<unknown>}
- */
-function enqueueAuditIntegrityJournalTask(resolvedRoot, task) {
-  const previous = auditIntegrityJournalQueues.get(resolvedRoot) || Promise.resolve();
-  const run = previous.catch(() => {}).then(task);
-  const cleanup = run.finally(() => {
-    if (auditIntegrityJournalQueues.get(resolvedRoot) === cleanup) {
-      auditIntegrityJournalQueues.delete(resolvedRoot);
-    }
-  });
-  cleanup.catch(() => {});
-  auditIntegrityJournalQueues.set(resolvedRoot, cleanup);
-  return run;
 }
 
 /**
@@ -454,7 +445,60 @@ function verifyRawJournal(raw) {
 }
 
 /**
+ * @internal Exclusive create under active write lease (no enqueue).
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {{ generationId: string }} options
+ * @returns {Promise<{ state: 'initialized', generationId: string, recordCount: 1, headDigest: string }>}
+ */
+export async function initializeAuditIntegrityJournalUnlocked(resolvedRoot, lease, options = {}) {
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+
+  // generationId already validated by public wrapper; re-validate for direct unlocked callers.
+  const generationId = readGenerationIdOption(options);
+
+  const linkDigest = generationOpenLinkDigest(generationId);
+  const record = {
+    schemaVersion: SCHEMA_VERSION,
+    recordKind: RECORD_KIND_OPEN,
+    generationId,
+    sequence: 0,
+    previousLinkDigest: null,
+    payloadDigest: null,
+    linkDigest,
+  };
+  const line = `${canonicalRecordLine(record)}\n`;
+
+  let result;
+  try {
+    result = await safeCreateExclusiveText(
+      resolvedRoot,
+      AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH,
+      line,
+      { mode: 0o600 },
+    );
+  } catch (error) {
+    if (error instanceof AuditIntegrityJournalError) throw error;
+    // SafeDataFileError / other open failures → io-error (not already-initialized).
+    mapIoError(error);
+  }
+
+  // created:false: file/dir/symlink/malicious leaf/concurrent loser — unified; NOT io.
+  if (!result || result.created !== true) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_ALREADY_INITIALIZED);
+  }
+
+  return {
+    state: 'initialized',
+    generationId,
+    recordCount: 1,
+    headDigest: linkDigest,
+  };
+}
+
+/**
  * Exclusive create of generation-open (O_EXCL concurrent init only; not authenticity).
+ * C1: resolve root → shared queue once → unlocked init (no state gate).
  * Success receipt allowlist: state, generationId, recordCount:1, headDigest.
  *
  * @param {string} root existing safe data root
@@ -472,45 +516,9 @@ export async function initializeAuditIntegrityJournal(root, options = {}) {
     mapIoError(error);
   }
 
-  return enqueueAuditIntegrityJournalTask(resolvedRoot, async () => {
-    const linkDigest = generationOpenLinkDigest(generationId);
-    const record = {
-      schemaVersion: SCHEMA_VERSION,
-      recordKind: RECORD_KIND_OPEN,
-      generationId,
-      sequence: 0,
-      previousLinkDigest: null,
-      payloadDigest: null,
-      linkDigest,
-    };
-    const line = `${canonicalRecordLine(record)}\n`;
-
-    let result;
-    try {
-      result = await safeCreateExclusiveText(
-        resolvedRoot,
-        AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH,
-        line,
-        { mode: 0o600 },
-      );
-    } catch (error) {
-      if (error instanceof AuditIntegrityJournalError) throw error;
-      // SafeDataFileError / other open failures → io-error (not already-initialized).
-      mapIoError(error);
-    }
-
-    // created:false: file/dir/symlink/malicious leaf/concurrent loser — unified; NOT io.
-    if (!result || result.created !== true) {
-      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_ALREADY_INITIALIZED);
-    }
-
-    return {
-      state: 'initialized',
-      generationId,
-      recordCount: 1,
-      headDigest: linkDigest,
-    };
-  });
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => (
+    initializeAuditIntegrityJournalUnlocked(resolvedRoot, lease, { generationId })
+  ));
 }
 
 /**
@@ -533,7 +541,276 @@ export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
 }
 
 /**
- * Append one event-link after full structure verify (same per-root write queue as initialize).
+ * @internal Read-only event-link planning (unique SoT). NO filesystem mutation / NO enqueue.
+ * Returns module-issued frozen plan with only serializable pre/post metadata.
+ * rawPreText/rawPostText stored in module-private WeakMap by plan identity.
+ *
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {{ generationId: string, event: unknown }} options
+ * @returns {Promise<object>}
+ */
+export async function planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, options = {}) {
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+
+  const generationId = readGenerationIdOption(options);
+
+  let event;
+  try {
+    event = options == null ? undefined : options.event;
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+
+  let canonicalEventUtf8;
+  try {
+    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(event);
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+
+  let raw;
+  try {
+    raw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
+      maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
+    });
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED);
+    }
+    if (error instanceof AuditIntegrityJournalError) throw error;
+    if (error instanceof SafeDataFileError) {
+      mapIoError(error);
+    }
+    mapIoError(error);
+  }
+
+  // Append line-count preflight (existing > 4096 → bounds) BEFORE full verify so that
+  // verify's legal max of 4097 does not mask the append preflight at 4096.
+  const existingLines = countExistingLinesForAppendPreflight(raw);
+  if (existingLines !== null && existingLines > AUDIT_INTEGRITY_JOURNAL_MAX_EXISTING_LINES) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+  }
+
+  const verified = verifyRawJournal(raw);
+
+  if (verified.generationId !== generationId) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+
+  // Reachable upper bound for sequence is 4096: append preflight allows existing ≤4096
+  // and verify forces sequence===line index; existing 4097 is already bounds-rejected.
+  const sequence = verified.headSequence + 1;
+  const previousLinkDigest = verified.headDigest;
+  const payloadDigest = eventPayloadDigest(canonicalEventUtf8);
+  const linkDigest = eventLinkDigest({
+    generationId,
+    sequence,
+    previousLinkDigest,
+    payloadDigest,
+  });
+
+  const record = {
+    schemaVersion: SCHEMA_VERSION,
+    recordKind: RECORD_KIND_EVENT,
+    generationId,
+    sequence,
+    previousLinkDigest,
+    payloadDigest,
+    linkDigest,
+  };
+  const recordLine = canonicalRecordLine(record);
+  const recordLineBytes = Buffer.byteLength(recordLine, 'utf8');
+  // size → IO, line/count → BOUNDS priority (design §7.2).
+  if (recordLineBytes > AUDIT_INTEGRITY_JOURNAL_MAX_RECORD_LINE_BYTES) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+  }
+
+  const postRecordCount = verified.recordCount + 1;
+  if (postRecordCount > AUDIT_INTEGRITY_JOURNAL_MAX_LINES_AFTER_APPEND) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+  }
+
+  const rawPostText = `${raw}${recordLine}\n`;
+  const rawPostBytes = Buffer.byteLength(rawPostText, 'utf8');
+  if (rawPostBytes > AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR);
+  }
+
+  const preMeta = Object.freeze({
+    recordCount: verified.recordCount,
+    headDigest: verified.headDigest,
+    rawByteLength: Buffer.byteLength(raw, 'utf8'),
+    rawSha256: sha256Hex(raw),
+  });
+  const postMeta = Object.freeze({
+    recordCount: postRecordCount,
+    headDigest: linkDigest,
+    rawByteLength: rawPostBytes,
+    rawSha256: sha256Hex(rawPostText),
+    sequence,
+    linkDigest,
+    previousLinkDigest,
+  });
+  const plan = Object.freeze({
+    generationId,
+    payloadDigest,
+    pre: preMeta,
+    post: postMeta,
+  });
+
+  auditIntegrityJournalPlanPayloads.set(plan, {
+    resolvedRoot,
+    leaseIdentity: lease,
+    rawPreText: raw,
+    rawPostText,
+  });
+
+  return plan;
+}
+
+/**
+ * @internal Publish WeakMap rawPost after re-read current === exact rawPre;
+ * after atomic write MUST reopen+full verify exact plan.post.
+ *
+ * One-shot consumption boundary (C1):
+ * - Private payload is deleted in `finally` only after a publish attempt that has
+ *   already passed the current root + active lease assertion.
+ * - Pre-check failures (wrong-root / expired lease / outside ALS context /
+ *   missing or forged lease) throw from `assertAuditIntegrityWriteLease` before
+ *   the try body and do **not** consume the plan.
+ * - Once that assertion passes, the plan is always consumed — whether the body
+ *   succeeds, hits chain-broken / I/O, or rejects forged/mismatched private payload.
+ *   (Not a vague “success-or-fail always consumes” claim for lease pre-checks.)
+ *
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {object} plan
+ * @returns {Promise<{
+ *   state: 'appended',
+ *   generationId: string,
+ *   sequence: number,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   payloadDigest: string,
+ * }>}
+ */
+export async function publishPlannedAuditIntegrityEventLinkAtomicUnlocked(
+  resolvedRoot,
+  lease,
+  plan,
+) {
+  // Lease/root/ALS pre-check is intentionally outside try/finally so failures here
+  // do not consume the plan (see one-shot boundary above).
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+
+  const privatePayload = auditIntegrityJournalPlanPayloads.get(plan);
+  try {
+    if (privatePayload === undefined) {
+      // Forged / non-module-issued / already consumed plan (lease assertion already passed).
+      throw new SafeDataFileError();
+    }
+    if (privatePayload.resolvedRoot !== resolvedRoot) {
+      throw new SafeDataFileError();
+    }
+    if (privatePayload.leaseIdentity !== lease) {
+      throw new SafeDataFileError();
+    }
+
+    // Re-read current journal: must exact rawPre (not hash alone).
+    let currentRaw;
+    try {
+      currentRaw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
+        maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
+      });
+    } catch (error) {
+      if (error instanceof AuditIntegrityJournalError) throw error;
+      if (error instanceof SafeDataFileError) {
+        mapIoError(error);
+      }
+      mapIoError(error);
+    }
+    if (currentRaw !== privatePayload.rawPreText) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+
+    try {
+      await safeAtomicWriteText(
+        resolvedRoot,
+        AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH,
+        privatePayload.rawPostText,
+        { mode: 0o600 },
+      );
+    } catch (error) {
+      if (error instanceof AuditIntegrityJournalError) throw error;
+      mapIoError(error);
+    }
+
+    // MUST reopen + full verify exact plan.post after atomic write returns.
+    let postRaw;
+    try {
+      postRaw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
+        maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
+      });
+    } catch (error) {
+      if (error instanceof AuditIntegrityJournalError) throw error;
+      if (error instanceof SafeDataFileError) {
+        mapIoError(error);
+      }
+      mapIoError(error);
+    }
+    if (postRaw !== privatePayload.rawPostText) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    const postVerified = verifyRawJournal(postRaw);
+    if (
+      postVerified.recordCount !== plan.post.recordCount
+      || postVerified.headDigest !== plan.post.headDigest
+      || postVerified.generationId !== plan.generationId
+      || sha256Hex(postRaw) !== plan.post.rawSha256
+      || Buffer.byteLength(postRaw, 'utf8') !== plan.post.rawByteLength
+    ) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+
+    return {
+      state: 'appended',
+      generationId: plan.generationId,
+      sequence: plan.post.sequence,
+      recordCount: plan.post.recordCount,
+      headDigest: plan.post.headDigest,
+      payloadDigest: plan.payloadDigest,
+    };
+  } finally {
+    // One-shot: drop private payload after a lease-asserted publish attempt only
+    // (assert above is outside this try/finally — pre-check failures do not reach here).
+    auditIntegrityJournalPlanPayloads.delete(plan);
+  }
+}
+
+/**
+ * @internal MUST reuse plan… + publishPlanned… (unique SoT; not V1.35 safeAppend).
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {{ generationId: string, event: unknown }} options
+ * @returns {Promise<{
+ *   state: 'appended',
+ *   generationId: string,
+ *   sequence: number,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   payloadDigest: string,
+ * }>}
+ */
+export async function appendAuditIntegrityEventUnlocked(resolvedRoot, lease, options = {}) {
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+  const plan = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, options);
+  return publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, plan);
+}
+
+/**
+ * Append one event-link after full structure verify (shared write queue as initialize).
+ * C1: resolve root → shared queue once → unlocked plan+publish (no state gate).
  * Success receipt proves write-time post-sanitize projection digest + structural chain only —
  * not authenticity, not external audit event provenance.
  *
@@ -554,6 +831,7 @@ export function computeAuditIntegrityEventPayloadDigest(strictEvent) {
 export async function appendAuditIntegrityEvent(root, options = {}) {
   // Only read generationId + event. Never touch sequence / previousLinkDigest / other extras
   // (even if those getters throw — must not affect a legal append).
+  // Hostile getter / validation runs before enqueue (error priority preserved).
   const generationId = readGenerationIdOption(options);
 
   let event;
@@ -563,9 +841,14 @@ export async function appendAuditIntegrityEvent(root, options = {}) {
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
   }
 
-  let canonicalEventUtf8;
+  // Call-time strict projection snapshot BEFORE any root / I/O / await / enqueue.
+  // Freezes a plain scalar snapshot so callers cannot TOCTOU-mutate the queued payload.
+  // Journal plan remains the unique SoT for canonical string / payloadDigest / linkDigest:
+  // unlocked plan still calls stringifyStrictCanonicalSanitizedEvent(snapshot) once.
+  // Do not invent a second canonical/digest formula here.
+  let eventSnapshot;
   try {
-    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(event);
+    eventSnapshot = Object.freeze(projectStrictCanonicalSanitizedEvent(event));
   } catch {
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
   }
@@ -578,77 +861,12 @@ export async function appendAuditIntegrityEvent(root, options = {}) {
     mapIoError(error);
   }
 
-  return enqueueAuditIntegrityJournalTask(resolvedRoot, async () => {
-    let raw;
-    try {
-      raw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
-        maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
-      });
-    } catch (error) {
-      if (error && error.code === 'ENOENT') {
-        throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED);
-      }
-      if (error instanceof AuditIntegrityJournalError) throw error;
-      if (error instanceof SafeDataFileError) {
-        mapIoError(error);
-      }
-      mapIoError(error);
-    }
-
-    // Append line-count preflight (existing > 4096 → bounds) BEFORE full verify so that
-    // verify's legal max of 4097 does not mask the append preflight at 4096.
-    const existingLines = countExistingLinesForAppendPreflight(raw);
-    if (existingLines !== null && existingLines > AUDIT_INTEGRITY_JOURNAL_MAX_EXISTING_LINES) {
-      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
-    }
-
-    const verified = verifyRawJournal(raw);
-
-    if (verified.generationId !== generationId) {
-      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
-    }
-
-    // Reachable upper bound for sequence is 4096: append preflight allows existing ≤4096
-    // and verify forces sequence===line index; existing 4097 is already bounds-rejected.
-    const sequence = verified.headSequence + 1;
-    const previousLinkDigest = verified.headDigest;
-    const payloadDigest = eventPayloadDigest(canonicalEventUtf8);
-    const linkDigest = eventLinkDigest({
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => (
+    appendAuditIntegrityEventUnlocked(resolvedRoot, lease, {
       generationId,
-      sequence,
-      previousLinkDigest,
-      payloadDigest,
-    });
-
-    const record = {
-      schemaVersion: SCHEMA_VERSION,
-      recordKind: RECORD_KIND_EVENT,
-      generationId,
-      sequence,
-      previousLinkDigest,
-      payloadDigest,
-      linkDigest,
-    };
-    const line = `${canonicalRecordLine(record)}\n`;
-
-    try {
-      await safeAppendText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, line);
-    } catch (error) {
-      // Underlying failure may leave a partial tail. This version does not truncate,
-      // unlink, or repair; subsequent verify/append treat a bad tail as chain-broken.
-      if (error instanceof AuditIntegrityJournalError) throw error;
-      mapIoError(error);
-    }
-
-    return {
-      state: 'appended',
-      generationId,
-      sequence,
-      recordCount: verified.recordCount + 1,
-      headDigest: linkDigest,
-      payloadDigest,
-    };
-  });
+      event: eventSnapshot,
+    })
+  ));
 }
 
 /**

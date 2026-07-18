@@ -482,21 +482,28 @@ describe('C4 B: honesty wording scans', () => {
 // ── C. bounds / error honesty (structural + runtime classification) ──────
 
 describe('C4 C: bounds and error-code honesty', () => {
-  it('12. source structure: append existingLines>MAX first throw is BOUNDS; 4097 is second evidence', async () => {
+  it('12. source structure: plan/append SoT existingLines>MAX first throw is BOUNDS; 4097 is second evidence', async () => {
     const full = await readText(PATHS.journal);
 
     // At least one independent BOUNDS_EXCEEDED use site on raw source.
     const boundsUses = full.match(/ERROR_CODES\.AUDIT_INTEGRITY_BOUNDS_EXCEEDED/g) || [];
     assert.ok(boundsUses.length >= 1, 'must reference ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED in code');
 
-    // Extract append function body (raw) for structural proof.
-    const appendIdx = full.indexOf('export async function appendAuditIntegrityEvent');
-    assert.ok(appendIdx >= 0, 'append export present');
-    const verifyIdx = full.indexOf('export async function verifyAuditIntegrityJournalFile', appendIdx);
-    const appendBody = full.slice(appendIdx, verifyIdx > appendIdx ? verifyIdx : appendIdx + 4000);
+    // V1.37 C1: line-count preflight lives in plan SoT (public append reuses plan+publish).
+    const planIdx = full.indexOf('export async function planAuditIntegrityEventLinkUnlocked');
+    assert.ok(planIdx >= 0, 'plan SoT export present');
+    const publishIdx = full.indexOf(
+      'export async function publishPlannedAuditIntegrityEventLinkAtomicUnlocked',
+      planIdx,
+    );
+    const planBody = full.slice(planIdx, publishIdx > planIdx ? publishIdx : planIdx + 5000);
 
     // Lock: branch body first throwJournalError code is exactly BOUNDS_EXCEEDED (no prior chain/other throw).
-    assertBoundsBranchFirstThrowIsBounds(appendBody, 'production append');
+    assertBoundsBranchFirstThrowIsBounds(planBody, 'production plan SoT');
+
+    // Public append must still exist and reuse unlocked plan/publish (no second formula).
+    assert.ok(full.includes('export async function appendAuditIntegrityEvent'));
+    assert.ok(full.includes('appendAuditIntegrityEventUnlocked'));
 
     // 4097 path remains second-layer evidence: MAX_LINES_AFTER_APPEND + bounds code (not chain-only mapping).
     assert.ok(
@@ -681,7 +688,7 @@ describe('C4 D: sensitive fields and path-free errors', () => {
 // ── E. import closed set + scan self-scope ───────────────────────────────
 
 describe('C4 E: import closed set and scan self-scope', () => {
-  it('17. journal production imports are closed: crypto, safe-data-files, error-codes, audit-event-schema', async () => {
+  it('17. journal production imports are closed: crypto, safe-data-files, error-codes, audit-event-schema, write-queue', async () => {
     const raw = await readText(PATHS.journal);
     // Closed set via raw static import extractor (not handwritten comment stripper).
     const imports = collectStaticImportSpecifiers(raw);
@@ -690,21 +697,25 @@ describe('C4 E: import closed set and scan self-scope', () => {
       './safe-data-files.js',
       './error-codes.js',
       './audit-event-schema.js',
+      './audit-integrity-write-queue.js',
     ]);
-    assert.ok(imports.length >= 4, 'expected production imports');
+    assert.ok(imports.length >= 5, 'expected production imports');
     for (const spec of imports) {
       assert.ok(allowed.has(spec), `unexpected import: ${spec}`);
     }
     for (const need of allowed) {
       assert.ok(imports.includes(need), `missing required import: ${need}`);
     }
-    // Explicit bans.
+    // Explicit bans (no audit-log/server/events/cross-store production wiring).
     for (const ban of [
       './server.js',
       './agent.js',
       './audit-log.js',
       './capability-audit-sink.js',
       './gold-readiness.js',
+      './audit-integrity-cross-store.js',
+      './audit-integrity-dual-write.js',
+      './audit-integrity-dual-write-state.js',
       'node:fs',
       'node:fs/promises',
     ]) {
@@ -712,6 +723,11 @@ describe('C4 E: import closed set and scan self-scope', () => {
     }
     // No dynamic import( in production journal raw (do not scan this test file).
     assert.equal(/\bimport\s*\(/.test(raw), false, 'journal must not use dynamic import(');
+    // C1: journal event-link uses atomic write path, not safeAppend.
+    assert.equal(/\bsafeAppendText\s*\(/.test(raw), false, 'journal must not call safeAppendText');
+    assert.match(raw, /\bsafeAtomicWriteText\s*\(/);
+    assert.match(raw, /planAuditIntegrityEventLinkUnlocked/);
+    assert.match(raw, /publishPlannedAuditIntegrityEventLinkAtomicUnlocked/);
   });
 
   it('18. scan suite only reads explicit allowlisted paths; runtime roots stay under tmpdir', async () => {

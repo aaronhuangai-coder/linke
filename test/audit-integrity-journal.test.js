@@ -10,6 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { watch, writeFileSync, readFileSync } from 'node:fs';
 import { readFile, writeFile, mkdir, lstat, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -816,58 +817,95 @@ describe('verifyAuditIntegrityJournalFile', () => {
   });
 });
 
-describe('auditIntegrityJournalQueues source contract', () => {
-  it('C3: exactly one queue Map; init+append both enqueue same helper; schema import; ban audit-log/server/events wiring', async () => {
+/**
+ * Detect real call sites of a callee name (ignore bare name in comments without `(`).
+ * @param {string} source
+ * @param {string} name
+ * @returns {boolean}
+ */
+function hasCallSite(source, name) {
+  return new RegExp(`\\b${name}\\s*\\(`).test(String(source));
+}
+
+describe('shared write queue + plan/publish source contract (V1.37 C1)', () => {
+  it('C1: journal has no private queue Map; shared enqueue once; plan+publish atomic SoT; ban audit-log/server/events wiring', async () => {
     const { readFile: rf } = await import('node:fs/promises');
     const sourcePath = new URL('../src/audit-integrity-journal.js', import.meta.url);
     const source = await rf(sourcePath, 'utf8');
+    const queueSourcePath = new URL('../src/audit-integrity-write-queue.js', import.meta.url);
+    const queueSource = await rf(queueSourcePath, 'utf8');
 
-    const mapDecls = source.match(/auditIntegrityJournalQueues\s*=\s*new Map\s*\(\s*\)/g) || [];
-    assert.equal(mapDecls.length, 1, 'exactly one auditIntegrityJournalQueues Map');
-    assert.match(source, /const auditIntegrityJournalQueues = new Map\(\)/);
-    // Forbidden: second Maps / split queues.
-    assert.ok(!source.includes('appendQueues'));
-    assert.ok(!source.includes('initQueues'));
-    assert.equal((source.match(/new Map\s*\(\s*\)/g) || []).length, 1);
+    // Journal no longer owns a Map queue; shared module is sole Map.
+    assert.equal(source.includes('auditIntegrityJournalQueues'), false);
+    assert.equal(source.includes('enqueueAuditIntegrityJournalTask'), false);
+    assert.equal((source.match(/new Map\s*\(\s*\)/g) || []).length, 0);
+    assert.equal((queueSource.match(/new Map\s*\(\s*\)/g) || []).length, 1);
+    assert.ok(source.includes("from './audit-integrity-write-queue.js'"));
+    assert.ok(source.includes('enqueueAuditIntegrityWriteTask'));
+    assert.ok(source.includes('assertAuditIntegrityWriteLease'));
 
-    // Single enqueue helper; init and append both call it (definition + ≥2 call sites).
-    assert.ok(source.includes('function enqueueAuditIntegrityJournalTask'));
-    const callSites = [...source.matchAll(/\benqueueAuditIntegrityJournalTask\s*\(/g)];
-    assert.ok(callSites.length >= 2, `expected ≥2 enqueue call sites, got ${callSites.length}`);
+    // Public init+append each return shared enqueue once.
     assert.ok(source.includes('export async function initializeAuditIntegrityJournal'));
     assert.ok(source.includes('export async function appendAuditIntegrityEvent'));
-    // Both writers return enqueueAuditIntegrityJournalTask(...).
-    const returnEnqueue = source.match(/return enqueueAuditIntegrityJournalTask\s*\(/g) || [];
-    assert.ok(returnEnqueue.length >= 2, 'init and append must both return enqueue helper');
+    const returnEnqueue = source.match(/return enqueueAuditIntegrityWriteTask\s*\(/g) || [];
+    assert.ok(returnEnqueue.length >= 2, 'init and append must both return shared enqueue');
+    assert.equal(
+      (source.match(/\benqueueAuditIntegrityWriteTask\s*\(/g) || []).length,
+      2,
+      'public wrappers enqueue exactly once each (2 call sites total)',
+    );
+
+    // Plan + publish unique SoT; no safeAppend on journal path.
+    assert.ok(source.includes('planAuditIntegrityEventLinkUnlocked'));
+    assert.ok(source.includes('publishPlannedAuditIntegrityEventLinkAtomicUnlocked'));
+    assert.ok(source.includes('appendAuditIntegrityEventUnlocked'));
+    assert.ok(source.includes('initializeAuditIntegrityJournalUnlocked'));
+    assert.ok(hasCallSite(source, 'safeAtomicWriteText'));
+    assert.equal(hasCallSite(source, 'safeAppendText'), false, 'event-link must not safeAppendText');
+    assert.equal(source.includes('safeAppendText'), false);
+    // Unlocked append must call plan + publish (unique SoT; no formula fork path).
+    assert.ok(hasCallSite(source, 'planAuditIntegrityEventLinkUnlocked'));
+    assert.ok(hasCallSite(source, 'publishPlannedAuditIntegrityEventLinkAtomicUnlocked'));
+    // Publish after-write MUST re-read + verify (source contract if swap inject hard).
+    const publishIdx = source.indexOf('export async function publishPlannedAuditIntegrityEventLinkAtomicUnlocked');
+    assert.ok(publishIdx >= 0);
+    const publishBody = source.slice(publishIdx, publishIdx + 2500);
+    assert.ok(publishBody.includes('safeAtomicWriteText'));
+    assert.ok(publishBody.includes('safeReadText'));
+    assert.ok(publishBody.includes('verifyRawJournal'));
+    // Plan stores raw in module-private WeakMap.
+    assert.ok(source.includes('WeakMap'));
+    assert.ok(source.includes('auditIntegrityJournalPlanPayloads'));
+    // Forbidden ambiguous publish(rawPre, recordLine).
+    assert.equal(source.includes('publishAuditIntegrityEventLinkAtomicUnlocked'), false);
+    // C1: no state gate / dual-write stubs.
+    assert.equal(source.includes('assertDualWriteStateAbsent'), false);
+    assert.equal(source.includes('dual-write-state'), false);
+    assert.equal(source.includes('always-allow'), false);
 
     assert.ok(
       source.includes("from './audit-event-schema.js'")
         || source.includes('from "./audit-event-schema.js"'),
-      'C3 requires schema import for strict stringify',
+      'schema import for strict stringify',
     );
     assert.ok(source.includes('stringifyStrictCanonicalSanitizedEvent'));
-    assert.ok(source.includes('safeAppendText'));
 
     assert.ok(!source.includes("from './audit-log.js'"));
     assert.ok(!source.includes("from './server.js'"));
     assert.ok(!source.includes("from '../server.js'"));
     assert.ok(!source.includes('appendAuditEvent'));
-    // Ban production events path wiring / dual-write — honest limitation comments may mention events.jsonl.
     assert.ok(!/from\s+['"][^'"]*events\.jsonl['"]/.test(source));
-    assert.ok(!source.includes("safeAppendText(resolvedRoot, 'audit/events.jsonl'"));
     assert.ok(!source.includes('AUDIT_EVENTS'));
     assert.ok(!source.includes("relativePath: 'audit/events.jsonl'"));
-
-    assert.ok(
-      /previous\.catch\(\s*\(\s*\)\s*=>\s*\{\s*\}\s*\)/.test(source)
-        || /previous\.catch\(\(\)=>\{\}\)/.test(source)
-        || source.includes('previous.catch(() => {})'),
-    );
 
     const mod = await loadJournalModule();
     assert.equal(typeof mod.initializeAuditIntegrityJournal, 'function');
     assert.equal(typeof mod.verifyAuditIntegrityJournalFile, 'function');
     assert.equal(typeof mod.appendAuditIntegrityEvent, 'function');
+    assert.equal(typeof mod.planAuditIntegrityEventLinkUnlocked, 'function');
+    assert.equal(typeof mod.publishPlannedAuditIntegrityEventLinkAtomicUnlocked, 'function');
+    assert.equal(typeof mod.appendAuditIntegrityEventUnlocked, 'function');
+    assert.equal(typeof mod.initializeAuditIntegrityJournalUnlocked, 'function');
   });
 });
 
@@ -2362,6 +2400,550 @@ describe('honest limitations (verify must succeed — design §2.4 / §17)', () 
       assert.equal(verified.recordCount, recordCount);
       assert.equal(verified.headDigest, headDigest);
       assert.notEqual(verified.generationId, GENERATION_ID);
+    });
+  });
+});
+
+describe('V1.37 C1 plan/publish unique SoT + lease', () => {
+  async function withLease(root, fn) {
+    const { enqueueAuditIntegrityWriteTask } = await import('../src/audit-integrity-write-queue.js');
+    const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+    const resolvedRoot = await assertSafeDataRoot(root);
+    return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => fn(resolvedRoot, lease));
+  }
+
+  it('public append still succeeds; receipt fields unchanged; mode 0600; trailing newline', async () => {
+    await withTempRoot('c1-public-append', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const receipt = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      assert.equal(receipt.state, 'appended');
+      assert.equal(receipt.generationId, GENERATION_ID);
+      assert.equal(receipt.sequence, 1);
+      assert.equal(receipt.recordCount, 2);
+      assert.equal(typeof receipt.headDigest, 'string');
+      assert.equal(receipt.payloadDigest, independentPayloadDigest(EVENT_A));
+      assert.equal(
+        Object.keys(receipt).join(','),
+        'state,generationId,sequence,recordCount,headDigest,payloadDigest',
+      );
+      const abs = journalAbs(root);
+      const st = await lstat(abs);
+      assert.equal(st.mode & 0o777, 0o600);
+      const raw = await readFile(abs, 'utf8');
+      assert.ok(raw.endsWith('\n'));
+      assert.equal((await verifyAuditIntegrityJournalFile(root)).state, 'verified');
+    });
+  });
+
+  it('plan has no filesystem mutation; journal bytes identical before/after plan', async () => {
+    await withTempRoot('c1-plan-readonly', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const before = await readFile(journalAbs(root));
+      await withLease(root, async (resolvedRoot, lease) => {
+        await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+      });
+      assert.deepEqual(await readFile(journalAbs(root)), before);
+    });
+  });
+
+  it('plan same pre+input is idempotent; frozen; no raw/path/body keys', async () => {
+    await withTempRoot('c1-plan-meta', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await withLease(root, async (resolvedRoot, lease) => {
+        const p1 = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+        const p2 = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+        assert.deepEqual(p1, p2);
+        assert.ok(Object.isFrozen(p1));
+        assert.ok(Object.isFrozen(p1.pre));
+        assert.ok(Object.isFrozen(p1.post));
+        assert.equal(p1.generationId, GENERATION_ID);
+        assert.equal(p1.payloadDigest, independentPayloadDigest(EVENT_A));
+        assert.equal(p1.pre.recordCount, 1);
+        assert.equal(p1.post.recordCount, 2);
+        assert.equal(p1.post.sequence, 1);
+        assert.equal(typeof p1.pre.rawSha256, 'string');
+        assert.equal(typeof p1.post.rawSha256, 'string');
+        assert.equal(p1.pre.rawSha256.length, 64);
+        // No caller-accessible raw/path/body.
+        for (const key of Object.keys(p1)) {
+          assert.ok(!/rawPre|rawPost|recordLine|pathname|path|event|body/i.test(key));
+        }
+        assert.equal('rawPreText' in p1, false);
+        assert.equal('rawPostText' in p1, false);
+        assert.equal('rawPre' in p1, false);
+        assert.equal('rawPost' in p1, false);
+        // Mutating frozen plan fields must throw.
+        assert.throws(() => {
+          p1.generationId = 'x';
+        });
+        assert.throws(() => {
+          p1.post.sequence = 99;
+        });
+      });
+    });
+  });
+
+  it('public append and unlocked plan+publish yield identical receipt hashes', async () => {
+    await withTempRoot('c1-public-vs-direct', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        planAuditIntegrityEventLinkUnlocked,
+        publishPlannedAuditIntegrityEventLinkAtomicUnlocked,
+      } = await loadJournalModule();
+
+      // Path A: public append.
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const publicReceipt = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const publicRaw = await readFile(journalAbs(root), 'utf8');
+
+      // Path B: unlocked plan+publish on a twin root.
+      await withTempRoot('c1-public-vs-direct-b', async (rootB) => {
+        await initializeAuditIntegrityJournal(rootB, { generationId: GENERATION_ID });
+        const directReceipt = await withLease(rootB, async (resolvedRoot, lease) => {
+          const plan = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+            generationId: GENERATION_ID,
+            event: { ...EVENT_A },
+          });
+          return publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, plan);
+        });
+        const directRaw = await readFile(journalAbs(rootB), 'utf8');
+        assert.deepEqual(directReceipt, publicReceipt);
+        assert.equal(directRaw, publicRaw);
+      });
+    });
+  });
+
+  it('unlocked without lease / wrong lease → SafeDataFileError', async () => {
+    await withTempRoot('c1-lease-req', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+        appendAuditIntegrityEventUnlocked,
+        initializeAuditIntegrityJournalUnlocked,
+      } = await loadJournalModule();
+      const { SafeDataFileError } = await import('../src/safe-data-files.js');
+      const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const resolvedRoot = await assertSafeDataRoot(root);
+      const fakeLease = Object.freeze({});
+      await assert.rejects(
+        () => planAuditIntegrityEventLinkUnlocked(resolvedRoot, fakeLease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => e instanceof SafeDataFileError,
+      );
+      await assert.rejects(
+        () => appendAuditIntegrityEventUnlocked(resolvedRoot, fakeLease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        }),
+        (e) => e instanceof SafeDataFileError,
+      );
+      await assert.rejects(
+        () => initializeAuditIntegrityJournalUnlocked(resolvedRoot, fakeLease, {
+          generationId: GENERATION_ID,
+        }),
+        (e) => e instanceof SafeDataFileError,
+      );
+    });
+  });
+
+  it('publish rejects forged / wrong-root / expired lease / consumed plan; external pre mutation', async () => {
+    await withTempRoot('c1-publish-reject', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+        publishPlannedAuditIntegrityEventLinkAtomicUnlocked,
+      } = await loadJournalModule();
+      const { SafeDataFileError } = await import('../src/safe-data-files.js');
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+
+      // Forged plan (no WeakMap brand).
+      await withLease(root, async (resolvedRoot, lease) => {
+        await assert.rejects(
+          () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, {
+            generationId: GENERATION_ID,
+            payloadDigest: 'a'.repeat(64),
+            pre: {},
+            post: {},
+          }),
+          (e) => e instanceof SafeDataFileError,
+        );
+      });
+
+      // Wrong root: active lease for A cannot be asserted/published as root B.
+      await withTempRoot('c1-pub-wrong-root', async (rootB) => {
+        const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+        const resolvedB = await assertSafeDataRoot(rootB);
+        await withLease(root, async (resolvedRoot, lease) => {
+          const planFromA = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+            generationId: GENERATION_ID,
+            event: { ...EVENT_A },
+          });
+          await assert.rejects(
+            () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedB, lease, planFromA),
+            (e) => e instanceof SafeDataFileError,
+          );
+        });
+      });
+
+      // Expired lease identity: plan under lease1, publish later with fresh lease2.
+      let planHeld;
+      await withLease(root, async (resolvedRoot, lease) => {
+        planHeld = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+      });
+      await withLease(root, async (resolvedRoot, lease2) => {
+        await assert.rejects(
+          () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease2, planHeld),
+          (e) => e instanceof SafeDataFileError,
+        );
+      });
+
+      // External mutation between plan and publish → CHAIN_BROKEN; mutated bytes kept.
+      await withLease(root, async (resolvedRoot, lease) => {
+        const plan = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+        const abs = journalAbs(root);
+        const mutated = `${(await readFile(abs, 'utf8')).trimEnd()}\n`;
+        // Flip open link nibble to change raw without leaving empty.
+        const lines = mutated.slice(0, -1).split('\n');
+        const open = JSON.parse(lines[0]);
+        open.linkDigest = (open.linkDigest[0] === '0' ? '1' : '0') + open.linkDigest.slice(1);
+        // Keep illegal chain intentionally for rawPre mismatch (publish compares exact raw).
+        const brokenRaw = `${canonicalRecordLine(open)}\n`;
+        await writeFile(abs, brokenRaw, { mode: 0o600 });
+        const before = await readFile(abs);
+        await assert.rejects(
+          () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, plan),
+          (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN, root),
+        );
+        assert.deepEqual(await readFile(abs), before);
+      });
+    });
+  });
+
+  it('plan one-shot: second publish after success rejects; caller-stuffed raw ignored', async () => {
+    await withTempRoot('c1-oneshot', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+        publishPlannedAuditIntegrityEventLinkAtomicUnlocked,
+      } = await loadJournalModule();
+      const { SafeDataFileError } = await import('../src/safe-data-files.js');
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      await withLease(root, async (resolvedRoot, lease) => {
+        const plan = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+        // Caller cannot inject raw fields into frozen plan.
+        assert.throws(() => {
+          // @ts-ignore
+          plan.rawPostText = 'evil\n';
+        });
+        const receipt = await publishPlannedAuditIntegrityEventLinkAtomicUnlocked(
+          resolvedRoot,
+          lease,
+          plan,
+        );
+        assert.equal(receipt.state, 'appended');
+        await assert.rejects(
+          () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, plan),
+          (e) => e instanceof SafeDataFileError,
+        );
+      });
+    });
+  });
+
+  it('one-shot boundary: wrong-root precheck does not consume; correct publish then consumes', async () => {
+    await withTempRoot('c1-oneshot-boundary-a', async (rootA) => {
+      await withTempRoot('c1-oneshot-boundary-b', async (rootB) => {
+        const {
+          initializeAuditIntegrityJournal,
+          planAuditIntegrityEventLinkUnlocked,
+          publishPlannedAuditIntegrityEventLinkAtomicUnlocked,
+        } = await loadJournalModule();
+        const { SafeDataFileError, assertSafeDataRoot } = await import('../src/safe-data-files.js');
+        await initializeAuditIntegrityJournal(rootA, { generationId: GENERATION_ID });
+        const resolvedB = await assertSafeDataRoot(rootB);
+
+        await withLease(rootA, async (resolvedA, lease) => {
+          const plan = await planAuditIntegrityEventLinkUnlocked(resolvedA, lease, {
+            generationId: GENERATION_ID,
+            event: { ...EVENT_A },
+          });
+
+          // Pre-check (wrong root / lease-root mismatch) fails outside consumption.
+          await assert.rejects(
+            () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedB, lease, plan),
+            (e) => e instanceof SafeDataFileError,
+          );
+
+          // Same plan still publishable under correct root-A + same active lease.
+          const receipt = await publishPlannedAuditIntegrityEventLinkAtomicUnlocked(
+            resolvedA,
+            lease,
+            plan,
+          );
+          assert.equal(receipt.state, 'appended');
+          assert.equal(receipt.payloadDigest, independentPayloadDigest(EVENT_A));
+
+          // Third attempt: plan already consumed by the successful publish attempt.
+          await assert.rejects(
+            () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedA, lease, plan),
+            (e) => e instanceof SafeDataFileError,
+          );
+        });
+      });
+    });
+  });
+
+  it('public append call-time event snapshot survives shared-queue mutation window (TOCTOU)', async () => {
+    await withTempRoot('c1-event-toctou', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+      } = await loadJournalModule();
+      const { enqueueAuditIntegrityWriteTask } = await import('../src/audit-integrity-write-queue.js');
+      const { assertSafeDataRoot } = await import('../src/safe-data-files.js');
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const resolvedRoot = await assertSafeDataRoot(root);
+
+      let releaseBlocker;
+      let signalBlockerStarted;
+      const blockerStarted = new Promise((resolve) => {
+        signalBlockerStarted = resolve;
+      });
+      const blockerGate = new Promise((resolve) => {
+        releaseBlocker = resolve;
+      });
+
+      // Occupy the same-root shared queue so public append must wait after enqueue.
+      const blockP = enqueueAuditIntegrityWriteTask(resolvedRoot, async () => {
+        signalBlockerStarted();
+        await blockerGate;
+      });
+      await blockerStarted;
+
+      const mutable = { ...EVENT_A };
+      const callTimeDigest = independentPayloadDigest({ ...EVENT_A });
+      const mutatedEvent = { ...EVENT_A, path: '/api/mutated-after-enqueue' };
+      const mutatedDigest = independentPayloadDigest(mutatedEvent);
+      assert.notEqual(callTimeDigest, mutatedDigest);
+
+      const appendP = appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: mutable,
+      });
+
+      // Drain enough turns for public append to finish pre-enqueue work and join the queue
+      // behind the blocker. Append must still be pending (queue window proven).
+      let appendSettled = false;
+      appendP.then(
+        () => {
+          appendSettled = true;
+        },
+        () => {
+          appendSettled = true;
+        },
+      );
+      for (let i = 0; i < 40; i += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (appendSettled) {
+          throw new Error('append settled before queue blocker released — window not established');
+        }
+      }
+      assert.equal(appendSettled, false, 'append must remain queued behind shared-root blocker');
+
+      // Hostile caller mutates the original object while the task is still queued.
+      mutable.path = mutatedEvent.path;
+
+      releaseBlocker();
+      await blockP;
+      const receipt = await appendP;
+
+      assert.equal(receipt.state, 'appended');
+      assert.equal(receipt.payloadDigest, callTimeDigest);
+      assert.notEqual(receipt.payloadDigest, mutatedDigest);
+
+      const lines = (await readFile(journalAbs(root), 'utf8')).slice(0, -1).split('\n');
+      assert.equal(lines.length, 2);
+      const eventLink = JSON.parse(lines[1]);
+      assert.equal(eventLink.payloadDigest, callTimeDigest);
+      assert.notEqual(eventLink.payloadDigest, mutatedDigest);
+
+      const verified = await verifyAuditIntegrityJournalFile(root);
+      assert.equal(verified.state, 'verified');
+      assert.equal(verified.recordCount, 2);
+    });
+  });
+
+  it('post-rename swap before post-verify → CHAIN_BROKEN; no success; injected bytes remain', async () => {
+    await withTempRoot('c1-post-rename-swap', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        planAuditIntegrityEventLinkUnlocked,
+        publishPlannedAuditIntegrityEventLinkAtomicUnlocked,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+
+      // Narrow structural order supplement (runtime swap below is the acceptance criterion).
+      const source = await readFile(new URL('../src/audit-integrity-journal.js', import.meta.url), 'utf8');
+      const pubStart = source.indexOf('export async function publishPlannedAuditIntegrityEventLinkAtomicUnlocked');
+      assert.ok(pubStart >= 0);
+      const nextExport = source.indexOf('\nexport ', pubStart + 10);
+      const pubBody = source.slice(pubStart, nextExport === -1 ? undefined : nextExport);
+      const atomicAt = pubBody.indexOf('safeAtomicWriteText');
+      const postReadAt = pubBody.indexOf('safeReadText', atomicAt + 1);
+      const verifyAt = pubBody.indexOf('verifyRawJournal', atomicAt + 1);
+      assert.ok(atomicAt >= 0 && postReadAt > atomicAt && verifyAt > postReadAt);
+
+      const abs = journalAbs(root);
+      const auditDir = join(root, 'audit');
+      const injectedBytes = 'POST_RENAME_SWAP_INJECTED_CORRUPT_BYTES\n';
+
+      await withLease(root, async (resolvedRoot, lease) => {
+        const plan = await planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        });
+
+        // Arm AFTER plan, BEFORE publish.
+        // macOS FSEvents can deliver final-leaf rename before rename(2) commits the new
+        // inode, so a sync writeFileSync in the watcher callback is often overwritten by
+        // the still-pending atomic rename (fake-green / lost inject). Deterministic path:
+        // directory watcher observes final `integrity-journal.jsonl` (ignore .tmp-*), then
+        // a concurrent poller waits until on-disk bytes differ from pre-plan (rename
+        // committed) and only then sync-overwrites final before publish post-verify.
+        const preBytes = await readFile(abs);
+        let injected = false;
+        let finalLeafObserved = false;
+
+        const tryInjectAfterRenameCommit = () => {
+          if (injected) return;
+          try {
+            const cur = readFileSync(abs);
+            if (cur.equals(preBytes)) return;
+            if (cur.toString('utf8') === injectedBytes) {
+              injected = true;
+              return;
+            }
+            writeFileSync(abs, injectedBytes);
+            injected = true;
+          } catch {
+            // Mid-rename ENOENT / transient — keep polling.
+          }
+        };
+
+        const watcher = watch(auditDir, (eventType, filename) => {
+          void eventType;
+          const name = filename == null ? '' : String(filename);
+          if (!name || name.startsWith('.tmp-')) return;
+          if (name !== 'integrity-journal.jsonl') return;
+          finalLeafObserved = true;
+          tryInjectAfterRenameCommit();
+        });
+
+        const pollerStop = { stop: false };
+        const poller = (async () => {
+          const deadline = Date.now() + 5000;
+          while (!pollerStop.stop && !injected && Date.now() < deadline) {
+            tryInjectAfterRenameCommit();
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        })();
+
+        try {
+          await assert.rejects(
+            () => publishPlannedAuditIntegrityEventLinkAtomicUnlocked(resolvedRoot, lease, plan),
+            (error) => {
+              // Prefer typed chain-broken; I/O classification also fail-closed (never success).
+              if (error && error.code === ERROR_CODES.AUDIT_CHAIN_BROKEN) {
+                return assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN, root);
+              }
+              if (error && error.code === ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR) {
+                return assertIntegrityError(error, ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR, root);
+              }
+              assert.fail(`unexpected publish outcome code: ${error && error.code}`);
+              return false;
+            },
+          );
+          assert.equal(injected, true, 'runtime post-rename injection must have fired');
+          assert.equal(await readFile(abs, 'utf8'), injectedBytes);
+          // Watcher arming is part of the preferred path; poller is the deterministic commit gate.
+          void finalLeafObserved;
+        } finally {
+          pollerStop.stop = true;
+          watcher.close();
+          await Promise.race([
+            poller,
+            new Promise((resolve) => setTimeout(resolve, 50)),
+          ]);
+        }
+      });
+    });
+  });
+
+  it('unlocked append does not double-enqueue (source + runtime nested reject)', async () => {
+    const source = await readFile(new URL('../src/audit-integrity-journal.js', import.meta.url), 'utf8');
+    // Unlocked path must not call enqueue.
+    const unlockedStart = source.indexOf('export async function appendAuditIntegrityEventUnlocked');
+    const unlockedEnd = source.indexOf('export async function appendAuditIntegrityEvent', unlockedStart + 10);
+    const unlockedBody = source.slice(unlockedStart, unlockedEnd);
+    assert.equal(unlockedBody.includes('enqueueAuditIntegrityWriteTask'), false);
+    assert.ok(unlockedBody.includes('planAuditIntegrityEventLinkUnlocked'));
+    assert.ok(unlockedBody.includes('publishPlannedAuditIntegrityEventLinkAtomicUnlocked'));
+
+    await withTempRoot('c1-no-double-enq', async (root) => {
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEventUnlocked,
+      } = await loadJournalModule();
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const receipt = await withLease(root, async (resolvedRoot, lease) => (
+        appendAuditIntegrityEventUnlocked(resolvedRoot, lease, {
+          generationId: GENERATION_ID,
+          event: { ...EVENT_A },
+        })
+      ));
+      assert.equal(receipt.state, 'appended');
     });
   });
 });
