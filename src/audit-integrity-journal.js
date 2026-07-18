@@ -33,10 +33,12 @@ import { createHash } from 'node:crypto';
 import {
   SafeDataFileError,
   assertSafeDataRoot,
+  safeAppendText,
   safeCreateExclusiveText,
   safeReadText,
 } from './safe-data-files.js';
 import { ERROR_CODES, assertRegisteredErrorCode } from './error-codes.js';
+import { stringifyStrictCanonicalSanitizedEvent } from './audit-event-schema.js';
 
 /** Relative path under data root for the integrity journal (not events.jsonl). */
 export const AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH = 'audit/integrity-journal.jsonl';
@@ -58,6 +60,7 @@ const RECORD_KIND_OPEN = 'generation-open';
 const RECORD_KIND_EVENT = 'event-link';
 
 const DOMAIN_GENERATION_OPEN = 'linke.audit-integrity-journal.v1.generation-open\u0000';
+const DOMAIN_EVENT_PAYLOAD = 'linke.audit-integrity-journal.v1.event-payload\u0000';
 const DOMAIN_EVENT_LINK = 'linke.audit-integrity-journal.v1.event-link\u0000';
 
 const GENERATION_ID_RE = /^[0-9a-f]{32}$/;
@@ -148,6 +151,16 @@ function generationOpenLinkDigest(generationId) {
       + '\u0000'
       + 'null',
   );
+}
+
+/**
+ * Write-time only: SHA256(DOMAIN_EVENT_PAYLOAD + canonicalEventUtf8).
+ * Verify never recomputes this against events; format-check + link preimage only.
+ * @param {string} canonicalEventUtf8
+ * @returns {string}
+ */
+function eventPayloadDigest(canonicalEventUtf8) {
+  return sha256Hex(DOMAIN_EVENT_PAYLOAD + canonicalEventUtf8);
 }
 
 /**
@@ -318,9 +331,28 @@ function assertPlainRecordShape(record) {
 }
 
 /**
- * Full structure verify on already-read UTF-8 raw (design §8).
+ * Count existing journal lines for append preflight when raw has a trailing newline.
+ * Returns null when tail is malformed — full structure verify owns chain-broken.
  * @param {string} raw
- * @returns {{ generationId: string, recordCount: number, headDigest: string }}
+ * @returns {number | null}
+ */
+function countExistingLinesForAppendPreflight(raw) {
+  if (raw === '' || !raw.endsWith('\n')) return null;
+  const body = raw.slice(0, -1);
+  if (body === '') return 0;
+  return body.split('\n').length;
+}
+
+/**
+ * Full structure verify on already-read UTF-8 raw (design §8).
+ * Private fields headSequence / headLinkDigest support append; public receipt omits them.
+ * @param {string} raw
+ * @returns {{
+ *   generationId: string,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   headSequence: number,
+ * }}
  */
 function verifyRawJournal(raw) {
   if (raw === '') throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
@@ -408,6 +440,7 @@ function verifyRawJournal(raw) {
     generationId,
     recordCount: records.length,
     headDigest: head.linkDigest,
+    headSequence: head.sequence,
   };
 }
 
@@ -467,6 +500,125 @@ export async function initializeAuditIntegrityJournal(root, options = {}) {
       generationId,
       recordCount: 1,
       headDigest: linkDigest,
+    };
+  });
+}
+
+/**
+ * Append one event-link after full structure verify (same per-root write queue as initialize).
+ * Success receipt proves write-time post-sanitize projection digest + structural chain only —
+ * not authenticity, not events.jsonl provenance.
+ *
+ * Function signature semantics use only `{ generationId, event }`.
+ * Plain options keys such as `sequence` / `previousLinkDigest` are ignored and must not be read.
+ *
+ * @param {string} root existing safe data root
+ * @param {{ generationId: string, event: object }} [options]
+ * @returns {Promise<{
+ *   state: 'appended',
+ *   generationId: string,
+ *   sequence: number,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   payloadDigest: string,
+ * }>}
+ */
+export async function appendAuditIntegrityEvent(root, options = {}) {
+  // Only read generationId + event. Never touch sequence / previousLinkDigest / other extras
+  // (even if those getters throw — must not affect a legal append).
+  const generationId = readGenerationIdOption(options);
+
+  let event;
+  try {
+    event = options == null ? undefined : options.event;
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+
+  let canonicalEventUtf8;
+  try {
+    canonicalEventUtf8 = stringifyStrictCanonicalSanitizedEvent(event);
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+
+  let resolvedRoot;
+  try {
+    resolvedRoot = await assertSafeDataRoot(root);
+  } catch (error) {
+    if (error instanceof AuditIntegrityJournalError) throw error;
+    mapIoError(error);
+  }
+
+  return enqueueAuditIntegrityJournalTask(resolvedRoot, async () => {
+    let raw;
+    try {
+      raw = await safeReadText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, {
+        maxBytes: AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES,
+      });
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED);
+      }
+      if (error instanceof AuditIntegrityJournalError) throw error;
+      if (error instanceof SafeDataFileError) {
+        mapIoError(error);
+      }
+      mapIoError(error);
+    }
+
+    // Append line-count preflight (existing > 4096 → bounds) BEFORE full verify so that
+    // verify's legal max of 4097 does not mask the append preflight at 4096.
+    const existingLines = countExistingLinesForAppendPreflight(raw);
+    if (existingLines !== null && existingLines > AUDIT_INTEGRITY_JOURNAL_MAX_EXISTING_LINES) {
+      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+    }
+
+    const verified = verifyRawJournal(raw);
+
+    if (verified.generationId !== generationId) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+
+    // Reachable upper bound for sequence is 4096: append preflight allows existing ≤4096
+    // and verify forces sequence===line index; existing 4097 is already bounds-rejected.
+    const sequence = verified.headSequence + 1;
+    const previousLinkDigest = verified.headDigest;
+    const payloadDigest = eventPayloadDigest(canonicalEventUtf8);
+    const linkDigest = eventLinkDigest({
+      generationId,
+      sequence,
+      previousLinkDigest,
+      payloadDigest,
+    });
+
+    const record = {
+      schemaVersion: SCHEMA_VERSION,
+      recordKind: RECORD_KIND_EVENT,
+      generationId,
+      sequence,
+      previousLinkDigest,
+      payloadDigest,
+      linkDigest,
+    };
+    const line = `${canonicalRecordLine(record)}\n`;
+
+    try {
+      await safeAppendText(resolvedRoot, AUDIT_INTEGRITY_JOURNAL_RELATIVE_PATH, line);
+    } catch (error) {
+      // Underlying failure may leave a partial tail. This version does not truncate,
+      // unlink, or repair; subsequent verify/append treat a bad tail as chain-broken.
+      if (error instanceof AuditIntegrityJournalError) throw error;
+      mapIoError(error);
+    }
+
+    return {
+      state: 'appended',
+      generationId,
+      sequence,
+      recordCount: verified.recordCount + 1,
+      headDigest: linkDigest,
+      payloadDigest,
     };
   });
 }
