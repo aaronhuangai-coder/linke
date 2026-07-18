@@ -1789,6 +1789,103 @@ function buildSupervisorLifecycleGuardedRunnerRealStatusCapabilityLines(canonica
   ];
 }
 
+/**
+ * V1.34 real-audit capability fixed lines (shall). Gate non-live facts only:
+ * auditPersistOccurred/hostSideEffect/hostMutation always false on Web (no live sink).
+ * Never shows auditEventFingerprint / auditEvent / auditResult / path / secret.
+ * Fail-closed: requires top+gates+readiness all true (AND), not OR single-locus trust.
+ * Never elevates global real / realAttemptAudit / wiring / execute / executionEligible.
+ */
+function isCanonicalRealAuditCapabilityReady(payload) {
+  const gates = payload?.gates || null;
+  const readiness = payload?.capabilityInjectionReadiness || null;
+  // AND across all three loci — single-point true is not enough.
+  if (
+    payload?.realAuditCapabilityImplementationReady !== true ||
+    gates?.realAuditCapabilityImplementationReady !== true ||
+    readiness?.realAuditCapabilityImplementationReady !== true
+  ) {
+    return false;
+  }
+  // Global / attempt-audit / wiring / execute must not be true (exact false when present).
+  if (
+    payload?.realCapabilityImplementationsReady === true ||
+    gates?.realCapabilityImplementationsReady === true ||
+    readiness?.realCapabilityImplementationsReady === true ||
+    payload?.realAttemptAuditImplementationReady === true ||
+    gates?.realAttemptAuditImplementationReady === true ||
+    readiness?.realAttemptAuditImplementationReady === true ||
+    payload?.realRunnerWiringReady === true ||
+    gates?.realRunnerWiringReady === true ||
+    payload?.runnerWiringContractReady === true ||
+    gates?.runnerWiringContractReady === true ||
+    payload?.executeCapabilityAuthorized === true ||
+    gates?.executeCapabilityAuthorized === true ||
+    readiness?.executeCapabilityAuthorized === true ||
+    payload?.executionEligible === true ||
+    gates?.executionEligible === true
+  ) {
+    return false;
+  }
+  // Non-live occurred flags: top/gates must be exact false when present; readiness must not claim true.
+  if (
+    payload?.hostSideEffectOccurred === true ||
+    gates?.hostSideEffectOccurred === true ||
+    readiness?.hostSideEffectOccurred === true ||
+    payload?.hostMutationOccurred === true ||
+    gates?.hostMutationOccurred === true ||
+    readiness?.hostMutationOccurred === true ||
+    payload?.auditPersistOccurred === true ||
+    gates?.auditPersistOccurred === true ||
+    readiness?.auditPersistOccurred === true
+  ) {
+    return false;
+  }
+  // Require exact false for top/gates host/audit occurred when those fields exist on canonical payloads.
+  if (
+    (Object.prototype.hasOwnProperty.call(payload || {}, 'hostSideEffectOccurred') &&
+      payload.hostSideEffectOccurred !== false) ||
+    (Object.prototype.hasOwnProperty.call(payload || {}, 'hostMutationOccurred') &&
+      payload.hostMutationOccurred !== false) ||
+    (Object.prototype.hasOwnProperty.call(payload || {}, 'auditPersistOccurred') &&
+      payload.auditPersistOccurred !== false) ||
+    (gates &&
+      Object.prototype.hasOwnProperty.call(gates, 'hostSideEffectOccurred') &&
+      gates.hostSideEffectOccurred !== false) ||
+    (gates &&
+      Object.prototype.hasOwnProperty.call(gates, 'hostMutationOccurred') &&
+      gates.hostMutationOccurred !== false) ||
+    (gates &&
+      Object.prototype.hasOwnProperty.call(gates, 'auditPersistOccurred') &&
+      gates.auditPersistOccurred !== false)
+  ) {
+    return false;
+  }
+  // Live fingerprint/event/result injection never makes ready (and never displayed).
+  if (
+    payload?.auditEventFingerprint != null ||
+    payload?.auditEvent != null ||
+    payload?.auditResult != null ||
+    gates?.auditEventFingerprint != null ||
+    gates?.auditEvent != null ||
+    gates?.auditResult != null
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function buildSupervisorLifecycleGuardedRunnerRealAuditCapabilityLines(canonicalReady = false) {
+  if (canonicalReady === true) {
+    return [
+      'realAuditCapability:state:ready:realAuditReady:true:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:none',
+    ];
+  }
+  return [
+    'realAuditCapability:state:not-ready:realAuditReady:false:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:real-audit-capability-not-ready',
+  ];
+}
+
 function buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload) {
   const receipt = payload?.capabilityReceipt;
   if (
@@ -2168,6 +2265,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
   const realStatusCapabilityLines = buildSupervisorLifecycleGuardedRunnerRealStatusCapabilityLines(
     canonicalRealStatusReady,
   );
+  const canonicalRealAuditReady = isCanonicalRealAuditCapabilityReady(payload) === true;
+  const realAuditCapabilityLines = buildSupervisorLifecycleGuardedRunnerRealAuditCapabilityLines(
+    canonicalRealAuditReady,
+  );
   const capabilityReceiptLines = buildSupervisorLifecycleGuardedRunnerCapabilityReceiptLines(payload);
 
   return {
@@ -2194,6 +2295,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       ...capabilityInjectionLines,
       ...realRenderCapabilityLines,
       ...realStatusCapabilityLines,
+      ...realAuditCapabilityLines,
       ...capabilityReceiptLines,
     ],
     recordLines: [],
@@ -2218,6 +2320,7 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(payl
       `dryRunCapabilityRegistryReady:${gates.dryRunCapabilityRegistryReady === true ? 'true' : 'false'}`,
       `realRenderCapabilityImplementationReady:${canonicalRealRenderReady ? 'true' : 'false'}`,
       `realStatusCapabilityImplementationReady:${canonicalRealStatusReady ? 'true' : 'false'}`,
+      `realAuditCapabilityImplementationReady:${canonicalRealAuditReady ? 'true' : 'false'}`,
       'executeCapabilityAuthorized:false',
       'realCapabilityImplementationsReady:false',
       'hostMutationOccurred:false',

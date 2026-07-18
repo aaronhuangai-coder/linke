@@ -8937,9 +8937,10 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
 
   // Ignore options.capabilityInjectionDecision / options.capabilityReceipt /
   // options.capabilityInjectionReady / options.handlers / options.capabilities /
-  // any realCapability* / realRender* / realStatus* / hostObservation* /
-  // hostSideEffect* / execute / wiring / executionEligible override.
-  // Production-derived only. Gate is non-live: never calls RealStatusProof / host reader.
+  // any realCapability* / realRender* / realStatus* / realAudit* / hostObservation* /
+  // hostSideEffect* / hostMutation* / auditPersist* / execute / wiring / executionEligible override.
+  // Production-derived only. Gate is non-live: never calls RealStatusProof / RealAuditProof /
+  // host reader / sink / hook; never emits auditEventFingerprint / event body / audit result.
   // realCapabilityImplementationsReady:false is an independent fail-closed fact, not a ready success signal.
   const capabilityInjectionReadiness =
     buildSupervisorLifecycleGuardedRunnerCapabilityInjectionReadiness();
@@ -8960,10 +8961,15 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
   const realStatusCapabilityImplementationReady =
     capabilityInjectionReadiness?.realStatusCapabilityImplementationReady === true &&
     isRealStatusCapabilityRegistryReady() === true;
+  // Local real-audit fact only (trusted readiness + registry probe); never options override.
+  // Gate non-live: no authorize/invoke RealAuditProof, no sink write, no fingerprint.
+  const realAuditCapabilityImplementationReady =
+    capabilityInjectionReadiness?.realAuditCapabilityImplementationReady === true &&
+    isRealAuditCapabilityRegistryReady() === true;
 
   // Gate attaches decision + readiness only (invoke remains pure unit-tested).
   // Optional receipt summary omitted to avoid secretsRedacted vocabulary colliding
-  // with existing full-JSON sensitive-scan tests; pure invokeDryRun/RealRenderProof/RealStatusProof cover receipts.
+  // with existing full-JSON sensitive-scan tests; pure invokeDryRun/RealRenderProof/RealStatusProof/RealAuditProof cover receipts.
 
   return {
     command: 'supervisor-lifecycle-guarded-runner-execution-gate',
@@ -8974,15 +8980,18 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
     executorReady: false,
     wouldExecute: false,
     realRunnerWiringReady: false,
-    // Independent global fact (2/7 real kinds): false-as-boundary, not ready-success input.
+    // Independent global fact (3/7 real kinds): false-as-boundary, not ready-success input.
     realCapabilityImplementationsReady: false,
+    realAttemptAuditImplementationReady: false,
     executeCapabilityAuthorized: false,
     realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
     realStatusCapabilityImplementationReady: realStatusCapabilityImplementationReady === true,
-    // Gate non-live observe: never statusResult / never host reader.
+    realAuditCapabilityImplementationReady: realAuditCapabilityImplementationReady === true,
+    // Gate non-live: never statusResult / host reader / audit persist / fingerprint.
     hostMutationOccurred: false,
     hostObservationOccurred: false,
     hostSideEffectOccurred: false,
+    auditPersistOccurred: false,
     blockers: [...new Set(blockers)],
     nextBlockers: [REAL_GUARDED_RUNNER_EXECUTION_WIRING_MISSING],
     runnerWiringContract,
@@ -9018,11 +9027,14 @@ export function buildSupervisorLifecycleGuardedRunnerExecutionGate(
       dryRunCapabilityRegistryReady: dryRunCapabilityRegistryReady === true,
       realRenderCapabilityImplementationReady: realRenderCapabilityImplementationReady === true,
       realStatusCapabilityImplementationReady: realStatusCapabilityImplementationReady === true,
+      realAuditCapabilityImplementationReady: realAuditCapabilityImplementationReady === true,
       realCapabilityImplementationsReady: false,
+      realAttemptAuditImplementationReady: false,
       executeCapabilityAuthorized: false,
       hostMutationOccurred: false,
       hostObservationOccurred: false,
       hostSideEffectOccurred: false,
+      auditPersistOccurred: false,
     },
     safety: executionPreviewSafety(),
   };

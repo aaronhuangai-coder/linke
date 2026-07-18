@@ -10923,12 +10923,15 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       wouldExecute: false,
       realRenderCapabilityImplementationReady: true,
       realStatusCapabilityImplementationReady: true,
+      realAuditCapabilityImplementationReady: true,
       realCapabilityImplementationsReady: false,
+      realAttemptAuditImplementationReady: false,
       executeCapabilityAuthorized: false,
       realRunnerWiringReady: false,
       hostMutationOccurred: false,
       hostObservationOccurred: false,
       hostSideEffectOccurred: false,
+      auditPersistOccurred: false,
       blockers: ['real-guarded-runner-execution-wiring-missing'],
       nextBlockers: ['real-guarded-runner-execution-wiring-missing'],
       gates: {
@@ -10951,18 +10954,23 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
         dryRunCapabilityRegistryReady: true,
         realRenderCapabilityImplementationReady: true,
         realStatusCapabilityImplementationReady: true,
+        realAuditCapabilityImplementationReady: true,
         realCapabilityImplementationsReady: false,
+        realAttemptAuditImplementationReady: false,
         executeCapabilityAuthorized: false,
         hostMutationOccurred: false,
         hostObservationOccurred: false,
         hostSideEffectOccurred: false,
+        auditPersistOccurred: false,
         ...(gateOverrides || {}),
       },
       capabilityInjectionReadiness: {
         state: 'ready',
         realRenderCapabilityImplementationReady: true,
         realStatusCapabilityImplementationReady: true,
+        realAuditCapabilityImplementationReady: true,
         realCapabilityImplementationsReady: false,
+        realAttemptAuditImplementationReady: false,
         dryRunCapabilityRegistryReady: true,
         executeCapabilityAuthorized: false,
         ...(capabilityInjectionReadinessOverrides || {}),
@@ -11318,7 +11326,13 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
       text,
       /^realStatusCapability:state:ready:realStatusReady:true:hostObservationOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none$/m,
     );
+    // V1.34 C4 shall: realAuditCapability fixed non-live line (no fingerprint/event/result)
+    assert.match(
+      text,
+      /^realAuditCapability:state:ready:realAuditReady:true:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:none$/m,
+    );
     assert.doesNotMatch(text, /statusResult/);
+    assert.doesNotMatch(text, /auditEventFingerprint|auditEvent:|auditResult/);
     assert.match(text, /real-guarded-runner-execution-wiring-missing/);
     assert.ok(viewModel.validationLines.includes('runnerRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('hostMutationAdapterReady:true'));
@@ -11331,6 +11345,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('dryRunCapabilityRegistryReady:true'));
     assert.ok(viewModel.validationLines.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(viewModel.validationLines.includes('realStatusCapabilityImplementationReady:true'));
+    assert.ok(viewModel.validationLines.includes('realAuditCapabilityImplementationReady:true'));
     assert.ok(viewModel.validationLines.includes('executeCapabilityAuthorized:false'));
     assert.ok(viewModel.validationLines.includes('realCapabilityImplementationsReady:false'));
     assert.ok(viewModel.validationLines.includes('hostMutationOccurred:false'));
@@ -11358,6 +11373,7 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     const capabilityInjectionLines = viewModel.requiredFields.filter((line) => line.startsWith('capabilityInjection:'));
     const realRenderLines = viewModel.requiredFields.filter((line) => line.startsWith('realRenderCapability:'));
     const realStatusLines = viewModel.requiredFields.filter((line) => line.startsWith('realStatusCapability:'));
+    const realAuditLines = viewModel.requiredFields.filter((line) => line.startsWith('realAuditCapability:'));
     assert.strictEqual(policyLines.length, 1);
     assert.strictEqual(sentinelLines.length, 1);
     assert.strictEqual(wiringPlanLines.length, 1);
@@ -11365,6 +11381,11 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.strictEqual(capabilityInjectionLines.length, 1);
     assert.strictEqual(realRenderLines.length, 1);
     assert.strictEqual(realStatusLines.length, 1);
+    assert.strictEqual(realAuditLines.length, 1);
+    // realAudit line sits after realStatus
+    const statusIdx = viewModel.requiredFields.findIndex((line) => line.startsWith('realStatusCapability:'));
+    const auditIdx = viewModel.requiredFields.findIndex((line) => line.startsWith('realAuditCapability:'));
+    assert.ok(statusIdx >= 0 && auditIdx === statusIdx + 1);
   });
 
   it('V1.30 W-plan: malicious wiringPlan payload never elevates real wiring or echoes secrets', () => {
@@ -11447,11 +11468,16 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     );
     assert.match(
       readyText,
+      /^realAuditCapability:state:ready:realAuditReady:true:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:none$/m,
+    );
+    assert.match(
+      readyText,
       /^executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing$/m,
     );
     assert.ok(ready.validationLines.includes('capabilityInjectionReady:true'));
     assert.ok(ready.validationLines.includes('realRenderCapabilityImplementationReady:true'));
     assert.ok(ready.validationLines.includes('realStatusCapabilityImplementationReady:true'));
+    assert.ok(ready.validationLines.includes('realAuditCapabilityImplementationReady:true'));
     assert.ok(ready.validationLines.includes('executeCapabilityAuthorized:false'));
     assert.doesNotMatch(readyText, /executeReady:true|executionEligible:true/);
 
@@ -11606,6 +11632,158 @@ describe('DOM test: supervisor lifecycle approval persistence preview panel inte
     assert.ok(viewModel.validationLines.includes('hostObservationOccurred:false'));
     assert.ok(viewModel.validationLines.includes('executionEligible:false'));
     assert.doesNotMatch(text, /statusResult|realCapabilityImplementationsReady:true|executionEligible:true/);
+  });
+
+  it('V1.34 C4 W-realAudit: shall non-live ready line + missing/contradictory/malicious → fixed not-ready; no fingerprint/secret', () => {
+    const READY_LINE =
+      'realAuditCapability:state:ready:realAuditReady:true:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:none';
+    const NOT_READY_LINE =
+      'realAuditCapability:state:not-ready:realAuditReady:false:auditPersistOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realAttemptAuditImplementationReady:false:realRunnerWiringReady:false:blocker:real-audit-capability-not-ready';
+
+    // 1) full canonical payload → exact ready audit line + validation true; render/status remain; sentinel blocked
+    const ready = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload(),
+    );
+    const readyText = [...ready.requiredFields, ...ready.validationLines, ready.messageText].join('\n');
+    assert.strictEqual(
+      ready.requiredFields.filter((line) => line.startsWith('realAuditCapability:')).length,
+      1,
+    );
+    assert.ok(ready.requiredFields.includes(READY_LINE));
+    assert.ok(
+      ready.requiredFields.includes(
+        'realRenderCapability:state:ready:realRenderReady:true:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none',
+      ),
+    );
+    assert.ok(
+      ready.requiredFields.includes(
+        'realStatusCapability:state:ready:realStatusReady:true:hostObservationOccurred:false:hostSideEffectOccurred:false:hostMutationOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:none',
+      ),
+    );
+    assert.ok(
+      ready.requiredFields.includes(
+        'executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing',
+      ),
+    );
+    assert.ok(ready.validationLines.includes('realAuditCapabilityImplementationReady:true'));
+    assert.strictEqual(
+      ready.validationLines.filter((line) => line.startsWith('realAuditCapabilityImplementationReady:')).length,
+      1,
+    );
+    assert.doesNotMatch(readyText, /auditEventFingerprint|auditEvent:|auditResult|UNSAFE_/);
+
+    // 2) missing realAudit → exact not-ready + validation false
+    const missing = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        realAuditCapabilityImplementationReady: false,
+        gates: { realAuditCapabilityImplementationReady: false },
+        capabilityInjectionReadiness: { realAuditCapabilityImplementationReady: false },
+      }),
+    );
+    assert.ok(missing.requiredFields.includes(NOT_READY_LINE));
+    assert.ok(missing.validationLines.includes('realAuditCapabilityImplementationReady:false'));
+    assert.ok(missing.validationLines.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(missing.validationLines.includes('realRunnerWiringReady:false'));
+
+    // 3) contradictory single-locus true (OR trust rejected — need all three)
+    const partial = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        realAuditCapabilityImplementationReady: true,
+        gates: { realAuditCapabilityImplementationReady: false },
+        capabilityInjectionReadiness: { realAuditCapabilityImplementationReady: true },
+      }),
+    );
+    assert.ok(partial.requiredFields.includes(NOT_READY_LINE));
+    assert.ok(partial.validationLines.includes('realAuditCapabilityImplementationReady:false'));
+
+    // 4) malicious elevation of globals/occurred/fingerprint/secret → fixed not-ready; no secret leak
+    const malicious = buildSupervisorLifecycleGuardedRunnerExecutionGateViewModel(
+      fullCanonicalRunnerRegistryReadyPayload({
+        realAuditCapabilityImplementationReady: true,
+        realCapabilityImplementationsReady: true,
+        realAttemptAuditImplementationReady: true,
+        realRunnerWiringReady: true,
+        executionEligible: true,
+        executeCapabilityAuthorized: true,
+        hostSideEffectOccurred: true,
+        hostMutationOccurred: true,
+        auditPersistOccurred: true,
+        auditEventFingerprint: 'LEAKED_FP_DEADBEEFcafe',
+        auditEvent: { body: 'UNSAFE_EVENT_BODY' },
+        auditResult: { path: '/tmp/secret-audit.jsonl' },
+        secret: 'UNSAFE_TOP_SECRET',
+        gates: {
+          realAuditCapabilityImplementationReady: true,
+          realCapabilityImplementationsReady: true,
+          realAttemptAuditImplementationReady: true,
+          realRunnerWiringReady: true,
+          executionEligible: true,
+          executeCapabilityAuthorized: true,
+          hostSideEffectOccurred: true,
+          hostMutationOccurred: true,
+          auditPersistOccurred: true,
+        },
+        capabilityInjectionReadiness: {
+          realAuditCapabilityImplementationReady: true,
+          realCapabilityImplementationsReady: true,
+          realAttemptAuditImplementationReady: true,
+          auditPersistOccurred: true,
+          secret: 'UNSAFE_READINESS_SECRET',
+        },
+      }),
+    );
+    const malText = [
+      ...malicious.requiredFields,
+      ...malicious.validationLines,
+      malicious.messageText,
+      JSON.stringify(malicious),
+    ].join('\n');
+    assert.ok(malicious.requiredFields.includes(NOT_READY_LINE));
+    assert.ok(malicious.validationLines.includes('realAuditCapabilityImplementationReady:false'));
+    assert.ok(malicious.validationLines.includes('realCapabilityImplementationsReady:false'));
+    assert.ok(malicious.validationLines.includes('realRunnerWiringReady:false'));
+    assert.ok(malicious.validationLines.includes('executionEligible:false'));
+    // render/status + sentinel unaffected by audit malice
+    assert.ok(
+      malicious.requiredFields.includes(
+        'realRenderCapability:state:not-ready:realRenderReady:false:hostSideEffectOccurred:false:realCapabilityImplementationsReady:false:realRunnerWiringReady:false:blocker:real-render-capability-not-ready',
+      ) ||
+        malicious.requiredFields.some((line) => line.startsWith('realRenderCapability:')),
+    );
+    assert.ok(
+      malicious.requiredFields.includes(
+        'executionSentinel:state:blocked:executionEligible:false:blocker:real-guarded-runner-execution-wiring-missing',
+      ),
+    );
+    assert.doesNotMatch(
+      malText,
+      /LEAKED_FP_DEADBEEFcafe|UNSAFE_EVENT_BODY|UNSAFE_TOP_SECRET|UNSAFE_READINESS_SECRET|\/tmp\/secret-audit/,
+    );
+    assert.doesNotMatch(malText, /auditEventFingerprint|auditResult/);
+
+    // 5) exactly one audit line; no audit button/endpoint/fetch/RealAuditProof/sink/hook refs in app source
+    assert.strictEqual(
+      malicious.requiredFields.filter((line) => line.startsWith('realAuditCapability:')).length,
+      1,
+    );
+  });
+
+  it('V1.34 C4 W-realAudit source: no live audit button/endpoint/fetch/RealAuditProof/sink refs', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const appSrc = await readFile(join(here, '../src/web/app.js'), 'utf8');
+    assert.ok(appSrc.includes('realAuditCapability:state:ready'));
+    assert.ok(appSrc.includes('realAuditCapability:state:not-ready'));
+    assert.ok(!appSrc.includes('RealAuditProof'));
+    assert.ok(!appSrc.includes('capability-audit-sink'));
+    assert.ok(!appSrc.includes('appendCapabilityRealAuditProofEvent'));
+    assert.ok(!appSrc.includes('setCapabilityRealAuditSinkHooksForTest'));
+    assert.ok(!/real-audit.*button|button.*real-audit/i.test(appSrc));
+    assert.ok(!/\/api\/.*real-audit|real-audit.*\/api\//i.test(appSrc));
+    // no fetch of proof endpoints
+    assert.ok(!/fetch\s*\([^)]*RealAudit/i.test(appSrc));
   });
 
   it('policy W2: denied allowlisted primary renders denied + blocked executionSentinel', () => {

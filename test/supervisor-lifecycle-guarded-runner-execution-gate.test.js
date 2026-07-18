@@ -3327,11 +3327,14 @@ describe('buildSupervisorLifecycleGuardedRunnerExecutionGate', () => {
       dryRunCapabilityRegistryReady: true,
       realRenderCapabilityImplementationReady: true,
       realStatusCapabilityImplementationReady: true,
+      realAuditCapabilityImplementationReady: true,
       realCapabilityImplementationsReady: false,
+      realAttemptAuditImplementationReady: false,
       executeCapabilityAuthorized: false,
       hostMutationOccurred: false,
       hostObservationOccurred: false,
       hostSideEffectOccurred: false,
+      auditPersistOccurred: false,
     });
     assert.strictEqual(result.registryDecision.state, 'resolved');
     assert.strictEqual(result.adapterDecision.state, 'resolved');
@@ -8488,5 +8491,192 @@ describe('V1.34 RealAuditProof fail-closed + concurrency', () => {
       assert.ok(!json.includes(root));
       assert.ok(!json.includes('BEGIN PRIVATE'));
     });
+  });
+});
+
+// ── V1.34 C4 / Task7: Gate non-live realAudit honesty ──
+describe('V1.34 C4 gate non-live realAudit honesty', () => {
+  it('T-gate-1: production ready fixture — local audit true; occurred false; globals/execute/wiring false; blocked wiring-missing; 6/0; no fingerprint/event keys', () => {
+    const gate = buildGate(getReadyInputs(), { executeRequested: true });
+
+    // Local realAudit readiness (top + gates)
+    assert.strictEqual(gate.realAuditCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.realAuditCapabilityImplementationReady, true);
+    // Preserve render/status
+    assert.strictEqual(gate.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(gate.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.realStatusCapabilityImplementationReady, true);
+
+    // Non-live occurred flags
+    assert.strictEqual(gate.hostSideEffectOccurred, false);
+    assert.strictEqual(gate.hostMutationOccurred, false);
+    assert.strictEqual(gate.auditPersistOccurred, false);
+    assert.strictEqual(gate.gates.hostSideEffectOccurred, false);
+    assert.strictEqual(gate.gates.hostMutationOccurred, false);
+    assert.strictEqual(gate.gates.auditPersistOccurred, false);
+
+    // Global / execute / wiring / realAttempt stay false
+    assert.strictEqual(gate.realCapabilityImplementationsReady, false);
+    assert.strictEqual(gate.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(gate.executeCapabilityAuthorized, false);
+    assert.strictEqual(gate.realRunnerWiringReady, false);
+    assert.strictEqual(gate.executionEligible, false);
+    assert.strictEqual(gate.gates.realCapabilityImplementationsReady, false);
+    assert.strictEqual(gate.gates.realAttemptAuditImplementationReady, false);
+    assert.strictEqual(gate.gates.executeCapabilityAuthorized, false);
+    assert.strictEqual(gate.gates.realRunnerWiringReady, false);
+    assert.strictEqual(gate.gates.runnerWiringContractReady, false);
+
+    // Blocked + wiring-missing + 6/0 unchanged
+    assert.strictEqual(gate.state, 'blocked');
+    assert.deepStrictEqual(gate.nextBlockers, [REAL_WIRING_MISSING]);
+    assert.strictEqual(gate.runnerWiringContract.readyCount, 6);
+    assert.strictEqual(gate.runnerWiringContract.blockedCount, 0);
+
+    // No live fingerprint / event / result keys
+    assert.strictEqual(gate.auditEventFingerprint, undefined);
+    assert.strictEqual(gate.auditEvent, undefined);
+    assert.strictEqual(gate.auditResult, undefined);
+    assert.strictEqual(gate.eventFingerprint, undefined);
+    const json = JSON.stringify(gate);
+    assert.ok(!json.includes('auditEventFingerprint'));
+    assert.ok(!/"auditEvent"\s*:/.test(json));
+    assert.ok(!/"auditResult"\s*:/.test(json));
+  });
+
+  it('T-gate-2: options full malicious override ignored; no secret leak; proof/sink zero calls', async () => {
+    const baseline = buildGate(getReadyInputs(), { executeRequested: true });
+    let sinkCalls = 0;
+    setCapabilityRealAuditSinkHooksForTest({
+      beforeAppend() {
+        sinkCalls += 1;
+      },
+    });
+    try {
+      const poisoned = buildGate(getReadyInputs(), {
+        executeRequested: true,
+        realAuditCapabilityImplementationReady: false,
+        realCapabilityImplementationsReady: true,
+        realAttemptAuditImplementationReady: true,
+        executeCapabilityAuthorized: true,
+        realRunnerWiringReady: true,
+        runnerWiringContractReady: true,
+        executionEligible: true,
+        hostSideEffectOccurred: true,
+        hostMutationOccurred: true,
+        auditPersistOccurred: true,
+        auditEventFingerprint: 'LEAKED_FINGERPRINT_DEADBEEF',
+        auditEvent: { secret: 'UNSAFE_AUDIT_EVENT_BODY' },
+        auditResult: { secret: 'UNSAFE_AUDIT_RESULT' },
+        handlers: { audit: () => { sinkCalls += 1; } },
+        capabilityReceipt: {
+          receiptKind: 'capability-real-implementation-receipt',
+          auditEventFingerprint: 'LEAKED_FINGERPRINT_DEADBEEF',
+          secret: 'UNSAFE_RECEIPT_SECRET',
+        },
+      });
+
+      // Fixed honesty fields match baseline production path
+      assert.strictEqual(poisoned.realAuditCapabilityImplementationReady, true);
+      assert.strictEqual(poisoned.gates.realAuditCapabilityImplementationReady, true);
+      assert.strictEqual(poisoned.realCapabilityImplementationsReady, false);
+      assert.strictEqual(poisoned.realAttemptAuditImplementationReady, false);
+      assert.strictEqual(poisoned.executeCapabilityAuthorized, false);
+      assert.strictEqual(poisoned.realRunnerWiringReady, false);
+      assert.strictEqual(poisoned.executionEligible, false);
+      assert.strictEqual(poisoned.hostSideEffectOccurred, false);
+      assert.strictEqual(poisoned.hostMutationOccurred, false);
+      assert.strictEqual(poisoned.auditPersistOccurred, false);
+      assert.strictEqual(poisoned.gates.auditPersistOccurred, false);
+      assert.strictEqual(poisoned.gates.realAttemptAuditImplementationReady, false);
+      assert.deepStrictEqual(poisoned.nextBlockers, baseline.nextBlockers);
+      assert.strictEqual(poisoned.runnerWiringContract.readyCount, baseline.runnerWiringContract.readyCount);
+      assert.strictEqual(poisoned.runnerWiringContract.blockedCount, baseline.runnerWiringContract.blockedCount);
+
+      // Render/status not degraded
+      assert.strictEqual(poisoned.realRenderCapabilityImplementationReady, true);
+      assert.strictEqual(poisoned.realStatusCapabilityImplementationReady, true);
+
+      // No secret/fingerprint leak; no proof/sink call
+      const json = JSON.stringify(poisoned);
+      assert.ok(!json.includes('LEAKED_FINGERPRINT_DEADBEEF'));
+      assert.ok(!json.includes('UNSAFE_AUDIT_EVENT_BODY'));
+      assert.ok(!json.includes('UNSAFE_AUDIT_RESULT'));
+      assert.ok(!json.includes('UNSAFE_RECEIPT_SECRET'));
+      assert.strictEqual(poisoned.auditEventFingerprint, undefined);
+      assert.strictEqual(poisoned.capabilityReceipt, undefined);
+      assert.strictEqual(sinkCalls, 0);
+    } finally {
+      setCapabilityRealAuditSinkHooksForTest(null);
+    }
+  });
+
+  it('T-gate-3: render/status existing gate behavior not degraded', () => {
+    const gate = buildGate(getReadyInputs(), { executeRequested: true });
+    assert.strictEqual(gate.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(gate.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.realRenderCapabilityImplementationReady, true);
+    assert.strictEqual(gate.gates.realStatusCapabilityImplementationReady, true);
+    assert.strictEqual(gate.hostObservationOccurred, false);
+    assert.strictEqual(gate.hostSideEffectOccurred, false);
+    assert.strictEqual(gate.hostMutationOccurred, false);
+    assert.strictEqual(gate.realCapabilityImplementationsReady, false);
+    assert.strictEqual(gate.executionEligible, false);
+    assert.deepStrictEqual(gate.nextBlockers, [REAL_WIRING_MISSING]);
+  });
+
+  it('T-gate-source: gate non-live — no RealAuditProof/sink call sites in production gate builder', () => {
+    const lifecycleSrc = readFileSync(join(process.cwd(), 'src/supervisor-lifecycle.js'), 'utf8');
+    // Stable full-function bounds (not a fixed char length — body is ~19k and still grows).
+    const GATE_START_MARKER = 'export function buildSupervisorLifecycleGuardedRunnerExecutionGate(';
+    const gateStart = lifecycleSrc.indexOf(GATE_START_MARKER);
+    assert.ok(gateStart >= 0, 'gate start marker must exist');
+    // Prefer real next top-level export/function marker after this gate; currently last export → EOF.
+    const afterGateStart = lifecycleSrc.slice(gateStart + GATE_START_MARKER.length);
+    const nextTopLevelMatch = afterGateStart.match(
+      /\nexport (?:async )?function |\nexport const |\nexport class |\nexport \{/,
+    );
+    const gateEnd = nextTopLevelMatch
+      ? gateStart + GATE_START_MARKER.length + nextTopLevelMatch.index + 1
+      : lifecycleSrc.length;
+    assert.ok(gateEnd > gateStart, 'gate end marker/EOF must be after start');
+    const gateSlice = lifecycleSrc.slice(gateStart, gateEnd);
+
+    // Call-expression scan (identifier + '('). Comments may abbreviate proof/sink names without
+    // the full forbidden call token; this still catches real production call sites.
+    for (const name of [
+      'authorizeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof',
+      'invokeSupervisorLifecycleGuardedRunnerCapabilityRealAuditProof',
+      'appendCapabilityRealAuditProofEvent',
+      'setCapabilityRealAuditSinkHooksForTest',
+    ]) {
+      assert.ok(
+        !new RegExp(String.raw`\b${name}\s*\(`).test(gateSlice),
+        `gate must not call ${name}(`,
+      );
+    }
+
+    // No production live key/event/result field form (colon key), distinct from comment prose.
+    assert.ok(
+      !/auditEventFingerprint\s*:/.test(gateSlice),
+      'gate must not emit auditEventFingerprint: live field',
+    );
+
+    // Honesty + realAudit local/non-live semantics on the complete gateSlice only (no full-file fallback).
+    assert.ok(
+      gateSlice.includes('Independent global fact (3/7 real kinds)'),
+      'gate honesty comment must document Independent global fact (3/7 real kinds)',
+    );
+    assert.ok(
+      !gateSlice.includes('Independent global fact (2/7 real kinds)'),
+      'must not retain 2/7 honesty comment inside gate',
+    );
+    assert.ok(
+      gateSlice.includes('Local real-audit fact only')
+        && gateSlice.includes('Gate non-live: no authorize/invoke RealAuditProof')
+        && /const realAuditCapabilityImplementationReady\s*=/.test(gateSlice),
+      'gate must document realAudit local/non-live field semantics',
+    );
   });
 });
