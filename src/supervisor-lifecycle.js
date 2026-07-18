@@ -4,9 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { join as pathJoin, resolve, sep } from 'node:path';
 import { types as utilTypes } from 'node:util';
+import {
+  SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS,
+  listSupervisorLifecycleActionIds,
+} from './supervisor-lifecycle-actions.js';
 
 const APPROVAL_MAX_WINDOW_MS = 60 * 60 * 1000;
-const ALLOWED_OPERATIONS = new Set(['install', 'uninstall', 'rollback', 'recover']);
+// Derived from pure shared SoT operations (insertion order of frozen map keys).
+const ALLOWED_OPERATIONS = new Set(Object.keys(SUPERVISOR_LIFECYCLE_OPERATION_ACTION_IDS));
 const EXECUTOR_MISSING_BLOCKER = 'executor-implementation-missing';
 const FAKE_EXECUTOR_KIND = 'fake-supervisor-lifecycle-executor';
 const FAKE_EXECUTOR_MODE = 'fake-test-only';
@@ -121,30 +126,25 @@ function isWithinBoundary(targetPath, boundaryPath) {
   return targetPath === resolvedBoundary || targetPath.startsWith(`${resolvedBoundary}${sep}`);
 }
 
+// Description text keyed by actionId only — not a second operation→ID authority list.
+const LIFECYCLE_ACTION_DESCRIPTIONS = Object.freeze({
+  'render-launch-agent-plist': 'Render a launch agent plist preview.',
+  'write-launch-agent-plist': 'Future apply would write a launch agent plist after all gates pass.',
+  'load-launch-agent': 'Future apply would ask launchd to load the launch agent.',
+  'unload-launch-agent': 'Future apply would ask launchd to unload the launch agent.',
+  'remove-launch-agent-plist': 'Future apply would remove the launch agent plist.',
+  'remove-supervisor-metadata': 'Future apply would remove supervisor lifecycle metadata.',
+  'capture-current-state': 'Future apply would capture current state before rollback.',
+  'restore-previous-plist': 'Future apply would restore the previous launch agent plist.',
+  'restart-previous-supervisor': 'Future apply would restart the previous supervisor.',
+  'start-recovery-supervisor': 'Recovery supervisor lifecycle is not designed in V0.88.',
+});
+
 function buildLifecycleActions(operation) {
-  const actionsByOperation = {
-    install: [
-      ['render-launch-agent-plist', 'Render a launch agent plist preview.'],
-      ['write-launch-agent-plist', 'Future apply would write a launch agent plist after all gates pass.'],
-      ['load-launch-agent', 'Future apply would ask launchd to load the launch agent.'],
-    ],
-    uninstall: [
-      ['unload-launch-agent', 'Future apply would ask launchd to unload the launch agent.'],
-      ['remove-launch-agent-plist', 'Future apply would remove the launch agent plist.'],
-      ['remove-supervisor-metadata', 'Future apply would remove supervisor lifecycle metadata.'],
-    ],
-    rollback: [
-      ['capture-current-state', 'Future apply would capture current state before rollback.'],
-      ['restore-previous-plist', 'Future apply would restore the previous launch agent plist.'],
-      ['restart-previous-supervisor', 'Future apply would restart the previous supervisor.'],
-    ],
-    recover: [
-      ['start-recovery-supervisor', 'Recovery supervisor lifecycle is not designed in V0.88.'],
-    ],
-  };
-  return (actionsByOperation[operation] || []).map(([id, description]) => ({
+  // Action ID order/membership authority is pure shared SoT only.
+  return listSupervisorLifecycleActionIds(operation).map((id) => ({
     id,
-    description,
+    description: LIFECYCLE_ACTION_DESCRIPTIONS[id],
     status: 'blocked',
     wouldRun: false,
     wouldWrite: false,
