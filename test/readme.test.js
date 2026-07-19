@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.36**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：V1.37**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.36**';
+  const startMarker = '> **当前版本：V1.37**';
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -1896,10 +1896,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.36 audit event/journal cross-store structural consistency verifier', () => {
-  it('title and badge claim V1.36 as current', () => {
-    assertReadmeContains(/# Linke V1\.36/, 'README title should mention V1.36');
-    assertReadmeContains(/\*\*当前版本：V1\.36\*\*/, 'README badge should mention V1.36');
+describe('README — V1.37 journal-first crash-recoverable audit dual-write coordinator', () => {
+  it('title and badge claim V1.37 as current', () => {
+    assertReadmeContains(/# Linke V1\.37/, 'README title should mention V1.37');
+    assertReadmeContains(/\*\*当前版本：V1\.37\*\*/, 'README badge should mention V1.37');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.36\*\*/, 'README badge must not still claim V1.36 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.36$/m, 'README title must not still claim V1.36 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.35\*\*/, 'README badge must not still claim V1.35 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.35$/m, 'README title must not still claim V1.35 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.34\*\*/, 'README badge must not still claim V1.34 as current');
@@ -1958,31 +1960,35 @@ describe('README — V1.36 audit event/journal cross-store structural consistenc
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.36 cross-store verifier signature ceiling and honest boundaries', () => {
+  it('badge mentions V1.37 dual-write coordinator signature ceiling and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.36 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.36 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes('| V1.37 | 当前版本 |'),
+      'extracted badge must not contain version table row "| V1.37 | 当前版本 |" (cross-region bleed guard)',
     );
     assert.ok(
-      badge.includes('V1.36 audit event/journal cross-store structural consistency verifier implementation'),
-      'top badge must include V1.36 exact signature ceiling',
+      badge.includes('V1.37 journal-first crash-recoverable audit dual-write coordinator implementation'),
+      'top badge must include V1.37 exact signature ceiling',
     );
-    assert.ok(badge.includes('src/audit-integrity-cross-store.js'), 'top badge cross-store module');
-    assert.ok(badge.includes('verifyAuditIntegrityAgainstEventStore'), 'top badge cross-store API');
+    assert.ok(badge.includes('src/audit-integrity-dual-write.js'), 'top badge dual-write module');
+    assert.ok(badge.includes('appendAuditEventWithIntegrityDualWrite'), 'top badge dual-write append API');
+    assert.ok(badge.includes('recoverAuditIntegrityDualWrite'), 'top badge dual-write recover API');
     assert.ok(
-      /read-only|readonly/i.test(badge)
-        && /(events.?journal|journal.?events|events↔journal|events↔journal|strict.*structural|structural.*relationship|cross-store)/i.test(badge),
-      'top badge read-only cross-store structural relationship',
+      /appendAuditEvent/i.test(badge)
+        && /sole|only|唯一|唯一接入|production/i.test(badge),
+      'top badge production appendAuditEvent sole dual-write wiring',
     );
-    assert.ok(/retention-aware|retention.?aware/i.test(badge), 'top badge retention-aware');
-    assert.ok(/T6d\.3 still partial|T6d\.3 partial foundation only|partial foundation only/i.test(badge), 'top badge T6d.3 still partial');
-    assert.ok(/not dual-write|no production dual-write|不是 dual-write|不.*dual-write/i.test(badge), 'top badge not dual-write');
-    assert.ok(/no production caller|not production caller|without production caller|explicit verifier only/i.test(badge), 'top badge not production caller');
-    assert.ok(/not production integration|不是 production integration|无 production integration/i.test(badge), 'top badge not production integration');
-    assert.ok(/not production detects|no production detects/i.test(badge), 'top badge not production detects');
+    assert.ok(/journal-first/i.test(badge), 'top badge journal-first');
+    assert.ok(/single-slot|single.?slot|WAL|cursor/i.test(badge), 'top badge single-slot WAL/cursor');
+    assert.ok(/single-process/i.test(badge), 'top badge single-process queue');
+    assert.ok(/crash.?recover/i.test(badge), 'top badge crash recovery');
+    assert.ok(badge.includes('audit/events.jsonl'), 'top badge events path');
+    assert.ok(badge.includes('audit/integrity-journal.jsonl'), 'top badge journal path');
+    assert.ok(badge.includes('audit/integrity-dual-write-state.json'), 'top badge dual-write state path');
+    assert.ok(/T6d\.3 still partial|T6d\.3 partial only|partial only/i.test(badge), 'top badge T6d.3 still partial');
+    assert.ok(/not T6d\.3 complete|not.*T6d\.3 complete/i.test(badge), 'top badge not T6d.3 complete');
     assert.ok(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i.test(badge), 'top badge not M6d Exit');
     assert.ok(/not Gold|不是 Gold|Gold 依旧 blocked|Gold remains blocked/i.test(badge), 'top badge not Gold');
     assert.ok(/production-hardening 仍 partial|production-hardening remains partial|production-hardening partial/i.test(badge), 'top badge production-hardening partial');
@@ -2001,36 +2007,37 @@ describe('README — V1.36 audit event/journal cross-store structural consistenc
     assert.ok(/runnerWiringContractReady:false/.test(badge), 'top badge runnerWiringContract false');
     assert.ok(/executionEligible:false/.test(badge), 'top badge executionEligible false');
     assert.ok(
-      /retention suffix/i.test(badge)
-        && /structure only|structural only|structure-only/i.test(badge)
-        && /not deletion authorization|no deletion authorization|does not prove deletion authorization/i.test(badge),
-      'top badge retention suffix structure only limitation',
+      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(badge)
+        && /single-process/i.test(badge),
+      'top badge not multi-process exclusive lock (single-process only)',
     );
     assert.ok(
-      /paired rewrite|consistent dual-suffix|dual.?suffix/i.test(badge)
-        && /may (?:still )?verify|can (?:still )?verify|still (?:may |can )?pass|可能通过/i.test(badge),
-      'top badge paired rewrite / dual-suffix may verify',
+      /no journal rotation|not journal rotation|rotation.*monitor|no.*rotation.*monitor.*alert/i.test(badge),
+      'top badge no journal rotation / monitor / alert',
     );
     assert.ok(
-      /E\s*=\s*J\+J|E=J\+J|occurrence ambigu|partial ambigu/i.test(badge),
-      'top badge E=J+J / occurrence ambiguity',
+      /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(badge)
+        && /best-effort|catch|swallow/i.test(badge),
+      'top badge not e2e production audit delivery (caller best-effort)',
     );
     assert.ok(
-      /no (?:writer )?cursor|without (?:writer )?cursor|no occurrence binding|without occurrence binding|no writer cursor or occurrence binding/i.test(badge),
-      'top badge no cursor/occurrence binding',
+      /not state continuity under adversarial state deletion|no state continuity under adversarial state deletion/i.test(badge)
+        && /re-bootstrap|rebootstrap|limitation/i.test(badge),
+      'top badge not state continuity under adversarial state deletion',
     );
     assert.ok(
-      /no public HTTP\/CLI\/Web|not.*HTTP\/CLI\/Web|无.*HTTP\/CLI\/Web|no public.*wiring/i.test(badge),
-      'top badge no public HTTP/CLI/Web wiring',
+      /not authenticity|no authenticity|no external authenticity|no external trusted anchor|no external anchor|HMAC|signature/i.test(badge),
+      'top badge not authenticity / external anchor / HMAC / signature',
     );
     assert.ok(
-      /not authenticity|no authenticity|not external anchor|no external anchor|not repair|no repair/i.test(badge),
-      'top badge not authenticity/external anchor/repair',
+      !/not dual-write|no production dual-write|no production caller/i.test(badge)
+        || /V1\.36/.test(badge),
+      'top badge must not claim V1.37 is not dual-write / no production caller',
     );
     assert.ok(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked/i.test(badge), 'badge Gold still blocked honesty');
     assert.doesNotMatch(badge, /\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
     // Forbidden compound assembled at runtime
-    const forbiddenCompound = ['tamper-', 'evident'].join('');
+    const forbiddenCompound = ['tamper', 'evident'].join('-');
     assert.equal(badge.includes(forbiddenCompound), false, 'top badge must not embed forbidden tamper compound');
     // Helper canary: missing start / duplicate start must assert-fail
     assert.throws(
@@ -2039,27 +2046,38 @@ describe('README — V1.36 audit event/journal cross-store structural consistenc
       'helper canary: missing badge start must fail',
     );
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.36** a\n> **当前版本：V1.36** b\n'),
+      () => extractCurrentBadgeBlockquote('> **当前版本：V1.37** a\n> **当前版本：V1.37** b\n'),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
   });
 
-  it('version table marks V1.36 current, V1.35 historical journal foundation, V1.34 historical with real audit, keeps V1.33/V1.32', () => {
-    // V1.36 current row — independently lock exact negative (not covered by badge it)
-    const v136RowMatch = readme.match(/\| V1\.36 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v136RowMatch, 'V1.36 current version table row must exist');
+  it('version table marks V1.37 current, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
+    // V1.37 current row — independently lock exact negative (not covered by badge)
+    const v137RowMatch = readme.match(/\| V1\.37 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v137RowMatch, 'V1.37 current version table row must exist');
     assert.ok(
-      v136RowMatch[0].includes('not production-hardening ready'),
-      'V1.36 current table row must include exact "not production-hardening ready"',
+      v137RowMatch[0].includes('not production-hardening ready'),
+      'V1.37 current table row must include exact "not production-hardening ready"',
     );
     assertReadmeContains(
-      /\| V1\.36 \| 当前版本 \|[^|]*(cross-store|verifyAuditIntegrityAgainstEventStore|audit-integrity-cross-store|structural consistency verifier)[^|]*(T6d\.3 still partial|partial foundation only|not dual-write|not M6d Exit|not production)[^|]*Gold 依旧 blocked/i,
-      'V1.36 should be current cross-store structural consistency verifier milestone',
+      /\| V1\.37 \| 当前版本 \|[^|]*(journal-first|dual-write coordinator|audit-integrity-dual-write|appendAuditEventWithIntegrityDualWrite|single-slot|single-process)[^|]*(T6d\.3 still partial|T6d\.3 partial only|not T6d\.3 complete|not M6d Exit|not production-hardening ready)[^|]*Gold 依旧 blocked/i,
+      'V1.37 should be current journal-first dual-write coordinator milestone',
+    );
+    // V1.36 historical row — lock cross-store verifier facts (must not remain 当前版本)
+    const v136RowMatch = readme.match(/\| V1\.36 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v136RowMatch, 'V1.36 historical version table row must exist');
+    assert.ok(
+      /cross-store|verifyAuditIntegrityAgainstEventStore|audit-integrity-cross-store|structural consistency verifier/i.test(v136RowMatch[0]),
+      'V1.36 historical table row must retain cross-store verifier facts',
+    );
+    assertReadmeContains(
+      /\| V1\.36 \| 历史版本 \|[^|]*(cross-store|verifyAuditIntegrityAgainstEventStore|audit-integrity-cross-store|structural consistency verifier)[^|]*(T6d\.3 still partial|partial foundation only|not dual-write|not M6d Exit|not production)[^|]*Gold 依旧 blocked/i,
+      'V1.36 should be historical cross-store structural consistency verifier milestone',
     );
     assertReadmeContains(
       /\| V1\.35 \| 历史版本 \|[^|]*(integrity-journal|unkeyed hash-chain structural consistency|无密钥哈希链结构一致性基座|T6d\.3 partial)[^|]*(not dual-write|not M6d Exit|not production integration|partial foundation only)[^|]*Gold 依旧 blocked/i,
-      'V1.35 should become historical unkeyed journal foundation milestone',
+      'V1.35 should remain historical unkeyed journal foundation milestone',
     );
     assertReadmeContains(
       /\| V1\.34 \| 历史版本 \|[^|]*(real audit|RealAudit|capability-proof-attempts|M6d-prep)[^|]*realAuditCapabilityImplementationReady:true[^|]*realCapabilityImplementationsReady:false[^|]*(3\/7|realAttemptAuditImplementationReady:false)[^|]*(executeCapabilityAuthorized:false|realRunnerWiringReady:false|executionEligible:false)[^|]*Gold 依旧 blocked/i,
@@ -2137,6 +2155,7 @@ describe('README — V1.36 audit event/journal cross-store structural consistenc
     assertReadmeDoesNotContain(/\| V1\.28 \| 当前版本 \|/i, 'V1.28 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.29 \| 当前版本 \|/i, 'V1.29 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.30 \| 当前版本 \|/i, 'V1.30 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.36 \| 当前版本 \|/i, 'V1.36 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.35 \| 当前版本 \|/i, 'V1.35 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.34 \| 当前版本 \|/i, 'V1.34 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.33 \| 当前版本 \|/i, 'V1.33 must not remain marked as current');
