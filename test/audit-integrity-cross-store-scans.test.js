@@ -22,6 +22,7 @@ const REPO_ROOT = join(__dirname, '..');
 const PATHS = Object.freeze({
   crossStore: join(REPO_ROOT, 'src/audit-integrity-cross-store.js'),
   journal: join(REPO_ROOT, 'src/audit-integrity-journal.js'),
+  dualWrite: join(REPO_ROOT, 'src/audit-integrity-dual-write.js'),
   auditLog: join(REPO_ROOT, 'src/audit-log.js'),
   server: join(REPO_ROOT, 'src/server.js'),
   agent: join(REPO_ROOT, 'src/agent.js'),
@@ -524,10 +525,14 @@ describe('C3 B: journal has no cross-store and no events.jsonl business writes',
   });
 });
 
-// ── 3. production surfaces have no cross-store wiring ────────────────────
+// ── 3. production surfaces zero direct cross-store; dual-write exact-one ─
+// V1.37 C6: audit-log/server/agent/sink remain zero direct cross-store/inspect.
+// Dual-write coordinator is the sole production importer and must static-import
+// cross-store + really call verifyAuditIntegrityAgainstEventStore.
+// Replaces prior "all production surfaces zero" with controlled exact-one allowlist.
 
-describe('C3 C: production surfaces free of cross-store / inspect wiring', () => {
-  it('3. audit-log/server/agent/capability-audit-sink have no cross-store module/API/inspect API', async () => {
+describe('C3 C: audit-log/server/agent/sink zero direct cross-store; dual-write exact-one allowed', () => {
+  it('3a. audit-log/server/agent/capability-audit-sink have no cross-store module/API/inspect API', async () => {
     for (const label of ['auditLog', 'server', 'agent', 'capabilitySink']) {
       const full = await readText(PATHS[label]);
       assert.equal(
@@ -539,6 +544,31 @@ describe('C3 C: production surfaces free of cross-store / inspect wiring', () =>
         assert.equal(full.includes(api), false, `${label}: ${api}`);
       }
       assert.equal(full.includes(INSPECT_API), false, `${label}: ${INSPECT_API}`);
+    }
+  });
+
+  it('3b. dual-write is sole production importer: static import + real verify call; no other production importer', async () => {
+    const dualWrite = await readText(PATHS.dualWrite);
+    const imports = collectStaticImportSpecifiers(dualWrite);
+    assert.equal(
+      imports.filter((s) => s === './audit-integrity-cross-store.js').length,
+      1,
+      'dual-write must static-import cross-store exactly once',
+    );
+    assert.ok(
+      hasCallSite(dualWrite, 'verifyAuditIntegrityAgainstEventStore'),
+      'dual-write must call verifyAuditIntegrityAgainstEventStore',
+    );
+
+    // No other allowlisted production surface imports cross-store.
+    for (const label of ['auditLog', 'server', 'agent', 'capabilitySink', 'journal']) {
+      const full = await readText(PATHS[label]);
+      const specs = collectStaticImportSpecifiers(full);
+      assert.equal(
+        specs.includes('./audit-integrity-cross-store.js'),
+        false,
+        `${label}: must not import cross-store`,
+      );
     }
   });
 });

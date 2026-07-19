@@ -413,3 +413,51 @@ describe('audit allowlist for NAS snapshot replication', () => {
     assert.equal(Object.hasOwn(event, 'fileCount'), false);
   });
 });
+
+/**
+ * V1.37 C6: agent appendNasReplicationAudit best-effort honesty.
+ * Real appendAuditEvent failure (occupied dual-write state) must not change
+ * nas-snapshot-replicate plan exit semantics. Does not modify agent catch.
+ * No mail / external network.
+ */
+describe('C6 agent appendNasReplicationAudit best-effort (audit write failure swallowed)', () => {
+  it('dry-run plan exits 0 when dual-write state is occupied; business stdout unchanged; no audit events', async () => {
+    const fixture = await createLocalSnapshotFixture();
+    try {
+      await mkdir(join(fixture.dataDir, 'audit'), { recursive: true });
+      await writeFile(
+        join(fixture.dataDir, 'audit', 'integrity-dual-write-state.json'),
+        'occupied-invalid-state\n',
+        { mode: 0o600 },
+      );
+
+      const beforeMount = await readdir(fixture.mountPath);
+      const { stdout, stderr } = await runAgent(baseArgs(fixture));
+      const result = JSON.parse(stdout);
+
+      // Business plan semantics unchanged by audit failure.
+      assert.equal(result.command, 'nas-snapshot-replicate');
+      assert.equal(result.mode, 'plan');
+      assert.equal(result.state, 'planned');
+      assert.equal(result.wouldWrite, false);
+      assert.deepEqual(await readdir(fixture.mountPath), beforeMount);
+
+      // No successful audit delivery (append swallowed).
+      const events = await readAuditEvents(fixture.dataDir, { limit: 20 });
+      assert.equal(
+        events.filter((e) => String(e.type || '').startsWith('nas.snapshot.replication')).length,
+        0,
+        'audit events must not appear when dual-write append fails',
+      );
+
+      // No path/secret leak on stdout/stderr.
+      assert.ok(!stdout.includes(fixture.dataDir));
+      assert.ok(!stdout.includes('occupied-invalid-state'));
+      assert.ok(!stderr.includes(fixture.dataDir));
+      assert.ok(!stderr.includes('occupied-invalid-state'));
+      assertNoSensitiveLeak(stdout, stderr, fixture.configPath, fixture.dataDir);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+});

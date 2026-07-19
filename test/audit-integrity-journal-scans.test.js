@@ -373,44 +373,73 @@ describe('C4 scan helpers: raw static import extractor canaries', () => {
   });
 });
 
-// ── A. zero production wiring ────────────────────────────────────────────
+// ── A. controlled dual-write wiring / no direct journal wiring ───────────
+// V1.37 C6: production may reach journal only via dual-write coordinator
+// (audit-log → dual-write → journal). Direct journal module/API remains banned
+// on audit-log/server/agent/sink. Replaces prior "zero production journal wiring"
+// with exact controlled-wiring contract (not a silent deletion of isolation).
 
-describe('C4 A: zero production journal wiring', () => {
-  it('1. journal full raw text has no events.jsonl; bans audit-log import/API; requires schema import', async () => {
+describe('C4 A: controlled dual-write wiring / no direct journal wiring', () => {
+  it('1. journal full raw text has no events.jsonl; bans audit-log/coordinator import/API; requires schema import', async () => {
     const full = await readText(PATHS.journal);
     // Full raw text (plan: source text itself must not contain these tokens).
     assert.equal(full.includes('events.jsonl'), false, 'journal must not mention events.jsonl');
     assert.equal(full.includes("from './audit-log.js'"), false);
     assert.equal(full.includes('from "./audit-log.js"'), false);
     assert.equal(full.includes('appendAuditEvent'), false);
+    // State module path contains the dual-write prefix; ban coordinator module only.
+    const journalImports = collectStaticImportSpecifiers(full);
+    assert.equal(
+      journalImports.includes('./audit-integrity-dual-write.js'),
+      false,
+      'journal must not import coordinator',
+    );
+    assert.equal(full.includes('appendAuditEventWithIntegrityDualWrite'), false);
     assert.ok(
       full.includes("from './audit-event-schema.js'") || full.includes('from "./audit-event-schema.js"'),
       'journal must import audit-event-schema',
     );
   });
 
-  it('2. audit-log raw text has no integrity-journal module or journal API names', async () => {
+  it('2. audit-log may static-import dual-write coordinator only; no direct journal module/API', async () => {
     const full = await readText(PATHS.auditLog);
+    // Controlled wiring: exact-one static import of dual-write coordinator is required.
+    const dualWriteImportRe = /from\s+['"]\.\/audit-integrity-dual-write\.js['"]/g;
+    const dualWriteImports = full.match(dualWriteImportRe) || [];
+    assert.equal(dualWriteImports.length, 1, 'audit-log must static-import dual-write exactly once');
+    assert.ok(
+      full.includes('appendAuditEventWithIntegrityDualWrite'),
+      'audit-log must reference coordinator API',
+    );
+    // Still forbidden: direct journal module / public journal APIs.
     assert.equal(full.includes('audit-integrity-journal'), false);
     for (const api of JOURNAL_APIS) {
       assert.equal(full.includes(api), false, `audit-log must not reference ${api}`);
     }
   });
 
-  it('3. server and agent raw text have no journal module or journal APIs', async () => {
+  it('3. server and agent raw text have no journal module, journal APIs, or dual-write coordinator', async () => {
     for (const label of ['server', 'agent']) {
       const full = await readText(PATHS[label]);
       assert.equal(full.includes('audit-integrity-journal'), false, `${label}: module name`);
+      assert.equal(full.includes('audit-integrity-dual-write'), false, `${label}: coordinator`);
+      assert.equal(
+        full.includes('appendAuditEventWithIntegrityDualWrite'),
+        false,
+        `${label}: coordinator API`,
+      );
       for (const api of JOURNAL_APIS) {
         assert.equal(full.includes(api), false, `${label}: ${api}`);
       }
     }
   });
 
-  it('4. capability-audit-sink raw text has no integrity-journal or journal APIs', async () => {
+  it('4. capability-audit-sink raw text has no integrity-journal, journal APIs, or dual-write coordinator', async () => {
     const full = await readText(PATHS.capabilitySink);
     assert.equal(full.includes('integrity-journal'), false);
     assert.equal(full.includes('audit-integrity-journal'), false);
+    assert.equal(full.includes('audit-integrity-dual-write'), false);
+    assert.equal(full.includes('appendAuditEventWithIntegrityDualWrite'), false);
     for (const api of JOURNAL_APIS) {
       assert.equal(full.includes(api), false, `sink: ${api}`);
     }

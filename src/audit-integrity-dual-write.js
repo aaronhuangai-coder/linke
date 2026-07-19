@@ -1,5 +1,8 @@
 /**
- * V1.37 C4: Prepared WAL + crash recovery core (library coordinator).
+ * V1.37 journal-first crash-recoverable audit dual-write coordinator implementation
+ *
+ * Signature ceiling (only allowed completion claim):
+ *   V1.37 journal-first crash-recoverable audit dual-write coordinator implementation
  *
  * Public surface:
  *   appendAuditEventWithIntegrityDualWrite(dataDir, event, options?)
@@ -13,9 +16,35 @@
  *   ensureAuditIntegrityDualWriteIdleUnlocked(resolvedRoot, lease)
  *     S3a–S3d with real prepared recovery (C4)
  *
- * Does NOT wire production appendAuditEvent (C5).
+ * Production wiring (C5 delivered; sole controlled caller):
+ *   src/audit-log.js is the only production static importer of this module and
+ *   appendAuditEvent body calls appendAuditEventWithIntegrityDualWrite exactly once.
+ *   server.js / agent.js never import this coordinator (they use audit-log only).
  * Does NOT import audit-log (no cycle).
  * Does NOT reimplement journal hash/link or events strict parser formulas.
+ *
+ * BLOCKED / not delivered (do not claim):
+ * - T6d.3 complete / M6d Exit / production-hardening ready / Gold ready
+ * - authenticity / external trusted anchor / HMAC / signature
+ * - multi-process exclusive lock (single-process queue only)
+ * - journal rotation / monitor / alert
+ * - end-to-end production audit delivery (caller may swallow failures)
+ * - state continuity under adversarial state deletion (delete state → re-bootstrap; not protection)
+ * - WORM / immutable
+ * - automatic next generation / production detects as full e2e delivery
+ *
+ * Honest limitations:
+ * - T6d.3 still partial only (not T6d.3 complete; not M6d Exit)
+ * - single-process write queue only; no multi-process exclusive lock
+ * - server.recordAudit / agent appendNasReplicationAudit remain best-effort catch
+ *   (not end-to-end production audit delivery)
+ * - not state continuity under adversarial state deletion: missing state may re-bootstrap
+ *   from self-consistent journal/events; that is a limitation, not delivered protection
+ * - no external authenticity / HMAC / signature / WORM / immutable
+ * - no journal rotation / monitor / alert
+ *
+ * Forbidden capability compound (prefix + suffix joined) is never written as a
+ * contiguous English literal in this file; tests scan via runtime concat.
  *
  * TEST ONLY crash injection uses Symbol key DUAL_WRITE_TEST_CRASH_HOOK
  * (not a plain options key; never imported by audit-log/server).
