@@ -1,27 +1,21 @@
 import {
   SafeDataFileError,
-  safeAppendText,
-  safeAtomicWriteText,
   safeReadText,
 } from './safe-data-files.js';
 import { sanitizeAuditEvent } from './audit-event-schema.js';
+import { appendAuditEventWithIntegrityDualWrite } from './audit-integrity-dual-write.js';
 
 // Local binding for appendAuditEvent + public re-export (must not use export-from alone).
 export { sanitizeAuditEvent };
 
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 100;
-const auditFileQueues = new Map();
 const AUDIT_RELATIVE_PATH = 'audit/events.jsonl';
 
 function normalizeLimit(limit) {
   const parsed = Number(limit);
   if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_AUDIT_LIMIT;
   return Math.min(parsed, MAX_AUDIT_LIMIT);
-}
-
-function auditQueueKey(dataDir) {
-  return `${dataDir}\0${AUDIT_RELATIVE_PATH}`;
 }
 
 function positiveIntegerOrZero(value) {
@@ -60,21 +54,6 @@ export function parseAuditRetentionMaxEvents(value) {
   return { maxEvents };
 }
 
-function withAuditFileQueue(queueKey, task) {
-  const previous = auditFileQueues.get(queueKey) || Promise.resolve();
-  const run = previous.catch(() => {}).then(task);
-  const cleanup = run.finally(() => {
-    if (auditFileQueues.get(queueKey) === cleanup) {
-      auditFileQueues.delete(queueKey);
-    }
-  });
-  // Keep chain linked via cleanup, but do not leave its rejection unhandled when
-  // callers only await `run` (intentional fail-closed append/compaction errors).
-  cleanup.catch(() => {});
-  auditFileQueues.set(queueKey, cleanup);
-  return run;
-}
-
 async function readAuditRaw(dataDir) {
   try {
     return await safeReadText(dataDir, AUDIT_RELATIVE_PATH);
@@ -85,50 +64,26 @@ async function readAuditRaw(dataDir) {
   }
 }
 
-async function compactAuditFile(dataDir, retention) {
-  const raw = await readAuditRaw(dataDir);
-  if (raw === null) return;
-
-  const lines = raw.split('\n').filter((line) => line.trim());
-  if (lines.length <= retention.maxEvents) return;
-
-  const retained = lines.slice(-retention.maxEvents);
-  await safeAtomicWriteText(
-    dataDir,
-    AUDIT_RELATIVE_PATH,
-    `${retained.join('\n')}\n`,
-    { mode: 0o600 },
-  );
-}
-
+/**
+ * Production dual-write entry: sanitize (keep) → retention snapshot → exact-one
+ * coordinator call. Does not forward Symbol test hooks or arbitrary options extras.
+ * @param {string} dataDir
+ * @param {object} event
+ * @param {{ retention?: unknown }} [options]
+ * @returns {Promise<object>} sanitized event
+ */
 export async function appendAuditEvent(dataDir, event, options = {}) {
+  // sanitize-first: event getter throws surface before options.retention is touched.
   const sanitized = sanitizeAuditEvent(event);
-  const line = `${JSON.stringify(sanitized)}\n`;
+
+  // Call-time retention snapshot exactly once (hostile options getter / TOCTOU).
+  // Prior contract: options=null → TypeError on property access; default {} / undefined only.
+  // Plain retention only — never pass DUAL_WRITE_TEST_* Symbols or extras.
   const retention = normalizeAuditRetention(options.retention);
-  const queueKey = auditQueueKey(dataDir);
 
-  if (!retention && !auditFileQueues.has(queueKey)) {
-    try {
-      await safeAppendText(dataDir, AUDIT_RELATIVE_PATH, line);
-    } catch (error) {
-      if (error instanceof SafeDataFileError) throw error;
-      throw auditIoError();
-    }
-    return sanitized;
-  }
-
-  await withAuditFileQueue(queueKey, async () => {
-    try {
-      await safeAppendText(dataDir, AUDIT_RELATIVE_PATH, line);
-      if (retention) {
-        await compactAuditFile(dataDir, retention);
-      }
-    } catch (error) {
-      if (error instanceof SafeDataFileError) throw error;
-      throw auditIoError();
-    }
-  });
-  return sanitized;
+  // Exact-one coordinator call. Coordinator re-sanitizes but id/createdAt stay stable
+  // on an already-sanitized plain object. Return value matches prior append contract.
+  return appendAuditEventWithIntegrityDualWrite(dataDir, sanitized, { retention });
 }
 
 export async function readAuditEvents(dataDir, options = {}) {
