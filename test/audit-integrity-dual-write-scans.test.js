@@ -1190,11 +1190,11 @@ describe('C6 K: audit-log no local queue/fast path; cold triple runtime', () => 
   });
 });
 
-// ── 12. ERROR_CODES exact 60 ─────────────────────────────────────────────
+// ── 12. ERROR_CODES exact 61 ─────────────────────────────────────────────
 
-describe('C6 L: ERROR_CODES exact 60 (registry runtime assertion)', () => {
-  it('12. ERROR_CODES registry length is exactly 60', () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+describe('C6 L: ERROR_CODES exact 61 (registry runtime assertion)', () => {
+  it('12. ERROR_CODES registry length is exactly 61', () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
     // Dual-write codes present (not a registry mutation).
     assert.equal(
       ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED,

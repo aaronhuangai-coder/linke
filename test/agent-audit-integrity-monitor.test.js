@@ -670,8 +670,8 @@ describe('C3 agent audit-integrity-monitor CLI', () => {
     assertInvalidArgs(result, ['--sneaky-path']);
   });
 
-  it('25. ERROR_CODES count remains 60', () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+  it('25. ERROR_CODES count remains 61', () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
   });
 
   it('26. regression: bare --h exit0; health still accepts --token value semantics elsewhere', async () => {

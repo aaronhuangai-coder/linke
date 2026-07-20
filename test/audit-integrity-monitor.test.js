@@ -1059,8 +1059,8 @@ describe('C2 audit integrity run-once monitor', () => {
     assert.equal(/\bsetImmediate\b/.test(masked), false);
   });
 
-  it('28. ERROR_CODES length remains 60 (this boundary does not change registry)', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+  it('28. ERROR_CODES length remains 61 (this boundary does not change registry)', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
   });
 
   it('29. #11 idle + journal missing/NOT_INITIALIZED → integrity-alert; dual idle; relationship null; not-initialized; exit 2', async () => {

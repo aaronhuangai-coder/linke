@@ -2269,8 +2269,8 @@ const t = \`case 'audit-integrity-monitor':\`;
     }
   });
 
-  it('16. ERROR_CODES exact 60; monitor does not import registry', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+  it('16. ERROR_CODES exact 61; monitor does not import registry', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
     const src = await readText(PATHS.monitor);
     const specs = collectStaticImportSpecifiers(src);
     assert.equal(specs.includes('./error-codes.js'), false);

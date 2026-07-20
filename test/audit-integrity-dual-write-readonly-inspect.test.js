@@ -729,8 +729,8 @@ describe('C1 read-only dual-write inspector', () => {
     });
   });
 
-  it('20. reasonCode membership SoT: non-null codes are registered; ERROR_CODES closed-set 60', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+  it('20. reasonCode membership SoT: non-null codes are registered; ERROR_CODES closed-set 61', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
     await withTempRoot('reason-member', async (root) => {
       await mkdir(join(root, 'audit'), { recursive: true });
       await writeFile(stateAbs(root), '{bad\n', { mode: 0o600 });
@@ -1199,8 +1199,8 @@ describe('C1 read-only dual-write inspector', () => {
     });
   });
 
-  it('40. cold uninitialized does not init; ERROR_CODES count remains 60', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 60);
+  it('40. cold uninitialized does not init; ERROR_CODES count remains 61', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 61);
     await withTempRoot('no-init', async (root) => {
       const { inspectAuditIntegrityDualWriteReadOnly } = await loadCoordinator();
       await inspectAuditIntegrityDualWriteReadOnly(root);
