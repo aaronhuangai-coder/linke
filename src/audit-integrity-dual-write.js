@@ -138,6 +138,27 @@ function throwCursorMismatch() {
 }
 
 /**
+ * Module-private sentinel for the idle-cursor cross-store probe stage only.
+ * Wraps ANY error from assertEventsUtf8Baseline + verifyCrossStoreBaseline so
+ * production can catch-all remap to cursor-mismatch (V1.37 contract) while
+ * the inspector unwraps for precise journal/cross-store classification.
+ *
+ * Not exported. Path-free: message is a fixed sentinel; never copies
+ * underlying path/message into public observation surfaces.
+ */
+class IdleCursorCrossStoreProbeError extends Error {
+  /**
+   * @param {unknown} underlying
+   */
+  constructor(underlying) {
+    super('idle-cursor-cross-store-probe');
+    this.name = 'IdleCursorCrossStoreProbeError';
+    /** @type {unknown} */
+    this.underlying = underlying;
+  }
+}
+
+/**
  * @returns {never}
  */
 function throwRecoveryConflict() {
@@ -550,18 +571,42 @@ async function bootstrapDualWriteIdleUnlocked(resolvedRoot, lease) {
 }
 
 /**
- * Exact idle cursor validation against live store bytes.
+ * Private granular read-only idle cursor/cross-store classification (V1.38).
+ * Reuses journal/events fingerprint + cross-store SoT — no formula copy.
+ *
+ * Stage contract (inspector SoT; production remaps only via wrapper):
+ *   1) first measureJournalFingerprint — typed journal errors rethrow unwrapped
+ *   2) journal/events raw fingerprint field mismatch →
+ *        { cursorMatch:'mismatch', receipt:null } (journal verified; cross not run)
+ *   3) readEventsBytes dual-write IO — rethrow unwrapped (events layer)
+ *   4) assertEventsUtf8Baseline + verifyCrossStoreBaseline — ANY throw is wrapped
+ *        in IdleCursorCrossStoreProbeError (incl second journal probe JournalError,
+ *        CrossStoreError, recovery-conflict, unexpected). underlying preserved.
+ *   5) receipt ok but strictRecordCount ≠ idle state →
+ *        { cursorMatch:'mismatch', receipt }
+ *   6) success → { cursorMatch:'match', receipt }
+ *
+ * Production catches IdleCursorCrossStoreProbeError → throwCursorMismatch (V1.37).
+ * Inspector unwraps underlying for precise journal/cross-store outcomes.
+ *
  * @param {string} resolvedRoot
  * @param {object} lease
- * @param {object} state
+ * @param {object} state idle dual-write state
+ * @returns {Promise<{
+ *   cursorMatch: 'match'|'mismatch',
+ *   receipt: { state: string, retainedEventCount: number, relationship: string }|null
+ * }>}
  */
-async function validateIdleCursorAgainstStoresUnlocked(resolvedRoot, lease, state) {
+async function measureIdleCursorAgainstStoresGranularUnlocked(resolvedRoot, lease, state) {
   assertAuditIntegrityWriteLease(resolvedRoot, lease);
 
+  // 1) first journal measure — typed journal errors (not-init / chain / io / bounds)
+  // rethrow unwrapped (V1.37: measureJournalFingerprint outside try-catch).
   const journalFp = await measureJournalFingerprint(resolvedRoot);
 
+  // 2) raw journal fingerprint field mismatch (incl generationId) — stage preserved.
   if (journalFp.generationId !== state.generationId) {
-    throwCursorMismatch();
+    return { cursorMatch: 'mismatch', receipt: null };
   }
   if (
     journalFp.recordCount !== state.journal.recordCount
@@ -569,42 +614,79 @@ async function validateIdleCursorAgainstStoresUnlocked(resolvedRoot, lease, stat
     || journalFp.rawByteLength !== state.journal.rawByteLength
     || journalFp.rawSha256 !== state.journal.rawSha256
   ) {
-    throwCursorMismatch();
+    return { cursorMatch: 'mismatch', receipt: null };
   }
 
+  // 3) Events raw read may throw dual-write IO (after journal verified; cross-store not run).
+  // Unwrapped — same as V1.37 (readEventsBytes outside cross-store catch).
   const eventsProbe = await readEventsBytes(resolvedRoot);
-  if (eventsProbe.present) {
-    try {
-      assertEventsUtf8Baseline(eventsProbe.bytes);
-    } catch {
-      throwCursorMismatch();
-    }
-  }
-
   const rawPresent = eventsProbe.present;
   const rawByteLength = eventsProbe.present ? eventsProbe.bytes.length : 0;
   const rawSha256 = eventsProbe.present ? sha256Hex(eventsProbe.bytes) : EMPTY_FILE_SHA256;
 
+  // 2b) raw events fingerprint field mismatch (present/byteLength/sha256 only).
   if (
     rawPresent !== state.events.present
     || rawByteLength !== state.events.byteLength
     || rawSha256 !== state.events.sha256
   ) {
-    throwCursorMismatch();
+    return { cursorMatch: 'mismatch', receipt: null };
   }
 
-  let strictRecordCount;
+  // 4) UTF-8 baseline + cross-store SoT — wrap ANY throw for V1.37 production catch-all
+  // (includes second journal inspect race → AuditIntegrityJournalError).
+  /** @type {{ state: string, retainedEventCount: number, relationship: string }} */
+  let receipt;
   try {
-    const cross = await verifyCrossStoreBaseline(resolvedRoot);
-    strictRecordCount = cross.retainedEventCount;
-  } catch {
-    throwCursorMismatch();
-  }
-  if (strictRecordCount !== state.events.strictRecordCount) {
-    throwCursorMismatch();
+    if (eventsProbe.present) {
+      assertEventsUtf8Baseline(eventsProbe.bytes);
+    }
+    receipt = await verifyCrossStoreBaseline(resolvedRoot);
+  } catch (error) {
+    if (error instanceof IdleCursorCrossStoreProbeError) throw error;
+    throw new IdleCursorCrossStoreProbeError(error);
   }
 
-  return state;
+  // 5) strictRecordCount vs idle state after successful receipt (result metadata).
+  if (receipt.retainedEventCount !== state.events.strictRecordCount) {
+    return { cursorMatch: 'mismatch', receipt };
+  }
+
+  // 6) success
+  return { cursorMatch: 'match', receipt };
+}
+
+/**
+ * Exact idle cursor validation against live store bytes (production path).
+ * Delegates to granular precise helper, then remaps:
+ *   - mismatch results → cursor-mismatch
+ *   - IdleCursorCrossStoreProbeError (entire cross-store stage, any underlying)
+ *     → cursor-mismatch (V1.37 catch-all; no underlying-type guessing)
+ * First-stage journal typed errors and events dual-write IO propagate as-is.
+ *
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {object} state
+ */
+async function validateIdleCursorAgainstStoresUnlocked(resolvedRoot, lease, state) {
+  try {
+    const result = await measureIdleCursorAgainstStoresGranularUnlocked(
+      resolvedRoot,
+      lease,
+      state,
+    );
+    if (result.cursorMatch === 'mismatch') {
+      throwCursorMismatch();
+    }
+    return state;
+  } catch (error) {
+    // V1.37 catch-all: cross-store stage (UTF-8 / cross-store typed / second journal
+    // probe JournalError / recovery-conflict / unexpected) → cursor-mismatch.
+    if (error instanceof IdleCursorCrossStoreProbeError) {
+      throwCursorMismatch();
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1261,6 +1343,536 @@ export async function recoverAuditIntegrityDualWrite(root) {
  */
 export async function recoverAndValidateAuditIntegrityDualWrite(root) {
   return recoverAuditIntegrityDualWrite(root);
+}
+
+// ── V1.38 public read-only inspector ───────────────────────────────────
+
+/** @typedef {'absent'|'idle'|'prepared'|'invalid'|'io-error'} DualWriteStatePresence */
+/** @typedef {'idle'|'prepared'|null} DualWriteStateStatus */
+/** @typedef {'n/a'|'match'|'mismatch'|'skipped'} DualWriteCursorMatch */
+/** @typedef {'missing'|'verified'|'typed-error'|'skipped'} DualWriteJournalOutcome */
+/** @typedef {'ok'|'typed-error'|'skipped'} DualWriteCrossStoreOutcome */
+/** @typedef {'none'|'state'|'journal'|'events'|'cross-store'|'cursor'|'root'} DualWriteErrorLayer */
+
+/**
+ * @typedef {object} DualWriteReadOnlyObservation
+ * @property {DualWriteStatePresence} statePresence
+ * @property {DualWriteStateStatus} stateStatus
+ * @property {boolean} storesEmpty
+ * @property {DualWriteCursorMatch} cursorMatch
+ * @property {DualWriteJournalOutcome} journalOutcome
+ * @property {DualWriteCrossStoreOutcome} crossStoreOutcome
+ * @property {string|null} relationship
+ * @property {string|null} reasonCode
+ * @property {DualWriteErrorLayer} errorLayer
+ */
+
+/**
+ * Deep-freeze observation with exact key order (path-free; no dualWriteState).
+ * @param {DualWriteReadOnlyObservation} fields
+ * @returns {Readonly<DualWriteReadOnlyObservation>}
+ */
+function freezeReadOnlyObservation(fields) {
+  return Object.freeze({
+    statePresence: fields.statePresence,
+    stateStatus: fields.stateStatus,
+    storesEmpty: fields.storesEmpty,
+    cursorMatch: fields.cursorMatch,
+    journalOutcome: fields.journalOutcome,
+    crossStoreOutcome: fields.crossStoreOutcome,
+    relationship: fields.relationship,
+    reasonCode: fields.reasonCode,
+    errorLayer: fields.errorLayer,
+  });
+}
+
+/**
+ * #7 Sio / #7b RootFail full frozen observation mapping (design §3.2).
+ * @param {'state'|'root'} errorLayer
+ * @returns {Readonly<DualWriteReadOnlyObservation>}
+ */
+function freezeIoObservation(errorLayer) {
+  return freezeReadOnlyObservation({
+    statePresence: 'io-error',
+    stateStatus: null,
+    storesEmpty: false,
+    cursorMatch: 'skipped',
+    journalOutcome: 'skipped',
+    crossStoreOutcome: 'skipped',
+    relationship: null,
+    reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+    errorLayer,
+  });
+}
+
+/**
+ * Narrow typed-error observation helper for paths where stage is fully known
+ * at the call site. Prefer explicit freeze at call sites when stage must be
+ * preserved; this helper only maps pure journal-first typed failures without
+ * inventing completed probes.
+ *
+ * @param {unknown} error
+ * @param {{
+ *   statePresence: DualWriteStatePresence,
+ *   stateStatus: DualWriteStateStatus,
+ *   storesEmpty?: boolean,
+ *   cursorMatch: DualWriteCursorMatch,
+ * }} base
+ * @returns {Readonly<DualWriteReadOnlyObservation>}
+ */
+function observationFromJournalTypedError(error, base) {
+  if (error instanceof AuditIntegrityJournalError) {
+    const notInit = error.code === ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED;
+    return freezeReadOnlyObservation({
+      statePresence: base.statePresence,
+      stateStatus: base.stateStatus,
+      storesEmpty: base.storesEmpty === true,
+      cursorMatch: base.cursorMatch,
+      journalOutcome: notInit ? 'missing' : 'typed-error',
+      crossStoreOutcome: 'skipped',
+      relationship: null,
+      reasonCode: error.code,
+      errorLayer: 'journal',
+    });
+  }
+  // Unexpected: fail-closed path-free dual-write IO (no fake probe outcomes).
+  return freezeIoObservation('state');
+}
+
+/**
+ * State-absent read-only classification (#1 / #2a / #2b).
+ * Preserves journalOutcome when subsequent cross-store typed error hits.
+ * @param {string} resolvedRoot
+ * @returns {Promise<Readonly<DualWriteReadOnlyObservation>>}
+ */
+async function observeStateAbsentReadOnly(resolvedRoot) {
+  /** @type {DualWriteJournalOutcome} */
+  let journalOutcome = 'skipped';
+  let journalMissing = false;
+
+  try {
+    await inspectAuditIntegrityJournalFile(resolvedRoot);
+    journalOutcome = 'verified';
+  } catch (error) {
+    if (
+      error instanceof AuditIntegrityJournalError
+      && error.code === ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED
+    ) {
+      journalMissing = true;
+      journalOutcome = 'missing';
+    } else if (error instanceof AuditIntegrityJournalError) {
+      // #2b typed journal (integrity or IO) — cross-store not executed; cursor n/a.
+      return observationFromJournalTypedError(error, {
+        statePresence: 'absent',
+        stateStatus: null,
+        storesEmpty: false,
+        cursorMatch: 'n/a',
+      });
+    } else {
+      return freezeIoObservation('state');
+    }
+  }
+
+  try {
+    const receipt = await verifyAuditIntegrityAgainstEventStore(resolvedRoot);
+    const eventsEmpty = receipt.retainedEventCount === 0;
+    // SoT: journal missing/NOT_INITIALIZED AND events missing-or-zero-strict.
+    const storesEmpty = journalMissing && eventsEmpty;
+
+    if (storesEmpty) {
+      // #1 cold empty — relationship null fixed (not receipt 'empty').
+      return freezeReadOnlyObservation({
+        statePresence: 'absent',
+        stateStatus: null,
+        storesEmpty: true,
+        cursorMatch: 'n/a',
+        journalOutcome: 'missing',
+        crossStoreOutcome: 'ok',
+        relationship: null,
+        reasonCode: null,
+        errorLayer: 'none',
+      });
+    }
+
+    // #2a state-missing + receipt success — relationship exact receipt enum.
+    return freezeReadOnlyObservation({
+      statePresence: 'absent',
+      stateStatus: null,
+      storesEmpty: false,
+      cursorMatch: 'n/a',
+      journalOutcome,
+      crossStoreOutcome: 'ok',
+      relationship: typeof receipt.relationship === 'string' ? receipt.relationship : null,
+      reasonCode: null,
+      errorLayer: 'none',
+    });
+  } catch (error) {
+    // Cross-store path may rethrow AuditIntegrityJournalError from its own journal
+    // inspect (race after our first probe). Map precisely as journal error — not
+    // generic dual-write IO / errorLayer state.
+    if (error instanceof AuditIntegrityJournalError) {
+      return observationFromJournalTypedError(error, {
+        statePresence: 'absent',
+        stateStatus: null,
+        storesEmpty: false,
+        cursorMatch: 'n/a',
+      });
+    }
+    // #2b: journal probe already completed (verified|missing) — keep it; mark cross-store.
+    if (error instanceof AuditIntegrityCrossStoreError) {
+      return freezeReadOnlyObservation({
+        statePresence: 'absent',
+        stateStatus: null,
+        storesEmpty: false,
+        cursorMatch: 'n/a',
+        journalOutcome,
+        crossStoreOutcome: 'typed-error',
+        relationship: null,
+        reasonCode: error.code,
+        errorLayer: 'cross-store',
+      });
+    }
+    // Unexpected under lease after journal probe — fail-closed; do not invent probe outcomes.
+    return freezeReadOnlyObservation({
+      statePresence: 'absent',
+      stateStatus: null,
+      storesEmpty: false,
+      cursorMatch: 'n/a',
+      journalOutcome,
+      crossStoreOutcome: 'skipped',
+      relationship: null,
+      reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+      errorLayer: 'state',
+    });
+  }
+}
+
+/**
+ * Idle-state read-only classification (P6a–P6i via granular helper).
+ * Outcome fields always reflect real probe stage from granular result/throws.
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @param {object} state
+ * @returns {Promise<Readonly<DualWriteReadOnlyObservation>>}
+ */
+async function observeStateIdleReadOnly(resolvedRoot, lease, state) {
+  try {
+    const result = await measureIdleCursorAgainstStoresGranularUnlocked(
+      resolvedRoot,
+      lease,
+      state,
+    );
+
+    // Raw fingerprint mismatch: journal verified; cross-store not executed.
+    if (result.cursorMatch === 'mismatch' && result.receipt === null) {
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'mismatch',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'skipped',
+        relationship: null,
+        reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH,
+        errorLayer: 'cursor',
+      });
+    }
+
+    // Strict-count mismatch after successful receipt: journal verified; cross-store ok.
+    if (result.cursorMatch === 'mismatch' && result.receipt !== null) {
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'mismatch',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'ok',
+        relationship: null,
+        reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH,
+        errorLayer: 'cursor',
+      });
+    }
+
+    const receipt = result.receipt;
+    const relationship =
+      receipt && typeof receipt.relationship === 'string' ? receipt.relationship : null;
+
+    if (relationship === 'empty') {
+      // #12 idle + empty — relationship-empty fail-closed attention only.
+      // storesEmpty SoT is cold journal-missing ∧ events-empty; NOT relationship=empty.
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'match',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'ok',
+        relationship: 'empty',
+        reasonCode: null,
+        errorLayer: 'none',
+      });
+    }
+
+    if (relationship === 'uncovered-events') {
+      // #13 uncovered-events — fail-closed; reasonCode null fixed.
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'match',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'ok',
+        relationship: 'uncovered-events',
+        reasonCode: null,
+        errorLayer: 'none',
+      });
+    }
+
+    if (relationship !== null && ALLOWED_SUPPLEMENTAL_RELATIONSHIPS.has(relationship)) {
+      // #4 healthy precursor.
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'match',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'ok',
+        relationship,
+        reasonCode: null,
+        errorLayer: 'none',
+      });
+    }
+
+    // Unexpected relationship — fail-closed integrity-shaped observation.
+    return freezeReadOnlyObservation({
+      statePresence: 'idle',
+      stateStatus: 'idle',
+      storesEmpty: false,
+      cursorMatch: 'match',
+      journalOutcome: 'verified',
+      crossStoreOutcome: 'ok',
+      relationship: null,
+      reasonCode: null,
+      errorLayer: 'none',
+    });
+  } catch (error) {
+    // #11 idle + not-initialized / other journal typed from first measure — unwrapped.
+    if (error instanceof AuditIntegrityJournalError) {
+      const notInit = error.code === ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED;
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'skipped',
+        journalOutcome: notInit ? 'missing' : 'typed-error',
+        crossStoreOutcome: 'skipped',
+        relationship: null,
+        reasonCode: error.code,
+        errorLayer: 'journal',
+      });
+    }
+
+    // Cross-store stage wrapper — unwrap underlying for precise classification.
+    // Production remaps the whole wrapper to cursor-mismatch; inspector must not.
+    if (error instanceof IdleCursorCrossStoreProbeError) {
+      const underlying = error.underlying;
+
+      // Second journal probe race inside verifyCrossStoreBaseline.
+      if (underlying instanceof AuditIntegrityJournalError) {
+        const notInit = underlying.code === ERROR_CODES.AUDIT_INTEGRITY_NOT_INITIALIZED;
+        return freezeReadOnlyObservation({
+          statePresence: 'idle',
+          stateStatus: 'idle',
+          storesEmpty: false,
+          cursorMatch: 'skipped',
+          journalOutcome: notInit ? 'missing' : 'typed-error',
+          crossStoreOutcome: 'skipped',
+          relationship: null,
+          reasonCode: underlying.code,
+          errorLayer: 'journal',
+        });
+      }
+
+      if (underlying instanceof AuditIntegrityCrossStoreError) {
+        return freezeReadOnlyObservation({
+          statePresence: 'idle',
+          stateStatus: 'idle',
+          storesEmpty: false,
+          cursorMatch: 'skipped',
+          journalOutcome: 'verified',
+          crossStoreOutcome: 'typed-error',
+          relationship: null,
+          reasonCode: underlying.code,
+          errorLayer: 'cross-store',
+        });
+      }
+
+      // verifyCrossStoreBaseline recovery-conflict: journal verified; receipt unusable.
+      if (
+        underlying instanceof AuditIntegrityDualWriteError
+        && underlying.code === ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT
+      ) {
+        return freezeReadOnlyObservation({
+          statePresence: 'idle',
+          stateStatus: 'idle',
+          storesEmpty: false,
+          cursorMatch: 'skipped',
+          journalOutcome: 'verified',
+          crossStoreOutcome: 'skipped',
+          relationship: null,
+          reasonCode: underlying.code,
+          errorLayer: 'cross-store',
+        });
+      }
+
+      // Unexpected under cross-store stage — path-free dual-write IO; no raw leak.
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'skipped',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'skipped',
+        relationship: null,
+        reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+        errorLayer: 'cross-store',
+      });
+    }
+
+    // Events-layer dual-write IO (e.g. readEventsBytes) after journal verified; unwrapped.
+    if (
+      error instanceof AuditIntegrityDualWriteError
+      && error.code === ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR
+    ) {
+      return freezeReadOnlyObservation({
+        statePresence: 'idle',
+        stateStatus: 'idle',
+        storesEmpty: false,
+        cursorMatch: 'skipped',
+        journalOutcome: 'verified',
+        crossStoreOutcome: 'skipped',
+        relationship: null,
+        reasonCode: error.code,
+        errorLayer: 'events',
+      });
+    }
+
+    // Fail-closed; do not invent completed probe outcomes.
+    return freezeReadOnlyObservation({
+      statePresence: 'idle',
+      stateStatus: 'idle',
+      storesEmpty: false,
+      cursorMatch: 'skipped',
+      journalOutcome: 'skipped',
+      crossStoreOutcome: 'skipped',
+      relationship: null,
+      reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR,
+      errorLayer: 'state',
+    });
+  }
+}
+
+/**
+ * Lease-gated read-only observation (no bootstrap/recover/publish/write).
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @returns {Promise<Readonly<DualWriteReadOnlyObservation>>}
+ */
+async function observeAuditIntegrityDualWriteReadOnlyUnlocked(resolvedRoot, lease) {
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+
+  let state;
+  try {
+    state = await loadDualWriteStateUnlocked(resolvedRoot, lease);
+  } catch (error) {
+    if (error instanceof AuditIntegrityDualWriteError) {
+      if (error.code === ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID) {
+        return freezeReadOnlyObservation({
+          statePresence: 'invalid',
+          stateStatus: null,
+          storesEmpty: false,
+          cursorMatch: 'skipped',
+          journalOutcome: 'skipped',
+          crossStoreOutcome: 'skipped',
+          relationship: null,
+          reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID,
+          errorLayer: 'state',
+        });
+      }
+      if (error.code === ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_IO_ERROR) {
+        // #7 Sio full freeze.
+        return freezeIoObservation('state');
+      }
+    }
+    return freezeIoObservation('state');
+  }
+
+  // #3 prepared short-circuit — relationship null; do not probe cross-store/journal for fill.
+  if (state !== null && state.status === 'prepared') {
+    return freezeReadOnlyObservation({
+      statePresence: 'prepared',
+      stateStatus: 'prepared',
+      storesEmpty: false,
+      cursorMatch: 'skipped',
+      journalOutcome: 'skipped',
+      crossStoreOutcome: 'skipped',
+      relationship: null,
+      reasonCode: null,
+      errorLayer: 'none',
+    });
+  }
+
+  if (state === null) {
+    return observeStateAbsentReadOnly(resolvedRoot);
+  }
+
+  if (state.status === 'idle') {
+    return observeStateIdleReadOnly(resolvedRoot, lease, state);
+  }
+
+  // Unexpected status after load (schema should forbid) — treat as invalid.
+  return freezeReadOnlyObservation({
+    statePresence: 'invalid',
+    stateStatus: null,
+    storesEmpty: false,
+    cursorMatch: 'skipped',
+    journalOutcome: 'skipped',
+    crossStoreOutcome: 'skipped',
+    relationship: null,
+    reasonCode: ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID,
+    errorLayer: 'state',
+  });
+}
+
+/**
+ * Public read-only consistent observation of dual-write integrity stores.
+ * assertSafeDataRoot first; RootFail → frozen path-free IO observation
+ * (enqueue 0; no root create). Valid resolvedRoot only → enqueue exactly
+ * once + fresh lease → observe → return frozen snapshot.
+ * NEVER bootstrap / recover / publish / write any store.
+ *
+ * @param {string} dataDir
+ * @param {object} [options] fully reserved; void options; no property/reflection/enumeration
+ * @returns {Promise<Readonly<DualWriteReadOnlyObservation>>}
+ */
+export async function inspectAuditIntegrityDualWriteReadOnly(dataDir, options = {}) {
+  // Fully reserved options slot: void only — no property/reflection/enumeration.
+  // Hostile Proxy traps on options must not run on this path.
+  void options;
+
+  let resolvedRoot;
+  try {
+    resolvedRoot = await assertSafeDataRoot(dataDir);
+  } catch {
+    // #7b RootFail: enqueue 0; no root create; path-free IO observation.
+    return freezeIoObservation('root');
+  }
+
+  // Valid resolved root only → exactly one enqueue + fresh lease.
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+    assertAuditIntegrityWriteLease(resolvedRoot, lease);
+    return observeAuditIntegrityDualWriteReadOnlyUnlocked(resolvedRoot, lease);
+  });
 }
 
 /**
