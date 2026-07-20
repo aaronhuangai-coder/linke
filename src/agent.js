@@ -111,6 +111,7 @@ import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
 } from './audit-integrity-monitor.js';
+import { ERROR_CODES, LinkeError } from './error-codes.js';
 
 const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
 const AUDIT_INTEGRITY_MONITOR_ARG_KEYS = new Set(['_', 'data-dir']);
@@ -250,6 +251,29 @@ async function appendNasReplicationAudit(dataDir, event) {
     await appendAuditEvent(dataDir, event);
   } catch {
     // ignore audit I/O failures
+  }
+}
+
+/**
+ * Required pre-side-effect NAS replication start audit (fail-closed).
+ * Calls appendAuditEvent directly — never the best-effort swallow helper.
+ * Any append/sanitize/dual-write failure remaps to AUDIT_DELIVERY_UNAVAILABLE.
+ * Does not log raw err.message / path / token / stack / errno.
+ */
+async function recordRequiredNasReplicationStartAudit(dataDir, fields) {
+  try {
+    await appendAuditEvent(dataDir, {
+      type: 'nas.snapshot.replication.started',
+      outcome: 'started',
+      targetName: fields.targetName,
+      deviceId: fields.deviceId,
+      snapshotId: fields.snapshotId,
+    });
+  } catch {
+    throw new LinkeError(ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE, {
+      statusCode: 503,
+      retryable: true,
+    });
   }
 }
 
@@ -1328,9 +1352,7 @@ export async function main() {
           };
 
           if (replicationOptions.execute) {
-            await appendNasReplicationAudit(auditDataDir, {
-              type: 'nas.snapshot.replication.started',
-              outcome: 'started',
+            await recordRequiredNasReplicationStartAudit(auditDataDir, {
               targetName: replicationOptions.targetName,
               deviceId: replicationOptions.deviceId,
               snapshotId: replicationOptions.snapshotId,
@@ -1354,6 +1376,20 @@ export async function main() {
 
           console.log(JSON.stringify(result, null, 2));
         } catch (err) {
+          // FIRST: fixed-code recognition (LinkeError OR equivalent object).
+          // Must not rely on instanceof LinkeError alone; precedes SmbReplicationError/generic.
+          if (err && err.code === ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE) {
+            await appendNasReplicationAudit(auditDataDir, {
+              type: 'nas.snapshot.replication.failed',
+              outcome: 'failure',
+              errorCode: ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE,
+              targetName: typeof args.target === 'string' ? args.target : undefined,
+              deviceId: typeof args['device-id'] === 'string' ? args['device-id'] : undefined,
+              snapshotId: typeof args['snapshot-id'] === 'string' ? args['snapshot-id'] : undefined,
+            });
+            console.error('Error: audit-delivery-unavailable');
+            process.exit(1);
+          }
           if (err instanceof SmbReplicationError) {
             const auditType = err.code === 'recovery_required'
               ? 'nas.snapshot.replication.recovery_required'
