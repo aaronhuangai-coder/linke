@@ -116,6 +116,8 @@ describe('Agent audit-log CLI', () => {
         base,
         '--token',
         'audit-read-token',
+        '--limit',
+        '1',
       ]);
       const body = JSON.parse(stdout);
 

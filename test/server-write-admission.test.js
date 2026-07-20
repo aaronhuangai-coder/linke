@@ -601,7 +601,8 @@ describe('V1.39 C1 write-admission — no gate on deny / read / dry-run', () => 
 
   it('rate-limit denied does not write required admission; keeps best-effort api.rate_limited', async () => {
     await withServer({
-      rateLimit: { maxRequests: 1, windowMs: 60_000 },
+      // Fixed now keeps both requests in one window (avoids real-clock minute-boundary flake).
+      rateLimit: { maxRequests: 1, windowMs: 60_000, now: () => 1_000 },
     }, async ({ port, dataDir }) => {
       const first = await postJson(port, '/api/heartbeat', { deviceId: 'mac-rate-1' });
       assert.equal(first.status, 200);
