@@ -41,6 +41,7 @@ function postRawJSONWithoutContentLength(port, path, body) {
         const text = Buffer.concat(chunks).toString('utf-8');
         resolve({
           status: res.statusCode,
+          text: async () => text,
           json: async () => JSON.parse(text),
         });
       });
@@ -641,35 +642,113 @@ describe('Security — API request body and error hardening', () => {
     }
   }
 
-  it('rejects oversized JSON request bodies with 413 and does not mutate dataDir', async () => {
+  async function assertOversizedWriteAdmissionOnly(dataDir, res, {
+    deviceId,
+    paddingSnippet,
+  }) {
+    const text = typeof res.text === 'function' ? await res.text() : String(res.body || '');
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+    assert.strictEqual(res.status, 413);
+    assert.deepStrictEqual(json, { error: 'Request body too large' });
+
+    // Response must not echo oversized payload / paths / tokens.
+    // Fixed error body is the only allowed public text; deviceId/padding must not appear.
+    assert.ok(!text.includes(deviceId));
+    assert.ok(!text.includes(paddingSnippet));
+    assert.ok(!text.includes(dataDir));
+    assert.ok(!text.includes('sourcePath'));
+    assert.ok(!text.includes('targetPath'));
+    assert.ok(!/Bearer|Authorization|token=/i.test(text));
+    assert.ok(!/ENOENT|EACCES|stack|at\s+\S+\s+\(/i.test(text));
+
+    // V1.39: required admission runs before readBody, so only audit integrity store may appear.
+    assert.deepStrictEqual(await readdir(dataDir), ['audit']);
+    const auditEntries = (await readdir(join(dataDir, 'audit'))).sort();
+    assert.deepStrictEqual(auditEntries, [
+      'events.jsonl',
+      'integrity-dual-write-state.json',
+      'integrity-journal.jsonl',
+    ]);
+
+    // Business mutation paths must not exist (no devices/backups/approvals/restore side effects).
+    for (const forbidden of [
+      'repo',
+      'approvals',
+      'devices',
+      'backups',
+      'snapshots',
+      'restore',
+    ]) {
+      await assert.rejects(() => readdir(join(dataDir, forbidden)), { code: 'ENOENT' });
+    }
+
+    const events = await readAuditEvents(dataDir, { limit: 20 });
+    assert.strictEqual(events.length, 1);
+    const admission = events[0];
+    assert.strictEqual(admission.type, 'api.write.admission.started');
+    assert.strictEqual(admission.method, 'POST');
+    assert.strictEqual(admission.path, '/api/heartbeat');
+    assert.strictEqual(admission.outcome, 'started');
+    assert.match(admission.requestId, /^[a-f0-9-]{36}$/i);
+    assert.ok(!('deviceId' in admission));
+    assert.ok(!('body' in admission));
+    assert.ok(!('token' in admission));
+    assert.ok(!('sourcePath' in admission));
+    assert.ok(!('targetPath' in admission));
+    assert.ok(!('padding' in admission));
+    assert.ok(!('statusCode' in admission));
+
+    // Body parser threw before handler outcome audits (no success/failure route events).
+    assert.strictEqual(events.some((event) => event.type === 'api.heartbeat.success'), false);
+    assert.strictEqual(events.some((event) => event.type === 'api.heartbeat.failure'), false);
+    assert.strictEqual(
+      events.some((event) => typeof event.type === 'string' && event.type.endsWith('.success')),
+      false,
+    );
+    assert.strictEqual(
+      events.some((event) => typeof event.type === 'string' && event.type.endsWith('.failure')),
+      false,
+    );
+
+    const serialized = JSON.stringify(events);
+    assert.ok(!serialized.includes(deviceId));
+    assert.ok(!serialized.includes(paddingSnippet));
+    assert.ok(!serialized.includes(dataDir));
+    assert.doesNotMatch(serialized, /sourcePath|targetPath|Authorization|Bearer|padding/);
+  }
+
+  it('rejects oversized JSON request bodies with 413; admission-only audit, zero business mutation', async () => {
     await withServer(async ({ dataDir, port }) => {
       assert.deepStrictEqual(await readdir(dataDir), []);
+      const deviceId = 'oversized-device';
+      const paddingSnippet = 'x'.repeat(64);
       const body = JSON.stringify({
-        deviceId: 'oversized-device',
+        deviceId,
         padding: 'x'.repeat(MAX_JSON_BODY_BYTES),
       });
 
       const res = await postRawJSON(port, '/api/heartbeat', body);
-
-      assert.strictEqual(res.status, 413);
-      assert.deepStrictEqual(await res.json(), { error: 'Request body too large' });
-      assert.deepStrictEqual(await readdir(dataDir), []);
+      await assertOversizedWriteAdmissionOnly(dataDir, res, { deviceId, paddingSnippet });
     });
   });
 
-  it('enforces the JSON body limit even when Content-Length is missing', async () => {
+  it('enforces JSON body limit without Content-Length; admission-only audit, zero business mutation', async () => {
     await withServer(async ({ dataDir, port }) => {
       assert.deepStrictEqual(await readdir(dataDir), []);
+      const deviceId = 'chunked-oversized-device';
+      const paddingSnippet = 'x'.repeat(64);
       const body = JSON.stringify({
-        deviceId: 'chunked-oversized-device',
+        deviceId,
         padding: 'x'.repeat(MAX_JSON_BODY_BYTES),
       });
 
       const res = await postRawJSONWithoutContentLength(port, '/api/heartbeat', body);
-
-      assert.strictEqual(res.status, 413);
-      assert.deepStrictEqual(await res.json(), { error: 'Request body too large' });
-      assert.deepStrictEqual(await readdir(dataDir), []);
+      await assertOversizedWriteAdmissionOnly(dataDir, res, { deviceId, paddingSnippet });
     });
   });
 

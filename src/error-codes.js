@@ -70,6 +70,8 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_INTEGRITY_DUAL_WRITE_RECOVERY_CONFLICT: 'audit-integrity-dual-write-recovery-conflict',
   AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH: 'audit-integrity-dual-write-cursor-mismatch',
   AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED: 'audit-integrity-dual-write-direct-mutation-blocked',
+  // V1.39 write-admission fail-closed (+1). Required pre-side-effect admission only.
+  AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));

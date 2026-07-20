@@ -515,6 +515,8 @@ describe('audit log API', () => {
   });
 
   it('applies audit retention to server-generated audit events', async () => {
+    // V1.39: each successful write = exact-one api.write.admission.started + outcome.
+    // maxEvents=2 keeps only the final request's pair (newest-first: outcome then admission).
     const fixture = await createAuditServer({
       authToken: 'audit-token',
       auditRetention: { maxEvents: 2 },
@@ -530,17 +532,46 @@ describe('audit log API', () => {
       const audit = await getJSON(fixture.base, '/api/audit-log?limit=10', 'audit-token');
       assert.equal(audit.status, 200);
       const body = await audit.json();
-      assert.deepEqual(body.events.map((event) => event.deviceId), [
-        'retained-server-device-2',
-        'retained-server-device-1',
-      ]);
-      assert.doesNotMatch(JSON.stringify(body.events), /audit-token|Authorization|Bearer/);
+      assert.equal(body.events.length, 2);
+
+      const [outcome, admission] = body.events;
+      assert.equal(outcome.type, 'api.heartbeat.success');
+      assert.equal(outcome.method, 'POST');
+      assert.equal(outcome.path, '/api/heartbeat');
+      assert.equal(outcome.outcome, 'success');
+      assert.equal(outcome.statusCode, 200);
+      assert.equal(outcome.deviceId, 'retained-server-device-2');
+      assert.match(outcome.requestId, /^[a-f0-9-]{36}$/i);
+
+      assert.equal(admission.type, 'api.write.admission.started');
+      assert.equal(admission.method, 'POST');
+      assert.equal(admission.path, '/api/heartbeat');
+      assert.equal(admission.outcome, 'started');
+      assert.equal(admission.requestId, outcome.requestId);
+      assert.equal(admission.deviceId, undefined);
+      assert.ok(!('body' in admission));
+      assert.ok(!('token' in admission));
+      assert.ok(!('sourcePath' in admission));
+      assert.ok(!('targetPath' in admission));
+
+      // Prior requests' events dropped by retention (only last pair remains).
+      assert.equal(
+        body.events.some((event) => event.deviceId === 'retained-server-device-0'
+          || event.deviceId === 'retained-server-device-1'),
+        false,
+      );
+
+      const serialized = JSON.stringify(body.events);
+      assert.doesNotMatch(serialized, /audit-token|Authorization|Bearer/);
+      assert.doesNotMatch(serialized, /sourcePath|targetPath|"token"|padding/);
     } finally {
       await cleanupAuditServer(fixture);
     }
   });
 
   it('treats server auditRetention maxEvents 0 as disabled', async () => {
+    // V1.39: retention disabled keeps all events. 3 successful heartbeats →
+    // 6 events = 3 × (exact-one admission + exact-one outcome), newest-first pairs.
     const fixture = await createAuditServer({
       authToken: 'audit-token',
       auditRetention: { maxEvents: 0 },
@@ -553,15 +584,56 @@ describe('audit log API', () => {
         assert.equal(res.status, 200);
       }
 
-      const audit = await getJSON(fixture.base, '/api/audit-log?limit=10', 'audit-token');
+      const audit = await getJSON(fixture.base, '/api/audit-log?limit=20', 'audit-token');
       assert.equal(audit.status, 200);
       const body = await audit.json();
-      assert.equal(body.events.length, 3);
-      assert.deepEqual(body.events.map((event) => event.deviceId), [
+      assert.equal(body.events.length, 6);
+
+      const expectedDeviceOrder = [
         'unbounded-server-device-2',
         'unbounded-server-device-1',
         'unbounded-server-device-0',
-      ]);
+      ];
+      for (let pair = 0; pair < 3; pair++) {
+        const outcome = body.events[pair * 2];
+        const admission = body.events[pair * 2 + 1];
+
+        assert.equal(outcome.type, 'api.heartbeat.success');
+        assert.equal(outcome.method, 'POST');
+        assert.equal(outcome.path, '/api/heartbeat');
+        assert.equal(outcome.outcome, 'success');
+        assert.equal(outcome.statusCode, 200);
+        assert.equal(outcome.deviceId, expectedDeviceOrder[pair]);
+        assert.match(outcome.requestId, /^[a-f0-9-]{36}$/i);
+
+        assert.equal(admission.type, 'api.write.admission.started');
+        assert.equal(admission.method, 'POST');
+        assert.equal(admission.path, '/api/heartbeat');
+        assert.equal(admission.outcome, 'started');
+        assert.equal(admission.requestId, outcome.requestId);
+        assert.equal(admission.deviceId, undefined);
+        assert.ok(!('body' in admission));
+        assert.ok(!('token' in admission));
+        assert.ok(!('sourcePath' in admission));
+        assert.ok(!('targetPath' in admission));
+      }
+
+      // Exact-one admission and exact-one success per requestId.
+      const requestIds = body.events
+        .filter((event) => event.type === 'api.write.admission.started')
+        .map((event) => event.requestId);
+      assert.equal(requestIds.length, 3);
+      assert.equal(new Set(requestIds).size, 3);
+      for (const requestId of requestIds) {
+        const forReq = body.events.filter((event) => event.requestId === requestId);
+        assert.equal(forReq.length, 2);
+        assert.equal(forReq.filter((event) => event.type === 'api.write.admission.started').length, 1);
+        assert.equal(forReq.filter((event) => event.type === 'api.heartbeat.success').length, 1);
+      }
+
+      const serialized = JSON.stringify(body.events);
+      assert.doesNotMatch(serialized, /audit-token|Authorization|Bearer/);
+      assert.doesNotMatch(serialized, /sourcePath|targetPath|"token"|padding/);
     } finally {
       await cleanupAuditServer(fixture);
     }

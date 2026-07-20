@@ -209,6 +209,28 @@ async function recordAudit(dataDir, event, retention) {
   }
 }
 
+/**
+ * Required pre-side-effect write-admission audit (fail-closed).
+ * Exact-one append; any underlying failure remaps to AUDIT_DELIVERY_UNAVAILABLE.
+ * Does not log raw err.message / path / token / stack / errno.
+ */
+async function recordRequiredWriteAdmissionAudit(dataDir, { method, path, requestId }, retention) {
+  try {
+    await appendAuditEvent(dataDir, {
+      type: 'api.write.admission.started',
+      method,
+      path,
+      outcome: 'started',
+      requestId,
+    }, { retention });
+  } catch {
+    throw new LinkeError(ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE, {
+      statusCode: 503,
+      retryable: true,
+    });
+  }
+}
+
 function errorStatusCode(err) {
   return Number.isInteger(err.statusCode) ? err.statusCode : 500;
 }
@@ -639,6 +661,15 @@ export function createServer({
             }
           }
         }
+      }
+
+      // Required write-admission (fail-closed): after rate/auth, before any write body/mutation.
+      if (isApiWriteRoute(method, pathname)) {
+        await recordRequiredWriteAdmissionAudit(
+          dataDir,
+          { method, path: pathname, requestId },
+          auditRetention,
+        );
       }
 
       // POST /api/device-enrollment-codes — loopback admin; requires full/write token config
@@ -1721,6 +1752,12 @@ export function createServer({
       // ── 404 ─────────────────────────────────────────────────
       sendError(res, 404, 'Not Found');
     } catch (err) {
+      if (
+        err instanceof LinkeError
+        && err.code === ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE
+      ) {
+        return sendError(res, 503, ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE);
+      }
       const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : 500;
       if (statusCode >= 400 && statusCode < 500) {
         return sendError(res, statusCode, err.message);
