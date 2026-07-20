@@ -7,21 +7,34 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact positive signature ceiling for V1.38. */
+/** Exact positive signature ceiling for V1.39. */
+const V139_SIGNATURE =
+  'V1.39 safety-critical audit write-admission fail-closed implementation';
+
+/** Exact historical V1.38 signature — retained base; must not be erased. */
 const V138_SIGNATURE =
   'V1.38 read-only audit integrity run-once monitor/alert implementation';
 
 /** Required honesty boundary phrases — must appear on currentSurface only. */
 const HONESTY_BOUNDARIES = Object.freeze([
-  'T6d.4 minimum viable run-once path delivered',
-  'Not T6d.3 complete; not M6d Exit; production-hardening remains partial',
-  'Not remote notification delivery; not managed scheduler; not production monitoring ready',
+  'pre-side-effect admission required',
+  'post-outcome recordAudit / appendNasReplicationAudit still best-effort',
+  'not end-to-end production audit delivery',
+  'T6d.3 still partial',
+  'not T6d.3 complete',
+  'not M6d Exit',
+  'not production-hardening ready',
+  'not Gold',
   'Gold remains blocked 4/4/1/9',
 ]);
 
 /** Ambiguous slash aggregate that must not appear as current-state wording. */
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
+
+/** Stale all-paths best-effort element — must not remain as current-state wording. */
+const STALE_ALL_PATHS_BEST_EFFORT =
+  'server recordAudit / agent appendNasReplicationAudit best-effort catch';
 
 /**
  * Clause-local split for honesty canaries.
@@ -66,7 +79,7 @@ function extractCurrentSurface(readme) {
   const currentRow = lines.find(
     (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
   );
-  assert.ok(currentRow, 'README version table current row for V1.38 must exist');
+  assert.ok(currentRow, 'README version table current row for V1.39 must exist');
   return { badge, currentRow, currentSurface: `${badge}\n${currentRow}`, lines };
 }
 
@@ -76,8 +89,8 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.38 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.38');
+  it('LINKE_RELEASE_VERSION is the V1.39 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.39');
   });
 
   it('README title matches LINKE_RELEASE_VERSION', async () => {
@@ -105,11 +118,59 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.38 exact signature and honesty boundaries', async () => {
+  it('README current surface carries V1.39 exact signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // V1.37 historical dual-write base must remain (not erased by V1.38)
+    // Exact V1.39 signature MUST be on currentSurface (badge + V1.39 row only)
+    assert.ok(
+      currentSurface.includes(V139_SIGNATURE),
+      `README currentSurface must include exact signature: ${V139_SIGNATURE}`,
+    );
+
+    // Required honesty boundaries MUST each exact-include on currentSurface
+    for (const phrase of HONESTY_BOUNDARIES) {
+      assert.ok(
+        currentSurface.includes(phrase),
+        `README currentSurface must exact-include honesty boundary: ${phrase}`,
+      );
+    }
+
+    // Required admission helpers must be named on current surface
+    assert.ok(
+      /recordRequiredWriteAdmissionAudit/i.test(currentSurface),
+      'current surface must name server recordRequiredWriteAdmissionAudit',
+    );
+    assert.ok(
+      /recordRequiredNasReplicationStartAudit/i.test(currentSurface),
+      'current surface must name agent recordRequiredNasReplicationStartAudit',
+    );
+    assert.ok(
+      /audit-delivery-unavailable/i.test(currentSurface),
+      'current surface must name audit-delivery-unavailable',
+    );
+
+    // Stale all-paths best-effort wording must not remain as current-state fact
+    assert.ok(
+      !currentSurface.includes(STALE_ALL_PATHS_BEST_EFFORT),
+      'current surface must not keep stale all-paths best-effort element as current fact',
+    );
+
+    // V1.38 historical monitor base must remain (not erased by V1.39)
+    const v138Row = lines.find(
+      (line) => line.includes('| V1.38 |') && line.includes('历史版本'),
+    );
+    assert.ok(v138Row, 'README version table must retain V1.38 as 历史版本');
+    assert.ok(
+      v138Row.includes(V138_SIGNATURE),
+      'V1.38 historical row must retain exact V1.38 monitor signature',
+    );
+    assert.ok(
+      /T6d\.4 minimum viable run-once path delivered|audit-integrity-monitor|local run-once/i.test(v138Row),
+      'V1.38 historical row must retain T6d.4 / monitor base facts',
+    );
+
+    // V1.37 historical dual-write base must remain
     const v137Row = lines.find(
       (line) => line.includes('| V1.37 |') && line.includes('历史版本'),
     );
@@ -119,27 +180,14 @@ describe('Release Version Consistency', () => {
       'V1.37 historical row must retain dual-write / journal-first base',
     );
 
-    // Exact signature MUST be on currentSurface (badge + V1.38 row only — no full-README fallback)
+    // Monitor CLI path must still be documented (historical base; anywhere in README is fine)
     assert.ok(
-      currentSurface.includes(V138_SIGNATURE),
-      `README currentSurface must include exact signature: ${V138_SIGNATURE}`,
-    );
-
-    // Four required boundaries MUST each exact-include on currentSurface (no full-README fallback)
-    for (const phrase of HONESTY_BOUNDARIES) {
-      assert.ok(
-        currentSurface.includes(phrase),
-        `README currentSurface must exact-include honesty boundary: ${phrase}`,
-      );
-    }
-
-    // Local run-once CLI path must be documented (anywhere in README is fine for CLI)
-    assert.ok(
-      readme.includes('node src/agent.js audit-integrity-monitor --data-dir'),
+      readme.includes('node src/agent.js audit-integrity-monitor --data-dir')
+        || readme.includes('audit-integrity-monitor --data-dir'),
       'README must document audit-integrity-monitor CLI example',
     );
 
-    // Stale V1.37 / slash-aggregate current-state wording must not remain on current surface
+    // Stale V1.37 slash-aggregate current-state wording must not remain on current surface
     assert.ok(
       !badge.includes('no journal rotation / monitor / alert')
         && !badge.includes('no journal rotation/monitor/alert')
@@ -163,6 +211,14 @@ describe('Release Version Consistency', () => {
     assert.ok(
       /not remote notification delivery|no remote notification delivery/i.test(currentSurface),
       'current surface must deny remote notification delivery directly',
+    );
+    assert.ok(
+      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(currentSurface),
+      'current surface must deny multi-process exclusive lock',
+    );
+    assert.ok(
+      /not production monitoring ready|no production monitoring ready/i.test(currentSurface),
+      'current surface must deny production monitoring ready',
     );
   });
 

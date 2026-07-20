@@ -74,9 +74,53 @@ function assertTextProductionHardeningReadyNegated(text, label = 'text') {
 /** Exact Gold short phrase required on production-hardening surface. */
 const GOLD_REMAINS_BLOCKED_4419 = 'Gold remains blocked 4/4/1/9';
 
-/** Ambiguous slash aggregate forbidden on V1.38 current-state surface. */
+/** Ambiguous slash aggregate forbidden on V1.39 current-state surface. */
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
+
+/** Exact V1.39 signature ceiling. */
+const V139_SIGNATURE =
+  'V1.39 safety-critical audit write-admission fail-closed implementation';
+
+/** Exact historical V1.38 signature — retained base. */
+const V138_SIGNATURE =
+  'V1.38 read-only audit integrity run-once monitor/alert implementation';
+
+/** Exact post-outcome still-best-effort honesty phrase. */
+const POST_OUTCOME_STILL_BEST_EFFORT =
+  'post-outcome recordAudit / appendNasReplicationAudit still best-effort';
+
+/**
+ * Exact V1.39 write-admission failure boundary atom.
+ * Binds required write-admission failure + audit-delivery-unavailable + HTTP 503 / CLI exit 1
+ * in one evidence element — must not be satisfied by V1.38 nextStep historical
+ * "exit 1 argv or program error".
+ */
+const WRITE_ADMISSION_FAILURE_BOUNDARY =
+  'required write-admission audit failure: audit-delivery-unavailable (HTTP 503 / CLI exit 1)';
+
+/**
+ * Exact V1.38 historical nextStep monitor exit-1 phrase (must match production nextStep text).
+ * Must not appear in the V1.39 current nextStep segment or substitute for write-admission boundary.
+ */
+const V138_MONITOR_EXIT_1 = 'exit 1 argv or program error';
+
+/** Stale all-paths best-effort element — must not remain as current production evidence. */
+const STALE_ALL_PATHS_BEST_EFFORT =
+  'server recordAudit / agent appendNasReplicationAudit best-effort catch';
+
+/** Frozen Gold item id/status snapshot (statuses must not change in V1.39). */
+const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
+  { id: 'release-readiness', status: 'ready' },
+  { id: 'local-backup-restore', status: 'ready' },
+  { id: 'fleet-device-management', status: 'ready' },
+  { id: 'version-consistency', status: 'ready' },
+  { id: 'nas-dry-run', status: 'partial' },
+  { id: 'automation-installation', status: 'partial' },
+  { id: 'security-auth', status: 'partial' },
+  { id: 'real-nas-remote-backup', status: 'blocked' },
+  { id: 'production-hardening', status: 'partial' },
+]);
 
 /**
  * Element-level helper: every evidence element that contains positivePhrase
@@ -231,13 +275,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.38', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.38');
+  it('expects LINKE_RELEASE_VERSION to be V1.39', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.39');
   });
 
-  it('expects report.version to be V1.38', () => {
+  it('expects report.version to be V1.39', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.38');
+    assert.strictEqual(report.version, 'V1.39');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -245,6 +289,13 @@ describe('Gold Readiness Report', () => {
     assert.strictEqual(report.status, 'blocked');
     assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
+  });
+
+  it('freezes all 9 item id/status bit-for-bit (V1.39 does not change statuses)', () => {
+    const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
+    const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
+    assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
+    assert.strictEqual(report.items.find((i) => i.id === 'production-hardening').status, 'partial');
   });
 
   it('verifies generatedAt timestamp is parsed from options.now', () => {
@@ -746,12 +797,117 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.38 honesty: read-only audit integrity run-once monitor/alert (T6d.4 delivered; T6d.3 still partial)
-    const V138_SIGNATURE =
-      'V1.38 read-only audit integrity run-once monitor/alert implementation';
+    // V1.39 honesty: pre-side-effect write-admission required; post-outcome still best-effort; T6d.3 still partial
+    assert.ok(
+      hardeningEvidence.includes(V139_SIGNATURE),
+      'production-hardening evidence must include V1.39 exact signature ceiling',
+    );
+    assert.ok(
+      hardeningEvidence.includes('pre-side-effect admission required'),
+      'production-hardening evidence must include pre-side-effect admission required',
+    );
+    // Exact evidence element only — no joined-text substring fallback
+    assert.ok(
+      hardeningItem.evidence.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'production-hardening evidence must exact-include post-outcome still best-effort element',
+    );
+    // Exact locus elements — no helper-name-only or bare src/server.js OR
+    assert.ok(
+      hardeningItem.evidence.includes('src/server.js recordRequiredWriteAdmissionAudit'),
+      'production-hardening evidence must exact-include src/server.js recordRequiredWriteAdmissionAudit',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/server-write-admission.test.js'),
+      'production-hardening evidence must include test/server-write-admission.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/server-write-admission-scans.test.js'),
+      'production-hardening evidence must include test/server-write-admission-scans.test.js',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes('src/agent.js recordRequiredNasReplicationStartAudit'),
+      'production-hardening evidence must exact-include src/agent.js recordRequiredNasReplicationStartAudit',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/agent-nas-snapshot-replicate.test.js'),
+      'production-hardening evidence must include test/agent-nas-snapshot-replicate.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('audit-delivery-unavailable'),
+      'production-hardening evidence must include audit-delivery-unavailable',
+    );
+    // Exact write-admission failure boundary atom — not bare audit-delivery-unavailable,
+    // not joined-text "exit 1" from V1.38 monitor history
+    assert.ok(
+      hardeningItem.evidence.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+      'production-hardening evidence must exact-include write-admission HTTP 503 / CLI exit 1 boundary atom',
+    );
+    // Mutation canary: only V1.38 monitor exit 1 + bare audit-delivery-unavailable must fail exact boundary
+    {
+      const monitorOnlyEvidence = [
+        V138_SIGNATURE,
+        V138_MONITOR_EXIT_1,
+        'audit-delivery-unavailable',
+        POST_OUTCOME_STILL_BEST_EFFORT,
+      ];
+      const joinedHasExit1 = monitorOnlyEvidence.join(' ').includes('exit 1');
+      const exactHasBoundary = monitorOnlyEvidence.includes(WRITE_ADMISSION_FAILURE_BOUNDARY);
+      assert.equal(
+        joinedHasExit1,
+        true,
+        'canary: V1.38 monitor-only evidence joined text has exit 1 (would greenwash weak checks)',
+      );
+      assert.equal(
+        exactHasBoundary,
+        false,
+        'canary: V1.38 monitor exit 1 + bare audit-delivery-unavailable must fail exact write-admission boundary',
+      );
+      assert.equal(
+        [V138_MONITOR_EXIT_1].includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+        false,
+        'canary: exact Array.includes must reject V1.38 monitor exit 1 as write-admission boundary',
+      );
+      assert.equal(
+        ['prefix ' + WRITE_ADMISSION_FAILURE_BOUNDARY].includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+        false,
+        'canary: prefixed/wrapped boundary must not satisfy exact-element includes',
+      );
+    }
+    // Stale all-paths best-effort: ban as substring of any evidence element (not Array.includes exact-only)
+    assert.ok(
+      !hardeningItem.evidence.some((e) => String(e).includes(STALE_ALL_PATHS_BEST_EFFORT)),
+      'production-hardening evidence must not contain stale all-paths best-effort as any-element substring',
+    );
+    // Mutation canaries: prove element-substring ban catches variants exact-includes would miss
+    assert.equal(
+      ['prefix ' + STALE_ALL_PATHS_BEST_EFFORT].some((e) => String(e).includes(STALE_ALL_PATHS_BEST_EFFORT)),
+      true,
+      'canary: prefixed stale phrase must be caught by element-substring ban',
+    );
+    assert.equal(
+      [STALE_ALL_PATHS_BEST_EFFORT + ' suffix'].includes(STALE_ALL_PATHS_BEST_EFFORT),
+      false,
+      'canary: Array.includes exact-equal would miss suffixed stale phrase (why substring ban is required)',
+    );
+    assert.equal(
+      ['src/server.js'].includes('src/server.js recordRequiredWriteAdmissionAudit'),
+      false,
+      'canary: bare src/server.js must not satisfy exact locus element',
+    );
+    assert.equal(
+      ['recordRequiredNasReplicationStartAudit'].includes('src/agent.js recordRequiredNasReplicationStartAudit'),
+      false,
+      'canary: helper-name-only must not satisfy exact agent locus element',
+    );
+    assert.equal(
+      ['pre ' + POST_OUTCOME_STILL_BEST_EFFORT + ' post'].includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      false,
+      'canary: joined/wrapped post-outcome text must not satisfy exact-element includes',
+    );
+    // V1.38 historical monitor base (must remain; T6d.4 delivered)
     assert.ok(
       hardeningEvidence.includes(V138_SIGNATURE),
-      'production-hardening evidence must include V1.38 exact signature ceiling',
+      'production-hardening evidence must retain V1.38 exact signature',
     );
     assert.ok(
       hardeningEvidence.includes('T6d.4 minimum viable run-once path delivered'),
@@ -877,7 +1033,8 @@ describe('Gold Readiness Report', () => {
         && /single-process/i.test(hardeningEvidence),
       'production-hardening evidence must deny multi-process exclusive lock',
     );
-    // V1.38 current-state: local run-once monitor/alert delivered; still no journal rotation;
+    // V1.39 current-state: pre-side-effect admission required; post-outcome still best-effort;
+    // local run-once monitor/alert delivered (V1.38 base); still no journal rotation;
     // not managed scheduler; not remote notification delivery; not production monitoring ready
     assert.ok(
       /no journal rotation|not journal rotation/i.test(hardeningEvidence),
@@ -894,7 +1051,7 @@ describe('Gold Readiness Report', () => {
       ),
       'production-hardening evidence must not keep stale exact "no journal rotation / monitor / alert" current-state element',
     );
-    // Ambiguous slash aggregate forbidden on V1.38 current-state evidence
+    // Ambiguous slash aggregate forbidden on V1.39 current-state evidence
     assert.ok(
       !hardeningItem.evidence.some((e) => String(e).includes(STALE_SLASH_AGGREGATE)),
       'production-hardening evidence must not keep slash aggregate rotation/scheduler/remote',
@@ -907,8 +1064,8 @@ describe('Gold Readiness Report', () => {
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(hardeningEvidence)
-        && /best-effort|catch|swallow/i.test(hardeningEvidence),
-      'production-hardening evidence must deny e2e production audit delivery (caller best-effort)',
+        && hardeningItem.evidence.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'production-hardening evidence must deny e2e production audit delivery with exact post-outcome still best-effort element',
     );
     assert.ok(
       /not state continuity under adversarial state deletion|no state continuity under adversarial state deletion/i.test(hardeningEvidence)
@@ -968,14 +1125,86 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realAttemptAuditImplementationReady:false'));
     assert.ok(hardeningEvidence.includes('realCapabilityImplementationsReady:false'));
     assert.ok(hardeningEvidence.includes('executeCapabilityAuthorized:false'));
-    // V1.38 nextStep leads with run-once monitor/alert honesty + exact signature
+    // Execution / real wiring flags remain false (must not flip true)
+    assert.ok(hardeningEvidence.includes('realRunnerWiringReady:false'));
+    assert.ok(hardeningEvidence.includes('runnerWiringContractReady:false'));
+    assert.ok(hardeningEvidence.includes('executionEligible:false'));
+    // V1.39 nextStep leads with write-admission fail-closed honesty + exact signature
     assert.ok(
-      hardeningItem.nextStep.startsWith('V1.38'),
-      'production-hardening nextStep must lead with V1.38',
+      hardeningItem.nextStep.startsWith('V1.39'),
+      'production-hardening nextStep must lead with V1.39',
     );
     assert.ok(
+      hardeningItem.nextStep.includes(V139_SIGNATURE),
+      'production-hardening nextStep must include V1.39 exact signature',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('pre-side-effect admission required'),
+      'production-hardening nextStep must include pre-side-effect admission required',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'production-hardening nextStep must include exact post-outcome still best-effort phrase',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('recordRequiredWriteAdmissionAudit'),
+      'production-hardening nextStep must name server recordRequiredWriteAdmissionAudit',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('recordRequiredNasReplicationStartAudit'),
+      'production-hardening nextStep must name agent recordRequiredNasReplicationStartAudit',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('not end-to-end production audit delivery'),
+      'production-hardening nextStep must deny end-to-end production audit delivery',
+    );
+    // V1.39 current nextStep segment must bind write-admission failure to HTTP 503 / CLI exit 1
+    // (not rely on later V1.38 historical "exit 1 argv or program error")
+    {
+      const nextV139Current = hardeningItem.nextStep.split(/V1\.38 historical/)[0];
+      assert.ok(
+        nextV139Current.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+        'production-hardening nextStep V1.39 current segment must include exact write-admission HTTP 503 / CLI exit 1 boundary',
+      );
+      assert.ok(
+        !nextV139Current.includes(V138_MONITOR_EXIT_1),
+        'production-hardening nextStep V1.39 current segment must not use V1.38 monitor exit 1 as admission boundary',
+      );
+    }
+    // Mutation canary: V1.38-only exit 1 in later historical text must not satisfy current-segment lock;
+    // and the real historical phrase (aligned constant) must be caught if leaked into current segment.
+    {
+      const hostileNext =
+        `V1.39 adds write-admission; audit-delivery-unavailable; V1.38 historical base: ${V138_MONITOR_EXIT_1}`;
+      const currentSeg = hostileNext.split(/V1\.38 historical/)[0];
+      assert.equal(
+        currentSeg.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+        false,
+        'canary: V1.39 segment with bare audit-delivery-unavailable must fail exact admission boundary',
+      );
+      assert.equal(
+        hostileNext.includes('exit 1') && !currentSeg.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
+        true,
+        'canary: whole-nextStep exit 1 from V1.38 must not greenwash missing current-segment boundary',
+      );
+      const leakedCurrent =
+        `V1.39 write-admission; ${V138_MONITOR_EXIT_1}; V1.38 historical base: ${V138_MONITOR_EXIT_1}`
+          .split(/V1\.38 historical/)[0];
+      assert.equal(
+        leakedCurrent.includes(V138_MONITOR_EXIT_1),
+        true,
+        'canary: real V1.38 nextStep exit-1 phrase leaked into current segment is detectable',
+      );
+      assert.equal(
+        !leakedCurrent.includes(V138_MONITOR_EXIT_1),
+        false,
+        'canary: ban must reject real historical exit-1 phrase when present in V1.39 current segment',
+      );
+    }
+    // V1.38 historical monitor base retained in nextStep
+    assert.ok(
       hardeningItem.nextStep.includes(V138_SIGNATURE),
-      'production-hardening nextStep must include V1.38 exact signature',
+      'production-hardening nextStep must retain V1.38 exact signature',
     );
     assert.ok(
       hardeningItem.nextStep.includes('T6d.4 minimum viable run-once path delivered'),
@@ -998,7 +1227,7 @@ describe('Gold Readiness Report', () => {
       /not production monitoring ready|no production monitoring ready/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny production monitoring ready',
     );
-    // V1.37 historical dual-write coordinator pointer (must remain after V1.38 lead-in)
+    // V1.37 historical dual-write coordinator pointer (must remain after V1.39 lead-in)
     assert.ok(
       hardeningItem.nextStep.includes('V1.37'),
       'production-hardening nextStep must retain V1.37 historical pointer',
@@ -1056,9 +1285,24 @@ describe('Gold Readiness Report', () => {
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(hardeningItem.nextStep)
-        && /best-effort|catch|swallow|recordAudit|appendNasReplicationAudit/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must deny e2e production audit delivery (caller best-effort)',
+        && hardeningItem.nextStep.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'production-hardening nextStep must deny e2e production audit delivery with exact post-outcome still best-effort',
     );
+    // nextStep must fully exclude stale all-paths best-effort — no "new phrase present → allow" OR
+    assert.ok(
+      !hardeningItem.nextStep.includes(STALE_ALL_PATHS_BEST_EFFORT),
+      'production-hardening nextStep must not contain stale all-paths best-effort phrase at all',
+    );
+    // Canary: old OR would greenwash stale+new coexistence; strict ban rejects it
+    {
+      const hostileNext = `${STALE_ALL_PATHS_BEST_EFFORT}; ${POST_OUTCOME_STILL_BEST_EFFORT}`;
+      const oldOrWouldPass =
+        !hostileNext.includes(STALE_ALL_PATHS_BEST_EFFORT)
+        || hostileNext.includes(POST_OUTCOME_STILL_BEST_EFFORT);
+      const strictBanPasses = !hostileNext.includes(STALE_ALL_PATHS_BEST_EFFORT);
+      assert.equal(oldOrWouldPass, true, 'canary: old OR would pass hostile nextStep with both phrases');
+      assert.equal(strictBanPasses, false, 'canary: strict ban must reject nextStep containing stale phrase');
+    }
     assert.ok(
       /not state continuity under adversarial state deletion|no state continuity under adversarial state deletion/i.test(hardeningItem.nextStep)
         && /re-bootstrap|rebootstrap|limitation/i.test(hardeningItem.nextStep),
@@ -1074,7 +1318,7 @@ describe('Gold Readiness Report', () => {
       'production-hardening nextStep must not claim V1.37 is not dual-write / no production caller',
     );
     assert.ok(hardeningItem.nextStep.includes('production-hardening remains partial'));
-    // Exact negative inside V1.38 capability-boundary parentheses
+    // Exact negative inside V1.39 capability-boundary parentheses
     assert.ok(
       hardeningItem.nextStep.includes(NOT_PRODUCTION_HARDENING_READY),
       'production-hardening nextStep must include exact "not production-hardening ready"',
@@ -1135,7 +1379,7 @@ describe('Gold Readiness Report', () => {
       true,
       'positive control: period+space after negative with T6d.3 must pass (no false split on version dot)',
     );
-    // V1.38 hostile honesty canaries: bare remote/scheduler/production-monitoring
+    // V1.39 hostile honesty canaries: bare remote/scheduler/production-monitoring
     // positives must not be sheltered by earlier Not, arbitrary same-clause not, or joined evidence
     assert.equal(
       clauseLocalDirectBarePositiveNegated('production monitoring ready', 'production monitoring ready'),
@@ -1355,7 +1599,7 @@ describe('Gold Readiness Report', () => {
         || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
       'production-hardening nextStep must retain V1.35 journal foundation pointer',
     );
-    // V1.34 historical real-audit pointer (must not jump V1.38 → V1.35 / skip V1.37/V1.36)
+    // V1.34 historical real-audit pointer (must not jump V1.39 → V1.35 / skip V1.38/V1.37/V1.36)
     assert.ok(hardeningItem.nextStep.includes('V1.34'));
     assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
     assert.ok(
@@ -1460,7 +1704,12 @@ describe('Gold Readiness Report', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];
     for (const item of report.items) {
-      const evidence = evidenceText(item).toLowerCase().replaceAll('available:false', '');
+      // Strip boolean false tokens and registered fail-closed error code
+      // (audit-delivery-unavailable contains substring "available" but is not a readiness claim).
+      const evidence = evidenceText(item)
+        .toLowerCase()
+        .replaceAll('available:false', '')
+        .replaceAll('audit-delivery-unavailable', '');
       for (const word of vagueWords) {
         assert.ok(
           !evidence.includes(word),

@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.38**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：V1.39**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.38**';
+  const startMarker = '> **当前版本：V1.39**';
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -51,6 +51,22 @@ function extractCurrentBadgeBlockquote(markdown) {
   assert.ok(collected.length > 0, 'current badge blockquote must collect at least one `>` line');
   return collected.join('\n');
 }
+
+/** Exact V1.39 signature ceiling. */
+const V139_SIGNATURE =
+  'V1.39 safety-critical audit write-admission fail-closed implementation';
+
+/** Exact historical V1.38 signature. */
+const V138_SIGNATURE =
+  'V1.38 read-only audit integrity run-once monitor/alert implementation';
+
+/** Exact post-outcome still-best-effort honesty phrase. */
+const POST_OUTCOME_STILL_BEST_EFFORT =
+  'post-outcome recordAudit / appendNasReplicationAudit still best-effort';
+
+/** Stale all-paths best-effort element. */
+const STALE_ALL_PATHS_BEST_EFFORT =
+  'server recordAudit / agent appendNasReplicationAudit best-effort catch';
 
 // ── Version coverage: V0.1 – V0.5 ──────────────────────────────────
 
@@ -1896,10 +1912,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.38 read-only audit integrity run-once monitor/alert', () => {
-  it('title and badge claim V1.38 as current', () => {
-    assertReadmeContains(/# Linke V1\.38/, 'README title should mention V1.38');
-    assertReadmeContains(/\*\*当前版本：V1\.38\*\*/, 'README badge should mention V1.38');
+describe('README — V1.39 safety-critical audit write-admission fail-closed', () => {
+  it('title and badge claim V1.39 as current', () => {
+    assertReadmeContains(/# Linke V1\.39/, 'README title should mention V1.39');
+    assertReadmeContains(/\*\*当前版本：V1\.39\*\*/, 'README badge should mention V1.39');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.38\*\*/, 'README badge must not still claim V1.38 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.38$/m, 'README title must not still claim V1.38 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.37\*\*/, 'README badge must not still claim V1.37 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.37$/m, 'README title must not still claim V1.37 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.36\*\*/, 'README badge must not still claim V1.36 as current');
@@ -1962,40 +1980,67 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.38 read-only audit integrity run-once monitor/alert signature ceiling and honest boundaries', () => {
+  it('badge mentions V1.39 write-admission fail-closed signature ceiling and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.38 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.38 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes('| V1.39 | 当前版本 |'),
+      'extracted badge must not contain version table row "| V1.39 | 当前版本 |" (cross-region bleed guard)',
     );
     assert.ok(
-      badge.includes('V1.38 read-only audit integrity run-once monitor/alert implementation'),
-      'top badge must include V1.38 exact signature ceiling',
-    );
-    assert.ok(badge.includes('src/audit-integrity-monitor.js'), 'top badge audit-integrity-monitor module');
-    assert.ok(
-      /audit-integrity-monitor --data-dir/i.test(badge),
-      'top badge audit-integrity-monitor --data-dir CLI surface',
+      badge.includes(V139_SIGNATURE),
+      'top badge must include V1.39 exact signature ceiling',
     );
     assert.ok(
-      /read-only|只读/i.test(badge) && /run-once|单次运行|本地单次/i.test(badge),
-      'top badge local read-only run-once monitor',
+      badge.includes('pre-side-effect admission required'),
+      'top badge must include pre-side-effect admission required',
     );
     assert.ok(
-      /exit 0 healthy/i.test(badge)
-        && /exit 2 alert/i.test(badge)
-        && /exit 1/i.test(badge),
-      'top badge exit 0/1/2 semantics (healthy/alert/error)',
+      badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'top badge must include exact post-outcome still best-effort phrase',
     );
     assert.ok(
-      /无写|no write|zero-write|zero write/i.test(badge)
-        && /无修复|no repair|repair/i.test(badge)
-        && /无 recover|no recover|recover/i.test(badge)
-        && /无 bootstrap|no bootstrap|bootstrap/i.test(badge),
-      'top badge zero-write / no repair / no recover / no bootstrap (fail-closed monitor path)',
+      /recordRequiredWriteAdmissionAudit/i.test(badge),
+      'top badge must name server recordRequiredWriteAdmissionAudit',
     );
+    assert.ok(
+      /recordRequiredNasReplicationStartAudit/i.test(badge),
+      'top badge must name agent recordRequiredNasReplicationStartAudit',
+    );
+    assert.ok(
+      /audit-delivery-unavailable/i.test(badge),
+      'top badge must name audit-delivery-unavailable',
+    );
+    assert.ok(
+      !badge.includes(STALE_ALL_PATHS_BEST_EFFORT),
+      'top badge must not keep stale all-paths best-effort element as current fact',
+    );
+    // V1.38 signature must appear after the explicit historical-base marker (no arbitrary-position / T6d.4 substitute)
+    {
+      const HISTORICAL_BASE_MARKER = 'V1.38 historical base retained';
+      const markerIdx = badge.indexOf(HISTORICAL_BASE_MARKER);
+      const signatureIdx = badge.indexOf(V138_SIGNATURE);
+      assert.ok(markerIdx >= 0, 'top badge must include exact "V1.38 historical base retained" marker');
+      assert.ok(signatureIdx >= 0, 'top badge must include exact V1.38 monitor signature');
+      assert.ok(
+        signatureIdx > markerIdx,
+        'top badge V1.38 signature must appear after "V1.38 historical base retained" marker',
+      );
+      // Mutation canaries: T6d.4 alone or signature before marker must not pass
+      const t6dOnly = 'T6d.4 minimum viable run-once path delivered';
+      assert.equal(
+        t6dOnly.includes(V138_SIGNATURE) || t6dOnly.includes(HISTORICAL_BASE_MARKER),
+        false,
+        'canary: T6d.4 substitute must not count as V1.38 historical base retention',
+      );
+      const signatureBeforeMarker = `${V138_SIGNATURE}; ${HISTORICAL_BASE_MARKER}`;
+      assert.equal(
+        signatureBeforeMarker.indexOf(V138_SIGNATURE) > signatureBeforeMarker.indexOf(HISTORICAL_BASE_MARKER),
+        false,
+        'canary: signature before marker must fail order guard',
+      );
+    }
     assert.ok(
       /not managed scheduler|no managed scheduler|not.*scheduler/i.test(badge),
       'top badge no managed scheduler',
@@ -2008,7 +2053,7 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
       /not production monitoring ready|no production monitoring ready/i.test(badge),
       'top badge not production monitoring ready',
     );
-    assert.ok(/T6d\.4 minimum viable run-once path delivered/i.test(badge), 'top badge T6d.4 minimum viable delivered');
+    assert.ok(/T6d\.3 still partial/i.test(badge), 'top badge T6d.3 still partial');
     assert.ok(/not T6d\.3 complete|Not T6d\.3 complete|not.*T6d\.3 complete/i.test(badge), 'top badge not T6d.3 complete');
     assert.ok(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i.test(badge), 'top badge not M6d Exit');
     assert.ok(/not Gold|不是 Gold|Gold 依旧 blocked|Gold remains blocked/i.test(badge), 'top badge not Gold');
@@ -2018,7 +2063,12 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
       badge.includes('not production-hardening ready'),
       'current badge must include exact "not production-hardening ready"',
     );
-    assert.ok(/4 ready[\s\S]*4 partial[\s\S]*1 blocked|4 ready \/ 4 partial \/ 1 blocked \/ total 9/i.test(badge), 'top badge Gold 4/4/1/9');
+    assert.ok(
+      badge.includes('Gold remains blocked 4/4/1/9')
+        || /4 ready[\s\S]*4 partial[\s\S]*1 blocked|4 ready \/ 4 partial \/ 1 blocked \/ total 9/i.test(badge),
+      'top badge Gold 4/4/1/9',
+    );
+    assert.ok(badge.includes('Gold remains blocked 4/4/1/9'), 'top badge exact Gold remains blocked 4/4/1/9');
     assert.ok(/M1 route open|M1.*open/i.test(badge), 'top badge M1 route open');
     assert.ok(/M2 denied|M2.*denied/i.test(badge), 'top badge M2 denied');
     assert.ok(/realCapabilityImplementationsReady:false/.test(badge), 'top badge global real false');
@@ -2037,8 +2087,8 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(badge)
-        && /best-effort|catch|swallow/i.test(badge),
-      'top badge not e2e production audit delivery (caller best-effort)',
+        && badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'top badge not e2e production audit delivery with post-outcome still best-effort',
     );
     assert.ok(
       /not state continuity under adversarial state deletion|no state continuity under adversarial state deletion/i.test(badge)
@@ -2053,7 +2103,7 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
       /not HTTP\/Web monitor|no HTTP\/Web monitor|not HTTP|not Web monitor/i.test(badge),
       'top badge not HTTP/Web monitor',
     );
-    assert.ok(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked/i.test(badge), 'badge Gold still blocked honesty');
+    assert.ok(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked|Gold remains blocked 4\/4\/1\/9/i.test(badge), 'badge Gold still blocked honesty');
     assert.doesNotMatch(badge, /\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
     assert.doesNotMatch(badge, /(?<!not\s)(?<!Not\s)T6d\.3 complete/i, 'badge must not claim T6d.3 complete');
     assert.doesNotMatch(badge, /(?<!not\s)(?<!Not\s)production monitoring ready(?!\s*yet)/i, 'badge must not claim production monitoring ready');
@@ -2067,23 +2117,58 @@ describe('README — V1.38 read-only audit integrity run-once monitor/alert', ()
       'helper canary: missing badge start must fail',
     );
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.38** a\n> **当前版本：V1.38** b\n'),
+      () => extractCurrentBadgeBlockquote('> **当前版本：V1.39** a\n> **当前版本：V1.39** b\n'),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
   });
 
-  it('version table marks V1.38 current, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
-    // V1.38 current row — independently lock exact negative (not covered by badge)
-    const v138RowMatch = readme.match(/\| V1\.38 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v138RowMatch, 'V1.38 current version table row must exist');
+  it('version table marks V1.39 current, V1.38 historical monitor, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
+    // V1.39 current row — independently lock exact signature and negatives
+    const v139RowMatch = readme.match(/\| V1\.39 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v139RowMatch, 'V1.39 current version table row must exist');
     assert.ok(
-      v138RowMatch[0].includes('not production-hardening ready'),
-      'V1.38 current table row must include exact "not production-hardening ready"',
+      v139RowMatch[0].includes(V139_SIGNATURE),
+      'V1.39 current table row must include exact V1.39 signature',
+    );
+    assert.ok(
+      v139RowMatch[0].includes('pre-side-effect admission required'),
+      'V1.39 current table row must include pre-side-effect admission required',
+    );
+    assert.ok(
+      v139RowMatch[0].includes(POST_OUTCOME_STILL_BEST_EFFORT),
+      'V1.39 current table row must include post-outcome still best-effort phrase',
+    );
+    assert.ok(
+      v139RowMatch[0].includes('not production-hardening ready'),
+      'V1.39 current table row must include exact "not production-hardening ready"',
+    );
+    assert.ok(
+      v139RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
+      'V1.39 current table row must include exact Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      !v139RowMatch[0].includes(STALE_ALL_PATHS_BEST_EFFORT),
+      'V1.39 current table row must not keep stale all-paths best-effort element',
     );
     assertReadmeContains(
-      /\| V1\.38 \| 当前版本 \|[^|]*(read-only audit integrity run-once monitor\/alert|audit-integrity-monitor|local run-once|exit 0\/2\/1|no write\/repair\/recover)[^|]*(Not T6d\.3 complete|not M6d Exit|not production-hardening ready|not production monitoring ready)[^|]*(Gold remains blocked|4 ready)/i,
-      'V1.38 should be current read-only audit integrity run-once monitor/alert milestone',
+      /\| V1\.39 \| 当前版本 \|[^|]*(safety-critical audit write-admission fail-closed|pre-side-effect admission required|recordRequiredWriteAdmissionAudit|recordRequiredNasReplicationStartAudit)[^|]*(post-outcome recordAudit \/ appendNasReplicationAudit still best-effort|not end-to-end production audit delivery)[^|]*(T6d\.3 still partial|not T6d\.3 complete|not M6d Exit|not production-hardening ready|not Gold)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
+      'V1.39 should be current write-admission fail-closed milestone',
+    );
+    // V1.38 historical row — lock monitor facts (must not remain 当前版本)
+    const v138RowMatch = readme.match(/\| V1\.38 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v138RowMatch, 'V1.38 historical version table row must exist');
+    assert.ok(
+      v138RowMatch[0].includes(V138_SIGNATURE),
+      'V1.38 historical table row must retain exact V1.38 monitor signature',
+    );
+    assert.ok(
+      /T6d\.4 minimum viable run-once path delivered|audit-integrity-monitor|local run-once/i.test(v138RowMatch[0]),
+      'V1.38 historical table row must retain T6d.4 / monitor base facts',
+    );
+    assertReadmeContains(
+      /\| V1\.38 \| 历史版本 \|[^|]*(read-only audit integrity run-once monitor\/alert|audit-integrity-monitor|local run-once|exit 0\/2\/1|no write\/repair\/recover)[^|]*(Not T6d\.3 complete|not M6d Exit|not production-hardening ready|not production monitoring ready|T6d\.4)[^|]*(Gold remains blocked|4 ready)/i,
+      'V1.38 should be historical read-only audit integrity run-once monitor/alert milestone',
     );
     // V1.37 historical row — lock dual-write coordinator facts (must not remain 当前版本)
     const v137RowMatch = readme.match(/\| V1\.37 \| 历史版本 \|[^|\n]*/);
