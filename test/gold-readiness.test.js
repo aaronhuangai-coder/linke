@@ -71,6 +71,53 @@ function assertTextProductionHardeningReadyNegated(text, label = 'text') {
   );
 }
 
+/** Exact Gold short phrase required on production-hardening surface. */
+const GOLD_REMAINS_BLOCKED_4419 = 'Gold remains blocked 4/4/1/9';
+
+/** Ambiguous slash aggregate forbidden on V1.38 current-state surface. */
+const STALE_SLASH_AGGREGATE =
+  'no journal rotation / managed scheduler / remote notification delivery';
+
+/**
+ * Element-level helper: every evidence element that contains positivePhrase
+ * must itself contain a *direct* `not <phrase>` or `no <phrase>`
+ * (case-insensitive). Arbitrary `not`/`no` elsewhere in the element, or in
+ * a sibling element, does NOT count. Joined-text shelter is impossible.
+ */
+function evidenceElementsDirectlyNegatePhrase(evidence, positivePhrase) {
+  assert.ok(Array.isArray(evidence), 'evidence must be an array');
+  const positive = positivePhrase.toLowerCase();
+  for (const element of evidence) {
+    const lower = String(element).toLowerCase();
+    if (!lower.includes(positive)) continue;
+    const hasDirect =
+      lower.includes(`not ${positive}`) || lower.includes(`no ${positive}`);
+    if (!hasDirect) return false;
+  }
+  return true;
+}
+
+/**
+ * Clause-local direct negation for free text (nextStep / README).
+ * Requires `not <phrase>` or `no <phrase>` in the same clause — arbitrary
+ * elsewhere `not`/`no` is not a shield.
+ */
+function clauseLocalDirectBarePositiveNegated(text, positivePhrase) {
+  const positive = positivePhrase.toLowerCase();
+  const clauses = String(text)
+    .split(/[;；。,，—–]|--|\.(?=\s)/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+  for (const clause of clauses) {
+    const lower = clause.toLowerCase();
+    if (!lower.includes(positive)) continue;
+    const hasDirect =
+      lower.includes(`not ${positive}`) || lower.includes(`no ${positive}`);
+    if (!hasDirect) return false;
+  }
+  return true;
+}
+
 function assertGuardedRunnerExecutionPreviewEvidence(evidence) {
   assert.ok(evidence.includes('buildSupervisorLifecycleGuardedRunnerExecutionPreview'));
   assert.ok(evidence.includes('test/supervisor-lifecycle-guarded-runner-execution-preview.test.js'));
@@ -184,13 +231,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.37', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.37');
+  it('expects LINKE_RELEASE_VERSION to be V1.38', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.38');
   });
 
-  it('expects report.version to be V1.37', () => {
+  it('expects report.version to be V1.38', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.37');
+    assert.strictEqual(report.version, 'V1.38');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -699,10 +746,67 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.37 honesty: journal-first crash-recoverable dual-write coordinator (T6d.3 still partial)
+    // V1.38 honesty: read-only audit integrity run-once monitor/alert (T6d.4 delivered; T6d.3 still partial)
+    const V138_SIGNATURE =
+      'V1.38 read-only audit integrity run-once monitor/alert implementation';
+    assert.ok(
+      hardeningEvidence.includes(V138_SIGNATURE),
+      'production-hardening evidence must include V1.38 exact signature ceiling',
+    );
+    assert.ok(
+      hardeningEvidence.includes('T6d.4 minimum viable run-once path delivered'),
+      'production-hardening evidence must include T6d.4 minimum viable run-once path delivered',
+    );
+    assert.ok(hardeningEvidence.includes('src/audit-integrity-monitor.js'));
+    assert.ok(hardeningEvidence.includes('test/audit-integrity-monitor.test.js'));
+    assert.ok(
+      hardeningEvidence.includes('src/agent.js audit-integrity-monitor')
+        || hardeningEvidence.includes('audit-integrity-monitor --data-dir'),
+      'production-hardening evidence must name Agent CLI audit-integrity-monitor',
+    );
+    assert.ok(hardeningEvidence.includes('test/agent-audit-integrity-monitor.test.js'));
+    // Separate local run-once / JSON / exit facts (no weak OR collapse)
+    assert.ok(
+      hardeningEvidence.includes('local run-once'),
+      'production-hardening evidence must include local run-once',
+    );
+    assert.ok(
+      hardeningEvidence.includes('compact JSON stdout'),
+      'production-hardening evidence must include compact JSON stdout',
+    );
+    assert.ok(
+      hardeningEvidence.includes('exit 0'),
+      'production-hardening evidence must include exit 0',
+    );
+    assert.ok(
+      hardeningEvidence.includes('exit 2'),
+      'production-hardening evidence must include exit 2',
+    );
+    assert.ok(
+      hardeningEvidence.includes('exit 1'),
+      'production-hardening evidence must include exit 1',
+    );
+    assert.ok(
+      /not remote notification delivery|no remote notification delivery/i.test(hardeningEvidence),
+      'production-hardening evidence must deny remote notification delivery',
+    );
+    assert.ok(
+      /not managed scheduler|no managed scheduler/i.test(hardeningEvidence),
+      'production-hardening evidence must deny managed scheduler',
+    );
+    assert.ok(
+      /not production monitoring ready|no production monitoring ready/i.test(hardeningEvidence),
+      'production-hardening evidence must deny production monitoring ready',
+    );
+    // Exact Gold short phrase (not only expanded 4 ready / 4 partial form)
+    assert.ok(
+      hardeningItem.evidence.includes(GOLD_REMAINS_BLOCKED_4419),
+      'production-hardening evidence array must exact-include "Gold remains blocked 4/4/1/9"',
+    );
+    // V1.37 historical dual-write coordinator base (must remain)
     assert.ok(
       hardeningEvidence.includes('V1.37 journal-first crash-recoverable audit dual-write coordinator implementation'),
-      'production-hardening evidence must include V1.37 exact signature ceiling',
+      'production-hardening evidence must retain V1.37 exact signature',
     );
     assert.ok(hardeningEvidence.includes('src/audit-integrity-dual-write.js'));
     assert.ok(hardeningEvidence.includes('appendAuditEventWithIntegrityDualWrite'));
@@ -773,9 +877,33 @@ describe('Gold Readiness Report', () => {
         && /single-process/i.test(hardeningEvidence),
       'production-hardening evidence must deny multi-process exclusive lock',
     );
+    // V1.38 current-state: local run-once monitor/alert delivered; still no journal rotation;
+    // not managed scheduler; not remote notification delivery; not production monitoring ready
     assert.ok(
-      /no journal rotation|not journal rotation|rotation.*monitor|no.*rotation.*monitor.*alert/i.test(hardeningEvidence),
-      'production-hardening evidence must deny journal rotation / monitor / alert',
+      /no journal rotation|not journal rotation/i.test(hardeningEvidence),
+      'production-hardening evidence must deny journal rotation',
+    );
+    assert.ok(
+      /local run-once monitor|run-once monitor\/alert|monitor\/alert delivered|local run-once/i.test(hardeningEvidence),
+      'production-hardening evidence must acknowledge local run-once monitor/alert delivered',
+    );
+    // Stale absolute "no monitor / alert" current-state wording must not remain as truth
+    assert.ok(
+      !hardeningItem.evidence.some((e) =>
+        /^(no journal rotation \/ monitor \/ alert|no journal rotation\/monitor\/alert yet)$/i.test(String(e).trim()),
+      ),
+      'production-hardening evidence must not keep stale exact "no journal rotation / monitor / alert" current-state element',
+    );
+    // Ambiguous slash aggregate forbidden on V1.38 current-state evidence
+    assert.ok(
+      !hardeningItem.evidence.some((e) => String(e).includes(STALE_SLASH_AGGREGATE)),
+      'production-hardening evidence must not keep slash aggregate rotation/scheduler/remote',
+    );
+    assert.ok(
+      hardeningItem.evidence.some((e) => /no journal rotation/i.test(String(e)))
+        && hardeningItem.evidence.some((e) => /not managed scheduler|no managed scheduler/i.test(String(e)))
+        && hardeningItem.evidence.some((e) => /not remote notification delivery|no remote notification delivery/i.test(String(e))),
+      'production-hardening evidence must carry direct negatives for rotation / scheduler / remote',
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(hardeningEvidence)
@@ -840,12 +968,44 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realAttemptAuditImplementationReady:false'));
     assert.ok(hardeningEvidence.includes('realCapabilityImplementationsReady:false'));
     assert.ok(hardeningEvidence.includes('executeCapabilityAuthorized:false'));
-    // V1.37 nextStep leads with dual-write coordinator honesty + exact signature
-    assert.ok(hardeningItem.nextStep.startsWith('V1.37') || hardeningItem.nextStep.includes('V1.37'),
-      'production-hardening nextStep must lead with / include V1.37');
+    // V1.38 nextStep leads with run-once monitor/alert honesty + exact signature
+    assert.ok(
+      hardeningItem.nextStep.startsWith('V1.38'),
+      'production-hardening nextStep must lead with V1.38',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(V138_SIGNATURE),
+      'production-hardening nextStep must include V1.38 exact signature',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('T6d.4 minimum viable run-once path delivered'),
+      'production-hardening nextStep must include T6d.4 minimum viable run-once path delivered',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('src/audit-integrity-monitor.js')
+        || hardeningItem.nextStep.includes('audit-integrity-monitor'),
+      'production-hardening nextStep must name monitor module or CLI',
+    );
+    assert.ok(
+      /not remote notification delivery|no remote notification delivery/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny remote notification delivery',
+    );
+    assert.ok(
+      /not managed scheduler|no managed scheduler/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny managed scheduler',
+    );
+    assert.ok(
+      /not production monitoring ready|no production monitoring ready/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny production monitoring ready',
+    );
+    // V1.37 historical dual-write coordinator pointer (must remain after V1.38 lead-in)
+    assert.ok(
+      hardeningItem.nextStep.includes('V1.37'),
+      'production-hardening nextStep must retain V1.37 historical pointer',
+    );
     assert.ok(
       hardeningItem.nextStep.includes('V1.37 journal-first crash-recoverable audit dual-write coordinator implementation'),
-      'production-hardening nextStep must include V1.37 exact signature',
+      'production-hardening nextStep must retain V1.37 exact signature',
     );
     assert.ok(
       hardeningItem.nextStep.includes('appendAuditEventWithIntegrityDualWrite')
@@ -875,8 +1035,24 @@ describe('Gold Readiness Report', () => {
       'production-hardening nextStep must deny multi-process exclusive lock',
     );
     assert.ok(
-      /no journal rotation|not journal rotation|rotation.*monitor|no.*rotation.*monitor.*alert/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must deny journal rotation / monitor / alert',
+      /no journal rotation|not journal rotation/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny journal rotation',
+    );
+    // Ambiguous slash aggregate forbidden on nextStep current-state surface
+    assert.ok(
+      !hardeningItem.nextStep.includes(STALE_SLASH_AGGREGATE),
+      'production-hardening nextStep must not keep slash aggregate rotation/scheduler/remote',
+    );
+    // Exact Gold short phrase on nextStep (expanded form may also remain)
+    assert.ok(
+      hardeningItem.nextStep.includes(GOLD_REMAINS_BLOCKED_4419),
+      'production-hardening nextStep must exact-include "Gold remains blocked 4/4/1/9"',
+    );
+    // Stale absolute "no monitor / alert yet" remaining-work wording must not claim monitor/alert absent
+    assert.ok(
+      !/no journal rotation\/monitor\/alert yet|no journal rotation \/ monitor \/ alert yet/i.test(hardeningItem.nextStep)
+        || /local run-once monitor|monitor\/alert delivered|T6d\.4 minimum viable/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must not claim monitor/alert still absent without acknowledging local run-once delivery',
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(hardeningItem.nextStep)
@@ -898,7 +1074,7 @@ describe('Gold Readiness Report', () => {
       'production-hardening nextStep must not claim V1.37 is not dual-write / no production caller',
     );
     assert.ok(hardeningItem.nextStep.includes('production-hardening remains partial'));
-    // Exact negative inside V1.37 capability-boundary parentheses
+    // Exact negative inside V1.38 capability-boundary parentheses
     assert.ok(
       hardeningItem.nextStep.includes(NOT_PRODUCTION_HARDENING_READY),
       'production-hardening nextStep must include exact "not production-hardening ready"',
@@ -959,9 +1135,180 @@ describe('Gold Readiness Report', () => {
       true,
       'positive control: period+space after negative with T6d.3 must pass (no false split on version dot)',
     );
+    // V1.38 hostile honesty canaries: bare remote/scheduler/production-monitoring
+    // positives must not be sheltered by earlier Not, arbitrary same-clause not, or joined evidence
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('production monitoring ready', 'production monitoring ready'),
+      false,
+      'hostile canary: bare production monitoring ready must fail',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('remote notification delivery', 'remote notification delivery'),
+      false,
+      'hostile canary: bare remote notification delivery must fail',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('managed scheduler', 'managed scheduler'),
+      false,
+      'hostile canary: bare managed scheduler must fail',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('not production monitoring ready', 'production monitoring ready'),
+      true,
+      'hostile canary: same-clause not production monitoring ready must pass',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('Not remote notification delivery; not managed scheduler', 'remote notification delivery'),
+      true,
+      'hostile canary: multi-clause all-negated remote notification must pass',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('Not T6d.3 complete; production monitoring ready', 'production monitoring ready'),
+      false,
+      'hostile canary: early Not-other must not shelter later bare production monitoring ready',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('T6d.3 still partial; remote notification delivery', 'remote notification delivery'),
+      false,
+      'hostile canary: partial limitation must not shelter bare remote notification delivery',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated('not production monitoring ready; managed scheduler', 'managed scheduler'),
+      false,
+      'hostile canary: early not-other must not shelter later bare managed scheduler',
+    );
+    // Same-clause arbitrary "not" without direct "not <phrase>" must fail
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated(
+        'not T6d.3 complete but production monitoring ready',
+        'production monitoring ready',
+      ),
+      false,
+      'hostile canary: same-clause not-other must not shelter bare production monitoring ready',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated(
+        'not T6d.3 complete but managed scheduler',
+        'managed scheduler',
+      ),
+      false,
+      'hostile canary: same-clause not-other must not shelter bare managed scheduler',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated(STALE_SLASH_AGGREGATE, 'managed scheduler'),
+      false,
+      'hostile canary: slash aggregate must not count as direct no managed scheduler',
+    );
+    assert.equal(
+      clauseLocalDirectBarePositiveNegated(STALE_SLASH_AGGREGATE, 'remote notification delivery'),
+      false,
+      'hostile canary: slash aggregate must not count as direct no remote notification delivery',
+    );
+
+    // Element-level evidence helper: sibling Not must not shelter bare positive element
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not T6d.3 complete', 'production monitoring ready'],
+        'production monitoring ready',
+      ),
+      false,
+      'hostile canary array: sibling not-other must not shelter bare production monitoring ready',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not production monitoring ready'],
+        'production monitoring ready',
+      ),
+      true,
+      'hostile canary array: direct not production monitoring ready must pass',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not T6d.3 complete', 'remote notification delivery'],
+        'remote notification delivery',
+      ),
+      false,
+      'hostile canary array: sibling not-other must not shelter bare remote notification delivery',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not remote notification delivery'],
+        'remote notification delivery',
+      ),
+      true,
+      'hostile canary array: direct not remote notification delivery must pass',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not T6d.3 complete', 'managed scheduler'],
+        'managed scheduler',
+      ),
+      false,
+      'hostile canary array: sibling not-other must not shelter bare managed scheduler',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not managed scheduler'],
+        'managed scheduler',
+      ),
+      true,
+      'hostile canary array: direct not managed scheduler must pass',
+    );
+    // Joined-text false-green: element A "not X" + element B bare positive would pass
+    // if helper joined first; element-level must still fail.
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        ['not T6d.3 complete', 'production monitoring ready'],
+        'production monitoring ready',
+      ),
+      false,
+      'hostile canary: joined-text shelter across evidence elements must fail',
+    );
+    assert.equal(
+      evidenceElementsDirectlyNegatePhrase(
+        [STALE_SLASH_AGGREGATE],
+        'managed scheduler',
+      ),
+      false,
+      'hostile canary: slash aggregate element must fail direct managed scheduler negation',
+    );
+
+    // Live evidence array: each phrase-bearing element must carry direct not/no <phrase>
     assert.ok(
-      /Gold remains blocked 4 ready \/ 4 partial \/ 1 blocked \/ total 9|4 ready \/ 4 partial \/ 1 blocked \/ total 9/.test(hardeningItem.nextStep),
-      'production-hardening nextStep must keep Gold blocked 4/4/1/9',
+      evidenceElementsDirectlyNegatePhrase(hardeningItem.evidence, 'production monitoring ready'),
+      'production-hardening evidence elements: production monitoring ready must be directly negated',
+    );
+    assert.ok(
+      evidenceElementsDirectlyNegatePhrase(hardeningItem.evidence, 'remote notification delivery'),
+      'production-hardening evidence elements: remote notification delivery must be directly negated',
+    );
+    assert.ok(
+      evidenceElementsDirectlyNegatePhrase(hardeningItem.evidence, 'managed scheduler'),
+      'production-hardening evidence elements: managed scheduler must be directly negated',
+    );
+
+    // Live nextStep: direct clause-local not/no <phrase>
+    assert.ok(
+      clauseLocalDirectBarePositiveNegated(hardeningItem.nextStep, 'production monitoring ready'),
+      'production-hardening nextStep: production monitoring ready must be direct clause-local negated',
+    );
+    assert.ok(
+      clauseLocalDirectBarePositiveNegated(hardeningItem.nextStep, 'remote notification delivery'),
+      'production-hardening nextStep: remote notification delivery must be direct clause-local negated',
+    );
+    assert.ok(
+      clauseLocalDirectBarePositiveNegated(hardeningItem.nextStep, 'managed scheduler'),
+      'production-hardening nextStep: managed scheduler must be direct clause-local negated',
+    );
+    // Exact short phrase already asserted above; expanded form may also remain
+    assert.ok(
+      /Gold remains blocked 4 ready \/ 4 partial \/ 1 blocked \/ total 9|4 ready \/ 4 partial \/ 1 blocked \/ total 9/.test(hardeningItem.nextStep)
+        || hardeningItem.nextStep.includes(GOLD_REMAINS_BLOCKED_4419),
+      'production-hardening nextStep must keep Gold blocked 4/4/1/9 (exact short and/or expanded)',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(GOLD_REMAINS_BLOCKED_4419),
+      'production-hardening nextStep must exact-include Gold remains blocked 4/4/1/9 (not only expanded)',
     );
     assert.ok(/M1 route open|M1.*open/i.test(hardeningItem.nextStep));
     assert.ok(/M2 denied|M2.*denied/i.test(hardeningItem.nextStep));
@@ -973,8 +1320,8 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('executionEligible:false'));
     // Next steps should point at remaining gaps (not imply this milestone is Gold)
     assert.ok(
-      /multi-process|rotation|monitor|anchor|authenticity|end-to-end|caller delivery|best-effort/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must point at remaining multi-process / rotation / e2e / authenticity gaps',
+      /multi-process|rotation|remote notification|managed scheduler|production monitoring|anchor|authenticity|end-to-end|caller delivery|best-effort/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must point at remaining multi-process / rotation / remote / scheduler / e2e / authenticity gaps',
     );
     // V1.36 historical cross-store pointer (must not erase base)
     assert.ok(hardeningItem.nextStep.includes('V1.36'));
@@ -1008,7 +1355,7 @@ describe('Gold Readiness Report', () => {
         || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
       'production-hardening nextStep must retain V1.35 journal foundation pointer',
     );
-    // V1.34 historical real-audit pointer (must not jump V1.37 → V1.35 / skip V1.36)
+    // V1.34 historical real-audit pointer (must not jump V1.38 → V1.35 / skip V1.37/V1.36)
     assert.ok(hardeningItem.nextStep.includes('V1.34'));
     assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
     assert.ok(

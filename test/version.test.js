@@ -7,14 +7,77 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
+/** Exact positive signature ceiling for V1.38. */
+const V138_SIGNATURE =
+  'V1.38 read-only audit integrity run-once monitor/alert implementation';
+
+/** Required honesty boundary phrases — must appear on currentSurface only. */
+const HONESTY_BOUNDARIES = Object.freeze([
+  'T6d.4 minimum viable run-once path delivered',
+  'Not T6d.3 complete; not M6d Exit; production-hardening remains partial',
+  'Not remote notification delivery; not managed scheduler; not production monitoring ready',
+  'Gold remains blocked 4/4/1/9',
+]);
+
+/** Ambiguous slash aggregate that must not appear as current-state wording. */
+const STALE_SLASH_AGGREGATE =
+  'no journal rotation / managed scheduler / remote notification delivery';
+
+/**
+ * Clause-local split for honesty canaries.
+ * `;` / fullwidth `；` / `。` / `,` / `，` / period+space / emdash / endash / `--`.
+ */
+function splitHonestyClauses(text) {
+  return String(text)
+    .split(/[;；。,，—–]|--|\.(?=\s)/)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+/**
+ * True when every clause that mentions positivePhrase also contains a *direct*
+ * same-clause negation: `not <phrase>` or `no <phrase>` (case-insensitive).
+ * Arbitrary elsewhere `not`/`no` does NOT count as a shield.
+ */
+function barePositiveIsNegatedInSameClause(text, positivePhrase) {
+  const positive = positivePhrase.toLowerCase();
+  for (const clause of splitHonestyClauses(text)) {
+    const lower = clause.toLowerCase();
+    if (!lower.includes(positive)) continue;
+    const hasDirect =
+      lower.includes(`not ${positive}`) || lower.includes(`no ${positive}`);
+    if (!hasDirect) return false;
+  }
+  return true;
+}
+
+function extractCurrentSurface(readme) {
+  const lines = readme.split('\n');
+  const badgeStart = lines.findIndex((l) =>
+    l.includes(`**当前版本：${LINKE_RELEASE_VERSION}**`),
+  );
+  assert.ok(badgeStart >= 0, 'README must have current-version badge');
+  const badgeLines = [];
+  for (let i = badgeStart; i < lines.length; i += 1) {
+    if (!lines[i].startsWith('>')) break;
+    badgeLines.push(lines[i]);
+  }
+  const badge = badgeLines.join('\n');
+  const currentRow = lines.find(
+    (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
+  );
+  assert.ok(currentRow, 'README version table current row for V1.38 must exist');
+  return { badge, currentRow, currentSurface: `${badge}\n${currentRow}`, lines };
+}
+
 describe('Release Version Consistency', () => {
   it('LINKE_RELEASE_VERSION is defined and starts with V', () => {
     assert.strictEqual(typeof LINKE_RELEASE_VERSION, 'string');
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.37 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.37');
+  it('LINKE_RELEASE_VERSION is the V1.38 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.38');
   });
 
   it('README title matches LINKE_RELEASE_VERSION', async () => {
@@ -25,15 +88,203 @@ describe('Release Version Consistency', () => {
 
   it('README badge matches LINKE_RELEASE_VERSION', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
-    assert.ok(readme.includes(`**当前版本：${LINKE_RELEASE_VERSION}**`), 'README badge must match current version');
+    assert.ok(
+      readme.includes(`**当前版本：${LINKE_RELEASE_VERSION}**`),
+      'README badge must match current version',
+    );
   });
 
   it('README version table marks LINKE_RELEASE_VERSION as 当前版本', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const lines = readme.split('\n');
-    const versionRow = lines.find(line => line.includes(`| ${LINKE_RELEASE_VERSION} |`));
+    const versionRow = lines.find((line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`));
     assert.ok(versionRow, `README version table must contain row for version ${LINKE_RELEASE_VERSION}`);
-    assert.ok(versionRow.includes('当前版本'), `Version table row for ${LINKE_RELEASE_VERSION} must be marked as "当前版本"`);
+    assert.ok(
+      versionRow.includes('当前版本'),
+      `Version table row for ${LINKE_RELEASE_VERSION} must be marked as "当前版本"`,
+    );
+  });
+
+  it('README current surface carries V1.38 exact signature and honesty boundaries', async () => {
+    const readme = await readFile(README_PATH, 'utf-8');
+    const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
+
+    // V1.37 historical dual-write base must remain (not erased by V1.38)
+    const v137Row = lines.find(
+      (line) => line.includes('| V1.37 |') && line.includes('历史版本'),
+    );
+    assert.ok(v137Row, 'README version table must retain V1.37 as 历史版本');
+    assert.ok(
+      /dual-write|journal-first/i.test(v137Row),
+      'V1.37 historical row must retain dual-write / journal-first base',
+    );
+
+    // Exact signature MUST be on currentSurface (badge + V1.38 row only — no full-README fallback)
+    assert.ok(
+      currentSurface.includes(V138_SIGNATURE),
+      `README currentSurface must include exact signature: ${V138_SIGNATURE}`,
+    );
+
+    // Four required boundaries MUST each exact-include on currentSurface (no full-README fallback)
+    for (const phrase of HONESTY_BOUNDARIES) {
+      assert.ok(
+        currentSurface.includes(phrase),
+        `README currentSurface must exact-include honesty boundary: ${phrase}`,
+      );
+    }
+
+    // Local run-once CLI path must be documented (anywhere in README is fine for CLI)
+    assert.ok(
+      readme.includes('node src/agent.js audit-integrity-monitor --data-dir'),
+      'README must document audit-integrity-monitor CLI example',
+    );
+
+    // Stale V1.37 / slash-aggregate current-state wording must not remain on current surface
+    assert.ok(
+      !badge.includes('no journal rotation / monitor / alert')
+        && !badge.includes('no journal rotation/monitor/alert')
+        && !currentRow.includes('no journal rotation / monitor / alert')
+        && !currentRow.includes('no journal rotation/monitor/alert'),
+      'current surface must not keep stale "no journal rotation / monitor / alert" wording',
+    );
+    assert.ok(
+      !currentSurface.includes(STALE_SLASH_AGGREGATE),
+      'current surface must not keep ambiguous slash aggregate for rotation/scheduler/remote',
+    );
+    // Prefer explicit direct negatives on current surface
+    assert.ok(
+      /no journal rotation/i.test(currentSurface),
+      'current surface must deny journal rotation directly',
+    );
+    assert.ok(
+      /not managed scheduler|no managed scheduler/i.test(currentSurface),
+      'current surface must deny managed scheduler directly',
+    );
+    assert.ok(
+      /not remote notification delivery|no remote notification delivery/i.test(currentSurface),
+      'current surface must deny remote notification delivery directly',
+    );
+  });
+
+  it('hostile honesty canaries: bare positives not sheltered by arbitrary Not or limitation text', () => {
+    // Bare positives must fail when not directly negated
+    assert.equal(
+      barePositiveIsNegatedInSameClause('production monitoring ready', 'production monitoring ready'),
+      false,
+      'hostile canary: bare production monitoring ready must fail',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause('remote notification delivery', 'remote notification delivery'),
+      false,
+      'hostile canary: bare remote notification delivery must fail',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause('managed scheduler', 'managed scheduler'),
+      false,
+      'hostile canary: bare managed scheduler must fail',
+    );
+
+    // Same-clause *direct* negatives pass
+    assert.equal(
+      barePositiveIsNegatedInSameClause('not production monitoring ready', 'production monitoring ready'),
+      true,
+      'hostile canary: same-clause not production monitoring ready must pass',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause('Not remote notification delivery', 'remote notification delivery'),
+      true,
+      'hostile canary: same-clause Not remote notification delivery must pass',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause('not managed scheduler', 'managed scheduler'),
+      true,
+      'hostile canary: same-clause not managed scheduler must pass',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause('no managed scheduler', 'managed scheduler'),
+      true,
+      'hostile canary: same-clause no managed scheduler must pass',
+    );
+
+    // Early Not / old limitation must NOT shelter a later bare positive
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'Not T6d.3 complete; production monitoring ready',
+        'production monitoring ready',
+      ),
+      false,
+      'hostile canary: early Not other must not shelter later bare production monitoring ready',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'T6d.3 still partial; remote notification delivery',
+        'remote notification delivery',
+      ),
+      false,
+      'hostile canary: partial limitation must not shelter bare remote notification delivery',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'not production monitoring ready; managed scheduler',
+        'managed scheduler',
+      ),
+      false,
+      'hostile canary: early not-other must not shelter later bare managed scheduler',
+    );
+
+    // Same-clause arbitrary "not" without direct "not <phrase>" must fail
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'not T6d.3 complete but production monitoring ready',
+        'production monitoring ready',
+      ),
+      false,
+      'hostile canary: same-clause not-other must not shelter bare production monitoring ready',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'not T6d.3 complete but remote notification delivery',
+        'remote notification delivery',
+      ),
+      false,
+      'hostile canary: same-clause not-other must not shelter bare remote notification delivery',
+    );
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'no journal rotation / managed scheduler / remote notification delivery',
+        'managed scheduler',
+      ),
+      false,
+      'hostile canary: slash aggregate must not count as direct no managed scheduler',
+    );
+
+    // Multi-clause all-negated control
+    assert.equal(
+      barePositiveIsNegatedInSameClause(
+        'Not remote notification delivery; not managed scheduler; not production monitoring ready',
+        'production monitoring ready',
+      ),
+      true,
+      'control: all-negated multi-clause honesty template must pass',
+    );
+  });
+
+  it('README current surface negates remote/scheduler/production-monitoring with direct not/no', async () => {
+    const readme = await readFile(README_PATH, 'utf-8');
+    const { currentSurface } = extractCurrentSurface(readme);
+
+    assert.ok(
+      barePositiveIsNegatedInSameClause(currentSurface, 'production monitoring ready'),
+      'README current surface: production monitoring ready must be direct clause-local negated',
+    );
+    assert.ok(
+      barePositiveIsNegatedInSameClause(currentSurface, 'remote notification delivery'),
+      'README current surface: remote notification delivery must be direct clause-local negated',
+    );
+    assert.ok(
+      barePositiveIsNegatedInSameClause(currentSurface, 'managed scheduler'),
+      'README current surface: managed scheduler must be direct clause-local negated',
+    );
   });
 
   it('buildHealthResponse version matches LINKE_RELEASE_VERSION', () => {
