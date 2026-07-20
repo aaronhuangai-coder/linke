@@ -31,6 +31,7 @@
  *   supervisor-lifecycle-guarded-runner-execution-preview — show sanitized guarded runner execution preview
  *   supervisor-lifecycle-guarded-runner-execution-gate — show sanitized guarded runner execution gate
  *   audit-log           — show sanitized local audit events
+ *   audit-integrity-monitor — run-once local audit integrity monitor (JSON on stdout; no network; no write)
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
  *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
@@ -52,7 +53,7 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, and guarded runner execution gate
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, and audit-integrity-monitor
  *   --target <name>      NAS target name (nas-snapshot-replicate)
  *   --device-id <id>     Device ID for local snapshot lookup (nas-snapshot-replicate)
  *   --snapshot-id <id>   Snapshot ID for local snapshot lookup (nas-snapshot-replicate)
@@ -105,6 +106,73 @@ import {
   heartbeatDevice,
   rotateDeviceToken,
 } from './device-client.js';
+import {
+  runAuditIntegrityMonitor,
+  auditIntegrityMonitorExitCode,
+  formatAuditIntegrityMonitorReportJson,
+} from './audit-integrity-monitor.js';
+
+const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
+const AUDIT_INTEGRITY_MONITOR_ARG_KEYS = new Set(['_', 'data-dir']);
+const AUDIT_INTEGRITY_MONITOR_ARGS_ERROR = 'audit-integrity-monitor arguments are invalid';
+const AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR = 'audit-integrity-monitor failed';
+
+/**
+ * Local strict argv contract for audit-integrity-monitor only.
+ * Does not change global parseArgs semantics.
+ * Fail-closed fixed message; never echoes flag/value/path/token.
+ *
+ * Layer 1: raw argv must be exactly
+ *   [ 'audit-integrity-monitor', '--data-dir', <non-empty path not starting with --> ]
+ * so prototype-polluting flags (e.g. --__proto__) cannot bypass Object.keys allowlists.
+ * Layer 2: parsed args exact keys / positional / string checks.
+ *
+ * @param {object} args
+ * @param {string[]} rawArgv process.argv.slice(2); compared only, never echoed
+ */
+function assertAuditIntegrityMonitorArgs(args, rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 3
+    || rawArgv[0] !== AUDIT_INTEGRITY_MONITOR_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].length === 0
+    || rawArgv[2].startsWith('--')
+  ) {
+    throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+
+  const keys = Object.keys(args);
+  if (keys.length !== AUDIT_INTEGRITY_MONITOR_ARG_KEYS.size) {
+    throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+  for (const key of keys) {
+    if (!AUDIT_INTEGRITY_MONITOR_ARG_KEYS.has(key)) {
+      throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+    }
+  }
+  for (const required of AUDIT_INTEGRITY_MONITOR_ARG_KEYS) {
+    if (!Object.hasOwn(args, required)) {
+      throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+    }
+  }
+  if (
+    !Array.isArray(args._)
+    || args._.length !== 1
+    || args._[0] !== AUDIT_INTEGRITY_MONITOR_COMMAND
+  ) {
+    throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+  const dataDir = args['data-dir'];
+  if (typeof dataDir !== 'string' || dataDir.trim().length === 0) {
+    throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+  // raw path token must match the parsed value (no reordering / alias tricks)
+  if (rawArgv[2] !== dataDir) {
+    throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+}
 
 const NAS_REPLICATION_ARG_KEYS = new Set([
   '_',
@@ -1017,6 +1085,7 @@ Commands:
   supervisor-lifecycle-guarded-runner-execution-preview Show sanitized supervisor lifecycle guarded runner execution preview
   supervisor-lifecycle-guarded-runner-execution-gate Show sanitized supervisor lifecycle guarded runner execution gate
   audit-log           Show sanitized local audit events
+  audit-integrity-monitor Run-once local audit integrity monitor (JSON on stdout; no network; no write)
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
   device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
@@ -1051,30 +1120,53 @@ Options:
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor)
 `);
 }
 
 // ── Main ───────────────────────────────────────────────────────────
 
 export async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const rawArgv = process.argv.slice(2);
+  const args = parseArgs(rawArgv);
   const command = args._[0];
   const server = args.server || 'http://localhost:3000';
   const requestOptions = args.token && args.token !== true ? { authToken: args.token } : {};
   const apiRequest = (path, method, body) => request(server, path, method, body, requestOptions);
 
-  if (!command || args.help || args.h || command === 'help') {
+  // audit-integrity-monitor owns --help/--h via local argv validator (exit 1 fixed phrase).
+  // Other commands keep the existing early-help behavior unchanged.
+  if (
+    command !== AUDIT_INTEGRITY_MONITOR_COMMAND
+    && (!command || args.help || args.h || command === 'help')
+  ) {
     printUsage();
     process.exit(args.help || args.h || command === 'help' ? 0 : 1);
   }
 
   try {
-    if (args.token === true) {
+    // Skip global bare-token trap for audit-integrity-monitor so local argv
+    // validator owns `audit-integrity-monitor --token` (fixed phrase, exit 1).
+    if (command !== AUDIT_INTEGRITY_MONITOR_COMMAND && args.token === true) {
       throw new Error('--token requires a value');
     }
 
     switch (command) {
+      case 'audit-integrity-monitor': {
+        // Validator stays outside execution try so argv errors keep the fixed invalid phrase.
+        assertAuditIntegrityMonitorArgs(args, rawArgv);
+        try {
+          const report = await runAuditIntegrityMonitor(args['data-dir']);
+          process.stdout.write(formatAuditIntegrityMonitorReportJson(report));
+          process.exitCode = auditIntegrityMonitorExitCode(report);
+        } catch {
+          // Programmer/runtime misuse after valid argv: fixed desensitized exit 1.
+          // Never echo raw err.message / path / token; never forge alert JSON or exit 2.
+          throw new Error(AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR);
+        }
+        break;
+      }
+
       case 'heartbeat': {
         if (!args.device) throw new Error('--device is required');
         const result = await apiRequest('/api/heartbeat', 'POST', {
