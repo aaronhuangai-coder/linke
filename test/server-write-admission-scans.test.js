@@ -1,11 +1,12 @@
 /**
- * V1.39 C3 — write-admission scans / honesty / closed-set 61.
+ * V1.39 C3 — write-admission scans / honesty / closed-set 62
+ * (V1.40 mechanical registry pin: 61→62 unique +1 process-lock).
  *
  * Static honesty gates for pre-side-effect required admission:
  *   server central gate + required helper remap+throw
  *   agent required NAS start (not best-effort swallow helper)
  *   post-outcome best-effort honesty retained
- *   ERROR_CODES closed-set 61; current test tree 60-locks cleared
+ *   ERROR_CODES closed-set 62; current test tree 61-locks cleared
  *
  * Reads explicit allowlisted production paths + recursive test/ *.js for
  * current closed-set locks. No git. No secret dirs.
@@ -47,11 +48,13 @@ const ADMISSION_TYPE = 'api.write.admission.started';
 
 /** Stale closed-set digit pair assembled at runtime so this file never holds a contiguous lock. */
 function staleClosedSetCount() {
-  return Number(['6', '0'].join(''));
+  // Prior global pin (V1.39 = 61). V1.40 current is 62 (unique +1 process-lock).
+  return Number(['6', '1'].join(''));
 }
 
 function currentClosedSetCount() {
-  return Number(['6', '1'].join(''));
+  // V1.40 closed-set = V1.39 61 + 1 process-lock code.
+  return Number(['6', '2'].join(''));
 }
 
 function escapeRegExp(s) {
@@ -1187,11 +1190,12 @@ describe('C3 S7: production scans reject comment/string/decoy (wired via helpers
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// S8 — closed-set 61 runtime + full test tree current 60 locks = 0
+// S8 — closed-set 62 runtime + full test tree stale 61 locks = 0
+// (V1.40: unique +1 process-lock; admission business gates unchanged)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('C3 S8: ERROR_CODES length 61; full test/ tree stale 60 locks cleared', () => {
-  it('S8a. runtime Object.keys(ERROR_CODES).length === 61 (import real registry)', () => {
+describe('C3 S8: ERROR_CODES length 62; full test/ tree stale 61 locks cleared', () => {
+  it('S8a. runtime Object.keys(ERROR_CODES).length === 62 (import real registry)', () => {
     assert.equal(Object.keys(ERROR_CODES).length, currentClosedSetCount());
   });
 
@@ -1210,11 +1214,12 @@ describe('C3 S8: ERROR_CODES length 61; full test/ tree stale 60 locks cleared',
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// S9 — AUDIT_DELIVERY_UNAVAILABLE unique V1.39 code; registry exact 61
+// S9 — AUDIT_DELIVERY_UNAVAILABLE unique V1.39 code; registry exact 62
+// (V1.40 closed-set pin only; delivery code uniqueness unchanged)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('C3 S9: AUDIT_DELIVERY_UNAVAILABLE unique new code; registry exact 61', () => {
-  it('S9. real ERROR_CODES import; exact 61; unique delivery code; value precise', async () => {
+describe('C3 S9: AUDIT_DELIVERY_UNAVAILABLE unique new code; registry exact 62', () => {
+  it('S9. real ERROR_CODES import; exact 62; unique delivery code; value precise', async () => {
     assert.equal(Object.keys(ERROR_CODES).length, currentClosedSetCount());
     assert.equal(
       ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE,

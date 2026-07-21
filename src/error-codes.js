@@ -72,6 +72,8 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED: 'audit-integrity-dual-write-direct-mutation-blocked',
   // V1.39 write-admission fail-closed (+1). Required pre-side-effect admission only.
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
+  // V1.40 local multi-process audit integrity write exclusive lock (+1).
+  AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));

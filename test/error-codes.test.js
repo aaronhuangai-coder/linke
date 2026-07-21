@@ -4,7 +4,7 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 61 = existing 60 (V1.38) + 1 new V1.39 audit write-admission code.
+ * Count: 62 = existing 61 (V1.39) + 1 new V1.40 audit multi-process process-lock code.
  *
  * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
  *   it is NOT counted as a new registration in this bump.
@@ -19,6 +19,7 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
  *   publish preflight serialize >65536 → AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID
  *   (size≠bounds analogy preserved; dual-write has no bounds code).
  * - V1.39: AUDIT_DELIVERY_UNAVAILABLE only (write-admission fail-closed).
+ * - V1.40: AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE only (local multi-process write lock).
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -98,8 +99,10 @@ const EXPECTED_ERROR_CODES = {
   AUDIT_INTEGRITY_DUAL_WRITE_CURSOR_MISMATCH: 'audit-integrity-dual-write-cursor-mismatch',
   // gate: state path occupied → public journal-only init/append blocked
   AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED: 'audit-integrity-dual-write-direct-mutation-blocked',
-  // --- new 1 (V1.39 write-admission fail-closed; only this code is new in this bump) ---
+  // --- new 1 (V1.39 write-admission fail-closed) ---
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
+  // --- new 1 (V1.40 local multi-process process-lock; only this code is new in this bump) ---
+  AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
@@ -130,9 +133,9 @@ const NEW_DUAL_WRITE_CODES = [
 ];
 
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (61 entries = existing 60 + 1)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 61);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 61);
+  it('matches the exact closed-set ERROR_CODES registry (62 entries = existing 61 + 1)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 62);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 62);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -199,13 +202,18 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE,
       'audit-delivery-unavailable',
     );
+    // V1.40 process-lock code exact value.
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE,
+      'audit-integrity-process-lock-unavailable',
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 61);
+    assert.strictEqual(values.length, 62);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
@@ -297,5 +305,16 @@ describe('Gold error-code registry', () => {
     assert.strictEqual(error.message, 'audit-delivery-unavailable');
     assert.strictEqual(error.statusCode, 503);
     assert.strictEqual(error.retryable, true);
+  });
+
+  it('registers AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE with LinkeError message===code', () => {
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE,
+      'audit-integrity-process-lock-unavailable',
+    );
+    const error = new LinkeError(ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE);
+    assert.strictEqual(error.name, 'LinkeError');
+    assert.strictEqual(error.code, 'audit-integrity-process-lock-unavailable');
+    assert.strictEqual(error.message, 'audit-integrity-process-lock-unavailable');
   });
 });

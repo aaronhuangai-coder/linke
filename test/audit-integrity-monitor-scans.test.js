@@ -2269,8 +2269,9 @@ const t = \`case 'audit-integrity-monitor':\`;
     }
   });
 
-  it('16. ERROR_CODES exact 61; monitor does not import registry', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 61);
+  // V1.40: registry pin 61→62 (unique +1 process-lock); monitor still no registry import.
+  it('16. ERROR_CODES exact 62; monitor does not import registry', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 62);
     const src = await readText(PATHS.monitor);
     const specs = collectStaticImportSpecifiers(src);
     assert.equal(specs.includes('./error-codes.js'), false);
