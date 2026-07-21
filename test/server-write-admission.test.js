@@ -8,7 +8,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -206,6 +206,23 @@ function assertNoLeakage(text, dataDir, token) {
   if (token) assert.ok(!text.includes(token), 'response must not leak token');
   assert.ok(!/ENOENT|EACCES|stack|at\s+\S+\s+\(/i.test(text), 'response must not leak stack/errno-ish');
   assert.ok(!text.includes('occupied-invalid-state'), 'response must not leak state body');
+  // V1.40 C2: process-lock raw code/path must not leak on admission body.
+  assert.ok(!text.includes('audit-integrity-process-lock-unavailable'));
+  assert.ok(!text.includes('integrity-write.lock'));
+  assert.ok(!text.includes('AuditIntegrityProcessLockError'));
+}
+
+/**
+ * V1.40 C2: real process-lock unavailability via hostile mode 0644 on canonical lock file.
+ * Not the dual-write-state invalid path. Tests may repair fixtures; production never does.
+ * @param {string} root
+ */
+async function makeHostileProcessLockMode0644(root) {
+  await mkdir(join(root, 'audit'), { recursive: true });
+  const lockAbs = join(root, 'audit', 'integrity-write.lock');
+  await writeFile(lockAbs, '', { mode: 0o644 });
+  await chmod(lockAbs, 0o644);
+  return lockAbs;
 }
 
 function assertAdmissionShape(event, route) {
@@ -527,6 +544,40 @@ describe('V1.39 C1 write-admission — fail-closed (invalid / unrecoverable)', (
         } else {
           assert.deepEqual(await readFile(eventsAbs(dataDir)), eventsBefore);
         }
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  });
+});
+
+describe('V1.40 C2 write-admission — process-lock unavailable mapping', () => {
+  it('hostile process-lock mode 0644: all 6 write routes 503 fixed body; mutation spies zero; business bytes unchanged', async () => {
+    const spies = { issueEnrollment: 0, revokeDevice: 0 };
+    await withTempRoot('plock', async (dataDir) => {
+      const lockAbs = await makeHostileProcessLockMode0644(dataDir);
+      const beforeBiz = await snapshotBusinessBytes(dataDir);
+      const server = createServer({
+        dataDir,
+        writeToken: 'tok-plock',
+        deviceAdministration: baseDeviceAdmin(spies),
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = server.address().port;
+      try {
+        for (const route of API_WRITE_ROUTES) {
+          const res = await postJson(port, route.path, mutationBodyFor(route.path), 'tok-plock');
+          assert.equal(res.status, 503, route.path);
+          assert.deepEqual(res.json, { error: 'audit-delivery-unavailable' });
+          assertNoLeakage(res.text, dataDir, 'tok-plock');
+          assert.ok(!res.text.includes(lockAbs));
+          assert.ok(!res.text.includes('0644'));
+        }
+        assert.equal(spies.issueEnrollment, 0);
+        assert.equal(spies.revokeDevice, 0);
+        await assert.rejects(() => access(journalAbs(dataDir)), { code: 'ENOENT' });
+        await assert.rejects(() => access(eventsAbs(dataDir)), { code: 'ENOENT' });
+        assertBusinessUnchanged(beforeBiz, await snapshotBusinessBytes(dataDir));
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }

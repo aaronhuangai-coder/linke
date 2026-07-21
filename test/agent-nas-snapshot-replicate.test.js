@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -665,17 +666,36 @@ function assertNasStartShape(event, fixture) {
 
 function assertFixedAuditDeliveryStderr(err) {
   assert.equal(err.code, 1);
+  // Exact fixed line; ignore Node env warnings (e.g. NO_COLOR/FORCE_COLOR conflict noise).
+  const businessLines = String(err.stderr || '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.startsWith('(node:') && !/^\(Use `node --trace-warnings/.test(line));
+  assert.deepEqual(businessLines, [`Error: ${AUDIT_DELIVERY_UNAVAILABLE}`]);
   assert.match(err.stderr, /^Error: audit-delivery-unavailable\s*$/m);
-  assert.equal(
-    err.stderr.trim(),
-    `Error: ${AUDIT_DELIVERY_UNAVAILABLE}`,
-  );
   assert.equal(err.stdout, '');
   assert.ok(!err.stderr.includes('occupied-invalid-state'));
   assert.ok(!err.stderr.includes('integrity-dual-write'));
   assert.ok(!err.stderr.includes('ENOENT'));
   assert.ok(!err.stderr.includes('EACCES'));
   assert.doesNotMatch(err.stderr, /at\s+\S+\s+\(/);
+  // V1.40 C2: raw process-lock code/path must not leak on required-start failure.
+  assert.ok(!err.stderr.includes('audit-integrity-process-lock-unavailable'));
+  assert.ok(!err.stderr.includes('integrity-write.lock'));
+  assert.ok(!err.stderr.includes('AuditIntegrityProcessLockError'));
+}
+
+/**
+ * V1.40 C2: real process-lock unavailability (hostile mode 0644), not dual-write state.
+ * @param {string} root
+ */
+async function makeHostileProcessLockMode0644(root) {
+  await mkdir(join(root, 'audit'), { recursive: true });
+  const lockAbs = join(root, 'audit', 'integrity-write.lock');
+  await writeFile(lockAbs, '', { mode: 0o644 });
+  await chmod(lockAbs, 0o644);
+  return lockAbs;
 }
 
 describe('V1.39 C2 NAS required start audit fail-closed', () => {
@@ -806,6 +826,51 @@ describe('V1.39 C2 NAS required start audit fail-closed', () => {
       assert.ok(!err.stderr.includes(fixture.mountPath));
       assert.ok(!err.stderr.includes(fixture.configPath));
       assertNoSensitiveLeak(err.stdout, err.stderr, fixture.configPath, fixture.dataDir, fixture.mountPath);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('execute + hostile process-lock mode 0644: exit 1 fixed code; zero SMB; no started; no raw lock leak', async () => {
+    const fixture = await createLocalSnapshotFixture();
+    try {
+      const lockAbs = await makeHostileProcessLockMode0644(fixture.dataDir);
+      const mountBefore = await snapshotMountTarget(fixture.mountPath);
+      const auditBefore = await snapshotAuditStoreBytes(fixture.dataDir);
+
+      const err = await rejectAgent(baseArgs(fixture, ['--execute']), 1, {
+        LINKE_NAS_SMB_EXECUTION: 'enabled',
+      });
+      assertFixedAuditDeliveryStderr(err);
+      assert.ok(!err.stderr.includes(lockAbs));
+      assert.ok(!err.stderr.includes('0644'));
+      assertMountTargetUnchanged(mountBefore, await snapshotMountTarget(fixture.mountPath));
+      await assertNoDeliveredNasStart(fixture.dataDir);
+      assertAuditStoreBytesUnchanged(auditBefore, await snapshotAuditStoreBytes(fixture.dataDir));
+      assertNoSensitiveLeak(err.stdout, err.stderr, fixture.configPath, fixture.dataDir, fixture.mountPath);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('plan-only + hostile process-lock: still exits 0; process-lock append failure swallowed', async () => {
+    const fixture = await createLocalSnapshotFixture();
+    try {
+      await makeHostileProcessLockMode0644(fixture.dataDir);
+      const mountBefore = await snapshotMountTarget(fixture.mountPath);
+      const { stdout, stderr } = await runAgent(baseArgs(fixture));
+      const result = JSON.parse(stdout);
+
+      assert.equal(result.command, 'nas-snapshot-replicate');
+      assert.equal(result.mode, 'plan');
+      assert.equal(result.state, 'planned');
+      assert.equal(result.wouldWrite, false);
+      assert.ok(!stderr.includes(AUDIT_DELIVERY_UNAVAILABLE));
+      assert.ok(!stderr.includes('audit-integrity-process-lock-unavailable'));
+      assert.ok(!stderr.includes('integrity-write.lock'));
+      assertMountTargetUnchanged(mountBefore, await snapshotMountTarget(fixture.mountPath));
+      await assertNoDeliveredNasStart(fixture.dataDir);
+      assertNoSensitiveLeak(stdout, stderr, fixture.configPath, fixture.dataDir);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }

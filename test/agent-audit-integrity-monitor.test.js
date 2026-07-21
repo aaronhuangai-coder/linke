@@ -575,15 +575,34 @@ describe('C3 agent audit-integrity-monitor CLI', () => {
     assert.equal(/Gold\s+complete/i.test(result.stdout), false);
   });
 
-  it('20. cold dir before/after still empty (zero write)', async () => {
+  // V1.40 C2: agent monitor → inspect is queue-backed; sole cold FS artifact may be
+  // audit/integrity-write.lock (protocol, not audit store / business mutation).
+  it('20. cold dir: zero audit-store writes (only process-lock protocol artifact)', async () => {
     await withTempRoot('zw', async (root) => {
       const before = await readdir(root);
       assert.deepEqual(before, []);
       const result = await runAgent([CMD, '--data-dir', root]);
       assert.equal(result.code, 2);
       const after = await readdir(root);
-      assert.deepEqual(after, []);
-      await assert.rejects(() => access(join(root, 'audit')), { code: 'ENOENT' });
+      assert.deepEqual(after.slice().sort(), ['audit']);
+      const auditEntries = await readdir(join(root, 'audit'));
+      assert.deepEqual(auditEntries.slice().sort(), ['integrity-write.lock']);
+      const lockAbs = join(root, 'audit', 'integrity-write.lock');
+      const st = await lstat(lockAbs);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.nlink, 1);
+      assert.equal(st.mode & 0o777, 0o600);
+      assert.equal(st.size, 0);
+      await assert.rejects(() => access(join(root, 'audit', 'events.jsonl')), { code: 'ENOENT' });
+      await assert.rejects(
+        () => access(join(root, 'audit', 'integrity-journal.jsonl')),
+        { code: 'ENOENT' },
+      );
+      await assert.rejects(
+        () => access(join(root, 'audit', 'integrity-dual-write-state.json')),
+        { code: 'ENOENT' },
+      );
     });
   });
 

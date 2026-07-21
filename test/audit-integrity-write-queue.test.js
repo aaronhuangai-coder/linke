@@ -43,6 +43,76 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const TASK_ENTRY_BOUND_MS = 5000;
+
+/**
+ * Bounded task-body entry barrier for concurrency tests.
+ * Call signal() at the start of the task body; await wait(taskPromise).
+ * Resolves on signal; rejects within boundMs with fixed diagnostic; rejects
+ * immediately if taskPromise rejects before entry. Clears timeout on settle
+ * so successful tests do not retain a 5s open handle. Never polls unboundedly.
+ *
+ * @param {string} diagnostic
+ * @param {number} [boundMs]
+ * @returns {{ signal: () => void, wait: (taskPromise?: Promise<unknown>) => Promise<void> }}
+ */
+function createTaskEntryBarrier(diagnostic, boundMs = TASK_ENTRY_BOUND_MS) {
+  let signalResolve;
+  const signaled = new Promise((resolve) => {
+    signalResolve = resolve;
+  });
+  return {
+    signal() {
+      signalResolve();
+    },
+    /**
+     * @param {Promise<unknown>} [taskPromise]
+     */
+    async wait(taskPromise) {
+      let timer;
+      let finished = false;
+      const cleanup = () => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      };
+      try {
+        await new Promise((resolve, reject) => {
+          timer = setTimeout(() => {
+            if (finished) return;
+            finished = true;
+            reject(new Error(diagnostic));
+          }, boundMs);
+
+          signaled.then(() => {
+            if (finished) return;
+            finished = true;
+            cleanup();
+            resolve();
+          });
+
+          if (taskPromise) {
+            // Fail-fast if enqueue/task rejects before body entry; ignore success
+            // (hold tasks complete only after the test releases their gate).
+            Promise.resolve(taskPromise).then(
+              () => {},
+              (err) => {
+                if (finished) return;
+                finished = true;
+                cleanup();
+                reject(err);
+              },
+            );
+          }
+        });
+      } finally {
+        cleanup();
+      }
+    },
+  };
+}
+
 describe('audit-integrity-write-queue exports and source contracts', () => {
   it('7+18: exports only enqueue+assert (no bare peek); ALS; sole Map; no npm deps', async () => {
     const mod = await loadQueue();
@@ -56,6 +126,9 @@ describe('audit-integrity-write-queue exports and source contracts', () => {
       Object.keys(mod).sort(),
       ['assertAuditIntegrityWriteLease', 'enqueueAuditIntegrityWriteTask'],
     );
+    // V1.40 C2: process-lock is queue-private; not re-exported.
+    assert.equal(typeof mod.acquireAuditIntegrityProcessLock, 'undefined');
+    assert.equal(typeof mod.releaseAuditIntegrityProcessLock, 'undefined');
 
     const source = await readFile(QUEUE_SRC, 'utf8');
     assert.match(source, /from\s+['"]node:async_hooks['"]/);
@@ -68,6 +141,10 @@ describe('audit-integrity-write-queue exports and source contracts', () => {
     // No bare public peek export restored.
     assert.equal(/export\s+function\s+peekAuditIntegrityWriteQueueTail\b/.test(source), false);
     assert.equal(/export\s*\{[^}]*peekAuditIntegrityWriteQueueTail/.test(source), false);
+    // V1.40 C2: sole production process-lock embed is inside the queue module.
+    assert.match(source, /from\s+['"]\.\/audit-integrity-process-lock\.js['"]/);
+    assert.match(source, /\bacquireAuditIntegrityProcessLock\b/);
+    assert.match(source, /\breleaseAuditIntegrityProcessLock\b/);
   });
 
   it('19: lease settle only in queue finally; task has no settle API (source)', async () => {
@@ -96,11 +173,15 @@ describe('active-lease-scoped queue observer (peekTail)', () => {
       let holdEntered = false;
       /** @type {{ peekTail: () => Promise<unknown> | null } | undefined} */
       let holdObserver;
+      const holdEntry = createTaskEntryBarrier(
+        'hold task did not enter within 5000ms (observer peekTail hold)',
+      );
       const hold = enqueueAuditIntegrityWriteTask(root, async (lease, observer) => {
         // Timing: Map.set(cleanup) is sync before task body microtask; first peek must
         // already see this hold's cleanup identity.
         holdObserver = observer;
         holdEntered = true;
+        holdEntry.signal();
         // b. observer frozen; method set fixed; no schedule/cancel/reorder/settle/grant.
         assert.ok(Object.isFrozen(observer));
         assert.deepEqual(Object.keys(observer).sort(), ['peekTail']);
@@ -117,9 +198,8 @@ describe('active-lease-scoped queue observer (peekTail)', () => {
         assert.equal(observer.peekTail(), tailInside);
         await holdGate;
       });
-      while (!holdEntered) {
-        await new Promise((r) => setImmediate(r));
-      }
+      await holdEntry.wait(hold);
+      assert.equal(holdEntered, true);
       assert.ok(holdObserver);
       // c. outside hold body but lease still active: same identity; repeatable.
       const tailHold = holdObserver.peekTail();
@@ -178,27 +258,35 @@ describe('active-lease-scoped queue observer (peekTail)', () => {
         let aEntered = false;
         let bEntered = false;
 
+        const aEntry = createTaskEntryBarrier(
+          'A observer task did not enter within 5000ms (root isolation)',
+        );
         const pA = enqueueAuditIntegrityWriteTask(rootA, async (_lease, observer) => {
           obsA = observer;
           aEntered = true;
+          aEntry.signal();
           await gateA;
         });
-        while (!aEntered) {
-          await new Promise((r) => setImmediate(r));
-        }
+        await aEntry.wait(pA);
+        assert.equal(aEntered, true);
+        assert.ok(obsA);
         const tailAHold = obsA.peekTail();
         assert.ok(tailAHold instanceof Promise);
 
         let releaseB;
         const gateB = new Promise((r) => { releaseB = r; });
+        const bEntry = createTaskEntryBarrier(
+          'B observer task did not enter within 5000ms (root isolation)',
+        );
         const pB = enqueueAuditIntegrityWriteTask(rootB, async (_lease, observer) => {
           obsB = observer;
           bEntered = true;
+          bEntry.signal();
           await gateB;
         });
-        while (!bEntered) {
-          await new Promise((r) => setImmediate(r));
-        }
+        await bEntry.wait(pB);
+        assert.equal(bEntered, true);
+        assert.ok(obsB);
         const tailBHold = obsB.peekTail();
         assert.ok(tailBHold instanceof Promise);
         // A still sees its own hold tail; B enqueue does not change A's identity.
@@ -288,13 +376,17 @@ describe('enqueueAuditIntegrityWriteTask serialization', () => {
           releaseA = r;
         });
 
+        const aEntry = createTaskEntryBarrier(
+          'A task did not enter within 5000ms (cross-root interleave)',
+        );
         const pA = enqueueAuditIntegrityWriteTask(rootA, async () => {
           aEntered = true;
+          aEntry.signal();
           await gate;
           return 'A';
         });
-        // Give A a tick to enter.
-        await sleep(10);
+        // Bounded signal wait: A holds its root task (still holding gate) before B starts.
+        await aEntry.wait(pA);
         assert.equal(aEntered, true);
 
         const pB = enqueueAuditIntegrityWriteTask(rootB, async () => {
@@ -476,11 +568,16 @@ describe('lease identity + assertAuditIntegrityWriteLease', () => {
       const hold = new Promise((r) => {
         releaseInner = r;
       });
+      const entry = createTaskEntryBarrier(
+        'task did not enter within 5000ms (sharedLease ALS outside-context)',
+      );
       const p = enqueueAuditIntegrityWriteTask(root, async (lease) => {
         sharedLease = lease;
+        entry.signal();
         await hold;
       });
-      await sleep(10);
+      await entry.wait(p);
+      assert.notEqual(sharedLease, undefined);
       // Outside the ALS.run context: assert must fail even while lease still active in WeakMap.
       assert.throws(() => assertAuditIntegrityWriteLease(root, sharedLease), assertSafeDataFileError);
       releaseInner();

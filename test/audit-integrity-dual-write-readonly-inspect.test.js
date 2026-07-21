@@ -305,7 +305,9 @@ describe('C1 read-only dual-write inspector', () => {
     assert.equal(mod.inspectAuditIntegrityDualWriteReadOnly.constructor.name, 'AsyncFunction');
   });
 
-  it('2. cold empty root → absent + storesEmpty true + relationship null (no files created)', async () => {
+  // V1.40 C2: inspect enqueues and briefly holds process-lock; audit stores stay absent.
+  // Permanent canonical lock artifact audit/integrity-write.lock may exist (not an audit store).
+  it('2. cold empty root → absent + storesEmpty true + relationship null (no audit store files)', async () => {
     await withTempRoot('cold-empty', async (root) => {
       const { inspectAuditIntegrityDualWriteReadOnly } = await loadCoordinator();
       const obs = await inspectAuditIntegrityDualWriteReadOnly(root);
@@ -316,20 +318,35 @@ describe('C1 read-only dual-write inspector', () => {
       assert.equal(obs.relationship, null);
       assert.equal(obs.reasonCode, null);
       assertPathFreeObservation(obs, root);
+      // Zero write for audit stores only — not a claim that the lock protocol file is absent.
       await assert.rejects(() => access(stateAbs(root)), { code: 'ENOENT' });
       await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
       await assert.rejects(() => access(eventsAbs(root)), { code: 'ENOENT' });
     });
   });
 
-  it('3. cold empty zero writes (root listing remains empty of audit stores)', async () => {
+  // V1.40 C2: sole cold-root FS artifact after successful queued inspect is the process-lock file.
+  it('3. cold empty zero audit-store writes (only process-lock protocol artifact under audit/)', async () => {
     await withTempRoot('cold-zw', async (root) => {
       const before = await readdir(root);
+      assert.deepEqual(before, []);
       const { inspectAuditIntegrityDualWriteReadOnly } = await loadCoordinator();
       await inspectAuditIntegrityDualWriteReadOnly(root);
       const after = await readdir(root);
-      assert.deepEqual(after, before);
-      await assert.rejects(() => access(join(root, 'audit')), { code: 'ENOENT' });
+      assert.deepEqual(after.slice().sort(), ['audit']);
+      const auditEntries = await readdir(join(root, 'audit'));
+      assert.deepEqual(auditEntries.slice().sort(), ['integrity-write.lock']);
+      const lockAbs = join(root, 'audit', 'integrity-write.lock');
+      const st = await lstat(lockAbs);
+      assert.equal(st.isFile(), true);
+      assert.equal(typeof st.isSymbolicLink === 'function' ? st.isSymbolicLink() : false, false);
+      assert.equal(st.nlink, 1);
+      assert.equal(st.mode & 0o777, 0o600);
+      assert.equal(st.size, 0);
+      // Audit/business stores remain absent (inspector zero-write for those paths).
+      await assert.rejects(() => access(stateAbs(root)), { code: 'ENOENT' });
+      await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
+      await assert.rejects(() => access(eventsAbs(root)), { code: 'ENOENT' });
     });
   });
 

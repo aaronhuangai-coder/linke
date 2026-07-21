@@ -1,23 +1,35 @@
 /**
  * Shared same-resolved-root serial write queue + module-generated lease capability
- * for audit integrity (V1.37 C1).
+ * for audit integrity (V1.37 C1 + V1.40 C2 process-lock embed).
  *
- * Sole Map SoT for per-root write serialization across journal / future dual-write.
+ * Sole Map SoT for per-root write serialization across journal / dual-write.
  * Lease settle is ONLY performed by queue infrastructure in finally of await task(lease, observer).
  * Task has NO settle API and cannot expire lease early.
  *
  * Nested enqueue (same-root AND cross-root) is forbidden while any active audit lease
  * is in the current async context — prevents self-deadlock and AB/BA lock-order.
  *
+ * V1.40 C2: sole production importer of audit-integrity-process-lock.
+ * Per running task lifecycle (after same-root FIFO predecessor settles):
+ *   acquire process lock → mint active lease → ALS task → expire/delete lease → release(close)
+ * Acquire failure: zero task / zero lease; fixed process-lock error propagates.
+ * Release failure always wins over task success and task failure (outer finally await).
+ * Mutations may already exist after task success + release failure; no retry-safety claim.
+ *
  * Queue tail observation is NOT a free public export. Each running task receives a
  * frozen, mutation-free observer capability (peekTail only) bound to that task's
  * active lease and resolvedRoot. After lease settle, peekTail fail-closes.
  *
- * Not a malicious same-process import sandbox. C1 errors: path-free SafeDataFileError only.
+ * Not a malicious same-process import sandbox. Path-free SafeDataFileError for queue
+ * programmer errors; process-lock unavailability uses AuditIntegrityProcessLockError.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isAbsolute, normalize } from 'node:path';
+import {
+  acquireAuditIntegrityProcessLock,
+  releaseAuditIntegrityProcessLock,
+} from './audit-integrity-process-lock.js';
 import { SafeDataFileError } from './safe-data-files.js';
 
 /**
@@ -114,6 +126,11 @@ export function assertAuditIntegrityWriteLease(resolvedRoot, lease) {
  * Task has NO settle API and cannot expire lease early.
  * Task Promise settle DEFINES lease lifecycle end.
  *
+ * V1.40 C2 process-lock embed (inner lifecycle per running task, after FIFO pred):
+ *   await acquire → mint lease → ALS task → expire lease → await release(close)
+ * Outer try/finally ensures release runs for task success and task failure;
+ * release rejection wins over both (await in outer finally).
+ *
  * Observer is issued only by this infrastructure with the lease for the running task.
  * Callers cannot mint an observer without an active enqueued task. Existing callbacks
  * that accept only (lease) remain compatible (extra observer arg is ignored).
@@ -141,19 +158,26 @@ export function enqueueAuditIntegrityWriteTask(resolvedRoot, task) {
 
   const previous = auditIntegrityWriteQueues.get(root) || Promise.resolve();
   const run = previous.catch(() => {}).then(async () => {
-    // Module-generated unique frozen lease; identity is the capability token.
-    const lease = Object.freeze(Object.create(null));
-    activeAuditIntegrityWriteLeases.set(lease, { resolvedRoot: root });
-    // Observer capability is issued only with an active lease; frozen, no mutation API.
-    const observer = createAuditIntegrityWriteQueueObserver(root, lease);
+    // Acquire only after same-root FIFO predecessor settles; before lease mint.
+    const processLockHandle = await acquireAuditIntegrityProcessLock(root);
     try {
-      return await auditIntegrityWriteLeaseAls.run(
-        lease,
-        async () => await task(lease, observer),
-      );
+      // Module-generated unique frozen lease; identity is the capability token.
+      const lease = Object.freeze(Object.create(null));
+      activeAuditIntegrityWriteLeases.set(lease, { resolvedRoot: root });
+      // Observer capability is issued only with an active lease; frozen, no mutation API.
+      const observer = createAuditIntegrityWriteQueueObserver(root, lease);
+      try {
+        return await auditIntegrityWriteLeaseAls.run(
+          lease,
+          async () => await task(lease, observer),
+        );
+      } finally {
+        // ONLY queue infrastructure may settle/expire lease here (before release).
+        activeAuditIntegrityWriteLeases.delete(lease);
+      }
     } finally {
-      // ONLY queue infrastructure may settle/expire lease here.
-      activeAuditIntegrityWriteLeases.delete(lease);
+      // Release after lease expire; await so release rejection wins over task settle.
+      await releaseAuditIntegrityProcessLock(processLockHandle);
     }
   });
 

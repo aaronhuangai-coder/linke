@@ -1347,6 +1347,22 @@ function assertSnapshotEqual(before, after, label) {
   assert.deepEqual(after, before, `${label}: zero-write snapshot mismatch`);
 }
 
+const PROCESS_LOCK_BASENAME = 'integrity-write.lock';
+
+/**
+ * Canonical permanent process-lock protocol artifact (not an audit store).
+ * @param {string} root
+ */
+async function assertCanonicalProcessLockArtifact(root) {
+  const lockAbs = join(root, 'audit', PROCESS_LOCK_BASENAME);
+  const st = await lstat(lockAbs);
+  assert.equal(st.isFile(), true);
+  assert.equal(st.isSymbolicLink(), false);
+  assert.equal(st.nlink, 1);
+  assert.equal(st.mode & 0o777, 0o600);
+  assert.equal(st.size, 0);
+}
+
 async function loadMonitor() {
   return import('../src/audit-integrity-monitor.js');
 }
@@ -2341,8 +2357,10 @@ describe('C4 C: runtime concurrency / zero-write', () => {
       assert.equal(report.recoveryRequired, false);
 
       // Final layout only: no extra tmp/spool/bypass siblings.
-      // Note: writer legitimately mutates the audit triple during this window (prepared→idle),
-      // so cross-window byte equality is NOT asserted here. Byte zero-write of monitor-only
+      // Writer (queue-backed) legitimately mutates the audit triple during this window
+      // (prepared→idle) and leaves the permanent process-lock protocol artifact.
+      // integrity-write.lock is NOT an audit store; not business mutation.
+      // Cross-window byte equality is NOT asserted here. Byte zero-write of monitor-only
       // paths is proven independently by #18/#19/#22/#24–#30 snapshots.
       const snap = await snapshotRootAndAuditTriple(root);
       assert.deepEqual(snap.rootEntries.entries, ['audit']);
@@ -2352,8 +2370,16 @@ describe('C4 C: runtime concurrency / zero-write', () => {
           'events.jsonl',
           'integrity-dual-write-state.json',
           'integrity-journal.jsonl',
+          'integrity-write.lock',
         ].sort(),
       );
+      const lockAbs = join(root, 'audit', 'integrity-write.lock');
+      const lockSt = await lstat(lockAbs);
+      assert.equal(lockSt.isFile(), true);
+      assert.equal(lockSt.isSymbolicLink(), false);
+      assert.equal(lockSt.nlink, 1);
+      assert.equal(lockSt.mode & 0o777, 0o600);
+      assert.equal(lockSt.size, 0);
       assert.equal(snap.state.exists, true);
       assert.equal(snap.state.type, 'file');
       assert.equal(snap.journal.exists, true);
@@ -2596,7 +2622,9 @@ describe('C4 C: runtime concurrency / zero-write', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('C4 D: full matrix zero-write snapshots + correct codes', () => {
-  it('24. cold existing empty root: no files created; code uninitialized', async () => {
+  // V1.40 C2: monitor → inspect is queue-backed; may create only integrity-write.lock
+  // protocol artifact. Audit stores (state/journal/events) remain absent — not business mutation.
+  it('24. cold existing empty root: zero audit-store writes; code uninitialized', async () => {
     await withTempRoot('cold', async (root) => {
       const before = await snapshotRootAndAuditTriple(root);
       assert.equal(before.root.exists, true);
@@ -2604,6 +2632,7 @@ describe('C4 D: full matrix zero-write snapshots + correct codes', () => {
       assert.equal(before.state.exists, false);
       assert.equal(before.journal.exists, false);
       assert.equal(before.events.exists, false);
+      assert.deepEqual(before.rootEntries.entries, []);
       const report = await runMonitor(root);
       assert.equal(report.code, 'uninitialized');
       assert.equal(report.status, 'alert');
@@ -2611,9 +2640,14 @@ describe('C4 D: full matrix zero-write snapshots + correct codes', () => {
       assert.equal(report.relationship, null);
       assert.equal(report.reasonCode, null);
       assert.equal(report.nextAction, 'initialize-via-production-write');
-      assertSnapshotEqual(before, await snapshotRootAndAuditTriple(root), 'cold');
-      const entries = await readdir(root);
-      assert.deepEqual(entries, []);
+      const after = await snapshotRootAndAuditTriple(root);
+      assert.deepEqual(after.rootEntries.entries, ['audit']);
+      assert.deepEqual(after.auditEntries.entries, [PROCESS_LOCK_BASENAME]);
+      await assertCanonicalProcessLockArtifact(root);
+      // Audit stores remain absent (monitor zero-write for those paths).
+      assert.equal(after.state.exists, false);
+      assert.equal(after.journal.exists, false);
+      assert.equal(after.events.exists, false);
     });
   });
 
@@ -2650,17 +2684,29 @@ describe('C4 D: full matrix zero-write snapshots + correct codes', () => {
     });
   });
 
-  it('27. invalid state JSON/schema zero-write; integrity-alert + state-invalid', async () => {
+  // Fixture plants only invalid state (no prior queue); monitor inspect may add lock protocol file.
+  // Audit store bytes must stay identical; exact layout = planted state + integrity-write.lock.
+  it('27. invalid state JSON/schema zero audit-store writes; integrity-alert + state-invalid', async () => {
     await withTempRoot('bad-state', async (root) => {
       await mkdir(join(root, 'audit'), { recursive: true });
       await writeFile(stateAbs(root), '{not-json\n', { mode: 0o600 });
       const before = await snapshotRootAndAuditTriple(root);
+      assert.deepEqual(before.auditEntries.entries, ['integrity-dual-write-state.json']);
       const report = await runMonitor(root);
       assert.equal(report.code, 'integrity-alert');
       assert.equal(report.dualWriteState, 'invalid');
       assert.equal(report.relationship, null);
       assert.equal(report.reasonCode, ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID);
-      assertSnapshotEqual(before, await snapshotRootAndAuditTriple(root), 'invalid-state');
+      const after = await snapshotRootAndAuditTriple(root);
+      assert.deepEqual(after.state, before.state, 'invalid-state: state store mutated');
+      assert.deepEqual(after.journal, before.journal, 'invalid-state: journal store mutated');
+      assert.deepEqual(after.events, before.events, 'invalid-state: events store mutated');
+      assert.deepEqual(after.rootEntries.entries, ['audit']);
+      assert.deepEqual(
+        after.auditEntries.entries,
+        ['integrity-dual-write-state.json', PROCESS_LOCK_BASENAME].sort(),
+      );
+      await assertCanonicalProcessLockArtifact(root);
     });
   });
 

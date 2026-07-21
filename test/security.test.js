@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile, readdir, lstat } from 'node:fs/promises';
 import { request } from 'node:http';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -666,14 +666,24 @@ describe('Security — API request body and error hardening', () => {
     assert.ok(!/Bearer|Authorization|token=/i.test(text));
     assert.ok(!/ENOENT|EACCES|stack|at\s+\S+\s+\(/i.test(text));
 
-    // V1.39: required admission runs before readBody, so only audit integrity store may appear.
+    // V1.39 + V1.40 C2: required admission enqueues before readBody.
+    // Exact allowed audit/ layout = integrity stores + permanent process-lock protocol artifact
+    // (integrity-write.lock is NOT an audit store / business mutation).
     assert.deepStrictEqual(await readdir(dataDir), ['audit']);
     const auditEntries = (await readdir(join(dataDir, 'audit'))).sort();
     assert.deepStrictEqual(auditEntries, [
       'events.jsonl',
       'integrity-dual-write-state.json',
       'integrity-journal.jsonl',
-    ]);
+      'integrity-write.lock',
+    ].sort());
+    const lockAbs = join(dataDir, 'audit', 'integrity-write.lock');
+    const lockSt = await lstat(lockAbs);
+    assert.strictEqual(lockSt.isFile(), true);
+    assert.strictEqual(lockSt.isSymbolicLink(), false);
+    assert.strictEqual(lockSt.nlink, 1);
+    assert.strictEqual(lockSt.mode & 0o777, 0o600);
+    assert.strictEqual(lockSt.size, 0);
 
     // Business mutation paths must not exist (no devices/backups/approvals/restore side effects).
     for (const forbidden of [

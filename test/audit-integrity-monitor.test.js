@@ -541,13 +541,27 @@ describe('C2 audit integrity run-once monitor', () => {
     });
   });
 
-  it('2. cold empty zero writes (no audit tree created)', async () => {
+  // V1.40 C2: monitor → inspect is queue-backed; sole cold FS artifact may be
+  // audit/integrity-write.lock (protocol, not audit store / business mutation).
+  it('2. cold empty zero audit-store writes (only process-lock protocol artifact)', async () => {
     await withTempRoot('cold-zw', async (root) => {
       const before = await readdir(root);
+      assert.deepEqual(before, []);
       await runWithFixedClock(root);
       const after = await readdir(root);
-      assert.deepEqual(after, before);
-      await assert.rejects(() => access(join(root, 'audit')), { code: 'ENOENT' });
+      assert.deepEqual(after.slice().sort(), ['audit']);
+      const auditEntries = await readdir(join(root, 'audit'));
+      assert.deepEqual(auditEntries.slice().sort(), ['integrity-write.lock']);
+      const lockAbs = join(root, 'audit', 'integrity-write.lock');
+      const st = await lstat(lockAbs);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.nlink, 1);
+      assert.equal(st.mode & 0o777, 0o600);
+      assert.equal(st.size, 0);
+      await assert.rejects(() => access(stateAbs(root)), { code: 'ENOENT' });
+      await assert.rejects(() => access(journalAbs(root)), { code: 'ENOENT' });
+      await assert.rejects(() => access(eventsAbs(root)), { code: 'ENOENT' });
     });
   });
 
