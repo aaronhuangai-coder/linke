@@ -1,5 +1,5 @@
 /**
- * V1.40 C4 — process-lock scans / honesty / closed-set 62.
+ * V1.40 C4 — process-lock scans / honesty / closed-set 74 (V1.41 coordinated).
  *
  * Static gates for local multi-process write exclusive lock wiring:
  *   sole production importer = audit-integrity-write-queue.js
@@ -70,17 +70,23 @@ const WAIT_LOCKF = 'waitForLockf';
 
 const LOCKF_ABS = '/usr/bin/lockf';
 
-/** Closed-set digit pairs assembled at runtime (no contiguous stale locks). */
+/**
+ * Closed-set digit pairs assembled at runtime (no contiguous stale locks).
+ * V1.41 semantics: prior = V1.40 (62), current = V1.41 (74), next = future (75).
+ * Historical V1.39=61 / old next=63 are not current helper values.
+ */
 function currentClosedSetCount() {
-  return Number(['6', '2'].join(''));
+  return Number(['7', '4'].join(''));
 }
 
 function priorClosedSetCount() {
-  return Number(['6', '1'].join(''));
+  // Immediate prior closed-set (V1.40) = 62.
+  return Number(['6', '2'].join(''));
 }
 
 function nextClosedSetCount() {
-  return Number(['6', '3'].join(''));
+  // Future closed-set after V1.41 = 75.
+  return Number(['7', '5'].join(''));
 }
 
 function orphanGraceNeedle() {
@@ -2664,6 +2670,36 @@ describe('C4 S6: queue executable lifecycle structure', () => {
 });
 
 describe('C4 S7: ERROR_CODES current closed-set; process-lock unique; suite coord', () => {
+  it('S7a. V1.41 helpers prior=62 current=74 next=75; fixtures capture prior/next not current-as-prior', () => {
+    const prior = priorClosedSetCount();
+    const cur = currentClosedSetCount();
+    const next = nextClosedSetCount();
+    assert.equal(prior, Number(['6', '2'].join('')));
+    assert.equal(cur, Number(['7', '4'].join('')));
+    assert.equal(next, Number(['7', '5'].join('')));
+
+    assert.ok(
+      findStructuralClosedSetLengthLocks(
+        `assert.equal(Object.keys(ERROR_CODES).length, ${prior});`,
+        prior,
+      ).length >= 1,
+    );
+    assert.ok(
+      findStructuralClosedSetLengthLocks(
+        `assert.equal(Object.keys(ERROR_CODES).length, ${next});`,
+        next,
+      ).length >= 1,
+    );
+    // Current count must not be reported when scanning for prior.
+    assert.deepEqual(
+      findStructuralClosedSetLengthLocks(
+        `assert.equal(Object.keys(ERROR_CODES).length, ${cur});`,
+        prior,
+      ),
+      [],
+    );
+  });
+
   it('S7. runtime length; unique process-lock; coord error-codes + admission scans; no prior/next pin in self', async () => {
     const cur = currentClosedSetCount();
     const prior = priorClosedSetCount();

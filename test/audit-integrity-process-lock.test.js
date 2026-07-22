@@ -284,12 +284,12 @@ function baseOptions(extra = {}) {
 }
 
 describe('ERROR_CODES process-lock registration (C1)', () => {
-  it('registers exact process-lock code and closed-set length 62', () => {
+  it('registers exact process-lock code and closed-set length 74', () => {
     assert.equal(
       ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE,
       'audit-integrity-process-lock-unavailable',
     );
-    assert.equal(Object.keys(ERROR_CODES).length, 62);
+    assert.equal(Object.keys(ERROR_CODES).length, 74);
   });
 });
 

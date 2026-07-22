@@ -74,6 +74,40 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
   // V1.40 local multi-process audit integrity write exclusive lock (+1).
   AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
+  // V1.41 G0b resumable snapshot upload (+12). String-only kebab values; no domain metadata.
+  UPLOAD_MANIFEST_INVALID: 'upload-manifest-invalid',
+  UPLOAD_SESSION_CONFLICT: 'upload-session-conflict',
+  UPLOAD_SESSION_NOT_FOUND: 'upload-session-not-found',
+  UPLOAD_SESSION_EXPIRED: 'upload-session-expired',
+  UPLOAD_CHUNK_INVALID: 'upload-chunk-invalid',
+  UPLOAD_CHUNK_OUT_OF_ORDER: 'upload-chunk-out-of-order',
+  UPLOAD_INTEGRITY_FAILED: 'upload-integrity-failed',
+  UPLOAD_CAPACITY_INSUFFICIENT: 'upload-capacity-insufficient',
+  UPLOAD_BACKPRESSURE: 'upload-backpressure',
+  UPLOAD_COMMIT_CONFLICT: 'upload-commit-conflict',
+  UPLOAD_IO_ERROR: 'upload-io-error',
+  // Client-local only (HTTP N/A). Distinct from DATA_RESUME_EXHAUSTED.
+  UPLOAD_RESUME_EXHAUSTED: 'upload-resume-exhausted',
+});
+
+/**
+ * Independent frozen HTTP/retryable contract for G0b upload error codes (design §7).
+ * Not part of ERROR_CODES (which remains string-only). statusCode null = client-local N/A.
+ * @type {Readonly<Record<string, Readonly<{ statusCode: number | null, retryable: boolean }>>>}
+ */
+export const UPLOAD_ERROR_HTTP_CONTRACT = Object.freeze({
+  [ERROR_CODES.UPLOAD_MANIFEST_INVALID]: Object.freeze({ statusCode: 400, retryable: false }),
+  [ERROR_CODES.UPLOAD_SESSION_CONFLICT]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.UPLOAD_SESSION_NOT_FOUND]: Object.freeze({ statusCode: 404, retryable: false }),
+  [ERROR_CODES.UPLOAD_SESSION_EXPIRED]: Object.freeze({ statusCode: 410, retryable: false }),
+  [ERROR_CODES.UPLOAD_CHUNK_INVALID]: Object.freeze({ statusCode: 400, retryable: false }),
+  [ERROR_CODES.UPLOAD_CHUNK_OUT_OF_ORDER]: Object.freeze({ statusCode: 409, retryable: true }),
+  [ERROR_CODES.UPLOAD_INTEGRITY_FAILED]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.UPLOAD_CAPACITY_INSUFFICIENT]: Object.freeze({ statusCode: 507, retryable: false }),
+  [ERROR_CODES.UPLOAD_BACKPRESSURE]: Object.freeze({ statusCode: 429, retryable: true }),
+  [ERROR_CODES.UPLOAD_COMMIT_CONFLICT]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.UPLOAD_IO_ERROR]: Object.freeze({ statusCode: 500, retryable: false }),
+  [ERROR_CODES.UPLOAD_RESUME_EXHAUSTED]: Object.freeze({ statusCode: null, retryable: false }),
 });
 
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));
@@ -91,15 +125,74 @@ export function assertRegisteredErrorCode(code) {
 /**
  * Error whose public message is always a registered, sanitized code.
  * Unregistered code or message inputs are rejected without echoing raw text.
+ *
+ * Upload codes present in {@link UPLOAD_ERROR_HTTP_CONTRACT} use the contract as
+ * base defaults for both omitted options and `{}` / partial options. Only **own**
+ * properties with value **!== undefined** override individual fields (prototype
+ * inheritance does not count; own `undefined` matches old destructuring defaults).
+ * Non-upload codes keep 500/false base defaults. Explicit `null` is a real status
+ * value; `retryable: null|false` becomes Boolean false.
+ *
+ * Client-local `upload-resume-exhausted` is stronger: final statusCode is always
+ * null. Explicit non-null statusCode fails closed with a fixed internal Error
+ * (never a serializable LinkeError, never echoes inputs). Own `statusCode: undefined`
+ * falls back to contract null.
+ *
  * @param {string} code - Must be a registered ERROR_CODES value.
- * @param {{ statusCode?: number, retryable?: boolean }} [options]
+ * @param {{ statusCode?: number | null, retryable?: boolean }} [options]
  */
 export class LinkeError extends Error {
-  constructor(code, { statusCode = 500, retryable = false } = {}) {
+  /**
+   * @param {string} code
+   * @param {{ statusCode?: number | null, retryable?: boolean }} [options]
+   */
+  constructor(code, options) {
     const registeredCode = assertRegisteredErrorCode(code);
     super(registeredCode);
     this.name = 'LinkeError';
     this.code = registeredCode;
+
+    const contract = UPLOAD_ERROR_HTTP_CONTRACT[registeredCode];
+    const isUpload = contract !== undefined;
+
+    /** @type {number | null} */
+    const baseStatus = isUpload ? contract.statusCode : 500;
+    /** @type {boolean} */
+    const baseRetryable = isUpload ? Boolean(contract.retryable) : false;
+
+    /** @type {number | null} */
+    let statusCode = baseStatus;
+    /** @type {boolean} */
+    let retryable = baseRetryable;
+
+    // Own-property-only overrides when options is a non-null non-array object.
+    // Own key present with value === undefined is treated as missing (JS default
+    // semantics: `{ statusCode = 500 } = { statusCode: undefined }` → 500).
+    if (options !== undefined && options !== null && typeof options === 'object' && !Array.isArray(options)) {
+      if (
+        Object.prototype.hasOwnProperty.call(options, 'statusCode')
+        && /** @type {{ statusCode?: number | null }} */ (options).statusCode !== undefined
+      ) {
+        statusCode = /** @type {{ statusCode?: number | null }} */ (options).statusCode;
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(options, 'retryable')
+        && /** @type {{ retryable?: boolean }} */ (options).retryable !== undefined
+      ) {
+        // Explicit null/false → false; true stays true.
+        retryable = Boolean(/** @type {{ retryable?: boolean }} */ (options).retryable);
+      }
+    }
+
+    // Client-local only: must never become a serializable non-null HTTP status.
+    if (registeredCode === ERROR_CODES.UPLOAD_RESUME_EXHAUSTED) {
+      if (statusCode !== null) {
+        // Fixed internal error — not LinkeError; do not echo options/status values.
+        throw new Error('invalid LinkeError options');
+      }
+      statusCode = null;
+    }
+
     this.statusCode = statusCode;
     this.retryable = Boolean(retryable);
   }

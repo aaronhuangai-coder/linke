@@ -1,10 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error-codes.js';
+import {
+  ERROR_CODES,
+  LinkeError,
+  assertRegisteredErrorCode,
+  UPLOAD_ERROR_HTTP_CONTRACT,
+} from '../src/error-codes.js';
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 62 = existing 61 (V1.39) + 1 new V1.40 audit multi-process process-lock code.
+ * Count: 74 = existing 62 (V1.40) + 12 new V1.41 G0b upload-* codes.
  *
  * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
  *   it is NOT counted as a new registration in this bump.
@@ -20,6 +25,8 @@ import { ERROR_CODES, LinkeError, assertRegisteredErrorCode } from '../src/error
  *   (size≠bounds analogy preserved; dual-write has no bounds code).
  * - V1.39: AUDIT_DELIVERY_UNAVAILABLE only (write-admission fail-closed).
  * - V1.40: AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE only (local multi-process write lock).
+ * - V1.41 G0b: +12 upload-* string-only codes (no domain/object metadata on ERROR_CODES).
+ * - UPLOAD_RESUME_EXHAUSTED is client-local only; ≠ DATA_RESUME_EXHAUSTED; HTTP N/A.
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -103,6 +110,19 @@ const EXPECTED_ERROR_CODES = {
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
   // --- new 1 (V1.40 local multi-process process-lock; only this code is new in this bump) ---
   AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
+  // --- new 12 (V1.41 G0b resumable snapshot upload; string-only upload-* values) ---
+  UPLOAD_MANIFEST_INVALID: 'upload-manifest-invalid',
+  UPLOAD_SESSION_CONFLICT: 'upload-session-conflict',
+  UPLOAD_SESSION_NOT_FOUND: 'upload-session-not-found',
+  UPLOAD_SESSION_EXPIRED: 'upload-session-expired',
+  UPLOAD_CHUNK_INVALID: 'upload-chunk-invalid',
+  UPLOAD_CHUNK_OUT_OF_ORDER: 'upload-chunk-out-of-order',
+  UPLOAD_INTEGRITY_FAILED: 'upload-integrity-failed',
+  UPLOAD_CAPACITY_INSUFFICIENT: 'upload-capacity-insufficient',
+  UPLOAD_BACKPRESSURE: 'upload-backpressure',
+  UPLOAD_COMMIT_CONFLICT: 'upload-commit-conflict',
+  UPLOAD_IO_ERROR: 'upload-io-error',
+  UPLOAD_RESUME_EXHAUSTED: 'upload-resume-exhausted',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
@@ -132,10 +152,41 @@ const NEW_DUAL_WRITE_CODES = [
   ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED,
 ];
 
+const NEW_UPLOAD_CODES = [
+  ERROR_CODES.UPLOAD_MANIFEST_INVALID,
+  ERROR_CODES.UPLOAD_SESSION_CONFLICT,
+  ERROR_CODES.UPLOAD_SESSION_NOT_FOUND,
+  ERROR_CODES.UPLOAD_SESSION_EXPIRED,
+  ERROR_CODES.UPLOAD_CHUNK_INVALID,
+  ERROR_CODES.UPLOAD_CHUNK_OUT_OF_ORDER,
+  ERROR_CODES.UPLOAD_INTEGRITY_FAILED,
+  ERROR_CODES.UPLOAD_CAPACITY_INSUFFICIENT,
+  ERROR_CODES.UPLOAD_BACKPRESSURE,
+  ERROR_CODES.UPLOAD_COMMIT_CONFLICT,
+  ERROR_CODES.UPLOAD_IO_ERROR,
+  ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
+];
+
+/** design §7 HTTP/retryable contract — independent of string-only ERROR_CODES. */
+const EXPECTED_UPLOAD_HTTP_CONTRACT = Object.freeze({
+  'upload-manifest-invalid': Object.freeze({ statusCode: 400, retryable: false }),
+  'upload-session-conflict': Object.freeze({ statusCode: 409, retryable: false }),
+  'upload-session-not-found': Object.freeze({ statusCode: 404, retryable: false }),
+  'upload-session-expired': Object.freeze({ statusCode: 410, retryable: false }),
+  'upload-chunk-invalid': Object.freeze({ statusCode: 400, retryable: false }),
+  'upload-chunk-out-of-order': Object.freeze({ statusCode: 409, retryable: true }),
+  'upload-integrity-failed': Object.freeze({ statusCode: 409, retryable: false }),
+  'upload-capacity-insufficient': Object.freeze({ statusCode: 507, retryable: false }),
+  'upload-backpressure': Object.freeze({ statusCode: 429, retryable: true }),
+  'upload-commit-conflict': Object.freeze({ statusCode: 409, retryable: false }),
+  'upload-io-error': Object.freeze({ statusCode: 500, retryable: false }),
+  'upload-resume-exhausted': Object.freeze({ statusCode: null, retryable: false }),
+});
+
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (62 entries = existing 61 + 1)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 62);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 62);
+  it('matches the exact closed-set ERROR_CODES registry (74 entries = existing 62 + 12)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 74);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 74);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -207,17 +258,86 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE,
       'audit-integrity-process-lock-unavailable',
     );
+    // V1.41 G0b upload codes exact values + distinct from data-resume-exhausted.
+    assert.strictEqual(ERROR_CODES.UPLOAD_MANIFEST_INVALID, 'upload-manifest-invalid');
+    assert.strictEqual(ERROR_CODES.UPLOAD_SESSION_CONFLICT, 'upload-session-conflict');
+    assert.strictEqual(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND, 'upload-session-not-found');
+    assert.strictEqual(ERROR_CODES.UPLOAD_SESSION_EXPIRED, 'upload-session-expired');
+    assert.strictEqual(ERROR_CODES.UPLOAD_CHUNK_INVALID, 'upload-chunk-invalid');
+    assert.strictEqual(ERROR_CODES.UPLOAD_CHUNK_OUT_OF_ORDER, 'upload-chunk-out-of-order');
+    assert.strictEqual(ERROR_CODES.UPLOAD_INTEGRITY_FAILED, 'upload-integrity-failed');
+    assert.strictEqual(ERROR_CODES.UPLOAD_CAPACITY_INSUFFICIENT, 'upload-capacity-insufficient');
+    assert.strictEqual(ERROR_CODES.UPLOAD_BACKPRESSURE, 'upload-backpressure');
+    assert.strictEqual(ERROR_CODES.UPLOAD_COMMIT_CONFLICT, 'upload-commit-conflict');
+    assert.strictEqual(ERROR_CODES.UPLOAD_IO_ERROR, 'upload-io-error');
+    assert.strictEqual(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, 'upload-resume-exhausted');
+    assert.notStrictEqual(
+      ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
+      ERROR_CODES.DATA_RESUME_EXHAUSTED,
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 62);
+    assert.strictEqual(values.length, 74);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
     }
+  });
+
+  it('keeps ERROR_CODES string-only with no domain/object metadata', () => {
+    for (const [key, value] of Object.entries(ERROR_CODES)) {
+      assert.strictEqual(typeof key, 'string');
+      assert.strictEqual(typeof value, 'string');
+      assert.ok(!Object.prototype.hasOwnProperty.call(ERROR_CODES, 'domain'));
+    }
+    // Registry values must not be objects/arrays.
+    for (const value of Object.values(ERROR_CODES)) {
+      assert.strictEqual(typeof value, 'string');
+      assert.notStrictEqual(typeof value, 'object');
+    }
+  });
+
+  it('registers twelve upload-* codes with unified prefix and LinkeError message===code', () => {
+    assert.strictEqual(NEW_UPLOAD_CODES.length, 12);
+    assert.strictEqual(new Set(NEW_UPLOAD_CODES).size, 12);
+    for (const code of NEW_UPLOAD_CODES) {
+      assert.match(code, /^upload-[a-z0-9]+(?:-[a-z0-9]+)*$/);
+      assert.strictEqual(assertRegisteredErrorCode(code), code);
+      const error = new LinkeError(code);
+      assert.strictEqual(error.message, code);
+      assert.strictEqual(error.code, code);
+      assert.strictEqual(error.name, 'LinkeError');
+    }
+  });
+
+  it('exports deep-frozen UPLOAD_ERROR_HTTP_CONTRACT covering design §7', () => {
+    assert.ok(Object.isFrozen(UPLOAD_ERROR_HTTP_CONTRACT));
+    assert.deepStrictEqual(
+      Object.keys(UPLOAD_ERROR_HTTP_CONTRACT).sort(),
+      Object.keys(EXPECTED_UPLOAD_HTTP_CONTRACT).sort(),
+    );
+    for (const code of NEW_UPLOAD_CODES) {
+      const entry = UPLOAD_ERROR_HTTP_CONTRACT[code];
+      assert.ok(entry, `missing contract for ${code}`);
+      assert.ok(Object.isFrozen(entry));
+      assert.deepStrictEqual(entry, EXPECTED_UPLOAD_HTTP_CONTRACT[code]);
+    }
+    // retryable only out-of-order + backpressure
+    assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-chunk-out-of-order'].retryable, true);
+    assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-backpressure'].retryable, true);
+    for (const code of NEW_UPLOAD_CODES) {
+      if (code === 'upload-chunk-out-of-order' || code === 'upload-backpressure') continue;
+      assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT[code].retryable, false);
+    }
+    // resume-exhausted is client-local: HTTP N/A (null), never a server 429
+    assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-resume-exhausted'].statusCode, null);
+    assert.notStrictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-resume-exhausted'].statusCode, 429);
+    // capacity uses controlled numeric 507
+    assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-capacity-insufficient'].statusCode, 507);
   });
 
   it('registers the six new integrity-journal codes with LinkeError message===code', () => {
@@ -281,11 +401,154 @@ describe('Gold error-code registry', () => {
     assert.strictEqual(error.retryable, false);
   });
 
-  it('defaults LinkeError statusCode, retryable, and name', () => {
+  it('defaults LinkeError statusCode, retryable, and name for non-upload codes', () => {
     const error = new LinkeError(ERROR_CODES.DEVICE_INTERNAL_ERROR);
     assert.strictEqual(error.name, 'LinkeError');
     assert.strictEqual(error.statusCode, 500);
     assert.strictEqual(error.retryable, false);
+  });
+
+  it('applies UPLOAD_ERROR_HTTP_CONTRACT defaults when LinkeError options omitted', () => {
+    // client-local: must not default to misleading HTTP 500
+    const resume = new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED);
+    assert.strictEqual(resume.statusCode, null);
+    assert.strictEqual(resume.retryable, false);
+    assert.strictEqual(resume.code, 'upload-resume-exhausted');
+
+    const backpressure = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE);
+    assert.strictEqual(backpressure.statusCode, 429);
+    assert.strictEqual(backpressure.retryable, true);
+
+    const outOfOrder = new LinkeError(ERROR_CODES.UPLOAD_CHUNK_OUT_OF_ORDER);
+    assert.strictEqual(outOfOrder.statusCode, 409);
+    assert.strictEqual(outOfOrder.retryable, true);
+
+    const manifestInvalid = new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
+    assert.strictEqual(manifestInvalid.statusCode, 400);
+    assert.strictEqual(manifestInvalid.retryable, false);
+  });
+
+  it('prefers UPLOAD_ERROR_HTTP_CONTRACT for empty/partial options; own props only override', () => {
+    // {} must keep contract (not fall back to 500/false)
+    const resumeEmpty = new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {});
+    assert.strictEqual(resumeEmpty.statusCode, null);
+    assert.strictEqual(resumeEmpty.retryable, false);
+
+    const bpEmpty = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {});
+    assert.strictEqual(bpEmpty.statusCode, 429);
+    assert.strictEqual(bpEmpty.retryable, true);
+
+    // Partial own override: missing field remains contract default
+    const bpPartialStatus = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      statusCode: 503,
+    });
+    assert.strictEqual(bpPartialStatus.statusCode, 503);
+    assert.strictEqual(bpPartialStatus.retryable, true, 'retryable from contract when not own');
+
+    const bpPartialRetry = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      retryable: false,
+    });
+    assert.strictEqual(bpPartialRetry.statusCode, 429);
+    assert.strictEqual(bpPartialRetry.retryable, false);
+
+    // Full explicit override for non-client-local upload codes
+    const bpFull = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      statusCode: 503,
+      retryable: false,
+    });
+    assert.strictEqual(bpFull.statusCode, 503);
+    assert.strictEqual(bpFull.retryable, false);
+
+    // Prototype-inherited fake "statusCode" must not count as own override
+    const proto = { statusCode: 999, retryable: false };
+    const inherited = Object.create(proto);
+    // no own props — contract base for out-of-order
+    const fromProto = new LinkeError(ERROR_CODES.UPLOAD_CHUNK_OUT_OF_ORDER, inherited);
+    assert.strictEqual(fromProto.statusCode, 409);
+    assert.strictEqual(fromProto.retryable, true);
+
+    // Non-upload codes: empty options still 500/false
+    const deviceEmpty = new LinkeError(ERROR_CODES.DEVICE_INTERNAL_ERROR, {});
+    assert.strictEqual(deviceEmpty.statusCode, 500);
+    assert.strictEqual(deviceEmpty.retryable, false);
+  });
+
+  it('treats own undefined as missing (old destructuring defaults), not as override', () => {
+    // Non-upload: own statusCode:undefined → base 500 (not undefined)
+    const deviceUndefStatus = new LinkeError(ERROR_CODES.DEVICE_INTERNAL_ERROR, {
+      statusCode: undefined,
+    });
+    assert.strictEqual(deviceUndefStatus.statusCode, 500);
+    assert.strictEqual(deviceUndefStatus.retryable, false);
+
+    // Upload: own statusCode:undefined → contract 429 (not undefined)
+    const bpUndefStatus = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      statusCode: undefined,
+    });
+    assert.strictEqual(bpUndefStatus.statusCode, 429);
+    assert.strictEqual(bpUndefStatus.retryable, true);
+
+    // Upload: own retryable:undefined → contract true (not Boolean(undefined)===false)
+    const bpUndefRetry = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      retryable: undefined,
+    });
+    assert.strictEqual(bpUndefRetry.statusCode, 429);
+    assert.strictEqual(bpUndefRetry.retryable, true);
+
+    // Client-local: own statusCode:undefined → contract null (not reject)
+    const resumeUndefStatus = new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {
+      statusCode: undefined,
+    });
+    assert.strictEqual(resumeUndefStatus.statusCode, null);
+    assert.strictEqual(resumeUndefStatus.retryable, false);
+
+    // Explicit null/false still override (null is a real status; false/null retryable → false)
+    const bpNullRetry = new LinkeError(ERROR_CODES.UPLOAD_BACKPRESSURE, {
+      retryable: null,
+    });
+    assert.strictEqual(bpNullRetry.statusCode, 429);
+    assert.strictEqual(bpNullRetry.retryable, false);
+  });
+
+  it('forces client-local UPLOAD_RESUME_EXHAUSTED statusCode null; rejects non-null', () => {
+    const okNull = new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {
+      statusCode: null,
+    });
+    assert.strictEqual(okNull.statusCode, null);
+    assert.strictEqual(okNull.retryable, false);
+
+    const okRetryOnly = new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {
+      retryable: false,
+    });
+    assert.strictEqual(okRetryOnly.statusCode, null);
+
+    const raw500 = 'status-500-token';
+    assert.throws(
+      () =>
+        new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {
+          statusCode: 500,
+        }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.ok(!(error instanceof LinkeError), 'must not mint serializable LinkeError');
+        assert.ok(!String(error.message).includes(raw500));
+        assert.ok(!String(error.message).includes('500'));
+        assert.ok(!String(error.message).includes('/Users/'));
+        return true;
+      },
+    );
+    assert.throws(
+      () =>
+        new LinkeError(ERROR_CODES.UPLOAD_RESUME_EXHAUSTED, {
+          statusCode: 429,
+        }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.ok(!(error instanceof LinkeError));
+        assert.ok(!String(error.message).includes('429'));
+        return true;
+      },
+    );
   });
 
   it('preserves retryable true when explicitly set', () => {

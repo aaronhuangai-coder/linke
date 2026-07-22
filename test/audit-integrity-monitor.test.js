@@ -1073,9 +1073,9 @@ describe('C2 audit integrity run-once monitor', () => {
     assert.equal(/\bsetImmediate\b/.test(masked), false);
   });
 
-  // V1.40: registry 61→62 (unique +1 process-lock); monitor boundary still does not change registry.
-  it('28. ERROR_CODES length remains 62 (this boundary does not change registry)', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 62);
+  // V1.41: registry 62→74 (G0b +12 upload); monitor boundary still does not change registry.
+  it('28. ERROR_CODES length remains 74 (this boundary does not change registry)', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 74);
   });
 
   it('29. #11 idle + journal missing/NOT_INITIALIZED → integrity-alert; dual idle; relationship null; not-initialized; exit 2', async () => {
