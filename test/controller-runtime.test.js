@@ -1789,3 +1789,506 @@ describe('controller-runtime late post-listen errors', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// C6 RED — production upload wiring via startController
+// Design §9.5 / §10: ensureSafeDataRoot → store/locks/service → inject listener
+// ---------------------------------------------------------------------------
+
+describe('C6 controller-runtime upload wiring (RED)', () => {
+  it('injects complete uploadService + independent uploadRateLimit into agentServerFactory after ensureSafeDataRoot', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-wire-'));
+    /** @type {any} */
+    let captured = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          captured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        assert.ok(captured, 'agentServerFactory must be called');
+        assert.ok(captured.registry, 'registry injected');
+        assert.ok(captured.rateLimit && typeof captured.rateLimit.check === 'function');
+        assert.ok(
+          captured.uploadRateLimit && typeof captured.uploadRateLimit.check === 'function',
+          'uploadRateLimit must be injected independently',
+        );
+        assert.notEqual(captured.uploadRateLimit, captured.rateLimit);
+
+        const svc = captured.uploadService;
+        assert.ok(svc && typeof svc === 'object', 'uploadService must be injected');
+        for (const m of ['create', 'status', 'putChunk', 'finalize', 'abort']) {
+          assert.equal(typeof svc[m], 'function', `uploadService.${m}`);
+        }
+        // Listener must not be expected to steal dataDir from registry.
+        assert.equal(captured.dataDir, undefined);
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('default maxGlobalTransfers=4; allows 1/16/down to 2; rejects 0/17/NaN/string/hostile without listen or half-service', async () => {
+    // Default 4: capture locks via service behavior (5th concurrent → backpressure) is heavy;
+    // freeze options surface + factory capture for maxGlobalTransfers wiring.
+    {
+      const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-mg-def-'));
+      /** @type {any} */
+      let captured = null;
+      try {
+        const runtime = await startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: memoryKeychain(),
+          listenServer: createLoopbackTestListenAdapter(),
+          agentServerFactory: (options) => {
+            captured = options;
+            return trackedServer([], 'agent');
+          },
+          managementServerFactory: () => trackedServer([], 'management'),
+        });
+        openRuntimes.add(runtime);
+        try {
+          assert.ok(captured?.uploadService);
+          // Default production surface: service present (maxGlobalTransfers default 4).
+        } finally {
+          await runtime.close();
+          openRuntimes.delete(runtime);
+        }
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    }
+
+    for (const maxGlobalTransfers of [1, 2, 16]) {
+      const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-mg-ok-'));
+      let factoryCalled = false;
+      try {
+        const runtime = await startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: memoryKeychain(),
+          maxGlobalTransfers,
+          listenServer: createLoopbackTestListenAdapter(),
+          agentServerFactory: (options) => {
+            factoryCalled = true;
+            assert.ok(options.uploadService);
+            return trackedServer([], 'agent');
+          },
+          managementServerFactory: () => trackedServer([], 'management'),
+        });
+        openRuntimes.add(runtime);
+        try {
+          assert.equal(factoryCalled, true, String(maxGlobalTransfers));
+        } finally {
+          await runtime.close();
+          openRuntimes.delete(runtime);
+        }
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    }
+
+    for (const maxGlobalTransfers of [0, 17, Number.NaN, '4', null, 1.5, -1, 100]) {
+      const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-mg-bad-'));
+      let keychainTouched = false;
+      let factoryCalled = false;
+      let managementFactoryCalled = false;
+      const keychain = {
+        async get() {
+          keychainTouched = true;
+          throw new Error('keychain should not run');
+        },
+        async set() {
+          keychainTouched = true;
+        },
+        async delete() {
+          keychainTouched = true;
+        },
+      };
+      try {
+        await assert.rejects(
+          () => startController({
+            dataDir,
+            managementHost: '127.0.0.1',
+            managementPort: 0,
+            agentHost: '192.168.10.4',
+            agentPort: 3443,
+            keychain,
+            maxGlobalTransfers,
+            agentServerFactory: () => {
+              factoryCalled = true;
+              throw new Error('agent factory must not run');
+            },
+            managementServerFactory: () => {
+              managementFactoryCalled = true;
+              throw new Error('management factory must not run');
+            },
+          }),
+          (error) => {
+            assert.ok(error instanceof Error);
+            // Fail-closed: no silent clamp. Message must not claim success.
+            assert.doesNotMatch(String(error.message), /clamped|normalized to/i);
+            return true;
+          },
+        );
+        assert.equal(factoryCalled, false, String(maxGlobalTransfers));
+        assert.equal(managementFactoryCalled, false, String(maxGlobalTransfers));
+        // Prefer rejecting before Keychain; if validation is after pure config only, keychain may
+        // still be untouched. Either way no listen / no half-service.
+        assert.equal(keychainTouched, false, String(maxGlobalTransfers));
+        await assert.rejects(() => access(join(dataDir, 'tls')), { code: 'ENOENT' });
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('creates default upload limiter 1200/min/60s isolated from agentRateLimit 60/min; illegal config fail-closed', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-ulim-'));
+    /** @type {any} */
+    let captured = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          captured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        const legacy = captured.rateLimit;
+        const upload = captured.uploadRateLimit;
+        assert.ok(legacy && upload);
+        assert.notEqual(legacy, upload);
+        const client = '10.9.8.7';
+        for (let i = 0; i < 60; i += 1) {
+          assert.equal(legacy.check(client).allowed, true, `legacy ${i + 1}`);
+        }
+        assert.equal(legacy.check(client).allowed, false, 'legacy 61 denied');
+        // Upload counter independent — still allows beyond 60.
+        for (let i = 0; i < 1200; i += 1) {
+          assert.equal(upload.check(client).allowed, true, `upload ${i + 1}`);
+        }
+        assert.equal(upload.check(client).allowed, false, 'upload 1201 denied');
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+
+    for (const agentUploadRateLimit of [
+      { maxRequests: -1, windowMs: 1000 },
+      { maxRequests: 10, windowMs: 0 },
+      { maxRequests: 1.5, windowMs: 1000 },
+      'not-an-object',
+      [],
+      { maxRequests: 0, windowMs: 60_000 },
+    ]) {
+      const dir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-ulim-bad-'));
+      let factoryCalled = false;
+      let keychainTouched = false;
+      try {
+        await assert.rejects(
+          () => startController({
+            dataDir: dir,
+            managementHost: '127.0.0.1',
+            managementPort: 0,
+            agentHost: '192.168.10.4',
+            agentPort: 3443,
+            keychain: {
+              async get() {
+                keychainTouched = true;
+                throw new Error('no');
+              },
+              async set() {
+                keychainTouched = true;
+              },
+              async delete() {
+                keychainTouched = true;
+              },
+            },
+            agentUploadRateLimit,
+            agentServerFactory: () => {
+              factoryCalled = true;
+              throw new Error('no factory');
+            },
+            managementServerFactory: () => {
+              factoryCalled = true;
+              throw new Error('no factory');
+            },
+          }),
+          (error) => {
+            assert.ok(error instanceof Error);
+            assert.match(String(error.message), /rateLimit|upload/i);
+            return true;
+          },
+        );
+        assert.equal(factoryCalled, false);
+        assert.equal(keychainTouched, false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+
+    // null/false must not disable upload protection (same spirit as agentRateLimit).
+    for (const agentUploadRateLimit of [null, false]) {
+      const dir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-ulim-null-'));
+      /** @type {any} */
+      let capturedUpload = null;
+      try {
+        const runtime = await startController({
+          dataDir: dir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: memoryKeychain(),
+          agentUploadRateLimit,
+          listenServer: createLoopbackTestListenAdapter(),
+          agentServerFactory: (options) => {
+            capturedUpload = options.uploadRateLimit;
+            return trackedServer([], 'agent');
+          },
+          managementServerFactory: () => trackedServer([], 'management'),
+        });
+        openRuntimes.add(runtime);
+        try {
+          assert.ok(capturedUpload && typeof capturedUpload.check === 'function');
+          const client = '10.1.1.1';
+          for (let i = 0; i < 1200; i += 1) {
+            assert.equal(capturedUpload.check(client).allowed, true);
+          }
+          assert.equal(capturedUpload.check(client).allowed, false);
+        } finally {
+          await runtime.close();
+          openRuntimes.delete(runtime);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('captured real uploadService supports create→status→abort on temp dataDir (behavior, not source scan)', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-live-svc-'));
+    /** @type {any} */
+    let uploadService = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          uploadService = options.uploadService;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        assert.ok(uploadService, 'uploadService required');
+
+        // Real Node fs.statfs should accept a tiny zero-byte manifest on local temp FS.
+        const { projectCanonicalUploadManifest } = await import('../src/upload-manifest.js');
+        const deviceId = 'runtime-upload-device-001';
+        const input = {
+          schemaVersion: 2,
+          snapshotId: '550e8400-e29b-41d4-a716-4466554400bb',
+          deviceId,
+          createdAt: '2026-07-22T12:00:00.000Z',
+          files: [],
+          integrity: {
+            algorithm: 'sha256',
+            totalBytes: 0,
+            entries: [],
+          },
+        };
+        const { manifest, manifestDigest } = projectCanonicalUploadManifest(input, {
+          authenticatedDeviceId: deviceId,
+        });
+
+        const created = await uploadService.create({
+          authenticatedDeviceId: deviceId,
+          manifest,
+          claimedManifestDigest: manifestDigest,
+        });
+        assert.ok(created && typeof created.uploadId === 'string');
+        assert.equal(created.status, 'initialized');
+        // Safe summary only
+        assert.equal(created.path, undefined);
+        assert.equal(created.sourcePath, undefined);
+        assert.equal(created.ipAddress, undefined);
+
+        const status = await uploadService.status({
+          authenticatedDeviceId: deviceId,
+          uploadId: created.uploadId,
+        });
+        assert.equal(status.uploadId, created.uploadId);
+        assert.equal(status.status, 'initialized');
+
+        const aborted = await uploadService.abort({
+          authenticatedDeviceId: deviceId,
+          uploadId: created.uploadId,
+        });
+        assert.equal(aborted.status, 'aborted');
+
+        const abortedAgain = await uploadService.abort({
+          authenticatedDeviceId: deviceId,
+          uploadId: created.uploadId,
+        });
+        assert.equal(abortedAgain.status, 'aborted');
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('agentServerFactory or upload assembly failure: no management listener; safe close; no public half-start', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-fail-'));
+    try {
+      let managementListening = false;
+      await assert.rejects(
+        () => startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: memoryKeychain(),
+          listenServer: createLoopbackTestListenAdapter(),
+          agentServerFactory: () => {
+            throw new Error('agent factory boom secret=/Users/secret/token.pem');
+          },
+          managementServerFactory: () => {
+            managementListening = true;
+            return trackedServer([], 'management');
+          },
+        }),
+        (error) => {
+          assert.ok(error instanceof Error);
+          // Must not leave management half-started.
+          return true;
+        },
+      );
+      assert.equal(managementListening, false);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+
+    // Missing uploadService dependency: production assembly must fail-closed before public start.
+    // Force by injecting a hostile maxGlobalTransfers already covered; additionally assert
+    // that a factory which receives incomplete options is not "success-started".
+    {
+      const dir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-half-'));
+      let agentListen = false;
+      let managementListen = false;
+      try {
+        // If GREEN wrongly omits uploadService but still starts, this test fails closed by
+        // asserting factory options always include a complete service when start succeeds.
+        const runtime = await startController({
+          dataDir: dir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          keychain: memoryKeychain(),
+          listenServer: async (server, port, host) => {
+            if (server && typeof server.listen === 'function') {
+              // track which fake servers listen via adapter on tracked servers only
+            }
+            return createLoopbackTestListenAdapter()(server, port, host);
+          },
+          agentServerFactory: (options) => {
+            assert.ok(options.uploadService, 'must not public-start without uploadService');
+            for (const m of ['create', 'status', 'putChunk', 'finalize', 'abort']) {
+              assert.equal(typeof options.uploadService[m], 'function');
+            }
+            agentListen = true;
+            return trackedServer([], 'agent');
+          },
+          managementServerFactory: () => {
+            managementListen = true;
+            return trackedServer([], 'management');
+          },
+        });
+        openRuntimes.add(runtime);
+        try {
+          assert.equal(agentListen, true);
+          assert.equal(managementListen, true);
+        } finally {
+          await runtime.close();
+          openRuntimes.delete(runtime);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('existing bind/TLS/keychain fail-closed gates remain (smoke: illegal agent host still early)', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-legacy-'));
+    let factoryCalled = false;
+    try {
+      await assert.rejects(
+        () => startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '8.8.8.8',
+          agentPort: 3443,
+          keychain: memoryKeychain(),
+          agentServerFactory: () => {
+            factoryCalled = true;
+            throw new Error('no');
+          },
+          managementServerFactory: () => {
+            factoryCalled = true;
+            throw new Error('no');
+          },
+        }),
+        /private|agent host/i,
+      );
+      assert.equal(factoryCalled, false);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});

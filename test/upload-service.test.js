@@ -160,11 +160,41 @@ async function yieldTurns(n = 8) {
   for (let i = 0; i < n; i += 1) await Promise.resolve();
 }
 
-async function waitUntil(predicate, label) {
-  for (let i = 0; i < 20_000; i += 1) {
+/**
+ * Wait until predicate. Must interleave setImmediate so FS I/O / macrotasks
+ * (e.g. store.getSession) can progress — pure microtask spinning starves disk
+ * and false-reports "barrier timeout: … entered" before inject hooks run.
+ * @param {() => boolean} predicate
+ * @param {string} label
+ * @param {{ pending?: Promise<unknown>, maxTurns?: number }} [opts]
+ */
+async function waitUntil(predicate, label, opts = {}) {
+  const maxTurns = opts.maxTurns ?? 5_000;
+  const pending = opts.pending;
+  /** @type {{ settled: boolean, error: unknown, ok: boolean }} */
+  const track = { settled: false, error: undefined, ok: false };
+  if (pending != null && typeof pending.then === 'function') {
+    Promise.resolve(pending).then(
+      () => {
+        track.settled = true;
+        track.ok = true;
+      },
+      (err) => {
+        track.settled = true;
+        track.error = err;
+      },
+    );
+  }
+  for (let i = 0; i < maxTurns; i += 1) {
     if (predicate()) return;
+    if (track.settled) {
+      if (track.error !== undefined) throw track.error;
+      assert.fail(`${label}: operation settled before target stage entered`);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
     await Promise.resolve();
   }
+  if (track.settled && track.error !== undefined) throw track.error;
   assert.fail(`barrier timeout: ${label}`);
 }
 
@@ -1732,5 +1762,289 @@ describe('H production exposure — agent-listener upload paths still 404', () =
       });
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ── H. Request AbortSignal propagation + cooperative cancel (P0) ────
+
+describe('H AbortSignal propagation and cooperative cancel (RED)', () => {
+  /**
+   * @param {unknown} value
+   * @param {string} label
+   */
+  function assertSignal(value, label) {
+    assert.ok(value != null && typeof value === 'object', `${label}: signal required`);
+    assert.equal(typeof /** @type {AbortSignal} */ (value).aborted, 'boolean', label);
+    return /** @type {AbortSignal} */ (value);
+  }
+
+  it('create propagates signal to store.createSession; aborted after barrier does not createSession', async () => {
+    const ac = new AbortController();
+    const gate = deferred();
+    let createSessionCalls = 0;
+    /** @type {unknown} */
+    let createSessionSignal = undefined;
+    const base = makeStore();
+    const realCreate = base.createSession.bind(base);
+    base.createSession = async (input) => {
+      createSessionCalls += 1;
+      createSessionSignal = input?.signal;
+      await gate.promise;
+      // Cooperative cancel: any sanitized Error is acceptable; refuse mutation.
+      if (input?.signal?.aborted) {
+        throw new Error('aborted');
+      }
+      return realCreate(input);
+    };
+    const { service } = makeService({ store: base });
+    const proj = makeProjection();
+
+    const pending = service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+      signal: ac.signal,
+    });
+    try {
+      await waitUntil(() => createSessionCalls === 1, 'createSession entered', { pending });
+      assertSignal(createSessionSignal, 'createSession input.signal');
+      assert.equal(/** @type {AbortSignal} */ (createSessionSignal).aborted, false);
+      assert.equal(createSessionSignal, ac.signal, 'same signal instance to createSession');
+
+      ac.abort();
+      gate.resolve();
+      await assert.rejects(() => pending, (err) => err instanceof Error);
+
+      // No session directory / no successful create.
+      const sessionsRoot = join(
+        dataDir,
+        safeDevicePath(dataDir, DEVICE_A).deviceRel,
+        'upload-sessions',
+      );
+      let names = [];
+      try {
+        names = await readdir(sessionsRoot);
+      } catch {
+        names = [];
+      }
+      assert.equal(names.length, 0, 'aborted create must not leave session on disk');
+      assert.equal(createSessionCalls, 1);
+    } finally {
+      ac.abort();
+      gate.resolve();
+      pending.catch(() => {});
+    }
+  });
+
+  it('putChunk propagates signal to ingestChunkBody + commitChunk + store advance; abort blocks tempPublish/advance', async () => {
+    const ac = new AbortController();
+    const content = Buffer.from('abcd');
+    const proj = makeProjection({
+      files: [{ path: 'a.txt', size: content.length, content }],
+    });
+    // Use service.create so session layout matches the working putChunk paths
+    // (global transfer + capacity preflight + store identity).
+    const store = makeStore();
+    const { service: bootstrap } = makeService({ store });
+    const created = await bootstrap.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+
+    const publishGate = deferred();
+    let ingestEntered = false;
+    let commitEntered = false;
+    /** @type {unknown} */
+    let ingestSignal = undefined;
+    /** @type {unknown} */
+    let commitSignal = undefined;
+    let advanceCalls = 0;
+    let tempPublishCompleted = false;
+
+    const realAdvance = store.advanceBoundary.bind(store);
+    store.advanceBoundary = async (input) => {
+      advanceCalls += 1;
+      return realAdvance(input);
+    };
+
+    const { request, stream } = makeChunkRequest({
+      uploadId: created.uploadId,
+      manifestDigest: proj.manifestDigest,
+      content,
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+    });
+
+    const ingest = {
+      parseChunkHeaders,
+      ingestChunkBody: async (bodyStream, options) => {
+        // Record entry/signal first so missing signal is a direct assert, not a hang.
+        ingestEntered = true;
+        ingestSignal = options?.signal;
+        return ingestChunkBody(bodyStream, options);
+      },
+      commitChunk: async (args) => {
+        commitEntered = true;
+        commitSignal = args?.signal;
+        const wrappedPublish = args.tempPublish;
+        return commitChunk({
+          ...args,
+          tempPublish: async (ctx) => {
+            await publishGate.promise;
+            // Production must refuse mutation after abort; do not soft-skip here.
+            const out = await wrappedPublish(ctx);
+            tempPublishCompleted = true;
+            return out;
+          },
+        });
+      },
+    };
+
+    const { service } = makeService({ store, ingest });
+    const pending = service.putChunk({
+      authenticatedDeviceId: DEVICE_A,
+      request,
+      stream,
+      signal: ac.signal,
+    });
+
+    try {
+      await waitUntil(() => ingestEntered, 'ingestChunkBody entered', { pending });
+      assertSignal(ingestSignal, 'ingestChunkBody options.signal');
+      assert.equal(ingestSignal, ac.signal, 'same signal instance to ingest');
+
+      await waitUntil(() => commitEntered, 'commitChunk entered', { pending });
+      assertSignal(commitSignal, 'commitChunk args.signal');
+      assert.equal(commitSignal, ac.signal, 'same signal instance to commit');
+
+      ac.abort();
+      publishGate.resolve();
+      await assert.rejects(() => pending, (err) => err instanceof Error);
+
+      assert.equal(tempPublishCompleted, false, 'aborted putChunk must not finish tempPublish mutation path');
+      assert.equal(advanceCalls, 0, 'aborted putChunk must not advanceBoundary');
+      const mid = await store.getSession({
+        authenticatedDeviceId: DEVICE_A,
+        uploadId: created.uploadId,
+      });
+      assert.equal(mid.files[0].confirmedBytes, 0);
+    } finally {
+      ac.abort();
+      publishGate.resolve();
+      pending.catch(() => {});
+    }
+  });
+
+  it('finalize propagates signal to verifyAndCommitSession; abort after barrier does not commit', async () => {
+    const ac = new AbortController();
+    const proj = makeProjection({
+      files: [{ path: 'a.txt', size: 0 }],
+    });
+    const store = makeStore();
+    const { service: bootstrap } = makeService({ store });
+    const created = await bootstrap.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+
+    const commitGate = deferred();
+    let verifyEntered = false;
+    /** @type {unknown} */
+    let verifySignal = undefined;
+    let verifyContinued = false;
+    const commit = {
+      preflightCapacity: (dir, totalBytes, options = {}) =>
+        preflightCapacity(dir, totalBytes, {
+          ...options,
+          deps: { ...(options.deps || {}), statfs: mockStatfsPlenty() },
+        }),
+      verifyAndCommitSession: async (input) => {
+        // Record entry/signal first — missing signal must assert directly.
+        verifyEntered = true;
+        verifySignal = input?.signal;
+        await commitGate.promise;
+        // Cooperative cancel: after barrier, aborted signal must not continue commit.
+        // (JS cannot cancel arbitrary suspended continuations; mock honors signal.)
+        if (input?.signal?.aborted) {
+          throw new Error('aborted');
+        }
+        verifyContinued = true;
+        return verifyAndCommitSession(input);
+      },
+    };
+
+    const { service } = makeService({ store, commit });
+    const pending = service.finalize({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+      signal: ac.signal,
+    });
+
+    try {
+      await waitUntil(() => verifyEntered, 'verifyAndCommitSession entered', { pending });
+      assertSignal(verifySignal, 'verifyAndCommitSession input.signal');
+      assert.equal(verifySignal, ac.signal, 'same signal instance to verifyAndCommitSession');
+      ac.abort();
+      commitGate.resolve();
+      await assert.rejects(() => pending, (err) => err instanceof Error);
+      assert.equal(verifyContinued, false, 'aborted finalize must not continue commit after barrier');
+      assert.equal(await pathExists(finalCompletedAbs(DEVICE_A, SNAPSHOT_A)), false);
+    } finally {
+      ac.abort();
+      commitGate.resolve();
+      pending.catch(() => {});
+    }
+  });
+
+  it('abort propagates signal to store.abortSession; already-aborted signal does not write status', async () => {
+    const store = makeStore();
+    const proj = makeProjection();
+    const { service: bootstrap } = makeService({ store });
+    const created = await bootstrap.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    const before = await store.getSession({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(before.status, 'initialized');
+
+    const ac = new AbortController();
+    ac.abort();
+    let abortSessionCalls = 0;
+    /** @type {unknown} */
+    let abortSignalSeen = undefined;
+    const realAbort = store.abortSession.bind(store);
+    store.abortSession = async (input) => {
+      abortSessionCalls += 1;
+      abortSignalSeen = input?.signal;
+      // Do not soft-skip: if service fails to gate, store write would succeed unless signal enforced.
+      return realAbort(input);
+    };
+
+    const { service } = makeService({ store });
+    await assert.rejects(
+      () =>
+        service.abort({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: created.uploadId,
+          signal: ac.signal,
+        }),
+      (err) => err instanceof Error,
+    );
+
+    if (abortSessionCalls > 0) {
+      assertSignal(abortSignalSeen, 'abortSession input.signal');
+      assert.equal(/** @type {AbortSignal} */ (abortSignalSeen).aborted, true);
+    }
+    const after = await store.getSession({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(after.status, 'initialized', 'aborted signal must not mark session aborted on disk');
   });
 });

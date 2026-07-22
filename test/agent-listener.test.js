@@ -45,6 +45,9 @@ function closeServer(server) {
  *   registry?: DeviceRegistry,
  *   onHeartbeat?: Function,
  *   rateLimit?: { check: Function },
+ *   uploadRateLimit?: { check: Function },
+ *   uploadService?: object,
+ *   timers?: { now?: Function, setTimeout?: Function, clearTimeout?: Function },
  * }} [options]
  */
 async function startAgentFixture(options = {}) {
@@ -62,6 +65,9 @@ async function startAgentFixture(options = {}) {
     registry,
     onHeartbeat,
     rateLimit: options.rateLimit,
+    uploadRateLimit: options.uploadRateLimit,
+    uploadService: options.uploadService,
+    ...(options.timers ? { timers: options.timers } : {}),
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -341,6 +347,12 @@ describe('Agent HTTPS listener', () => {
     assert.equal(MAX_AGENT_JSON_BODY_BYTES, 64 * 1024);
   });
 
+  it('freezes server headersTimeout=10000 and requestTimeout=0 (C6 dual-timer architecture)', () => {
+    // Design §6.4.1: close server-level hard ceiling; per-route reader enforces G0a 15s.
+    assert.equal(fixture.server.headersTimeout, 10_000);
+    assert.equal(fixture.server.requestTimeout, 0);
+  });
+
   it('enrolls once, authenticates heartbeat and rotates the token', async () => {
     const issued = await fixture.registry.issueEnrollment({ deviceId: 'mac-alpha' });
     const enrolled = await fixture.postAgent('/agent/enroll', {
@@ -532,12 +544,12 @@ describe('Agent HTTPS listener', () => {
       assert.equal(exact.status, 401);
       assert.deepEqual(exact.body, { error: 'device-enrollment-invalid' });
 
-      // 64 KiB + 1 via Content-Length
+      // 64 KiB + 1 via Content-Length — design §6.4 freezes unique 400 (not 413)
       const oversized = await local.postAgentRaw(
         '/agent/enroll',
         'x'.repeat(MAX_AGENT_JSON_BODY_BYTES + 1),
       );
-      assertPublicError(oversized, 413, 'device-request-invalid');
+      assertPublicError(oversized, 400, 'device-request-invalid');
 
       // declared Content-Length over limit with matching body (early reject path)
       const declaredBody = 'x'.repeat(MAX_AGENT_JSON_BODY_BYTES + 1);
@@ -548,7 +560,7 @@ describe('Agent HTTPS listener', () => {
           'content-length': String(Buffer.byteLength(declaredBody)),
         },
       });
-      assertPublicError(declared, 413, 'device-request-invalid');
+      assertPublicError(declared, 400, 'device-request-invalid');
 
       // chunked transfer oversize
       const chunkedOver = await local.requestAgent('POST', '/agent/enroll', {
@@ -559,7 +571,7 @@ describe('Agent HTTPS listener', () => {
           'transfer-encoding': 'chunked',
         },
       });
-      assertPublicError(chunkedOver, 413, 'device-request-invalid');
+      assertPublicError(chunkedOver, 400, 'device-request-invalid');
 
       const invalid = await local.postAgentRaw('/agent/enroll', '{broken');
       assertPublicError(invalid, 400, 'device-request-invalid');
@@ -808,7 +820,7 @@ describe('Agent HTTPS listener', () => {
     }
   });
 
-  it('returns 413 immediately when a chunked body crosses 64KiB without terminating chunk', async () => {
+  it('returns 400 immediately when a chunked body crosses 64KiB without terminating chunk', async () => {
     const local = await startAgentFixture();
     try {
       const oversize = MAX_AGENT_JSON_BODY_BYTES + 1;
@@ -836,8 +848,9 @@ describe('Agent HTTPS listener', () => {
       });
       const elapsed = Date.now() - startedAt;
       assert.equal(result.kind, 'response', 'must not wait for client to finish the chunked stream');
-      assert.ok(elapsed < 350, `expected fast 413, took ${elapsed}ms`);
-      assert.equal(result.status, 413);
+      assert.ok(elapsed < 350, `expected fast 400, took ${elapsed}ms`);
+      // Design §6.4: G0a oversize unique device-request-invalid status 400 (not 413).
+      assert.equal(result.status, 400);
       assert.deepEqual(result.body, { error: 'device-request-invalid' });
     } finally {
       await local.cleanup();
@@ -1078,6 +1091,297 @@ describe('Agent HTTPS listener', () => {
       assertNoSecretEcho(response.raw, [secretCode, local.identity.keyPem]);
       assert.equal(response.body.error, 'device-enrollment-invalid');
       assert.equal(Object.keys(response.body).join(','), 'error');
+    } finally {
+      await local.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C6 extensions: G0a 15s total fake timer, single-settle, upload isolation
+// ---------------------------------------------------------------------------
+
+/**
+ * Manual timer harness for G0a total deadline tests (no real 15s sleep).
+ * Injected as createAgentListener({ timers }).
+ */
+function createManualTimers(startMs = 5_000_000) {
+  let nowMs = startMs;
+  let nextId = 1;
+  /** @type {Map<number, { id: number, fireAt: number, fn: Function, args: any[], cleared: boolean }>} */
+  const pending = new Map();
+  return {
+    now: () => nowMs,
+    setTimeout(fn, ms, ...args) {
+      const id = nextId;
+      nextId += 1;
+      const delay = Number(ms);
+      const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : 0;
+      pending.set(id, {
+        id,
+        fireAt: nowMs + safeDelay,
+        fn,
+        args,
+        cleared: false,
+      });
+      return id;
+    },
+    clearTimeout(id) {
+      const entry = pending.get(id);
+      if (entry) entry.cleared = true;
+      pending.delete(id);
+    },
+    advance(ms) {
+      nowMs += ms;
+      const due = [...pending.values()]
+        .filter((e) => !e.cleared && e.fireAt <= nowMs)
+        .sort((a, b) => a.id - b.id);
+      for (const entry of due) {
+        if (entry.cleared) continue;
+        pending.delete(entry.id);
+        entry.fn(...entry.args);
+      }
+    },
+    pendingCount() {
+      return [...pending.values()].filter((e) => !e.cleared).length;
+    },
+  };
+}
+
+/**
+ * Wait until the handler has armed enough manual timers before advance().
+ * TLS/HTTP delivery can lag a single setImmediate; poll via bounded
+ * setImmediate + microtask barriers only (no wall-clock sleep).
+ * @param {{ pendingCount: () => number }} timers
+ * @param {{ minPending?: number, maxTurns?: number }} [opts]
+ */
+async function waitForTimerArmed(timers, { minPending = 1, maxTurns = 64 } = {}) {
+  for (let turn = 0; turn < maxTurns; turn += 1) {
+    if (timers.pendingCount() >= minPending) return;
+    await new Promise((resolve) => setImmediate(resolve));
+    await Promise.resolve();
+  }
+  assert.ok(
+    timers.pendingCount() >= minPending,
+    `expected >=${minPending} armed timer(s) before advance, got ${timers.pendingCount()} after ${maxTurns} turns`,
+  );
+}
+
+describe('C6 G0a deadline + upload isolation (RED)', () => {
+  it('G0a enroll 15s total deadline → unique device-request-invalid 400 (fake timers)', async () => {
+    const timers = createManualTimers();
+    const local = await startAgentFixture({ timers });
+    try {
+      assert.equal(local.server.requestTimeout, 0);
+      const body = JSON.stringify({
+        deviceId: 'mac-deadline',
+        protocolVersion: 2,
+        enrollmentCode: 'x'.repeat(43),
+      });
+      const head = [
+        'POST /agent/enroll HTTP/1.1',
+        'Host: 127.0.0.1',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n');
+      const resultPromise = rawTlsHttpExchange({
+        port: local.port,
+        head,
+        bodyParts: [body.slice(0, 10)],
+        endAfterBody: false,
+        timeoutMs: 1500,
+      });
+      await waitForTimerArmed(timers, { minPending: 1 });
+      timers.advance(15_000 + 1);
+      const result = await resultPromise;
+      // RED without total timer: exchange times out (kind=timeout) or wrong status.
+      assert.equal(result.kind, 'response', 'handler total timer must settle JSON error (not hang)');
+      assert.equal(result.status, 400);
+      assert.deepEqual(result.body, { error: 'device-request-invalid' });
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('G0a late data/end after total deadline single-settles; no second response', async () => {
+    const timers = createManualTimers();
+    const local = await startAgentFixture({ timers });
+    try {
+      const body = JSON.stringify({
+        deviceId: 'mac-late-settle',
+        protocolVersion: 2,
+        enrollmentCode: 'y'.repeat(43),
+      });
+      const head = [
+        'POST /agent/enroll HTTP/1.1',
+        'Host: 127.0.0.1',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n');
+      const resultPromise = rawTlsHttpExchange({
+        port: local.port,
+        head,
+        bodyParts: [body.slice(0, 4)],
+        endAfterBody: false,
+        timeoutMs: 1500,
+      });
+      await waitForTimerArmed(timers, { minPending: 1 });
+      timers.advance(15_001);
+      const result = await resultPromise;
+      assert.equal(result.kind, 'response', 'must single-settle before client wait bound');
+      assert.equal(result.status, 400);
+      assert.deepEqual(result.body, { error: 'device-request-invalid' });
+      const errorMatches = result.raw.match(/"error"/g) || [];
+      assert.equal(errorMatches.length, 1, 'must single-settle one JSON error body');
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('uploadRateLimit is isolated from legacy rateLimit; G0a never counts as upload', async () => {
+    let legacy = 0;
+    let upload = 0;
+    const local = await startAgentFixture({
+      rateLimit: {
+        check: () => {
+          legacy += 1;
+          return { allowed: true };
+        },
+      },
+      uploadRateLimit: {
+        check: () => {
+          upload += 1;
+          return { allowed: false, retryAfterMs: 1000 };
+        },
+      },
+    });
+    try {
+      const prep = await enrollFixture(local.registry, 'mac-lim-iso');
+      const enrolled = await local.postAgent('/agent/enroll', prep.enrollBody);
+      assert.equal(enrolled.status, 201);
+      assert.ok(legacy >= 1);
+      assert.equal(upload, 0, 'G0a enroll must not hit upload limiter');
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('without uploadService, typical /agent/upload/* paths stay fixed 404 on real TLS', async () => {
+    const local = await startAgentFixture();
+    try {
+      const paths = [
+        ['POST', '/agent/upload/sessions'],
+        ['GET', '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+        ['POST', '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/chunks'],
+        ['POST', '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/finalize'],
+        ['POST', '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/abort'],
+      ];
+      for (const [method, path] of paths) {
+        const res = await local.requestAgent(method, path, {
+          body: method === 'GET' ? undefined : '{}',
+          headers: {
+            authorization: `Bearer ${'t'.repeat(43)}`,
+            'x-linke-device-id': 'mac-x',
+            'x-linke-protocol-version': '2',
+            'content-type': 'application/json',
+          },
+        });
+        assertPublicError(res, 404, 'device-route-not-found');
+      }
+      // requestTimeout remains 0 even without upload service.
+      assert.equal(local.server.requestTimeout, 0);
+      assert.equal(local.server.headersTimeout, 10_000);
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('G0a heartbeat/rotate still work under requestTimeout=0 with 64KiB bound', async () => {
+    const local = await startAgentFixture();
+    try {
+      assert.equal(local.server.requestTimeout, 0);
+      const { token } = await enrollViaHttps(local, 'mac-g0a-still');
+      const hb = await local.postAgent('/agent/heartbeat', {
+        deviceId: 'mac-g0a-still',
+        protocolVersion: 2,
+        hostname: 'still.local',
+      }, token);
+      assert.equal(hb.status, 200);
+      assert.deepEqual(hb.body, { deviceId: 'mac-g0a-still', accepted: true });
+
+      const over = await local.postAgentRaw(
+        '/agent/heartbeat',
+        'z'.repeat(MAX_AGENT_JSON_BODY_BYTES + 1),
+        { token },
+      );
+      assertPublicError(over, 400, 'device-request-invalid');
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('complete uploadService without complete uploadRateLimit stays 404; G0a enroll untouched', async () => {
+    // P1-b / G0a isolation: half-wired upload surface must not open routes or steal G0a traffic.
+    let uploadServiceCalls = 0;
+    const uploadService = {
+      create: async () => {
+        uploadServiceCalls += 1;
+        return { uploadId: 'x', status: 'initialized' };
+      },
+      status: async () => {
+        uploadServiceCalls += 1;
+        return { uploadId: 'x', status: 'initialized' };
+      },
+      putChunk: async () => {
+        uploadServiceCalls += 1;
+        return { acked: true };
+      },
+      finalize: async () => {
+        uploadServiceCalls += 1;
+        return { uploadId: 'x', status: 'committed' };
+      },
+      abort: async () => {
+        uploadServiceCalls += 1;
+        return { uploadId: 'x', status: 'aborted' };
+      },
+    };
+    let legacy = 0;
+    const local = await startAgentFixture({
+      uploadService,
+      // intentionally omit complete uploadRateLimit
+      rateLimit: {
+        check: () => {
+          legacy += 1;
+          return { allowed: true };
+        },
+      },
+    });
+    try {
+      const prep = await enrollFixture(local.registry, 'mac-lim-gate');
+      const enrolled = await local.postAgent('/agent/enroll', prep.enrollBody);
+      assert.equal(enrolled.status, 201, 'G0a enroll must still work');
+      assert.ok(legacy >= 1, 'G0a must still hit legacy rateLimit');
+
+      const up = await local.requestAgent('POST', '/agent/upload/sessions', {
+        body: JSON.stringify({
+          manifest: { schemaVersion: 2 },
+          manifestDigest: 'a'.repeat(64),
+        }),
+        headers: {
+          authorization: `Bearer ${'t'.repeat(43)}`,
+          'x-linke-device-id': 'mac-lim-gate',
+          'x-linke-protocol-version': '2',
+          'content-type': 'application/json',
+        },
+      });
+      assertPublicError(up, 404, 'device-route-not-found');
+      assert.equal(uploadServiceCalls, 0, 'upload service must not be touched without complete limiter');
     } finally {
       await local.cleanup();
     }

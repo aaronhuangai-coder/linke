@@ -2525,3 +2525,91 @@ describe('PM-P2 index metadata fail-close', () => {
     assert.notEqual(sessionAfter.status, 'committed');
   });
 });
+
+// ── AbortSignal cooperative cancel at afterStagingVerified (P0 / C4) ─
+
+describe('verifyAndCommitSession AbortSignal (RED)', () => {
+  function deferred() {
+    /** @type {(v?: unknown) => void} */
+    let resolve = () => {};
+    const promise = new Promise((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it('abort via afterStagingVerified deferred hook: release must not materialize candidate/claim/COMPLETED/index/markCommitted', async () => {
+    const proj = makeProjection({
+      files: [
+        { path: 'readme.txt', size: 5, content: 'hello' },
+        { path: 'empty.dat', size: 0 },
+      ],
+    });
+    const { uploadId } = await prepareCompleteStaging(proj);
+    const fpBefore = await stagingFingerprint(proj.deviceId, uploadId);
+
+    const ac = new AbortController();
+    const gate = deferred();
+    let markCommittedCalls = 0;
+    const realMarkCommitted = store.markCommitted.bind(store);
+    store.markCommitted = async (input) => {
+      markCommittedCalls += 1;
+      return realMarkCommitted(input);
+    };
+
+    const pending = verifyAndCommitSession({
+      store,
+      dataDir,
+      deviceId: proj.deviceId,
+      uploadId,
+      now: () => clock.now(),
+      signal: ac.signal,
+      hooks: {
+        afterStagingVerified: async () => {
+          // Abort while commit is between staging verify and durable publish.
+          ac.abort();
+          await gate.promise;
+        },
+      },
+    });
+
+    try {
+      // Hook runs after staging verify; abort is set inside hook before gate release.
+      await Promise.resolve();
+      await new Promise((r) => setImmediate(r));
+      // Release hook so implementation continues — must observe aborted signal and stop.
+      gate.resolve();
+
+      await assert.rejects(() => pending, (error) => error instanceof Error);
+
+      assert.equal(await pathExists(candidateAbs(proj.deviceId, uploadId)), false, 'no candidate');
+      assert.equal(await pathExists(claimAbs(proj.deviceId, proj.snapshotId)), false, 'no claim');
+      assert.equal(
+        await pathExists(join(finalAbs(proj.deviceId, proj.snapshotId), 'COMPLETED.json')),
+        false,
+        'no COMPLETED',
+      );
+      const index = await readJsonIfExists(
+        join(dataDir, deviceRelOf(proj.deviceId), 'snapshots.json'),
+      );
+      if (index) {
+        assert.equal(
+          index.some((e) => e && e.snapshotId === proj.snapshotId),
+          false,
+          'no index entry',
+        );
+      }
+      assert.equal(markCommittedCalls, 0, 'must not markCommitted');
+      const sessionAfter = await store.getSession({
+        authenticatedDeviceId: proj.deviceId,
+        uploadId,
+      });
+      assert.notEqual(sessionAfter.status, 'committed');
+      // Staging remains intact (no publish side effects).
+      assert.equal(await stagingFingerprint(proj.deviceId, uploadId), fpBefore);
+    } finally {
+      gate.resolve();
+      pending.catch(() => {});
+    }
+  });
+});

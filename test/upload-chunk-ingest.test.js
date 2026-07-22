@@ -2242,3 +2242,156 @@ describe('GLM-P2: publish-new result schema (existingSha256 present vs absent)',
     assert.equal(result.files[0].confirmedBytes, 10);
   });
 });
+
+// ── AbortSignal cooperative cancel (P0 / C3) ────────────────────────
+
+describe('ingestChunkBody AbortSignal (RED)', () => {
+  it('already-aborted signal rejects immediately without waiting for body', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const body = makeBodyStream(Buffer.alloc(8, 0x61));
+    // Push body only after start; already-aborted must reject without needing body.
+    // If signal is ignored, body completes and assert.rejects fails (RED, no hang).
+    queueMicrotask(() => body.pushAll());
+    await assert.rejects(
+      () =>
+        ingestChunkBody(body.stream, {
+          maxBytes: UPLOAD_CHUNK_SIZE,
+          expectedSize: 8,
+          signal: ac.signal,
+        }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        if (error instanceof LinkeError) {
+          assert.ok(
+            error.code === ERROR_CODES.UPLOAD_CHUNK_INVALID
+            || error.code === ERROR_CODES.UPLOAD_IO_ERROR
+            || error.code === ERROR_CODES.DEVICE_REQUEST_INVALID,
+          );
+        }
+        return true;
+      },
+    );
+    assert.equal(body.bytesRead, 0, 'must not consume body when already aborted');
+  });
+
+  it('abort during ingest: single reject, remove listeners/destroy input, late data/end do not resolve', async () => {
+    const ac = new AbortController();
+    const stream = new Readable({ read() {} });
+    let destroyCount = 0;
+    const originalDestroy = stream.destroy.bind(stream);
+    stream.destroy = (err) => {
+      destroyCount += 1;
+      return originalDestroy(err);
+    };
+
+    let settles = 0;
+    /** @type {unknown} */
+    let firstResult = undefined;
+    /** @type {unknown} */
+    let firstError = undefined;
+    const pending = ingestChunkBody(stream, {
+      maxBytes: UPLOAD_CHUNK_SIZE,
+      expectedSize: 16,
+      signal: ac.signal,
+    }).then(
+      (v) => {
+        settles += 1;
+        firstResult = v;
+        return v;
+      },
+      (e) => {
+        settles += 1;
+        firstError = e;
+        throw e;
+      },
+    );
+
+    // Deliver partial body then abort mid-flight (no wall-clock sleep).
+    stream.push(Buffer.alloc(4, 0x62));
+    await Promise.resolve();
+    await new Promise((r) => setImmediate(r));
+    ac.abort();
+    // Unblock any implementation that ignores signal so the suite cannot hang;
+    // GREEN must have already single-rejected on abort before these late events.
+    stream.push(Buffer.alloc(12, 0x63));
+    stream.push(null);
+
+    await assert.rejects(() => pending, (error) => {
+      assert.ok(error instanceof Error);
+      return true;
+    });
+    assert.equal(settles, 1, 'single settle on abort');
+    assert.equal(firstResult, undefined);
+    assert.ok(firstError instanceof Error);
+
+    // Cleanup: listeners removed and/or stream destroyed.
+    assert.ok(
+      destroyCount >= 1 || stream.destroyed || stream.listenerCount('data') === 0,
+      'must remove data listeners and/or destroy input on abort',
+    );
+
+    // Further late data/end must not second-resolve.
+    assert.doesNotThrow(() => {
+      stream.emit('data', Buffer.alloc(1, 0x64));
+      stream.emit('end');
+    });
+    await Promise.resolve();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(settles, 1, 'late data/end must not re-settle');
+  });
+});
+
+describe('commitChunk AbortSignal (RED)', () => {
+  function deferred() {
+    /** @type {(v?: unknown) => void} */
+    let resolve = () => {};
+    const promise = new Promise((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it('abort during tempPublish await: after release must not advanceBoundary', async () => {
+    const session = makeSession({
+      status: 'initialized',
+      files: [{ fileIndex: 0, size: 10, confirmedBytes: 0, confirmedChunks: 0, complete: false }],
+    });
+    const store = makeFakeStore(session);
+    const ac = new AbortController();
+    const gate = deferred();
+    let advanceAfterAbort = 0;
+    const identity = makeIdentity({ size: 10, sha256: CHUNK_SHA_A });
+
+    const pending = commitChunk({
+      store: {
+        async advanceBoundary(input) {
+          advanceAfterAbort += 1;
+          return store.advanceBoundary(input);
+        },
+        async abortSession(input) {
+          return store.abortSession(input);
+        },
+      },
+      session,
+      identity,
+      bodyHash: CHUNK_SHA_A,
+      signal: ac.signal,
+      tempPublish: async () => {
+        await gate.promise;
+        // Intentionally ignore signal here — production commitChunk must gate advance.
+        return { ok: true };
+      },
+    });
+
+    // Abort while tempPublish is awaiting the barrier.
+    await Promise.resolve();
+    ac.abort();
+    gate.resolve();
+
+    await assert.rejects(() => pending, (error) => error instanceof Error);
+    assert.equal(advanceAfterAbort, 0, 'must not advanceBoundary after abort during tempPublish');
+    assert.ok(!store.calls.some((c) => c.op === 'advanceBoundary'));
+    assert.equal(store.session.files[0].confirmedBytes, 0);
+  });
+});

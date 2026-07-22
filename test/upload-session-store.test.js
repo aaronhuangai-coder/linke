@@ -2915,3 +2915,120 @@ describe('TEST_GAPS advance/verify on terminal + reconcile size mismatch', () =>
     assert.equal(await readFile(chunkPath, 'utf8'), oversized);
   });
 });
+
+// ── AbortSignal write boundaries (P0 / C2) ───────────────────────────
+
+describe('store AbortSignal write boundaries (RED)', () => {
+  it('createSession with already-aborted signal does not create session dir', async () => {
+    const proj = makeProjection();
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(
+      () =>
+        store.createSession({
+          authenticatedDeviceId: DEVICE_A,
+          snapshotId: proj.manifest.snapshotId,
+          manifestDigest: proj.manifestDigest,
+          canonicalManifest: proj.manifest,
+          signal: ac.signal,
+        }),
+      (error) => error instanceof Error,
+    );
+    const { deviceRel } = safeDevicePath(dataDir, DEVICE_A);
+    const root = join(dataDir, deviceRel, 'upload-sessions');
+    let names = [];
+    try {
+      names = await readdir(root);
+    } catch {
+      names = [];
+    }
+    assert.equal(names.length, 0, 'aborted createSession must not leave upload-sessions entries');
+  });
+
+  it('abortSession/advanceBoundary/markVerifying/markCommitted refuse write when signal already aborted', async () => {
+    const proj = makeProjection({
+      files: [{ path: 'a.txt', size: 4, content: 'abcd' }],
+    });
+    const session = await store.createSession({
+      authenticatedDeviceId: DEVICE_A,
+      snapshotId: proj.manifest.snapshotId,
+      manifestDigest: proj.manifestDigest,
+      canonicalManifest: proj.manifest,
+    });
+    const uploadId = session.uploadId;
+    const sessionPath = sessionJsonAbs(DEVICE_A, uploadId);
+    const beforeRaw = await readFile(sessionPath, 'utf8');
+    const before = JSON.parse(beforeRaw);
+
+    const ac = new AbortController();
+    ac.abort();
+
+    await assert.rejects(
+      () =>
+        store.abortSession({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+          signal: ac.signal,
+        }),
+      (error) => error instanceof Error,
+    );
+    assert.equal(JSON.parse(await readFile(sessionPath, 'utf8')).status, before.status);
+
+    await assert.rejects(
+      () =>
+        store.advanceBoundary({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+          fileIndex: 0,
+          chunkIndex: 0,
+          chunkBytes: 4,
+          signal: ac.signal,
+        }),
+      (error) => error instanceof Error,
+    );
+    // Disk session.json uses C2 schema field `boundaries` (public summary uses `files`).
+    assert.equal(
+      JSON.parse(await readFile(sessionPath, 'utf8')).boundaries[0].confirmedBytes,
+      before.boundaries[0].confirmedBytes,
+    );
+
+    // Prepare a complete session for markVerifying/markCommitted boundaries.
+    await store.advanceBoundary({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId,
+      fileIndex: 0,
+      chunkIndex: 0,
+      chunkBytes: 4,
+    });
+    const midRaw = await readFile(sessionPath, 'utf8');
+
+    await assert.rejects(
+      () =>
+        store.markVerifying({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+          signal: ac.signal,
+        }),
+      (error) => error instanceof Error,
+    );
+    assert.equal(await readFile(sessionPath, 'utf8'), midRaw);
+
+    // Live markVerifying then aborted markCommitted.
+    await store.markVerifying({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId,
+    });
+    const verifyingRaw = await readFile(sessionPath, 'utf8');
+    await assert.rejects(
+      () =>
+        store.markCommitted({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+          signal: ac.signal,
+        }),
+      (error) => error instanceof Error,
+    );
+    assert.equal(await readFile(sessionPath, 'utf8'), verifyingRaw);
+    assert.equal(JSON.parse(verifyingRaw).status, 'verifying');
+  });
+});

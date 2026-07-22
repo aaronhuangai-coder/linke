@@ -123,6 +123,35 @@ function failIo() {
 }
 
 /**
+ * Optional AbortSignal: already-aborted fails before I/O / 落盘 (sanitized Error).
+ * @param {unknown} signal
+ */
+function throwIfSignalAborted(signal) {
+  if (signal == null) return;
+  try {
+    if (typeof signal === 'object' && /** @type {{ aborted?: unknown }} */ (signal).aborted === true) {
+      failIo();
+    }
+  } catch (error) {
+    if (error instanceof LinkeError) throw error;
+    failIo();
+  }
+}
+
+/**
+ * @param {unknown} input
+ * @returns {unknown}
+ */
+function readInputSignal(input) {
+  if (input == null || typeof input !== 'object') return undefined;
+  try {
+    return /** @type {{ signal?: unknown }} */ (input).signal;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * @returns {never}
  */
 function failNotFound() {
@@ -1013,10 +1042,13 @@ export function createUploadSessionStore(options) {
    *   snapshotId: string,
    *   manifestDigest: string,
    *   canonicalManifest: object,
+   *   signal?: AbortSignal,
    * }} input
    */
   async function createSession(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) failIo();
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input.authenticatedDeviceId;
     if (typeof deviceId !== 'string' || deviceId.length === 0) failIo();
     const snapshotId = input.snapshotId;
@@ -1061,12 +1093,15 @@ export function createUploadSessionStore(options) {
 
     const identity = boundariesFromProjectedManifest(projectedManifest);
 
+    throwIfSignalAborted(signal);
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const { deviceRel } = deviceScope(dataDir, deviceId);
 
       // Read-only scan (does not create upload-sessions).
       const records = await loadAllSessions(deviceId);
+      throwIfSignalAborted(signal);
 
       /** @type {ReturnType<typeof parseSessionRecord> | null} */
       let active = null;
@@ -1095,6 +1130,7 @@ export function createUploadSessionStore(options) {
 
       // Same-identity active → ensure manifest, idempotent return.
       if (matchingActiveSame) {
+        throwIfSignalAborted(signal);
         await ensureMatchingManifest(deviceId, matchingActiveSame.uploadId, manifestText);
         return toPublicSummary(matchingActiveSame);
       }
@@ -1109,6 +1145,7 @@ export function createUploadSessionStore(options) {
       }
 
       if (matchingCommitted) {
+        throwIfSignalAborted(signal);
         await ensureMatchingManifest(deviceId, matchingCommitted.uploadId, manifestText);
         return toPublicSummary(matchingCommitted);
       }
@@ -1143,16 +1180,21 @@ export function createUploadSessionStore(options) {
         boundaries: identity.boundaries.map((b) => ({ ...b })),
       };
 
+      throwIfSignalAborted(signal);
       try {
         await ensureSafeRelativeDir(dataDir, `${deviceRel}/upload-sessions`, safeDeps);
+        throwIfSignalAborted(signal);
         await ensureSafeRelativeDir(dataDir, sessionRel(deviceRel, uploadId), safeDeps);
       } catch (error) {
+        if (error instanceof LinkeError) throw error;
         if (error instanceof SafeDataFileError) failIo();
         failIo();
       }
 
+      throwIfSignalAborted(signal);
       // 1) atomic session.json first (recoverable commit point)
       await writeSessionRecord(deviceId, record);
+      throwIfSignalAborted(signal);
       // 2) exclusive manifest via same helper (O_EXCL; never overwrite leaf)
       await ensureMatchingManifest(deviceId, uploadId, manifestText);
 
@@ -1161,15 +1203,19 @@ export function createUploadSessionStore(options) {
   }
 
   /**
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function getSession(input) {
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof deviceId !== 'string') failNotFound();
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const record = await readSessionRecord(deviceId, uploadId, { missing: 'not-found' });
+      throwIfSignalAborted(signal);
       if (!TERMINAL_SET.has(record.status) && isExpiredSession(record, now)) {
         failExpired();
       }
@@ -1211,27 +1257,32 @@ export function createUploadSessionStore(options) {
   }
 
   /**
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function abortSession(input) {
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof deviceId !== 'string') failNotFound();
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const record = await readSessionRecord(deviceId, uploadId, { missing: 'not-found' });
+      throwIfSignalAborted(signal);
       if (record.status === 'committed') failCommitConflict();
       if (record.status === 'aborted') return toPublicSummary(record);
       if (isExpiredSession(record, now)) failExpired();
       record.status = 'aborted';
       record.updatedAt = toCanonicalIso(now);
+      throwIfSignalAborted(signal);
       await writeSessionRecord(deviceId, record);
       return toPublicSummary(record);
     });
   }
 
   /**
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function markAborted(input) {
     return abortSession(input);
@@ -1253,15 +1304,20 @@ export function createUploadSessionStore(options) {
    *   fileIndex: number,
    *   chunkIndex: number,
    *   chunkBytes: number,
+   *   signal?: AbortSignal,
    * }} input
    */
   async function advanceBoundary(input) {
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof deviceId !== 'string') failNotFound();
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const record = await readSessionRecord(deviceId, uploadId, { missing: 'not-found' });
+      throwIfSignalAborted(signal);
       assertRecordNotExpired(record, now);
       const result = applyBoundaryAdvance(record, {
         fileIndex: input.fileIndex,
@@ -1274,6 +1330,7 @@ export function createUploadSessionStore(options) {
       }
       if (result.kind === 'integrity_failed') {
         // Persist abort under same device lock, then throw integrity error.
+        // Integrity path preserves original semantics over signal cancel.
         record.status = 'aborted';
         record.updatedAt = toCanonicalIso(now);
         await writeSessionRecord(deviceId, record);
@@ -1281,21 +1338,26 @@ export function createUploadSessionStore(options) {
       }
       // advanced
       record.updatedAt = toCanonicalIso(now);
+      throwIfSignalAborted(signal);
       await writeSessionRecord(deviceId, record);
       return toPublicSummary(record);
     });
   }
 
   /**
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function markVerifying(input) {
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof deviceId !== 'string') failNotFound();
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const record = await readSessionRecord(deviceId, uploadId, { missing: 'not-found' });
+      throwIfSignalAborted(signal);
       assertRecordNotExpired(record, now);
       if (record.status === 'committed' || record.status === 'aborted') failCommitConflict();
       if (record.status === 'verifying') return toPublicSummary(record);
@@ -1305,21 +1367,26 @@ export function createUploadSessionStore(options) {
       if (record.status !== 'initialized' && record.status !== 'receiving') failChunkInvalid();
       record.status = 'verifying';
       record.updatedAt = toCanonicalIso(now);
+      throwIfSignalAborted(signal);
       await writeSessionRecord(deviceId, record);
       return toPublicSummary(record);
     });
   }
 
   /**
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function markCommitted(input) {
+    const signal = readInputSignal(input);
+    throwIfSignalAborted(signal);
     const deviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof deviceId !== 'string') failNotFound();
     return withDeviceLock(deviceId, async () => {
+      throwIfSignalAborted(signal);
       const now = currentNow();
       const record = await readSessionRecord(deviceId, uploadId, { missing: 'not-found' });
+      throwIfSignalAborted(signal);
       // Already committed: idempotent frozen summary; no rewrite / no updatedAt change.
       if (record.status === 'committed') return toPublicSummary(record);
       if (record.status === 'aborted') failCommitConflict();
@@ -1327,6 +1394,7 @@ export function createUploadSessionStore(options) {
       if (record.status !== 'verifying') failChunkInvalid();
       record.status = 'committed';
       record.updatedAt = toCanonicalIso(now);
+      throwIfSignalAborted(signal);
       await writeSessionRecord(deviceId, record);
       return toPublicSummary(record);
     });

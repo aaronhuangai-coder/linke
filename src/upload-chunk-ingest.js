@@ -369,6 +369,7 @@ export function assertContiguousOrder(session, identity) {
  *   maxBytes: number,
  *   expectedSize: number,
  *   onOversize?: () => void,
+ *   signal?: AbortSignal,
  * }} options
  * @returns {Promise<Buffer | { body: Buffer }>}
  */
@@ -381,6 +382,18 @@ export function ingestChunkBody(stream, options) {
     const maxBytes = options?.maxBytes;
     const expectedSize = options?.expectedSize;
     const onOversize = options?.onOversize;
+    const signal = options?.signal;
+
+    // Already-aborted: reject immediately without attaching body listeners.
+    try {
+      if (signal && typeof signal === 'object' && signal.aborted === true) {
+        reject(new LinkeError(ERROR_CODES.UPLOAD_CHUNK_INVALID));
+        return;
+      }
+    } catch {
+      reject(new LinkeError(ERROR_CODES.UPLOAD_IO_ERROR));
+      return;
+    }
 
     if (
       !Number.isSafeInteger(maxBytes)
@@ -399,6 +412,8 @@ export function ingestChunkBody(stream, options) {
     let total = 0;
     /** @type {Buffer[]} */
     const chunks = [];
+    /** @type {(() => void) | null} */
+    let detachAbort = null;
 
     const cleanup = () => {
       stream.removeListener('data', onData);
@@ -411,6 +426,14 @@ export function ingestChunkBody(stream, options) {
         stream.off('error', onError);
         stream.off('close', onClose);
       }
+      if (detachAbort) {
+        try {
+          detachAbort();
+        } catch {
+          // ignore
+        }
+        detachAbort = null;
+      }
     };
 
     /**
@@ -422,12 +445,28 @@ export function ingestChunkBody(stream, options) {
       settled = true;
       cleanup();
       // Keep a no-op error listener so late emit('error') does not become unhandled.
-      stream.on('error', () => {});
+      try {
+        stream.on('error', () => {});
+      } catch {
+        // ignore
+      }
       if (err) {
         reject(err instanceof LinkeError ? err : new LinkeError(ERROR_CODES.UPLOAD_CHUNK_INVALID));
         return;
       }
       resolve(/** @type {Buffer} */ (buf));
+    };
+
+    const safeDestroyInput = () => {
+      try {
+        if (typeof stream.destroy === 'function' && !/** @type {{ destroyed?: boolean }} */ (stream).destroyed) {
+          stream.destroy();
+        } else if (typeof stream.pause === 'function') {
+          stream.pause();
+        }
+      } catch {
+        // ignore
+      }
     };
 
     const triggerOversize = () => {
@@ -496,10 +535,50 @@ export function ingestChunkBody(stream, options) {
       settle(new LinkeError(ERROR_CODES.UPLOAD_CHUNK_INVALID));
     }
 
+    function onAbort() {
+      if (settled) return;
+      safeDestroyInput();
+      // Public code only — never raw AbortError / reason.
+      settle(new LinkeError(ERROR_CODES.UPLOAD_IO_ERROR));
+    }
+
     stream.on('data', onData);
     stream.on('end', onEnd);
     stream.on('error', onError);
     stream.on('close', onClose);
+
+    if (signal && typeof signal === 'object') {
+      if (typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', onAbort, { once: true });
+        detachAbort = () => {
+          try {
+            signal.removeEventListener('abort', onAbort);
+          } catch {
+            // ignore
+          }
+        };
+      } else if (typeof signal.on === 'function') {
+        signal.on('abort', onAbort);
+        detachAbort = () => {
+          try {
+            if (typeof signal.off === 'function') signal.off('abort', onAbort);
+            else if (typeof signal.removeListener === 'function') signal.removeListener('abort', onAbort);
+          } catch {
+            // ignore
+          }
+        };
+      }
+      // Re-check after attach (TOCTOU).
+      try {
+        if (signal.aborted === true) {
+          onAbort();
+          return;
+        }
+      } catch {
+        onAbort();
+        return;
+      }
+    }
 
     // Ensure flowing mode for mock/push streams that start paused.
     if (typeof stream.resume === 'function') {
@@ -577,6 +656,23 @@ function classifyExistingSha256(published) {
 }
 
 /**
+ * Optional signal check: already-aborted → sanitized io (no raw AbortError).
+ * Does not run during abortQuiet integrity paths that must preserve original semantics.
+ * @param {unknown} signal
+ */
+function throwIfSignalAborted(signal) {
+  if (signal == null) return;
+  try {
+    if (typeof signal === 'object' && /** @type {{ aborted?: unknown }} */ (signal).aborted === true) {
+      failIo();
+    }
+  } catch (error) {
+    if (error instanceof LinkeError) throw error;
+    failIo();
+  }
+}
+
+/**
  * Commit one ingested chunk: identity check → order → publish/rehash → atomic advance.
  * Exact duplicates ACK without rewrite/advance after verify-existing rehash.
  * Failures never false-ACK and never leak path/raw errors into LinkeError public fields.
@@ -589,6 +685,7 @@ function classifyExistingSha256(published) {
  *       fileIndex: number,
  *       chunkIndex: number,
  *       chunkBytes: number,
+ *       signal?: AbortSignal,
  *     }) => Promise<object>,
  *     abortSession: (input: {
  *       authenticatedDeviceId: string,
@@ -620,6 +717,7 @@ function classifyExistingSha256(published) {
  *   },
  *   bodyHash: string,
  *   tempPublish: (context: Readonly<{ mode: 'publish-new' | 'verify-existing' }>) => Promise<unknown>,
+ *   signal?: AbortSignal,
  * }} args
  * @returns {Promise<object>}
  *
@@ -645,6 +743,9 @@ export async function commitChunk(args) {
   const identity = args?.identity;
   const bodyHash = args?.bodyHash;
   const tempPublish = args?.tempPublish;
+  const signal = args?.signal;
+
+  throwIfSignalAborted(signal);
 
   if (!store || !session || !identity || typeof tempPublish !== 'function') {
     failIo();
@@ -689,6 +790,8 @@ export async function commitChunk(args) {
     failIntegrity();
   }
 
+  throwIfSignalAborted(signal);
+
   // Frozen context: mode only; immutable; no path/token/raw material.
   const publishContext = Object.freeze({
     mode: /** @type {'publish-new' | 'verify-existing'} */ (
@@ -703,6 +806,7 @@ export async function commitChunk(args) {
   } catch (error) {
     if (error instanceof LinkeError) {
       if (error.code === ERROR_CODES.UPLOAD_INTEGRITY_FAILED) {
+        // Preserve integrity semantics — do not let signal cancel mask this path.
         await abortQuiet(store, session);
       }
       throw error;
@@ -710,6 +814,8 @@ export async function commitChunk(args) {
     // Never echo path/raw OS errors (ENOSPC, absolute paths, etc.).
     failIo();
   }
+
+  throwIfSignalAborted(signal);
 
   const existingClass = classifyExistingSha256(published);
 
@@ -739,6 +845,8 @@ export async function commitChunk(args) {
     }
   }
 
+  throwIfSignalAborted(signal);
+
   try {
     const advanced = await store.advanceBoundary({
       authenticatedDeviceId: session.deviceId,
@@ -746,6 +854,7 @@ export async function commitChunk(args) {
       fileIndex: identity.fileIndex,
       chunkIndex: identity.chunkIndex,
       chunkBytes: identity.size,
+      signal,
     });
     return advanced;
   } catch (error) {

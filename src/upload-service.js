@@ -53,6 +53,38 @@ function rethrowSafe(error) {
 }
 
 /**
+ * Optional AbortSignal: already-aborted → sanitized public error (no raw AbortError).
+ * @param {unknown} signal
+ */
+function throwIfAborted(signal) {
+  if (signal == null) return;
+  try {
+    if (typeof signal === 'object' && /** @type {{ aborted?: unknown }} */ (signal).aborted === true) {
+      failIo();
+    }
+  } catch (error) {
+    if (error instanceof LinkeError) throw error;
+    failIo();
+  }
+}
+
+/**
+ * @param {unknown} input
+ * @returns {AbortSignal | undefined}
+ */
+function readOptionalSignal(input) {
+  if (input == null || typeof input !== 'object') return undefined;
+  try {
+    const signal = /** @type {{ signal?: unknown }} */ (input).signal;
+    if (signal == null) return undefined;
+    if (typeof signal !== 'object') return undefined;
+    return /** @type {AbortSignal} */ (signal);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Resolve device-relative path without leaking invalid deviceId via storage errors.
  * @param {string} dataDir
  * @param {string} deviceId
@@ -214,16 +246,23 @@ export function createUploadService(options) {
    *   authenticatedDeviceId: string,
    *   manifest: unknown,
    *   claimedManifestDigest: string,
+   *   signal?: AbortSignal,
    * }} input
    */
   async function create(input) {
+    const signal = readOptionalSignal(input);
+    throwIfAborted(signal);
+
     const authenticatedDeviceId = input?.authenticatedDeviceId;
     if (typeof authenticatedDeviceId !== 'string' || authenticatedDeviceId.length === 0) {
       throw new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
     }
 
-    return locks.runTransfer(async () =>
-      locks.runDevice(authenticatedDeviceId, async () => {
+    throwIfAborted(signal);
+    return locks.runTransfer(async () => {
+      throwIfAborted(signal);
+      return locks.runDevice(authenticatedDeviceId, async () => {
+        throwIfAborted(signal);
         let projected;
         try {
           projected = projectCanonicalUploadManifest(input.manifest, {
@@ -239,36 +278,45 @@ export function createUploadService(options) {
           throw new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
         }
 
+        throwIfAborted(signal);
         try {
           await commit.preflightCapacity(dataDir, totalBytes);
         } catch (error) {
           rethrowSafe(error);
         }
 
+        // After project/preflight, before store.createSession mutation.
+        throwIfAborted(signal);
         try {
           return await store.createSession({
             authenticatedDeviceId,
             snapshotId: projected.manifest.snapshotId,
             manifestDigest: projected.manifestDigest,
             canonicalManifest: projected.manifest,
+            signal,
           });
         } catch (error) {
           rethrowSafe(error);
         }
-      }),
-    );
+      });
+    });
   }
 
   /**
    * Safe session status / resume summary. Does NOT take a global transfer slot.
    *
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function status(input) {
+    const signal = readOptionalSignal(input);
+    throwIfAborted(signal);
     try {
+      // Legacy direct-service contract: only authenticatedDeviceId+uploadId when no signal.
+      // Propagate signal key only when a real AbortSignal is present (C6 always passes one).
       return await store.getSession({
         authenticatedDeviceId: input?.authenticatedDeviceId,
         uploadId: input?.uploadId,
+        ...(signal !== undefined ? { signal } : {}),
       });
     } catch (error) {
       rethrowSafe(error);
@@ -283,16 +331,22 @@ export function createUploadService(options) {
    *   authenticatedDeviceId: string,
    *   request: unknown,
    *   stream: unknown,
+   *   signal?: AbortSignal,
    * }} input
    */
   async function putChunk(input) {
+    const signal = readOptionalSignal(input);
+    throwIfAborted(signal);
+
     const authenticatedDeviceId = input?.authenticatedDeviceId;
     if (typeof authenticatedDeviceId !== 'string' || authenticatedDeviceId.length === 0) {
       throw new LinkeError(ERROR_CODES.UPLOAD_CHUNK_INVALID);
     }
 
     // Capture request/stream only after global slot is acquired (backpressure must not touch them).
+    throwIfAborted(signal);
     return locks.runTransfer(async () => {
+      throwIfAborted(signal);
       // Parse after global acquire so full semaphore never reads headers/stream.
       let identity;
       try {
@@ -326,17 +380,21 @@ export function createUploadService(options) {
         throw new LinkeError(ERROR_CODES.UPLOAD_CHUNK_INVALID);
       }
 
+      throwIfAborted(signal);
       return locks.runSession(authenticatedDeviceId, uploadId, async () => {
+        throwIfAborted(signal);
         let session;
         try {
           session = await store.getSession({
             authenticatedDeviceId,
             uploadId,
+            signal,
           });
         } catch (error) {
           rethrowSafe(error);
         }
 
+        throwIfAborted(signal);
         const expectedSize = identity.size;
         if (
           !Number.isSafeInteger(expectedSize)
@@ -351,11 +409,13 @@ export function createUploadService(options) {
           bodyResult = await ingest.ingestChunkBody(input.stream, {
             maxBytes: expectedSize,
             expectedSize,
+            signal,
           });
         } catch (error) {
           rethrowSafe(error);
         }
 
+        throwIfAborted(signal);
         const body = coerceBodyBuffer(bodyResult);
         const bodyHash = createHash('sha256').update(body).digest('hex');
 
@@ -374,14 +434,17 @@ export function createUploadService(options) {
          * @param {Readonly<{ mode: 'publish-new' | 'verify-existing' }>} ctx
          */
         async function tempPublish(ctx) {
+          throwIfAborted(signal);
           if (!ctx || typeof ctx !== 'object') failIo();
           const mode = ctx.mode;
 
           if (mode === 'verify-existing') {
+            throwIfAborted(signal);
             try {
               const hashed = await safeHashFileSha256(dataDir, relativeStagingPath, {
                 maxBytes: UPLOAD_CHUNK_SIZE,
               });
+              throwIfAborted(signal);
               if (!hashed || typeof hashed.sha256 !== 'string') failIo();
               return { existingSha256: hashed.sha256 };
             } catch (error) {
@@ -393,8 +456,10 @@ export function createUploadService(options) {
 
           if (mode !== 'publish-new') failIo();
 
+          throwIfAborted(signal);
           try {
             await safeAtomicWriteBytes(dataDir, relativeStagingPath, body);
+            throwIfAborted(signal);
             // Absent existingSha256 → new publish succeeded (C3 contract).
             return Object.freeze({ ok: true });
           } catch (error) {
@@ -404,6 +469,7 @@ export function createUploadService(options) {
           }
         }
 
+        throwIfAborted(signal);
         try {
           return await ingest.commitChunk({
             store,
@@ -411,6 +477,7 @@ export function createUploadService(options) {
             identity,
             bodyHash,
             tempPublish,
+            signal,
           });
         } catch (error) {
           rethrowSafe(error);
@@ -422,9 +489,12 @@ export function createUploadService(options) {
   /**
    * Finalize: global → per-session → per-snapshot → verifyAndCommitSession.
    *
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function finalize(input) {
+    const signal = readOptionalSignal(input);
+    throwIfAborted(signal);
+
     const authenticatedDeviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof authenticatedDeviceId !== 'string' || authenticatedDeviceId.length === 0) {
@@ -434,24 +504,31 @@ export function createUploadService(options) {
       throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
     }
 
-    return locks.runTransfer(async () =>
-      locks.runSession(authenticatedDeviceId, uploadId, async () => {
+    throwIfAborted(signal);
+    return locks.runTransfer(async () => {
+      throwIfAborted(signal);
+      return locks.runSession(authenticatedDeviceId, uploadId, async () => {
+        throwIfAborted(signal);
         let session;
         try {
           session = await store.getSession({
             authenticatedDeviceId,
             uploadId,
+            signal,
           });
         } catch (error) {
           rethrowSafe(error);
         }
 
+        throwIfAborted(signal);
         const snapshotId = session?.snapshotId;
         if (typeof snapshotId !== 'string' || snapshotId.length === 0) {
           failIo();
         }
 
+        throwIfAborted(signal);
         return locks.runSnapshot(authenticatedDeviceId, snapshotId, async () => {
+          throwIfAborted(signal);
           try {
             await commit.verifyAndCommitSession({
               store,
@@ -459,21 +536,26 @@ export function createUploadService(options) {
               deviceId: authenticatedDeviceId,
               uploadId,
               now,
+              signal,
             });
+            throwIfAborted(signal);
           } catch (error) {
             rethrowSafe(error);
           }
         });
-      }),
-    );
+      });
+    });
   }
 
   /**
    * Abort: per-session only (no global transfer slot).
    *
-   * @param {{ authenticatedDeviceId: string, uploadId: string }} input
+   * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
   async function abort(input) {
+    const signal = readOptionalSignal(input);
+    throwIfAborted(signal);
+
     const authenticatedDeviceId = input?.authenticatedDeviceId;
     const uploadId = input?.uploadId;
     if (typeof authenticatedDeviceId !== 'string' || authenticatedDeviceId.length === 0) {
@@ -483,11 +565,14 @@ export function createUploadService(options) {
       throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
     }
 
+    throwIfAborted(signal);
     return locks.runSession(authenticatedDeviceId, uploadId, async () => {
+      throwIfAborted(signal);
       try {
         return await store.abortSession({
           authenticatedDeviceId,
           uploadId,
+          signal,
         });
       } catch (error) {
         rethrowSafe(error);

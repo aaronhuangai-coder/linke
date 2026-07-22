@@ -115,6 +115,22 @@ function failIo() {
 }
 
 /**
+ * Optional AbortSignal checkpoint: already-aborted → sanitized io (no raw AbortError).
+ * @param {unknown} signal
+ */
+function throwIfSignalAborted(signal) {
+  if (signal == null) return;
+  try {
+    if (typeof signal === 'object' && /** @type {{ aborted?: unknown }} */ (signal).aborted === true) {
+      failIo();
+    }
+  } catch (error) {
+    if (error instanceof LinkeError) throw error;
+    failIo();
+  }
+}
+
+/**
  * Dual-copy peak: staging + candidate, plus safety margin.
  * @param {number} totalBytes
  * @returns {number}
@@ -204,11 +220,14 @@ function readCommitInput(input) {
   const now = /** @type {{ now?: unknown }} */ (input).now;
   const hooks = /** @type {{ hooks?: unknown }} */ (input).hooks;
   const deps = /** @type {{ deps?: unknown }} */ (input).deps;
+  const signal = /** @type {{ signal?: unknown }} */ (input).signal;
 
   if (!store || typeof store !== 'object') failIo();
   if (typeof dataDir !== 'string' || dataDir.length === 0) failIo();
   if (typeof deviceId !== 'string' || deviceId.length === 0) failIo();
   if (typeof uploadId !== 'string' || !UUID_RE.test(uploadId)) failIo();
+
+  throwIfSignalAborted(signal);
 
   const nowFn =
     typeof now === 'function'
@@ -221,6 +240,7 @@ function readCommitInput(input) {
     deviceId,
     uploadId,
     now: nowFn,
+    signal,
     hooks: hooks && typeof hooks === 'object' && !Array.isArray(hooks)
       ? /** @type {Record<string, Function>} */ (hooks)
       : {},
@@ -1056,12 +1076,18 @@ async function finishFromExistingCompleted(args) {
     deps,
     sessionStatus,
     claimHeld = false,
+    signal,
   } = args;
+
+  throwIfSignalAborted(signal);
 
   // Do not re-acquire when caller already holds the same claim (publish path takeover).
   if (!claimHeld) {
+    throwIfSignalAborted(signal);
     await acquireClaim(dataDir, deviceRel, identity);
+    throwIfSignalAborted(signal);
     await runHook(hooks, 'afterClaimAcquired');
+    throwIfSignalAborted(signal);
   }
 
   const snapRel = finalRel(deviceRel, identity.snapshotId);
@@ -1069,6 +1095,7 @@ async function finishFromExistingCompleted(args) {
 
   // Fresh bounded no-follow COMPLETED under claim — TOCTOU vs claim-pre parameter.
   const freshCompleted = await readJsonRel(dataDir, completedRel);
+  throwIfSignalAborted(signal);
   if (
     !isValidCompletedBody(freshCompleted, identity.snapshotId)
     || !isSameIdentity(freshCompleted, identity)
@@ -1080,17 +1107,22 @@ async function finishFromExistingCompleted(args) {
 
   // Durable marker must still match final canonical manifest + file integrity.
   const manifest = await loadAndProjectFinalManifest(dataDir, snapRel, identity);
+  throwIfSignalAborted(signal);
   await reverifyFinal(dataDir, snapRel, manifest);
+  throwIfSignalAborted(signal);
 
   // Indexes may be missing after crash; repair idempotently using fresh marker committedAt only.
   await upsertRemoteIndexes(dataDir, deviceRel, slug, identity, committedAt);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterIndexUpsert');
+  throwIfSignalAborted(signal);
 
   // markCommitted is idempotent for already-committed sessions.
   try {
     await store.markCommitted({
       authenticatedDeviceId: identity.deviceId,
       uploadId: identity.uploadId,
+      signal,
     });
   } catch (error) {
     if (sessionStatus === 'committed') {
@@ -1102,7 +1134,9 @@ async function finishFromExistingCompleted(args) {
     }
   }
 
+  throwIfSignalAborted(signal);
   await cleanupClaim(dataDir, deviceRel, identity, deps);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterClaimCleanup');
 }
 
@@ -1117,6 +1151,7 @@ async function finishFromExistingCompleted(args) {
  *   now?: () => Date,
  *   hooks?: object,
  *   deps?: object,
+ *   signal?: AbortSignal,
  * }} input
  * @returns {Promise<void>}
  */
@@ -1140,7 +1175,8 @@ export async function verifyAndCommitSession(input) {
  * @param {unknown} input
  */
 async function verifyAndCommitSessionImpl(input) {
-  const { store, dataDir, deviceId, uploadId, now, hooks, deps } = readCommitInput(input);
+  const { store, dataDir, deviceId, uploadId, now, hooks, deps, signal } = readCommitInput(input);
+  throwIfSignalAborted(signal);
   const { slug, deviceRel } = resolveDevice(dataDir, deviceId);
 
   let session;
@@ -1148,11 +1184,13 @@ async function verifyAndCommitSessionImpl(input) {
     session = await store.getSession({
       authenticatedDeviceId: deviceId,
       uploadId,
+      signal,
     });
   } catch (error) {
     if (error instanceof LinkeError) throw error;
     failIo();
   }
+  throwIfSignalAborted(signal);
   if (!session || typeof session !== 'object') failIo();
 
   const snapshotId = session.snapshotId;
@@ -1175,6 +1213,7 @@ async function verifyAndCommitSessionImpl(input) {
   // Claim-pre COMPLETED is a gate only; finish re-reads under claim for TOCTOU safety.
   if (session.status === 'committed') {
     const completed = await readJsonRel(dataDir, completedRel);
+    throwIfSignalAborted(signal);
     if (!isValidCompletedBody(completed, snapshotId) || !isSameIdentity(completed, identity)) {
       failConflict();
     }
@@ -1187,25 +1226,30 @@ async function verifyAndCommitSessionImpl(input) {
       hooks,
       deps,
       sessionStatus: 'committed',
+      signal,
     });
     return;
   }
 
   // Enter verifying (requires all boundaries complete).
+  throwIfSignalAborted(signal);
   try {
     await store.markVerifying({
       authenticatedDeviceId: deviceId,
       uploadId,
+      signal,
     });
   } catch (error) {
     if (error instanceof LinkeError) throw error;
     failIo();
   }
+  throwIfSignalAborted(signal);
 
   // Crash recovery: valid COMPLETED already present with same identity.
   // Claim-pre gate only; finish re-reads COMPLETED under claim.
   {
     const completed = await readJsonRel(dataDir, completedRel);
+    throwIfSignalAborted(signal);
     if (isValidCompletedBody(completed, snapshotId)) {
       if (!isSameIdentity(completed, identity)) failConflict();
       await finishFromExistingCompleted({
@@ -1217,6 +1261,7 @@ async function verifyAndCommitSessionImpl(input) {
         hooks,
         deps,
         sessionStatus: 'verifying',
+        signal,
       });
       return;
     }
@@ -1261,6 +1306,7 @@ async function verifyAndCommitSessionImpl(input) {
   if (!Array.isArray(session.files)) failIntegrity();
   if (session.files.length !== entries.length) failIntegrity();
   for (let i = 0; i < entries.length; i += 1) {
+    throwIfSignalAborted(signal);
     const f = session.files[i];
     if (!f || f.complete !== true) failIntegrity();
     if (f.size !== entries[i].size) failIntegrity();
@@ -1275,7 +1321,10 @@ async function verifyAndCommitSessionImpl(input) {
     );
   }
 
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterStagingVerified');
+  // Critical: afterStagingVerified may abort signal — stop before materialize.
+  throwIfSignalAborted(signal);
 
   await materializeCandidate(
     dataDir,
@@ -1285,18 +1334,24 @@ async function verifyAndCommitSessionImpl(input) {
     identity,
     manifestText,
   );
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterCandidateMaterialized');
+  throwIfSignalAborted(signal);
 
   await acquireClaim(dataDir, deviceRel, identity);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterClaimAcquired');
+  throwIfSignalAborted(signal);
 
   // Holding claim: inspect final path.
   const finalKind = await classifyLeaf(dataDir, snapRel);
+  throwIfSignalAborted(signal);
   const cand = candidateRel(deviceRel, uploadId);
 
   if (finalKind === 'dir') {
     // Re-check COMPLETED (race / prior).
     const completed = await readJsonRel(dataDir, completedRel);
+    throwIfSignalAborted(signal);
     if (isValidCompletedBody(completed, snapshotId)) {
       if (!isSameIdentity(completed, identity)) failConflict();
       // Same identity COMPLETED: drop candidate; claim already held — do not re-acquire.
@@ -1315,12 +1370,14 @@ async function verifyAndCommitSessionImpl(input) {
         deps,
         sessionStatus: 'verifying',
         claimHeld: true,
+        signal,
       });
       return;
     }
 
     // No valid COMPLETED: only same-identity PENDING may take over.
     const pending = await readJsonRel(dataDir, `${snapRel}/PENDING.json`);
+    throwIfSignalAborted(signal);
     if (!isValidPendingBody(pending) || !isSameIdentity(pending, identity)) {
       failConflict();
     }
@@ -1331,6 +1388,7 @@ async function verifyAndCommitSessionImpl(input) {
       // best-effort
     }
   } else if (finalKind === 'missing') {
+    throwIfSignalAborted(signal);
     // Atomic publish: rename candidate → final (mutex is claim, not EEXIST).
     try {
       await rename(join(dataDir, cand), join(dataDir, snapRel));
@@ -1342,28 +1400,38 @@ async function verifyAndCommitSessionImpl(input) {
     failConflict();
   }
 
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterRename');
+  throwIfSignalAborted(signal);
 
   // Rename/takeover done; PENDING retained until COMPLETED.
   await reverifyFinal(dataDir, snapRel, manifest);
+  throwIfSignalAborted(signal);
 
   const committedAt = nowIso(now);
   await writeCompleted(dataDir, snapRel, identity, committedAt);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterCompleted');
+  throwIfSignalAborted(signal);
 
   await upsertRemoteIndexes(dataDir, deviceRel, slug, identity, committedAt);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterIndexUpsert');
+  throwIfSignalAborted(signal);
 
   try {
     await store.markCommitted({
       authenticatedDeviceId: deviceId,
       uploadId,
+      signal,
     });
   } catch (error) {
     if (error instanceof LinkeError) throw error;
     failIo();
   }
 
+  throwIfSignalAborted(signal);
   await cleanupClaim(dataDir, deviceRel, identity, deps);
+  throwIfSignalAborted(signal);
   await runHook(hooks, 'afterClaimCleanup');
 }

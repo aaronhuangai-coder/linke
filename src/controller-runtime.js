@@ -1,6 +1,7 @@
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
+import { statfs } from 'node:fs/promises';
 import { createServer as createManagementServer, normalizeRestoreRoot } from './server.js';
 import { createAgentListener } from './agent-listener.js';
 import { DeviceRegistry } from './device-registry.js';
@@ -10,6 +11,15 @@ import { recordHeartbeat } from './storage.js';
 import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
 import { parseAuditRetentionMaxEvents } from './audit-log.js';
 import { ensureSafeDataRoot, ensureSafeRelativeDir } from './safe-data-files.js';
+import { createUploadSessionStore } from './upload-session-store.js';
+import {
+  parseChunkHeaders,
+  ingestChunkBody,
+  commitChunk,
+} from './upload-chunk-ingest.js';
+import { preflightCapacity, verifyAndCommitSession } from './upload-commit.js';
+import { createUploadLocks } from './upload-locks.js';
+import { createUploadService } from './upload-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -17,6 +27,10 @@ const DEFAULT_AGENT_PORT = 3443;
 const DEFAULT_MANAGEMENT_PORT = 3000;
 const DEFAULT_MANAGEMENT_HOST = '127.0.0.1';
 const DEFAULT_AGENT_RATE_LIMIT = Object.freeze({ maxRequests: 60, windowMs: 60_000 });
+const DEFAULT_AGENT_UPLOAD_RATE_LIMIT = Object.freeze({ maxRequests: 1200, windowMs: 60_000 });
+const DEFAULT_MAX_GLOBAL_TRANSFERS = 4;
+const MIN_MAX_GLOBAL_TRANSFERS = 1;
+const MAX_MAX_GLOBAL_TRANSFERS = 16;
 
 /**
  * Listen helper used by production and tests (injectable).
@@ -185,6 +199,23 @@ function assertPort(port, label) {
 }
 
 /**
+ * Fail-closed maxGlobalTransfers in 1..16 (no silent clamp).
+ * @param {unknown} value
+ * @returns {number}
+ */
+function assertMaxGlobalTransfers(value) {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < MIN_MAX_GLOBAL_TRANSFERS
+    || value > MAX_MAX_GLOBAL_TRANSFERS
+  ) {
+    throw new Error('maxGlobalTransfers must be an integer between 1 and 16');
+  }
+  return value;
+}
+
+/**
  * Parse a non-negative integer env value with a default.
  * @param {unknown} raw
  * @param {number} fallback
@@ -223,6 +254,8 @@ function parseEnvPort(raw, fallback, label) {
  *   keychain?: { get: Function, set: Function, delete?: Function },
  *   acceptTlsFingerprintChange?: boolean,
  *   agentRateLimit?: { maxRequests: number, windowMs: number },
+ *   agentUploadRateLimit?: { maxRequests: number, windowMs: number },
+ *   maxGlobalTransfers?: number,
  *   listenServer?: typeof listen,
  *   managementServerFactory?: Function,
  *   agentServerFactory?: Function,
@@ -256,6 +289,8 @@ export async function startController({
   keychain,
   acceptTlsFingerprintChange = false,
   agentRateLimit = DEFAULT_AGENT_RATE_LIMIT,
+  agentUploadRateLimit = DEFAULT_AGENT_UPLOAD_RATE_LIMIT,
+  maxGlobalTransfers = DEFAULT_MAX_GLOBAL_TRANSFERS,
   listenServer = listen,
   managementServerFactory = createManagementServer,
   agentServerFactory = createAgentListener,
@@ -277,11 +312,16 @@ export async function startController({
   assertPort(managementPort, 'management');
   assertPort(agentPort, 'agent');
 
-  // Structure-validate and build Agent limiter after pure config checks, before any
-  // Keychain / TLS / registry side effects. null/false must fall back to default 60/min
+  // Structure-validate and build Agent limiters after pure config checks, before any
+  // Keychain / TLS / registry side effects. null/false must fall back to defaults
   // (never disable). Construct once here; do not rebuild later.
   const agentLimiter = createFixedWindowRateLimiter(agentRateLimit)
     || createFixedWindowRateLimiter(DEFAULT_AGENT_RATE_LIMIT);
+  // Independent upload path-aware limiter (1200/min default); never shares legacy 60/min.
+  const agentUploadLimiter = createFixedWindowRateLimiter(agentUploadRateLimit)
+    || createFixedWindowRateLimiter(DEFAULT_AGENT_UPLOAD_RATE_LIMIT);
+  // maxGlobalTransfers fail-closed 1..16 before Keychain / listen / half-service.
+  const resolvedMaxGlobalTransfers = assertMaxGlobalTransfers(maxGlobalTransfers);
 
   const resolvedKeychain = keychain ?? new KeychainStore();
   const identityPort = agentPort === 0 ? DEFAULT_AGENT_PORT : agentPort;
@@ -309,6 +349,29 @@ export async function startController({
     await registry.acceptControllerFingerprint(identity.fingerprint);
   }
 
+  // Production upload assembly after safe data root: store + locks + service with real statfs.
+  // Shared now clock; listener never steals dataDir from registry.
+  const uploadNow = () => new Date();
+  const uploadStore = createUploadSessionStore({ dataDir, now: uploadNow });
+  const uploadLocks = createUploadLocks({ maxGlobalTransfers: resolvedMaxGlobalTransfers });
+  const uploadService = createUploadService({
+    dataDir,
+    store: uploadStore,
+    locks: uploadLocks,
+    ingest: {
+      parseChunkHeaders,
+      ingestChunkBody,
+      commitChunk,
+    },
+    commit: {
+      preflightCapacity: (dir, totalBytes) => preflightCapacity(dir, totalBytes, {
+        deps: { statfs },
+      }),
+      verifyAndCommitSession,
+    },
+    now: uploadNow,
+  });
+
   const status = {
     managementHost,
     managementListening: false,
@@ -317,14 +380,22 @@ export async function startController({
     tlsFingerprint: identity.fingerprint,
   };
 
-  const agentServer = agentServerFactory({
-    identity,
-    registry,
-    rateLimit: agentLimiter,
-    onHeartbeat: ({ deviceId, hostname, remoteAddress }) => (
-      recordHeartbeat(dataDir, deviceId, hostname, remoteAddress)
-    ),
-  });
+  let agentServer;
+  try {
+    agentServer = agentServerFactory({
+      identity,
+      registry,
+      rateLimit: agentLimiter,
+      uploadRateLimit: agentUploadLimiter,
+      uploadService,
+      onHeartbeat: ({ deviceId, hostname, remoteAddress }) => (
+        recordHeartbeat(dataDir, deviceId, hostname, remoteAddress)
+      ),
+    });
+  } catch (error) {
+    // Agent factory / upload injection failure: no management, no public half-start.
+    throw error;
+  }
 
   let managementServer;
   try {
