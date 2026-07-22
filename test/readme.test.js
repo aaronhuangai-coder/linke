@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.40**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：V1.41**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.40**';
+  const startMarker = '> **当前版本：V1.41**';
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -52,7 +52,11 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact V1.40 signature ceiling. */
+/** Exact V1.41 signature ceiling. */
+const V141_SIGNATURE =
+  'V1.41 G0b resumable manifest v2 snapshot upload implementation';
+
+/** Exact historical V1.40 signature. */
 const V140_SIGNATURE =
   'V1.40 local multi-process audit integrity write exclusive lock implementation';
 
@@ -1940,10 +1944,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.40 local multi-process audit integrity write exclusive lock', () => {
-  it('title and badge claim V1.40 as current', () => {
-    assertReadmeContains(/# Linke V1\.40/, 'README title should mention V1.40');
-    assertReadmeContains(/\*\*当前版本：V1\.40\*\*/, 'README badge should mention V1.40');
+describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
+  it('title and badge claim V1.41 as current', () => {
+    assertReadmeContains(/# Linke V1\.41/, 'README title should mention V1.41');
+    assertReadmeContains(/\*\*当前版本：V1\.41\*\*/, 'README badge should mention V1.41');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.40\*\*/, 'README badge must not still claim V1.40 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.40$/m, 'README title must not still claim V1.40 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.39\*\*/, 'README badge must not still claim V1.39 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.39$/m, 'README title must not still claim V1.39 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.38\*\*/, 'README badge must not still claim V1.38 as current');
@@ -2010,68 +2016,37 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.40 multi-process lock signature ceiling and honest boundaries', () => {
+  it('badge mentions V1.41 G0b signature ceiling and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.40 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.40 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes('| V1.41 | 当前版本 |'),
+      'extracted badge must not contain version table row "| V1.41 | 当前版本 |" (cross-region bleed guard)',
     );
     assert.ok(
-      badge.includes(V140_SIGNATURE),
-      'top badge must include V1.40 exact signature ceiling',
+      badge.includes(V141_SIGNATURE),
+      'top badge must include V1.41 exact signature ceiling',
     );
     assert.ok(
-      /lockf|\/usr\/bin\/lockf/i.test(badge),
-      'top badge must name lockf',
+      badge.includes('G0b real-LAN evidence absent') || badge.includes('real-LAN evidence absent'),
+      'top badge must state real-LAN evidence absent',
     );
     assert.ok(
-      /local multi-process|same-dataDir local multi-process|multi-process.*exclusive|exclusive.*lock/i.test(badge),
-      'top badge must claim local multi-process exclusive lock delivery',
+      /auto harness complete|automatic harness/i.test(badge),
+      'top badge must mention auto harness',
     );
     assert.ok(
-      /not distributed|no distributed|not cross-host|no cross-host/i.test(badge),
-      'top badge must deny distributed / cross-host',
+      !/G0b real-LAN complete/i.test(badge),
+      'top badge must not claim G0b real-LAN complete',
     );
     assert.ok(
-      /network FS|network-FS|network filesystem/i.test(badge)
-        && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered|out of contract/i.test(badge),
-      'top badge must bound network FS (not auto-detected/auto-rejected / not delivered)',
-    );
-    // V1.40 release/close failure ops boundary (honesty; non-absolute)
-    assert.ok(
-      badge.includes(RELEASE_CLOSE_FAIL_CLOSES),
-      'top badge must include "release/close failure fail-closes"',
+      /G0b|resumable|local multi-process|same-dataDir local multi-process/i.test(badge),
+      'top badge must claim G0b delivery or retained multi-process lock base',
     );
     assert.ok(
-      badge.includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
-      'top badge must include "task mutation may already be applied"',
-    );
-    assert.ok(
-      badge.includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
-      'top badge must include "caller retry has no idempotent/exactly-once guarantee"',
-    );
-    assert.ok(
-      badge.includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
-      'top badge must include "no deterministic in-band fd reclaim before process exit"',
-    );
-    {
-      const badgeLower = badge.toLowerCase();
-      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
-        assert.ok(
-          !badgeLower.includes(phrase.toLowerCase()),
-          `top badge must not claim absolute "${phrase}"`,
-        );
-      }
-    }
-    assert.ok(
-      badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
-      'top badge must include exact post-outcome still best-effort phrase',
-    );
-    assert.ok(
-      !badge.includes(STALE_ALL_PATHS_BEST_EFFORT),
-      'top badge must not keep stale all-paths best-effort element as current fact',
+      badge.includes('not Gold') || badge.includes('Gold remains blocked 4/4/1/9'),
+      'top badge must keep Gold honesty',
     );
     assert.ok(
       !badge.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
@@ -2085,16 +2060,20 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
       !badge.includes(STALE_MULTI_PROCESS_YET),
       'top badge must not keep remaining "not multi-process exclusive lock yet"',
     );
-    // V1.39 historical write-admission base retained after marker
+    // V1.40 historical process-lock base retained
+    assert.ok(
+      badge.includes(V140_SIGNATURE) || badge.includes('V1.40 historical base'),
+      'top badge must retain V1.40 historical base',
+    );
+    // V1.39 historical write-admission base retained
     {
-      const HISTORICAL_BASE_MARKER = 'V1.39 historical base retained';
-      const markerIdx = badge.indexOf(HISTORICAL_BASE_MARKER);
+      const markerIdx = badge.indexOf('V1.39 historical base');
       const signatureIdx = badge.indexOf(V139_SIGNATURE);
-      assert.ok(markerIdx >= 0, 'top badge must include exact "V1.39 historical base retained" marker');
+      assert.ok(markerIdx >= 0, 'top badge must include V1.39 historical base marker');
       assert.ok(signatureIdx >= 0, 'top badge must include exact V1.39 write-admission signature');
       assert.ok(
         signatureIdx > markerIdx,
-        'top badge V1.39 signature must appear after "V1.39 historical base retained" marker',
+        'top badge V1.39 signature must appear after V1.39 historical base marker',
       );
     }
     // V1.38 signature may also appear after a historical-base marker
@@ -2177,7 +2156,7 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
       'helper canary: missing badge start must fail',
     );
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.40** a\n> **当前版本：V1.40** b\n'),
+      () => extractCurrentBadgeBlockquote('> **当前版本：V1.41** a\n> **当前版本：V1.41** b\n'),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
@@ -2242,63 +2221,41 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
     }
   });
 
-  it('version table marks V1.40 current, V1.39 historical write-admission, V1.38 historical monitor, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
-    // V1.40 current row — independently lock exact signature and honesty
-    const v140RowMatch = readme.match(/\| V1\.40 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v140RowMatch, 'V1.40 current version table row must exist');
+  it('version table marks V1.41 current, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
+    // V1.41 current row — independently lock exact signature and honesty
+    const v141RowMatch = readme.match(/\| V1\.41 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v141RowMatch, 'V1.41 current version table row must exist');
     assert.ok(
-      v140RowMatch[0].includes(V140_SIGNATURE),
-      'V1.40 current table row must include exact V1.40 signature',
+      v141RowMatch[0].includes(V141_SIGNATURE),
+      'V1.41 current table row must include exact V1.41 signature',
     );
     assert.ok(
-      v140RowMatch[0].includes('not production-hardening ready'),
-      'V1.40 current table row must include exact "not production-hardening ready"',
+      v141RowMatch[0].includes('not production-hardening ready'),
+      'V1.41 current table row must include exact "not production-hardening ready"',
     );
     assert.ok(
-      v140RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
-      'V1.40 current table row must include exact Gold remains blocked 4/4/1/9',
+      v141RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
+      'V1.41 current table row must include exact Gold remains blocked 4/4/1/9',
     );
     assert.ok(
-      !v140RowMatch[0].includes(STALE_CURRENT_MULTI_PROCESS_DENY),
-      'V1.40 current table row must not keep stale "not multi-process exclusive lock"',
+      v141RowMatch[0].includes('G0b real-LAN evidence absent')
+        || v141RowMatch[0].includes('real-LAN evidence absent'),
+      'V1.41 current table row must state real-LAN evidence absent',
     );
     assert.ok(
-      !v140RowMatch[0].includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
-      'V1.40 current table row must not keep stale "single-process queue only"',
+      !/G0b real-LAN complete/i.test(v141RowMatch[0]),
+      'V1.41 current table row must not claim G0b real-LAN complete',
     );
-    assert.ok(
-      !v140RowMatch[0].includes(STALE_MULTI_PROCESS_YET),
-      'V1.40 current table row must not keep remaining "not multi-process exclusive lock yet"',
-    );
-    // V1.40 release/close failure ops boundary on current version-table row
-    assert.ok(
-      v140RowMatch[0].includes(RELEASE_CLOSE_FAIL_CLOSES),
-      'V1.40 current table row must include "release/close failure fail-closes"',
-    );
-    assert.ok(
-      v140RowMatch[0].includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
-      'V1.40 current table row must include "task mutation may already be applied"',
-    );
-    assert.ok(
-      v140RowMatch[0].includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
-      'V1.40 current table row must include "caller retry has no idempotent/exactly-once guarantee"',
-    );
-    assert.ok(
-      v140RowMatch[0].includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
-      'V1.40 current table row must include "no deterministic in-band fd reclaim before process exit"',
-    );
-    {
-      const rowLower = v140RowMatch[0].toLowerCase();
-      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
-        assert.ok(
-          !rowLower.includes(phrase.toLowerCase()),
-          `V1.40 current table row must not claim absolute "${phrase}"`,
-        );
-      }
-    }
     assertReadmeContains(
-      /\| V1\.40 \| 当前版本 \|[^|]*(local multi-process audit integrity write exclusive lock|lockf|same-dataDir local multi-process)[^|]*(T6d\.3 still partial|not T6d\.3 complete|not M6d Exit|not production-hardening ready|not Gold)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
-      'V1.40 should be current multi-process write exclusive lock milestone',
+      /\| V1\.41 \| 当前版本 \|[^|]*(G0b resumable manifest v2 snapshot upload)[^|]*(auto harness complete|real-LAN evidence absent|not G0b real-LAN complete)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
+      'V1.41 should be current G0b resumable upload milestone',
+    );
+    // V1.40 historical row — retain process-lock signature/facts
+    const v140HistMatch = readme.match(/\| V1\.40 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v140HistMatch, 'V1.40 historical version table row must exist');
+    assert.ok(
+      v140HistMatch[0].includes(V140_SIGNATURE),
+      'V1.40 historical table row must retain exact V1.40 process-lock signature',
     );
     // V1.39 historical row — retain write-admission signature/facts (must not remain 当前版本)
     const v139RowMatch = readme.match(/\| V1\.39 \| 历史版本 \|[^|\n]*/);

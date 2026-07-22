@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact positive signature ceiling for V1.40. */
+/** Exact positive signature ceiling for V1.41. */
+const V141_SIGNATURE =
+  'V1.41 G0b resumable manifest v2 snapshot upload implementation';
+
+/** Exact historical V1.40 signature — retained process-lock base; must not be erased. */
 const V140_SIGNATURE =
   'V1.40 local multi-process audit integrity write exclusive lock implementation';
 
@@ -96,8 +100,10 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.40 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.40');
+  it('LINKE_RELEASE_VERSION is the V1.41 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.41');
+    assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
   });
 
   it('README title matches LINKE_RELEASE_VERSION', async () => {
@@ -125,14 +131,27 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.40 exact signature and honesty boundaries', async () => {
+  it('README current surface carries V1.41 exact signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.40 signature MUST be on currentSurface (badge + V1.40 row only)
+    // Exact V1.41 signature MUST be on currentSurface (badge + V1.41 row only)
     assert.ok(
-      currentSurface.includes(V140_SIGNATURE),
-      `README currentSurface must include exact signature: ${V140_SIGNATURE}`,
+      currentSurface.includes(V141_SIGNATURE),
+      `README currentSurface must include exact signature: ${V141_SIGNATURE}`,
+    );
+    assert.ok(
+      currentSurface.includes('G0b real-LAN evidence absent')
+        || currentSurface.includes('real-LAN evidence absent'),
+      'current surface must state G0b real-LAN evidence absent',
+    );
+    assert.ok(
+      /auto harness complete|auto complete|automatic harness/i.test(currentSurface),
+      'current surface must mention auto harness',
+    );
+    assert.ok(
+      !/G0b real-LAN complete/i.test(currentSurface),
+      'current surface must not claim G0b real-LAN complete',
     );
 
     // Required honesty boundaries MUST each exact-include on currentSurface
@@ -143,26 +162,17 @@ describe('Release Version Consistency', () => {
       );
     }
 
-    // V1.40 process-lock delivery facts on current surface
-    assert.ok(
-      /lockf|\/usr\/bin\/lockf/i.test(currentSurface),
-      'current surface must name lockf',
+    // V1.40 historical process-lock base retained on table
+    const v140Row = lines.find(
+      (line) => line.includes('| V1.40 |') && line.includes('历史版本'),
     );
+    assert.ok(v140Row, 'README version table must retain V1.40 as 历史版本');
     assert.ok(
-      /local multi-process|same-dataDir local multi-process|multi-process.*exclusive|exclusive.*lock/i.test(currentSurface),
-      'current surface must claim local multi-process exclusive lock delivery',
-    );
-    assert.ok(
-      /not distributed|no distributed|not cross-host|no cross-host/i.test(currentSurface),
-      'current surface must deny distributed / cross-host',
-    );
-    assert.ok(
-      /network FS|network-FS|network filesystem/i.test(currentSurface)
-        && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered|out of contract|OUT OF CONTRACT/i.test(currentSurface),
-      'current surface must bound network FS (not auto-detected/auto-rejected / not delivered)',
+      v140Row.includes(V140_SIGNATURE),
+      'V1.40 historical row must retain exact V1.40 process-lock signature',
     );
 
-    // Stale standalone current multi-process denials must not remain on V1.40 current surface
+    // Stale standalone current multi-process denials must not remain on current surface
     assert.ok(
       !currentSurface.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
       'current surface must not keep stale standalone "not multi-process exclusive lock"',
@@ -176,7 +186,7 @@ describe('Release Version Consistency', () => {
       'current surface must not keep stale remaining "not multi-process exclusive lock yet"',
     );
 
-    // V1.39 historical write-admission base must remain (not erased by V1.40)
+    // V1.39 historical write-admission base must remain
     const v139Row = lines.find(
       (line) => line.includes('| V1.39 |') && line.includes('历史版本'),
     );
