@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.39**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：V1.40**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.39**';
+  const startMarker = '> **当前版本：V1.40**';
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -52,7 +52,11 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact V1.39 signature ceiling. */
+/** Exact V1.40 signature ceiling. */
+const V140_SIGNATURE =
+  'V1.40 local multi-process audit integrity write exclusive lock implementation';
+
+/** Exact historical V1.39 signature — retained write-admission base. */
 const V139_SIGNATURE =
   'V1.39 safety-critical audit write-admission fail-closed implementation';
 
@@ -67,6 +71,11 @@ const POST_OUTCOME_STILL_BEST_EFFORT =
 /** Stale all-paths best-effort element. */
 const STALE_ALL_PATHS_BEST_EFFORT =
   'server recordAudit / agent appendNasReplicationAudit best-effort catch';
+
+/** Stale standalone current multi-process denials — delivered by V1.40. */
+const STALE_CURRENT_MULTI_PROCESS_DENY = 'not multi-process exclusive lock';
+const STALE_SINGLE_PROCESS_QUEUE_ONLY = 'single-process queue only';
+const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
 
 // ── Version coverage: V0.1 – V0.5 ──────────────────────────────────
 
@@ -1912,10 +1921,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.39 safety-critical audit write-admission fail-closed', () => {
-  it('title and badge claim V1.39 as current', () => {
-    assertReadmeContains(/# Linke V1\.39/, 'README title should mention V1.39');
-    assertReadmeContains(/\*\*当前版本：V1\.39\*\*/, 'README badge should mention V1.39');
+describe('README — V1.40 local multi-process audit integrity write exclusive lock', () => {
+  it('title and badge claim V1.40 as current', () => {
+    assertReadmeContains(/# Linke V1\.40/, 'README title should mention V1.40');
+    assertReadmeContains(/\*\*当前版本：V1\.40\*\*/, 'README badge should mention V1.40');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.39\*\*/, 'README badge must not still claim V1.39 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.39$/m, 'README title must not still claim V1.39 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.38\*\*/, 'README badge must not still claim V1.38 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.38$/m, 'README title must not still claim V1.38 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.37\*\*/, 'README badge must not still claim V1.37 as current');
@@ -1980,66 +1991,74 @@ describe('README — V1.39 safety-critical audit write-admission fail-closed', (
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.39 write-admission fail-closed signature ceiling and honest boundaries', () => {
+  it('badge mentions V1.40 multi-process lock signature ceiling and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.39 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.39 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes('| V1.40 | 当前版本 |'),
+      'extracted badge must not contain version table row "| V1.40 | 当前版本 |" (cross-region bleed guard)',
     );
     assert.ok(
-      badge.includes(V139_SIGNATURE),
-      'top badge must include V1.39 exact signature ceiling',
+      badge.includes(V140_SIGNATURE),
+      'top badge must include V1.40 exact signature ceiling',
     );
     assert.ok(
-      badge.includes('pre-side-effect admission required'),
-      'top badge must include pre-side-effect admission required',
+      /lockf|\/usr\/bin\/lockf/i.test(badge),
+      'top badge must name lockf',
+    );
+    assert.ok(
+      /local multi-process|same-dataDir local multi-process|multi-process.*exclusive|exclusive.*lock/i.test(badge),
+      'top badge must claim local multi-process exclusive lock delivery',
+    );
+    assert.ok(
+      /not distributed|no distributed|not cross-host|no cross-host/i.test(badge),
+      'top badge must deny distributed / cross-host',
+    );
+    assert.ok(
+      /network FS|network-FS|network filesystem/i.test(badge)
+        && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered|out of contract/i.test(badge),
+      'top badge must bound network FS (not auto-detected/auto-rejected / not delivered)',
     );
     assert.ok(
       badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
       'top badge must include exact post-outcome still best-effort phrase',
     );
     assert.ok(
-      /recordRequiredWriteAdmissionAudit/i.test(badge),
-      'top badge must name server recordRequiredWriteAdmissionAudit',
-    );
-    assert.ok(
-      /recordRequiredNasReplicationStartAudit/i.test(badge),
-      'top badge must name agent recordRequiredNasReplicationStartAudit',
-    );
-    assert.ok(
-      /audit-delivery-unavailable/i.test(badge),
-      'top badge must name audit-delivery-unavailable',
-    );
-    assert.ok(
       !badge.includes(STALE_ALL_PATHS_BEST_EFFORT),
       'top badge must not keep stale all-paths best-effort element as current fact',
     );
-    // V1.38 signature must appear after the explicit historical-base marker (no arbitrary-position / T6d.4 substitute)
+    assert.ok(
+      !badge.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
+      'top badge must not keep stale standalone "not multi-process exclusive lock"',
+    );
+    assert.ok(
+      !badge.includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
+      'top badge must not keep stale "single-process queue only"',
+    );
+    assert.ok(
+      !badge.includes(STALE_MULTI_PROCESS_YET),
+      'top badge must not keep remaining "not multi-process exclusive lock yet"',
+    );
+    // V1.39 historical write-admission base retained after marker
     {
-      const HISTORICAL_BASE_MARKER = 'V1.38 historical base retained';
+      const HISTORICAL_BASE_MARKER = 'V1.39 historical base retained';
       const markerIdx = badge.indexOf(HISTORICAL_BASE_MARKER);
-      const signatureIdx = badge.indexOf(V138_SIGNATURE);
-      assert.ok(markerIdx >= 0, 'top badge must include exact "V1.38 historical base retained" marker');
-      assert.ok(signatureIdx >= 0, 'top badge must include exact V1.38 monitor signature');
+      const signatureIdx = badge.indexOf(V139_SIGNATURE);
+      assert.ok(markerIdx >= 0, 'top badge must include exact "V1.39 historical base retained" marker');
+      assert.ok(signatureIdx >= 0, 'top badge must include exact V1.39 write-admission signature');
       assert.ok(
         signatureIdx > markerIdx,
-        'top badge V1.38 signature must appear after "V1.38 historical base retained" marker',
+        'top badge V1.39 signature must appear after "V1.39 historical base retained" marker',
       );
-      // Mutation canaries: T6d.4 alone or signature before marker must not pass
-      const t6dOnly = 'T6d.4 minimum viable run-once path delivered';
-      assert.equal(
-        t6dOnly.includes(V138_SIGNATURE) || t6dOnly.includes(HISTORICAL_BASE_MARKER),
-        false,
-        'canary: T6d.4 substitute must not count as V1.38 historical base retention',
-      );
-      const signatureBeforeMarker = `${V138_SIGNATURE}; ${HISTORICAL_BASE_MARKER}`;
-      assert.equal(
-        signatureBeforeMarker.indexOf(V138_SIGNATURE) > signatureBeforeMarker.indexOf(HISTORICAL_BASE_MARKER),
-        false,
-        'canary: signature before marker must fail order guard',
-      );
+    }
+    // V1.38 signature may also appear after a historical-base marker
+    {
+      const markerIdx = badge.indexOf('V1.38 historical base');
+      const signatureIdx = badge.indexOf(V138_SIGNATURE);
+      if (markerIdx >= 0) {
+        assert.ok(signatureIdx > markerIdx, 'top badge V1.38 signature after historical marker when present');
+      }
     }
     assert.ok(
       /not managed scheduler|no managed scheduler|not.*scheduler/i.test(badge),
@@ -2078,10 +2097,6 @@ describe('README — V1.39 safety-critical audit write-admission fail-closed', (
     assert.ok(/runnerWiringContractReady:false/.test(badge), 'top badge runnerWiringContract false');
     assert.ok(/executionEligible:false/.test(badge), 'top badge executionEligible false');
     assert.ok(
-      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(badge),
-      'top badge not multi-process exclusive lock',
-    );
-    assert.ok(
       /no journal rotation|not journal rotation/i.test(badge),
       'top badge no journal rotation',
     );
@@ -2117,43 +2132,77 @@ describe('README — V1.39 safety-critical audit write-admission fail-closed', (
       'helper canary: missing badge start must fail',
     );
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.39** a\n> **当前版本：V1.39** b\n'),
+      () => extractCurrentBadgeBlockquote('> **当前版本：V1.40** a\n> **当前版本：V1.40** b\n'),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
   });
 
-  it('version table marks V1.39 current, V1.38 historical monitor, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
-    // V1.39 current row — independently lock exact signature and negatives
-    const v139RowMatch = readme.match(/\| V1\.39 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v139RowMatch, 'V1.39 current version table row must exist');
+  it('documents Concurrency / Audit integrity lockf local multi-process serialization boundaries', () => {
     assert.ok(
-      v139RowMatch[0].includes(V139_SIGNATURE),
-      'V1.39 current table row must include exact V1.39 signature',
+      /lockf|\/usr\/bin\/lockf/i.test(readme),
+      'README must document lockf',
     );
     assert.ok(
-      v139RowMatch[0].includes('pre-side-effect admission required'),
-      'V1.39 current table row must include pre-side-effect admission required',
+      /local multi-process|same-dataDir|多进程.*序列|序列化/i.test(readme),
+      'README must document local multi-process serialization',
     );
     assert.ok(
-      v139RowMatch[0].includes(POST_OUTCOME_STILL_BEST_EFFORT),
-      'V1.39 current table row must include post-outcome still best-effort phrase',
+      /not distributed|no distributed|不是 distributed|非 distributed|跨主机|cross-host|distributed/i.test(readme),
+      'README must bound distributed / cross-host',
     );
     assert.ok(
-      v139RowMatch[0].includes('not production-hardening ready'),
-      'V1.39 current table row must include exact "not production-hardening ready"',
+      /network FS|network-FS|网络文件系统|NFS/i.test(readme),
+      'README must mention network FS boundary',
+    );
+  });
+
+  it('version table marks V1.40 current, V1.39 historical write-admission, V1.38 historical monitor, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
+    // V1.40 current row — independently lock exact signature and honesty
+    const v140RowMatch = readme.match(/\| V1\.40 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v140RowMatch, 'V1.40 current version table row must exist');
+    assert.ok(
+      v140RowMatch[0].includes(V140_SIGNATURE),
+      'V1.40 current table row must include exact V1.40 signature',
     );
     assert.ok(
-      v139RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
-      'V1.39 current table row must include exact Gold remains blocked 4/4/1/9',
+      v140RowMatch[0].includes('not production-hardening ready'),
+      'V1.40 current table row must include exact "not production-hardening ready"',
     );
     assert.ok(
-      !v139RowMatch[0].includes(STALE_ALL_PATHS_BEST_EFFORT),
-      'V1.39 current table row must not keep stale all-paths best-effort element',
+      v140RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
+      'V1.40 current table row must include exact Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      !v140RowMatch[0].includes(STALE_CURRENT_MULTI_PROCESS_DENY),
+      'V1.40 current table row must not keep stale "not multi-process exclusive lock"',
+    );
+    assert.ok(
+      !v140RowMatch[0].includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
+      'V1.40 current table row must not keep stale "single-process queue only"',
+    );
+    assert.ok(
+      !v140RowMatch[0].includes(STALE_MULTI_PROCESS_YET),
+      'V1.40 current table row must not keep remaining "not multi-process exclusive lock yet"',
     );
     assertReadmeContains(
-      /\| V1\.39 \| 当前版本 \|[^|]*(safety-critical audit write-admission fail-closed|pre-side-effect admission required|recordRequiredWriteAdmissionAudit|recordRequiredNasReplicationStartAudit)[^|]*(post-outcome recordAudit \/ appendNasReplicationAudit still best-effort|not end-to-end production audit delivery)[^|]*(T6d\.3 still partial|not T6d\.3 complete|not M6d Exit|not production-hardening ready|not Gold)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
-      'V1.39 should be current write-admission fail-closed milestone',
+      /\| V1\.40 \| 当前版本 \|[^|]*(local multi-process audit integrity write exclusive lock|lockf|same-dataDir local multi-process)[^|]*(T6d\.3 still partial|not T6d\.3 complete|not M6d Exit|not production-hardening ready|not Gold)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
+      'V1.40 should be current multi-process write exclusive lock milestone',
+    );
+    // V1.39 historical row — retain write-admission signature/facts (must not remain 当前版本)
+    const v139RowMatch = readme.match(/\| V1\.39 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v139RowMatch, 'V1.39 historical version table row must exist');
+    assert.ok(
+      v139RowMatch[0].includes(V139_SIGNATURE),
+      'V1.39 historical table row must retain exact V1.39 write-admission signature',
+    );
+    assert.ok(
+      /write-admission|pre-side-effect|recordRequiredWriteAdmissionAudit|recordRequiredNasReplicationStartAudit|audit-delivery-unavailable/i.test(v139RowMatch[0]),
+      'V1.39 historical table row must retain write-admission facts',
+    );
+    assertReadmeContains(
+      /\| V1\.39 \| 历史版本 \|[^|]*(safety-critical audit write-admission fail-closed|pre-side-effect admission required|recordRequiredWriteAdmissionAudit|recordRequiredNasReplicationStartAudit)[^|]*(post-outcome recordAudit \/ appendNasReplicationAudit still best-effort|not end-to-end production audit delivery|T6d\.3 still partial|not production-hardening ready|Gold remains blocked)/i,
+      'V1.39 should be historical write-admission fail-closed milestone',
     );
     // V1.38 historical row — lock monitor facts (must not remain 当前版本)
     const v138RowMatch = readme.match(/\| V1\.38 \| 历史版本 \|[^|\n]*/);
@@ -2272,6 +2321,8 @@ describe('README — V1.39 safety-critical audit write-admission fail-closed', (
     assertReadmeDoesNotContain(/\| V1\.28 \| 当前版本 \|/i, 'V1.28 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.29 \| 当前版本 \|/i, 'V1.29 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.30 \| 当前版本 \|/i, 'V1.30 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.39 \| 当前版本 \|/i, 'V1.39 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.38 \| 当前版本 \|/i, 'V1.38 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.37 \| 当前版本 \|/i, 'V1.37 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.36 \| 当前版本 \|/i, 'V1.36 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.35 \| 当前版本 \|/i, 'V1.35 must not remain marked as current');

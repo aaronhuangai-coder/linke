@@ -74,11 +74,15 @@ function assertTextProductionHardeningReadyNegated(text, label = 'text') {
 /** Exact Gold short phrase required on production-hardening surface. */
 const GOLD_REMAINS_BLOCKED_4419 = 'Gold remains blocked 4/4/1/9';
 
-/** Ambiguous slash aggregate forbidden on V1.39 current-state surface. */
+/** Ambiguous slash aggregate forbidden on V1.40 current-state surface. */
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
 
-/** Exact V1.39 signature ceiling. */
+/** Exact V1.40 signature ceiling. */
+const V140_SIGNATURE =
+  'V1.40 local multi-process audit integrity write exclusive lock implementation';
+
+/** Exact historical V1.39 signature — retained write-admission base. */
 const V139_SIGNATURE =
   'V1.39 safety-critical audit write-admission fail-closed implementation';
 
@@ -91,7 +95,7 @@ const POST_OUTCOME_STILL_BEST_EFFORT =
   'post-outcome recordAudit / appendNasReplicationAudit still best-effort';
 
 /**
- * Exact V1.39 write-admission failure boundary atom.
+ * Exact V1.39 write-admission failure boundary atom (historical retained fact).
  * Binds required write-admission failure + audit-delivery-unavailable + HTTP 503 / CLI exit 1
  * in one evidence element — must not be satisfied by V1.38 nextStep historical
  * "exit 1 argv or program error".
@@ -101,7 +105,7 @@ const WRITE_ADMISSION_FAILURE_BOUNDARY =
 
 /**
  * Exact V1.38 historical nextStep monitor exit-1 phrase (must match production nextStep text).
- * Must not appear in the V1.39 current nextStep segment or substitute for write-admission boundary.
+ * Must not appear in the V1.40 current nextStep segment or substitute for write-admission boundary.
  */
 const V138_MONITOR_EXIT_1 = 'exit 1 argv or program error';
 
@@ -109,7 +113,16 @@ const V138_MONITOR_EXIT_1 = 'exit 1 argv or program error';
 const STALE_ALL_PATHS_BEST_EFFORT =
   'server recordAudit / agent appendNasReplicationAudit best-effort catch';
 
-/** Frozen Gold item id/status snapshot (statuses must not change in V1.39). */
+/**
+ * Stale standalone current multi-process denials — delivered by V1.40.
+ * Forbidden as exact evidence elements / current prefix / remaining-work list.
+ * Historical V1.37/V1.39 prose may still mention them as past fact.
+ */
+const STALE_CURRENT_MULTI_PROCESS_DENY = 'not multi-process exclusive lock';
+const STALE_SINGLE_PROCESS_QUEUE_ONLY = 'single-process queue only';
+const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
+
+/** Frozen Gold item id/status snapshot (statuses must not change in V1.40). */
 const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'release-readiness', status: 'ready' },
   { id: 'local-backup-restore', status: 'ready' },
@@ -121,6 +134,14 @@ const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'real-nas-remote-backup', status: 'blocked' },
   { id: 'production-hardening', status: 'partial' },
 ]);
+
+/**
+ * Current production-hardening prefix: text before first V1.39/V1.38/V1.37 historical marker.
+ * Used to reject stale multi-process denials that are only valid as historical fact.
+ */
+function productionHardeningCurrentPrefix(text) {
+  return String(text).split(/V1\.39 historical|V1\.38 historical|V1\.37 historical/)[0];
+}
 
 /**
  * Element-level helper: every evidence element that contains positivePhrase
@@ -275,13 +296,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.39', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.39');
+  it('expects LINKE_RELEASE_VERSION to be V1.40', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.40');
   });
 
-  it('expects report.version to be V1.39', () => {
+  it('expects report.version to be V1.40', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.39');
+    assert.strictEqual(report.version, 'V1.40');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -291,7 +312,7 @@ describe('Gold Readiness Report', () => {
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.39 does not change statuses)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.40 does not change statuses)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -797,10 +818,96 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.39 honesty: pre-side-effect write-admission required; post-outcome still best-effort; T6d.3 still partial
+    // V1.40 honesty: local multi-process write exclusive lock delivered; T6d.3 still partial
+    assert.ok(
+      hardeningEvidence.includes(V140_SIGNATURE),
+      'production-hardening evidence must include V1.40 exact signature ceiling',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes(V140_SIGNATURE)
+        || hardeningItem.evidence[0] === V140_SIGNATURE
+        || hardeningEvidence.indexOf(V140_SIGNATURE) < hardeningEvidence.indexOf(V139_SIGNATURE),
+      'production-hardening evidence must place V1.40 signature before V1.39 historical base',
+    );
+    // V1.40 process-lock locus + tests
+    assert.ok(
+      hardeningItem.evidence.includes('src/audit-integrity-process-lock.js'),
+      'production-hardening evidence must exact-include src/audit-integrity-process-lock.js',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes('src/audit-integrity-write-queue.js'),
+      'production-hardening evidence must exact-include src/audit-integrity-write-queue.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-process-lock.test.js'),
+      'production-hardening evidence must include test/audit-integrity-process-lock.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-process-lock-queue.test.js'),
+      'production-hardening evidence must include test/audit-integrity-process-lock-queue.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-multiprocess-lock.test.js'),
+      'production-hardening evidence must include test/audit-integrity-multiprocess-lock.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-process-lock-scans.test.js'),
+      'production-hardening evidence must include test/audit-integrity-process-lock-scans.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('/usr/bin/lockf') || /lockf fd form/i.test(hardeningEvidence),
+      'production-hardening evidence must name /usr/bin/lockf fd form',
+    );
+    assert.ok(
+      /exact -s -t 5 3|-s -t 5 3/i.test(hardeningEvidence),
+      'production-hardening evidence must name exact -s -t 5 3 semantics',
+    );
+    assert.ok(
+      /same-dataDir local multi-process exclusive serialization|local multi-process exclusive/i.test(hardeningEvidence),
+      'production-hardening evidence must claim same-dataDir local multi-process exclusive serialization',
+    );
+    assert.ok(
+      /acquire→lease→task→expire→release|acquire.?lease.?task.?expire.?release/i.test(hardeningEvidence),
+      'production-hardening evidence must name queue acquire→lease→task→expire→release',
+    );
+    assert.ok(
+      /SIGKILL/i.test(hardeningEvidence) && /inode/i.test(hardeningEvidence),
+      'production-hardening evidence must mention holder/waiter SIGKILL and inode permanence',
+    );
+    assert.ok(
+      /local only/i.test(hardeningEvidence),
+      'production-hardening evidence must state local only',
+    );
+    assert.ok(
+      /not distributed|no distributed/i.test(hardeningEvidence),
+      'production-hardening evidence must deny distributed',
+    );
+    assert.ok(
+      /not cross-host|no cross-host/i.test(hardeningEvidence),
+      'production-hardening evidence must deny cross-host',
+    );
+    assert.ok(
+      /network FS|network-FS/i.test(hardeningEvidence)
+        && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered/i.test(hardeningEvidence),
+      'production-hardening evidence must bound network FS detection/correctness as not delivered',
+    );
+    // Stale standalone exact elements forbidden (historical prose may still mention past fact)
+    assert.ok(
+      !hardeningItem.evidence.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
+      'production-hardening evidence must not keep standalone exact "not multi-process exclusive lock"',
+    );
+    assert.ok(
+      !hardeningItem.evidence.includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
+      'production-hardening evidence must not keep standalone exact "single-process queue only"',
+    );
+    assert.ok(
+      !hardeningItem.evidence.some((e) => String(e).includes(STALE_MULTI_PROCESS_YET)),
+      'production-hardening evidence must not keep remaining "not multi-process exclusive lock yet"',
+    );
+    // V1.39 historical write-admission base retained
     assert.ok(
       hardeningEvidence.includes(V139_SIGNATURE),
-      'production-hardening evidence must include V1.39 exact signature ceiling',
+      'production-hardening evidence must retain V1.39 exact write-admission signature',
     );
     assert.ok(
       hardeningEvidence.includes('pre-side-effect admission required'),
@@ -1028,12 +1135,12 @@ describe('Gold Readiness Report', () => {
       /not T6d\.3 complete|not.*T6d\.3 complete/i.test(hardeningEvidence),
       'production-hardening evidence must deny T6d.3 complete',
     );
+    // V1.40 delivered multi-process exclusive lock; historical V1.37 may still mention single-process queue
     assert.ok(
-      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(hardeningEvidence)
-        && /single-process/i.test(hardeningEvidence),
-      'production-hardening evidence must deny multi-process exclusive lock',
+      /single-process/i.test(hardeningEvidence),
+      'production-hardening evidence must retain V1.37 historical single-process queue wording',
     );
-    // V1.39 current-state: pre-side-effect admission required; post-outcome still best-effort;
+    // V1.40 current-state: local multi-process lock delivered; post-outcome still best-effort;
     // local run-once monitor/alert delivered (V1.38 base); still no journal rotation;
     // not managed scheduler; not remote notification delivery; not production monitoring ready
     assert.ok(
@@ -1051,7 +1158,7 @@ describe('Gold Readiness Report', () => {
       ),
       'production-hardening evidence must not keep stale exact "no journal rotation / monitor / alert" current-state element',
     );
-    // Ambiguous slash aggregate forbidden on V1.39 current-state evidence
+    // Ambiguous slash aggregate forbidden on V1.40 current-state evidence
     assert.ok(
       !hardeningItem.evidence.some((e) => String(e).includes(STALE_SLASH_AGGREGATE)),
       'production-hardening evidence must not keep slash aggregate rotation/scheduler/remote',
@@ -1129,76 +1236,102 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realRunnerWiringReady:false'));
     assert.ok(hardeningEvidence.includes('runnerWiringContractReady:false'));
     assert.ok(hardeningEvidence.includes('executionEligible:false'));
-    // V1.39 nextStep leads with write-admission fail-closed honesty + exact signature
+    // V1.40 nextStep leads with multi-process write exclusive lock honesty + exact signature
     assert.ok(
-      hardeningItem.nextStep.startsWith('V1.39'),
-      'production-hardening nextStep must lead with V1.39',
+      hardeningItem.nextStep.startsWith('V1.40'),
+      'production-hardening nextStep must lead with V1.40',
     );
     assert.ok(
-      hardeningItem.nextStep.includes(V139_SIGNATURE),
-      'production-hardening nextStep must include V1.39 exact signature',
+      hardeningItem.nextStep.includes(V140_SIGNATURE),
+      'production-hardening nextStep must include V1.40 exact signature',
     );
     assert.ok(
-      hardeningItem.nextStep.includes('pre-side-effect admission required'),
-      'production-hardening nextStep must include pre-side-effect admission required',
+      hardeningItem.nextStep.includes('src/audit-integrity-process-lock.js')
+        || hardeningItem.nextStep.includes('audit-integrity-process-lock'),
+      'production-hardening nextStep must name process-lock module',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('src/audit-integrity-write-queue.js')
+        || hardeningItem.nextStep.includes('audit-integrity-write-queue'),
+      'production-hardening nextStep must name write-queue module',
+    );
+    assert.ok(
+      /lockf|\/usr\/bin\/lockf/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must name lockf',
+    );
+    assert.ok(
+      /same-dataDir local multi-process|local multi-process exclusive/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must claim local multi-process exclusive serialization',
+    );
+    assert.ok(
+      /not distributed|no distributed/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny distributed',
+    );
+    assert.ok(
+      /not cross-host|no cross-host/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny cross-host',
     );
     assert.ok(
       hardeningItem.nextStep.includes(POST_OUTCOME_STILL_BEST_EFFORT),
       'production-hardening nextStep must include exact post-outcome still best-effort phrase',
     );
     assert.ok(
-      hardeningItem.nextStep.includes('recordRequiredWriteAdmissionAudit'),
-      'production-hardening nextStep must name server recordRequiredWriteAdmissionAudit',
-    );
-    assert.ok(
-      hardeningItem.nextStep.includes('recordRequiredNasReplicationStartAudit'),
-      'production-hardening nextStep must name agent recordRequiredNasReplicationStartAudit',
-    );
-    assert.ok(
       hardeningItem.nextStep.includes('not end-to-end production audit delivery'),
       'production-hardening nextStep must deny end-to-end production audit delivery',
     );
-    // V1.39 current nextStep segment must bind write-admission failure to HTTP 503 / CLI exit 1
-    // (not rely on later V1.38 historical "exit 1 argv or program error")
+    // V1.40 current nextStep prefix must not keep stale multi-process denials
     {
-      const nextV139Current = hardeningItem.nextStep.split(/V1\.38 historical/)[0];
+      const nextCurrent = productionHardeningCurrentPrefix(hardeningItem.nextStep);
       assert.ok(
-        nextV139Current.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
-        'production-hardening nextStep V1.39 current segment must include exact write-admission HTTP 503 / CLI exit 1 boundary',
+        nextCurrent.includes(V140_SIGNATURE),
+        'production-hardening nextStep current prefix must include V1.40 signature',
       );
       assert.ok(
-        !nextV139Current.includes(V138_MONITOR_EXIT_1),
-        'production-hardening nextStep V1.39 current segment must not use V1.38 monitor exit 1 as admission boundary',
+        !nextCurrent.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
+        'production-hardening nextStep current prefix must not keep stale "not multi-process exclusive lock"',
+      );
+      assert.ok(
+        !nextCurrent.includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
+        'production-hardening nextStep current prefix must not keep stale "single-process queue only"',
+      );
+      assert.ok(
+        !nextCurrent.includes(V138_MONITOR_EXIT_1),
+        'production-hardening nextStep current prefix must not use V1.38 monitor exit 1 as admission boundary',
       );
     }
-    // Mutation canary: V1.38-only exit 1 in later historical text must not satisfy current-segment lock;
-    // and the real historical phrase (aligned constant) must be caught if leaked into current segment.
+    assert.ok(
+      !hardeningItem.nextStep.includes(STALE_MULTI_PROCESS_YET),
+      'production-hardening nextStep remaining list must not keep "not multi-process exclusive lock yet"',
+    );
+    // V1.39 historical write-admission base retained in nextStep (signature + boundary atom)
+    assert.ok(
+      hardeningItem.nextStep.includes(V139_SIGNATURE),
+      'production-hardening nextStep must retain V1.39 exact write-admission signature',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes('pre-side-effect admission required')
+        || hardeningItem.nextStep.includes('recordRequiredWriteAdmissionAudit'),
+      'production-hardening nextStep must retain write-admission facts',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(WRITE_ADMISSION_FAILURE_BOUNDARY)
+        || /write-admission|audit-delivery-unavailable/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must retain write-admission / audit-delivery-unavailable facts',
+    );
+    // Mutation canary: V1.38-only exit 1 in later historical text must not satisfy current-segment lock
     {
       const hostileNext =
-        `V1.39 adds write-admission; audit-delivery-unavailable; V1.38 historical base: ${V138_MONITOR_EXIT_1}`;
-      const currentSeg = hostileNext.split(/V1\.38 historical/)[0];
+        `V1.40 adds process lock; audit-delivery-unavailable; V1.39 historical base: write-admission; V1.38 historical base: ${V138_MONITOR_EXIT_1}`;
+      const currentSeg = productionHardeningCurrentPrefix(hostileNext);
       assert.equal(
         currentSeg.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
         false,
-        'canary: V1.39 segment with bare audit-delivery-unavailable must fail exact admission boundary',
+        'canary: V1.40 current segment with bare audit-delivery-unavailable must fail exact admission boundary',
       );
       assert.equal(
         hostileNext.includes('exit 1') && !currentSeg.includes(WRITE_ADMISSION_FAILURE_BOUNDARY),
         true,
         'canary: whole-nextStep exit 1 from V1.38 must not greenwash missing current-segment boundary',
-      );
-      const leakedCurrent =
-        `V1.39 write-admission; ${V138_MONITOR_EXIT_1}; V1.38 historical base: ${V138_MONITOR_EXIT_1}`
-          .split(/V1\.38 historical/)[0];
-      assert.equal(
-        leakedCurrent.includes(V138_MONITOR_EXIT_1),
-        true,
-        'canary: real V1.38 nextStep exit-1 phrase leaked into current segment is detectable',
-      );
-      assert.equal(
-        !leakedCurrent.includes(V138_MONITOR_EXIT_1),
-        false,
-        'canary: ban must reject real historical exit-1 phrase when present in V1.39 current segment',
       );
     }
     // V1.38 historical monitor base retained in nextStep
@@ -1227,7 +1360,7 @@ describe('Gold Readiness Report', () => {
       /not production monitoring ready|no production monitoring ready/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny production monitoring ready',
     );
-    // V1.37 historical dual-write coordinator pointer (must remain after V1.39 lead-in)
+    // V1.37 historical dual-write coordinator pointer (must remain after V1.40 lead-in)
     assert.ok(
       hardeningItem.nextStep.includes('V1.37'),
       'production-hardening nextStep must retain V1.37 historical pointer',
@@ -1245,7 +1378,7 @@ describe('Gold Readiness Report', () => {
       /journal-first/i.test(hardeningItem.nextStep)
         && /single-slot|single.?slot|WAL|cursor/i.test(hardeningItem.nextStep)
         && /single-process/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must name journal-first + single-slot WAL + single-process',
+      'production-hardening nextStep must name journal-first + single-slot WAL + single-process (V1.37 historical)',
     );
     assert.ok(
       /T6d\.3 still partial|T6d\.3 partial only/i.test(hardeningItem.nextStep),
@@ -1259,10 +1392,18 @@ describe('Gold Readiness Report', () => {
       /not M6d Exit|不是 M6d Exit|does not complete M6d Exit/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny M6d Exit',
     );
-    assert.ok(
-      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must deny multi-process exclusive lock',
-    );
+    // Historical V1.37 may still state not multi-process exclusive lock; current prefix must not
+    {
+      const historicalOnly = hardeningItem.nextStep.slice(
+        hardeningItem.nextStep.search(/V1\.37 historical|V1\.37 journal-first/),
+      );
+      assert.ok(
+        historicalOnly.length > 0
+          && (/not multi-process exclusive lock|no multi-process exclusive lock|single-process queue only|single-process queue/i.test(historicalOnly)
+            || /V1\.37 historical base/i.test(hardeningItem.nextStep)),
+        'production-hardening nextStep may retain V1.37 historical multi-process-not-yet / single-process fact',
+      );
+    }
     assert.ok(
       /no journal rotation|not journal rotation/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny journal rotation',
@@ -1318,7 +1459,7 @@ describe('Gold Readiness Report', () => {
       'production-hardening nextStep must not claim V1.37 is not dual-write / no production caller',
     );
     assert.ok(hardeningItem.nextStep.includes('production-hardening remains partial'));
-    // Exact negative inside V1.39 capability-boundary parentheses
+    // Exact negative inside V1.40 capability-boundary parentheses
     assert.ok(
       hardeningItem.nextStep.includes(NOT_PRODUCTION_HARDENING_READY),
       'production-hardening nextStep must include exact "not production-hardening ready"',
@@ -1379,7 +1520,7 @@ describe('Gold Readiness Report', () => {
       true,
       'positive control: period+space after negative with T6d.3 must pass (no false split on version dot)',
     );
-    // V1.39 hostile honesty canaries: bare remote/scheduler/production-monitoring
+    // V1.40 hostile honesty canaries: bare remote/scheduler/production-monitoring
     // positives must not be sheltered by earlier Not, arbitrary same-clause not, or joined evidence
     assert.equal(
       clauseLocalDirectBarePositiveNegated('production monitoring ready', 'production monitoring ready'),
@@ -1564,8 +1705,12 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningItem.nextStep.includes('executionEligible:false'));
     // Next steps should point at remaining gaps (not imply this milestone is Gold)
     assert.ok(
-      /multi-process|rotation|remote notification|managed scheduler|production monitoring|anchor|authenticity|end-to-end|caller delivery|best-effort/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must point at remaining multi-process / rotation / remote / scheduler / e2e / authenticity gaps',
+      /rotation|remote notification|managed scheduler|production monitoring|anchor|authenticity|end-to-end|caller delivery|best-effort|distributed|network FS/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must point at remaining rotation / remote / scheduler / e2e / authenticity / distributed gaps',
+    );
+    assert.ok(
+      !/next remaining work still missing \(not delivered\):[^.]*not multi-process exclusive lock yet/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep remaining list must not claim multi-process exclusive lock still missing',
     );
     // V1.36 historical cross-store pointer (must not erase base)
     assert.ok(hardeningItem.nextStep.includes('V1.36'));
@@ -1599,8 +1744,9 @@ describe('Gold Readiness Report', () => {
         || hardeningItem.nextStep.includes('无密钥哈希链结构一致性基座'),
       'production-hardening nextStep must retain V1.35 journal foundation pointer',
     );
-    // V1.34 historical real-audit pointer (must not jump V1.39 → V1.35 / skip V1.38/V1.37/V1.36)
+    // V1.34 historical real-audit pointer (must not jump V1.40 → V1.35 / skip V1.39/V1.38/V1.37/V1.36)
     assert.ok(hardeningItem.nextStep.includes('V1.34'));
+
     assert.ok(hardeningItem.nextStep.includes('M6d-prep'));
     assert.ok(
       /third real|第三个/.test(hardeningItem.nextStep) ||

@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact positive signature ceiling for V1.39. */
+/** Exact positive signature ceiling for V1.40. */
+const V140_SIGNATURE =
+  'V1.40 local multi-process audit integrity write exclusive lock implementation';
+
+/** Exact historical V1.39 signature — retained write-admission base; must not be erased. */
 const V139_SIGNATURE =
   'V1.39 safety-critical audit write-admission fail-closed implementation';
 
@@ -17,24 +21,27 @@ const V138_SIGNATURE =
 
 /** Required honesty boundary phrases — must appear on currentSurface only. */
 const HONESTY_BOUNDARIES = Object.freeze([
-  'pre-side-effect admission required',
-  'post-outcome recordAudit / appendNasReplicationAudit still best-effort',
-  'not end-to-end production audit delivery',
   'T6d.3 still partial',
   'not T6d.3 complete',
   'not M6d Exit',
   'not production-hardening ready',
   'not Gold',
   'Gold remains blocked 4/4/1/9',
+  'not end-to-end production audit delivery',
 ]);
 
 /** Ambiguous slash aggregate that must not appear as current-state wording. */
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
 
-/** Stale all-paths best-effort element — must not remain as current-state wording. */
-const STALE_ALL_PATHS_BEST_EFFORT =
-  'server recordAudit / agent appendNasReplicationAudit best-effort catch';
+/**
+ * Stale standalone current claims — delivered by V1.40; must not remain on
+ * V1.40 current surface (badge + current version-table row). Historical
+ * V1.39/V1.38/V1.37 rows may still state them as past fact.
+ */
+const STALE_CURRENT_MULTI_PROCESS_DENY = 'not multi-process exclusive lock';
+const STALE_SINGLE_PROCESS_QUEUE_ONLY = 'single-process queue only';
+const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
 
 /**
  * Clause-local split for honesty canaries.
@@ -79,7 +86,7 @@ function extractCurrentSurface(readme) {
   const currentRow = lines.find(
     (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
   );
-  assert.ok(currentRow, 'README version table current row for V1.39 must exist');
+  assert.ok(currentRow, 'README version table current row for V1.40 must exist');
   return { badge, currentRow, currentSurface: `${badge}\n${currentRow}`, lines };
 }
 
@@ -89,8 +96,8 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.39 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.39');
+  it('LINKE_RELEASE_VERSION is the V1.40 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.40');
   });
 
   it('README title matches LINKE_RELEASE_VERSION', async () => {
@@ -118,14 +125,14 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.39 exact signature and honesty boundaries', async () => {
+  it('README current surface carries V1.40 exact signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.39 signature MUST be on currentSurface (badge + V1.39 row only)
+    // Exact V1.40 signature MUST be on currentSurface (badge + V1.40 row only)
     assert.ok(
-      currentSurface.includes(V139_SIGNATURE),
-      `README currentSurface must include exact signature: ${V139_SIGNATURE}`,
+      currentSurface.includes(V140_SIGNATURE),
+      `README currentSurface must include exact signature: ${V140_SIGNATURE}`,
     );
 
     // Required honesty boundaries MUST each exact-include on currentSurface
@@ -136,27 +143,54 @@ describe('Release Version Consistency', () => {
       );
     }
 
-    // Required admission helpers must be named on current surface
+    // V1.40 process-lock delivery facts on current surface
     assert.ok(
-      /recordRequiredWriteAdmissionAudit/i.test(currentSurface),
-      'current surface must name server recordRequiredWriteAdmissionAudit',
+      /lockf|\/usr\/bin\/lockf/i.test(currentSurface),
+      'current surface must name lockf',
     );
     assert.ok(
-      /recordRequiredNasReplicationStartAudit/i.test(currentSurface),
-      'current surface must name agent recordRequiredNasReplicationStartAudit',
+      /local multi-process|same-dataDir local multi-process|multi-process.*exclusive|exclusive.*lock/i.test(currentSurface),
+      'current surface must claim local multi-process exclusive lock delivery',
     );
     assert.ok(
-      /audit-delivery-unavailable/i.test(currentSurface),
-      'current surface must name audit-delivery-unavailable',
+      /not distributed|no distributed|not cross-host|no cross-host/i.test(currentSurface),
+      'current surface must deny distributed / cross-host',
+    );
+    assert.ok(
+      /network FS|network-FS|network filesystem/i.test(currentSurface)
+        && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered|out of contract|OUT OF CONTRACT/i.test(currentSurface),
+      'current surface must bound network FS (not auto-detected/auto-rejected / not delivered)',
     );
 
-    // Stale all-paths best-effort wording must not remain as current-state fact
+    // Stale standalone current multi-process denials must not remain on V1.40 current surface
     assert.ok(
-      !currentSurface.includes(STALE_ALL_PATHS_BEST_EFFORT),
-      'current surface must not keep stale all-paths best-effort element as current fact',
+      !currentSurface.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
+      'current surface must not keep stale standalone "not multi-process exclusive lock"',
+    );
+    assert.ok(
+      !currentSurface.includes(STALE_SINGLE_PROCESS_QUEUE_ONLY),
+      'current surface must not keep stale "single-process queue only"',
+    );
+    assert.ok(
+      !currentSurface.includes(STALE_MULTI_PROCESS_YET),
+      'current surface must not keep stale remaining "not multi-process exclusive lock yet"',
     );
 
-    // V1.38 historical monitor base must remain (not erased by V1.39)
+    // V1.39 historical write-admission base must remain (not erased by V1.40)
+    const v139Row = lines.find(
+      (line) => line.includes('| V1.39 |') && line.includes('历史版本'),
+    );
+    assert.ok(v139Row, 'README version table must retain V1.39 as 历史版本');
+    assert.ok(
+      v139Row.includes(V139_SIGNATURE),
+      'V1.39 historical row must retain exact V1.39 write-admission signature',
+    );
+    assert.ok(
+      /write-admission|pre-side-effect|recordRequiredWriteAdmissionAudit|recordRequiredNasReplicationStartAudit|audit-delivery-unavailable/i.test(v139Row),
+      'V1.39 historical row must retain write-admission facts',
+    );
+
+    // V1.38 historical monitor base must remain
     const v138Row = lines.find(
       (line) => line.includes('| V1.38 |') && line.includes('历史版本'),
     );
@@ -170,7 +204,7 @@ describe('Release Version Consistency', () => {
       'V1.38 historical row must retain T6d.4 / monitor base facts',
     );
 
-    // V1.37 historical dual-write base must remain
+    // V1.37 historical dual-write base must remain (may retain historical multi-process-not-yet wording)
     const v137Row = lines.find(
       (line) => line.includes('| V1.37 |') && line.includes('历史版本'),
     );
@@ -211,10 +245,6 @@ describe('Release Version Consistency', () => {
     assert.ok(
       /not remote notification delivery|no remote notification delivery/i.test(currentSurface),
       'current surface must deny remote notification delivery directly',
-    );
-    assert.ok(
-      /not multi-process exclusive lock|no multi-process exclusive lock/i.test(currentSurface),
-      'current surface must deny multi-process exclusive lock',
     );
     assert.ok(
       /not production monitoring ready|no production monitoring ready/i.test(currentSurface),
