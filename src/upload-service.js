@@ -127,6 +127,160 @@ function coerceBodyBuffer(bodyResult) {
 }
 
 /**
+ * Pure helper: derive wire-safe missingSummary from a trusted store public summary.
+ * Uses only files[{fileIndex,size,confirmedBytes,confirmedChunks,complete}];
+ * hostile / incomplete integer shape → fail-close (no guessing).
+ *
+ * @param {unknown} summary
+ * @returns {Readonly<{
+ *   next?: Readonly<{
+ *     fileIndex: number,
+ *     chunkIndex: number,
+ *     offset: number,
+ *     size: number,
+ *     complete: false,
+ *   }>,
+ *   remainingFiles: number,
+ *   remainingBytes: number,
+ *   remainingChunks: number,
+ *   complete: boolean,
+ * }>}
+ */
+function deriveMissingSummary(summary) {
+  if (!isNonNullObject(summary)) failIo();
+  let files;
+  try {
+    files = /** @type {{ files?: unknown }} */ (summary).files;
+  } catch {
+    failIo();
+  }
+  if (!Array.isArray(files)) failIo();
+
+  let remainingFiles = 0;
+  let remainingBytes = 0;
+  let remainingChunks = 0;
+  /** @type {{
+   *   fileIndex: number,
+   *   chunkIndex: number,
+   *   offset: number,
+   *   size: number,
+   *   complete: false,
+   * } | null} */
+  let next = null;
+
+  for (let i = 0; i < files.length; i += 1) {
+    const f = files[i];
+    if (!isNonNullObject(f)) failIo();
+    let fileIndex;
+    let size;
+    let confirmedBytes;
+    let confirmedChunks;
+    let complete;
+    try {
+      fileIndex = /** @type {{ fileIndex?: unknown }} */ (f).fileIndex;
+      size = /** @type {{ size?: unknown }} */ (f).size;
+      confirmedBytes = /** @type {{ confirmedBytes?: unknown }} */ (f).confirmedBytes;
+      confirmedChunks = /** @type {{ confirmedChunks?: unknown }} */ (f).confirmedChunks;
+      complete = /** @type {{ complete?: unknown }} */ (f).complete;
+    } catch {
+      failIo();
+    }
+    if (!Number.isSafeInteger(fileIndex) || fileIndex !== i) failIo();
+    if (!Number.isSafeInteger(size) || size < 0) failIo();
+    if (!Number.isSafeInteger(confirmedBytes) || confirmedBytes < 0 || confirmedBytes > size) {
+      failIo();
+    }
+    if (!Number.isSafeInteger(confirmedChunks) || confirmedChunks < 0) failIo();
+    if (typeof complete !== 'boolean') failIo();
+
+    if (size === 0) {
+      if (confirmedBytes !== 0 || confirmedChunks !== 0 || complete !== true) failIo();
+      continue;
+    }
+
+    if (complete === true) {
+      if (confirmedBytes !== size) failIo();
+      continue;
+    }
+
+    // Incomplete positive-size file.
+    const rem = size - confirmedBytes;
+    if (!Number.isSafeInteger(rem) || rem <= 0) failIo();
+    remainingFiles += 1;
+    remainingBytes += rem;
+    if (!Number.isSafeInteger(remainingBytes)) failIo();
+    const remChunks = Math.ceil(rem / UPLOAD_CHUNK_SIZE);
+    if (!Number.isSafeInteger(remChunks) || remChunks < 1) failIo();
+    remainingChunks += remChunks;
+    if (!Number.isSafeInteger(remainingChunks)) failIo();
+
+    if (next === null) {
+      const chunkIndex = Math.floor(confirmedBytes / UPLOAD_CHUNK_SIZE);
+      const chunkSize = Math.min(UPLOAD_CHUNK_SIZE, rem);
+      if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0) failIo();
+      if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0 || chunkSize > UPLOAD_CHUNK_SIZE) {
+        failIo();
+      }
+      next = Object.freeze({
+        fileIndex,
+        chunkIndex,
+        offset: confirmedBytes,
+        size: chunkSize,
+        complete: /** @type {false} */ (false),
+      });
+    }
+  }
+
+  if (remainingFiles === 0) {
+    if (remainingBytes !== 0 || remainingChunks !== 0 || next !== null) failIo();
+    return Object.freeze({
+      remainingFiles: 0,
+      remainingBytes: 0,
+      remainingChunks: 0,
+      complete: true,
+    });
+  }
+  if (next === null) failIo();
+  return Object.freeze({
+    next,
+    remainingFiles,
+    remainingBytes,
+    remainingChunks,
+    complete: false,
+  });
+}
+
+/**
+ * Attach missingSummary to a trusted store summary while preserving original fields
+ * for domain callers (listener projects allowlist only).
+ *
+ * @param {unknown} summary
+ * @returns {Readonly<Record<string, unknown>>}
+ */
+function attachMissingSummary(summary) {
+  if (!isNonNullObject(summary)) failIo();
+  const missingSummary = deriveMissingSummary(summary);
+  /** @type {Record<string, unknown>} */
+  const out = Object.create(null);
+  let keys;
+  try {
+    keys = Object.keys(summary);
+  } catch {
+    failIo();
+  }
+  for (const key of keys) {
+    if (typeof key !== 'string') failIo();
+    try {
+      out[key] = /** @type {Record<string, unknown>} */ (summary)[key];
+    } catch {
+      failIo();
+    }
+  }
+  out.missingSummary = missingSummary;
+  return Object.freeze(out);
+}
+
+/**
  * Create pure-domain upload service. Does not listen on ports or register routes.
  *
  * @param {{
@@ -288,13 +442,15 @@ export function createUploadService(options) {
         // After project/preflight, before store.createSession mutation.
         throwIfAborted(signal);
         try {
-          return await store.createSession({
+          const session = await store.createSession({
             authenticatedDeviceId,
             snapshotId: projected.manifest.snapshotId,
             manifestDigest: projected.manifestDigest,
             canonicalManifest: projected.manifest,
             signal,
           });
+          throwIfAborted(signal);
+          return attachMissingSummary(session);
         } catch (error) {
           rethrowSafe(error);
         }
@@ -313,11 +469,13 @@ export function createUploadService(options) {
     try {
       // Legacy direct-service contract: only authenticatedDeviceId+uploadId when no signal.
       // Propagate signal key only when a real AbortSignal is present (C6 always passes one).
-      return await store.getSession({
+      const session = await store.getSession({
         authenticatedDeviceId: input?.authenticatedDeviceId,
         uploadId: input?.uploadId,
         ...(signal !== undefined ? { signal } : {}),
       });
+      throwIfAborted(signal);
+      return attachMissingSummary(session);
     } catch (error) {
       rethrowSafe(error);
     }
@@ -539,6 +697,28 @@ export function createUploadService(options) {
               signal,
             });
             throwIfAborted(signal);
+            // Re-read after commit; only status=committed is a success summary.
+            const after = await store.getSession({
+              authenticatedDeviceId,
+              uploadId,
+              ...(signal !== undefined ? { signal } : {}),
+            });
+            throwIfAborted(signal);
+            if (
+              !isNonNullObject(after)
+              || /** @type {{ status?: unknown }} */ (after).status !== 'committed'
+            ) {
+              failIo();
+            }
+            // Identity must still match the session we committed.
+            if (
+              /** @type {{ uploadId?: unknown }} */ (after).uploadId !== uploadId
+              || /** @type {{ deviceId?: unknown }} */ (after).deviceId !== authenticatedDeviceId
+              || /** @type {{ snapshotId?: unknown }} */ (after).snapshotId !== snapshotId
+            ) {
+              failIo();
+            }
+            return attachMissingSummary(after);
           } catch (error) {
             rethrowSafe(error);
           }

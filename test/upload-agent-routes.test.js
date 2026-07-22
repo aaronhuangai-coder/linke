@@ -56,6 +56,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import https from 'node:https';
 import tls from 'node:tls';
 import { PassThrough } from 'node:stream';
@@ -69,6 +70,19 @@ import {
 } from '../src/tls-identity-store.js';
 import { createAgentListener } from '../src/agent-listener.js';
 import { ERROR_CODES, LinkeError } from '../src/error-codes.js';
+import { projectCanonicalUploadManifest } from '../src/upload-manifest.js';
+import { createUploadSessionStore } from '../src/upload-session-store.js';
+import { createUploadLocks } from '../src/upload-locks.js';
+import { createUploadService } from '../src/upload-service.js';
+import {
+  parseChunkHeaders,
+  ingestChunkBody,
+  commitChunk,
+} from '../src/upload-chunk-ingest.js';
+import {
+  preflightCapacity,
+  verifyAndCommitSession,
+} from '../src/upload-commit.js';
 
 // ---------------------------------------------------------------------------
 // Frozen constants (test-side; mirror design — do not import non-exported src)
@@ -3253,6 +3267,146 @@ describe('C6 H — chunk bridge readable stream (RED)', () => {
       assert.equal(resultB.status, 400);
       assert.deepEqual(resultB.body, { error: ERROR_CODES.UPLOAD_CHUNK_INVALID });
       assert.equal(capturedB.aborted, true);
+    } finally {
+      await fx.cleanup();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ===========================================================================
+// C7 production status/finalize projection (missingSummary + committed identity)
+// ===========================================================================
+
+describe('C7 — real service status missingSummary + finalize committed identity', () => {
+  it('status JSON has missingSummary.next, never files; finalize has exact committed identity', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c7-route-sum-'));
+    const registry = new DeviceRegistry({ dataDir });
+    const device = await enrollDevice(registry, 'c7-sum-dev');
+    const content = Buffer.from('route-summary-bytes');
+    const sha256 = createHash('sha256').update(content).digest('hex');
+    const snapshotId = '550e8400-e29b-41d4-a716-4466554400c7';
+    const input = {
+      schemaVersion: 2,
+      snapshotId,
+      deviceId: device.deviceId,
+      createdAt: '2026-07-22T12:00:00.000Z',
+      files: ['note.txt'],
+      integrity: {
+        algorithm: 'sha256',
+        totalBytes: content.length,
+        entries: [{ path: 'note.txt', size: content.length, sha256 }],
+      },
+    };
+    const { manifest, manifestDigest } = projectCanonicalUploadManifest(input, {
+      authenticatedDeviceId: device.deviceId,
+    });
+
+    const store = createUploadSessionStore({ dataDir });
+    const locks = createUploadLocks({ maxGlobalTransfers: 4 });
+    const uploadService = createUploadService({
+      dataDir,
+      store,
+      locks,
+      ingest: { parseChunkHeaders, ingestChunkBody, commitChunk },
+      commit: {
+        preflightCapacity: (dir, totalBytes, options = {}) =>
+          preflightCapacity(dir, totalBytes, {
+            ...options,
+            deps: {
+              ...(options.deps || {}),
+              statfs: async () => ({
+                type: 0,
+                bsize: 4096,
+                blocks: 1e12,
+                bfree: 1e12,
+                bavail: 1e12,
+                files: 0,
+                ffree: 0,
+              }),
+            },
+          }),
+        verifyAndCommitSession,
+      },
+      now: () => new Date('2026-07-22T12:00:00.000Z'),
+    });
+
+    const fx = await startUploadFixture({
+      registry,
+      uploadService,
+      uploadRateLimit: { check: () => ({ allowed: true }) },
+    });
+    try {
+      const createRes = await fx.requestAgent('POST', '/agent/upload/sessions', {
+        body: JSON.stringify({ manifest, manifestDigest }),
+        headers: {
+          ...authHeaders(device),
+          'content-type': 'application/json',
+        },
+      });
+      assert.equal(createRes.status, 201);
+      assert.equal(typeof createRes.body.uploadId, 'string');
+      assert.ok(createRes.body.missingSummary);
+      assert.equal(createRes.body.missingSummary.complete, false);
+      assert.ok(createRes.body.missingSummary.next);
+      assert.equal(createRes.body.missingSummary.next.fileIndex, 0);
+      assert.equal(createRes.body.missingSummary.next.chunkIndex, 0);
+      assert.equal(createRes.body.files, undefined, 'listener must not project files');
+      assertNoForbiddenKeys(createRes.body);
+
+      const uploadId = createRes.body.uploadId;
+      const statusRes = await fx.requestAgent(
+        'GET',
+        `/agent/upload/sessions/${uploadId}`,
+        { headers: authHeaders(device) },
+      );
+      assert.equal(statusRes.status, 200);
+      assert.ok(statusRes.body.missingSummary);
+      assert.ok(statusRes.body.missingSummary.next);
+      assert.equal(statusRes.body.files, undefined);
+      assert.equal(statusRes.body.snapshotId, snapshotId);
+      assert.equal(statusRes.body.manifestDigest, manifestDigest);
+      assert.equal(statusRes.body.deviceId, device.deviceId);
+
+      // Upload the only chunk then finalize.
+      const chunkRes = await fx.requestAgent(
+        'POST',
+        `/agent/upload/sessions/${uploadId}/chunks`,
+        {
+          body: content,
+          headers: {
+            ...authHeaders(device),
+            'content-type': 'application/octet-stream',
+            'content-length': String(content.length),
+            'x-linke-upload-id': uploadId,
+            'x-linke-snapshot-id': snapshotId,
+            'x-linke-manifest-digest': manifestDigest,
+            'x-linke-file-index': '0',
+            'x-linke-chunk-index': '0',
+            'x-linke-chunk-offset': '0',
+            'x-linke-chunk-size': String(content.length),
+            'x-linke-chunk-sha256': sha256,
+          },
+        },
+      );
+      assert.equal(chunkRes.status, 200);
+
+      const finRes = await fx.requestAgent(
+        'POST',
+        `/agent/upload/sessions/${uploadId}/finalize`,
+        { headers: authHeaders(device) },
+      );
+      assert.equal(finRes.status, 200);
+      assert.notDeepEqual(finRes.body, {});
+      assert.equal(finRes.body.status, 'committed');
+      assert.equal(finRes.body.uploadId, uploadId);
+      assert.equal(finRes.body.snapshotId, snapshotId);
+      assert.equal(finRes.body.manifestDigest, manifestDigest);
+      assert.equal(finRes.body.deviceId, device.deviceId);
+      assert.equal(finRes.body.files, undefined);
+      assert.ok(finRes.body.missingSummary);
+      assert.equal(finRes.body.missingSummary.complete, true);
+      assertNoForbiddenKeys(finRes.body);
     } finally {
       await fx.cleanup();
       await rm(dataDir, { recursive: true, force: true });

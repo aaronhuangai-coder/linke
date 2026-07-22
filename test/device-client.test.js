@@ -6,9 +6,11 @@ import { Readable } from 'node:stream';
 import {
   DeviceCredentialStore,
   requestPinnedJson,
+  requestPinnedBinary,
   enrollDevice,
   heartbeatDevice,
   rotateDeviceToken,
+  abortUploadSession,
 } from '../src/device-client.js';
 import {
   runDeviceEnrollCommand,
@@ -1118,6 +1120,235 @@ describe('requestPinnedJson error mapping and bounds', () => {
             && !text.includes(String(server.url));
         },
       );
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe('requestPinnedBinary (C7) + G0a requestPinnedJson regression', () => {
+  it('G0a requestPinnedJson still posts JSON after pin without auth triad requirement', async () => {
+    let sawAuth = false;
+    let sawBody = false;
+    const server = await startHttpsFixture((req, res) => {
+      if (req.headers.authorization) sawAuth = true;
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        sawBody = Buffer.concat(chunks).length > 0;
+        sendJson(res, 200, { ok: true, via: 'json' });
+      });
+    });
+    try {
+      const response = await requestPinnedJson({
+        agentUrl: server.url,
+        path: '/agent/ping',
+        tlsFingerprint: server.fingerprint,
+        body: { hello: 'g0a' },
+      });
+      assert.deepStrictEqual(response, { ok: true, via: 'json' });
+      assert.strictEqual(sawBody, true);
+      // G0a path may omit Authorization when no token is provided.
+      assert.strictEqual(sawAuth, false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('pin failure never writes binary body; success sends mandatory auth triad exactly once', async () => {
+    let sawBody = false;
+    /** @type {Record<string, string|string[]|undefined>} */
+    let lastHeaders = {};
+    const server = await startHttpsFixture((req, res) => {
+      lastHeaders = req.headers;
+      const chunks = [];
+      req.on('data', (c) => {
+        sawBody = true;
+        chunks.push(c);
+      });
+      req.on('end', () => {
+        sendJson(res, 200, { acked: true });
+      });
+    });
+    try {
+      await assert.rejects(
+        requestPinnedBinary({
+          agentUrl: server.url,
+          path: '/agent/upload/sessions/x/chunks',
+          tlsFingerprint: 'f'.repeat(64),
+          method: 'POST',
+          token: 'tok-must-not-arrive-on-wrong-pin',
+          deviceId: 'mac-alpha',
+          body: Buffer.from('secret-binary-payload'),
+          bodyMode: 'buffer',
+        }),
+        (error) => error.code === 'device-tls-fingerprint-mismatch'
+          && !errorText(error).includes('secret-binary-payload')
+          && !errorText(error).includes('tok-must-not-arrive'),
+      );
+      assert.strictEqual(sawBody, false);
+
+      sawBody = false;
+      const response = await requestPinnedBinary({
+        agentUrl: server.url,
+        path: '/agent/upload/sessions/x/chunks',
+        tlsFingerprint: server.fingerprint,
+        method: 'POST',
+        token: 'device-token-fixture-value',
+        deviceId: 'mac-alpha',
+        body: Buffer.from('ok-binary'),
+        bodyMode: 'buffer',
+      });
+      assert.deepStrictEqual(response, { acked: true });
+      assert.strictEqual(sawBody, true);
+      assert.strictEqual(lastHeaders.authorization, 'Bearer device-token-fixture-value');
+      assert.strictEqual(lastHeaders['x-linke-device-id'], 'mac-alpha');
+      assert.strictEqual(lastHeaders['x-linke-protocol-version'], '2');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('AbortSignal settles as device-request-invalid without raw AbortError leak', async () => {
+    const server = await startHttpsFixture((req, res) => {
+      // never complete
+      void req;
+      void res;
+    });
+    const controller = new AbortController();
+    try {
+      const pending = requestPinnedBinary({
+        agentUrl: server.url,
+        path: '/agent/upload/sessions/u1',
+        tlsFingerprint: server.fingerprint,
+        method: 'GET',
+        token: 't'.repeat(32),
+        deviceId: 'mac-alpha',
+        signal: controller.signal,
+        timeoutMs: 30_000,
+      });
+      controller.abort();
+      await assert.rejects(
+        pending,
+        (error) => {
+          const text = errorText(error);
+          return error.name === 'LinkeError'
+            && error.code === 'device-request-invalid'
+            && !text.includes('AbortError')
+            && !text.includes('This operation was aborted');
+        },
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('abortUploadSession posts abort path with mandatory triad', async () => {
+    /** @type {string | undefined} */
+    let method;
+    /** @type {string | undefined} */
+    let url;
+    /** @type {Record<string, string|string[]|undefined>} */
+    let headers = {};
+    const server = await startHttpsFixture((req, res) => {
+      method = req.method;
+      url = req.url;
+      headers = req.headers;
+      sendJson(res, 200, {
+        uploadId: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001',
+        deviceId: 'mac-alpha',
+        status: 'aborted',
+      });
+    });
+    const credentialStore = memoryCredentialStore();
+    await credentialStore.setToken(server.url, 'mac-alpha', 'abort-token-value-32chars-min!!');
+    try {
+      const result = await abortUploadSession({
+        agentUrl: server.url,
+        tlsFingerprint: server.fingerprint,
+        deviceId: 'mac-alpha',
+        uploadId: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001',
+        credentialStore,
+      });
+      assert.equal(method, 'POST');
+      assert.equal(url, '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-000000000001/abort');
+      assert.equal(headers.authorization, 'Bearer abort-token-value-32chars-min!!');
+      assert.equal(headers['x-linke-device-id'], 'mac-alpha');
+      assert.equal(headers['x-linke-protocol-version'], '2');
+      assert.equal(result.status, 'aborted');
+      assert.equal(result.deviceId, 'mac-alpha');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('2xx empty / array / malformed JSON are non-retry wire-shape invalid (statusCode 400)', async () => {
+    const cases = [
+      { label: 'empty', write: (res) => { res.writeHead(200, { 'content-type': 'application/json', 'content-length': 0 }); res.end(); } },
+      { label: 'array', write: (res) => sendJson(res, 200, ['not-object']) },
+      { label: 'malformed', write: (res) => {
+        const data = '{not-json';
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(data),
+        });
+        res.end(data);
+      } },
+    ];
+    for (const c of cases) {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        c.write(res);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedBinary({
+            agentUrl: server.url,
+            path: '/agent/upload/sessions/x',
+            tlsFingerprint: server.fingerprint,
+            method: 'GET',
+            token: 't'.repeat(32),
+            deviceId: 'mac-alpha',
+          }),
+          (error) => error.name === 'LinkeError'
+            && error.code === 'device-request-invalid'
+            && error.statusCode === 400,
+          c.label,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('abort 2xx empty or wrong status fail-closes non-retry', async () => {
+    let n = 0;
+    const server = await startHttpsFixture((req, res) => {
+      n += 1;
+      if (n === 1) {
+        return sendJson(res, 200, {});
+      }
+      return sendJson(res, 200, {
+        uploadId: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001',
+        deviceId: 'mac-alpha',
+        status: 'receiving',
+      });
+    });
+    const credentialStore = memoryCredentialStore();
+    await credentialStore.setToken(server.url, 'mac-alpha', 'abort-token-value-32chars-min!!');
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        await assert.rejects(
+          abortUploadSession({
+            agentUrl: server.url,
+            tlsFingerprint: server.fingerprint,
+            deviceId: 'mac-alpha',
+            uploadId: 'aaaaaaaa-bbbb-4ccc-8ddd-000000000001',
+            credentialStore,
+          }),
+          (error) => error.code === 'device-request-invalid' && error.statusCode === 400,
+        );
+      }
     } finally {
       await server.close();
     }

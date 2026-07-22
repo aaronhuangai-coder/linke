@@ -1272,17 +1272,25 @@ describe('E finalize', () => {
     };
 
     let commitArgs = null;
+    const store = makeStore();
     const commit = {
       preflightCapacity: async () => {},
       verifyAndCommitSession: async (input) => {
         order.push('commit');
         commitArgs = input;
-        // Do not actually publish — unit-level lock ordering only.
-        return;
+        // Unit lock ordering: advance to committed so post-commit re-read succeeds.
+        await store.markVerifying({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: created.uploadId,
+        });
+        await store.markCommitted({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: created.uploadId,
+        });
       },
     };
 
-    const { service } = makeService({ locks, commit });
+    const { service } = makeService({ locks, commit, store });
     const proj = makeProjection({ files: [{ path: 'a.txt', size: 0 }] });
     const created = await service.create({
       authenticatedDeviceId: DEVICE_A,
@@ -1291,10 +1299,14 @@ describe('E finalize', () => {
     });
     order.length = 0;
 
-    await service.finalize({
+    const fin = await service.finalize({
       authenticatedDeviceId: DEVICE_A,
       uploadId: created.uploadId,
     });
+    assert.equal(fin.status, 'committed');
+    assert.equal(fin.uploadId, created.uploadId);
+    assert.ok(fin.missingSummary);
+    assert.equal(fin.missingSummary.complete, true);
 
     // Must include transfer + session + snapshot before commit (device optional).
     assert.ok(order.includes('transfer'));
@@ -1311,6 +1323,37 @@ describe('E finalize', () => {
     assert.equal(commitArgs.uploadId, created.uploadId);
     assert.ok(commitArgs.store);
     assert.equal(typeof commitArgs.now, 'function');
+  });
+
+  it('finalize re-reads session: commit without status=committed fail-closes as upload-io-error', async () => {
+    const store = makeStore();
+    const commit = {
+      preflightCapacity: async () => {},
+      verifyAndCommitSession: async () => {
+        // Pretend commit succeeded but leave session non-terminal.
+      },
+    };
+    const { service } = makeService({ store, commit });
+    const proj = makeProjection({ files: [{ path: 'z.txt', size: 0 }] });
+    const created = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    await assert.rejects(
+      () =>
+        service.finalize({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: created.uploadId,
+        }),
+      (err) => {
+        assertLinkeCode(err, ERROR_CODES.UPLOAD_IO_ERROR, {
+          statusCode: 500,
+          leakTokens: [dataDir, created.uploadId],
+        });
+        return true;
+      },
+    );
   });
 
   it('global full → backpressure without lookup or commit', async () => {
@@ -1509,6 +1552,131 @@ describe('F abort', () => {
   });
 });
 
+// ── missingSummary + finalize re-read (C7 production contract) ──────
+
+describe('missingSummary derivation + finalize re-read', () => {
+  it('create/status: initial next, partial progress, then complete after all bytes', async () => {
+    const content = Buffer.alloc(UPLOAD_CHUNK_SIZE + 10, 0x41);
+    const proj = makeProjection({
+      files: [
+        { path: 'big.bin', size: content.length, content },
+        { path: 'empty.txt', size: 0 },
+      ],
+    });
+    const { service } = makeService();
+    const created = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    assert.ok(created.missingSummary);
+    assert.equal(created.missingSummary.complete, false);
+    assert.deepEqual(created.missingSummary.next, {
+      fileIndex: 0,
+      chunkIndex: 0,
+      offset: 0,
+      size: UPLOAD_CHUNK_SIZE,
+      complete: false,
+    });
+    assert.equal(created.missingSummary.remainingFiles, 1);
+    assert.equal(created.missingSummary.remainingBytes, content.length);
+    assert.equal(created.missingSummary.remainingChunks, 2);
+    assert.ok(created.files, 'domain summary still has files');
+
+    // First full chunk
+    const c0 = content.subarray(0, UPLOAD_CHUNK_SIZE);
+    const r0 = makeChunkRequest({
+      uploadId: created.uploadId,
+      manifestDigest: proj.manifestDigest,
+      content: c0,
+      fileIndex: 0,
+      chunkIndex: 0,
+      offset: 0,
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+    });
+    await service.putChunk({
+      authenticatedDeviceId: DEVICE_A,
+      request: r0.request,
+      stream: r0.stream,
+    });
+    const mid = await service.status({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(mid.missingSummary.complete, false);
+    assert.deepEqual(mid.missingSummary.next, {
+      fileIndex: 0,
+      chunkIndex: 1,
+      offset: UPLOAD_CHUNK_SIZE,
+      size: 10,
+      complete: false,
+    });
+    assert.equal(mid.missingSummary.remainingBytes, 10);
+    assert.equal(mid.missingSummary.remainingChunks, 1);
+
+    // Last chunk
+    const c1 = content.subarray(UPLOAD_CHUNK_SIZE);
+    const r1 = makeChunkRequest({
+      uploadId: created.uploadId,
+      manifestDigest: proj.manifestDigest,
+      content: c1,
+      fileIndex: 0,
+      chunkIndex: 1,
+      offset: UPLOAD_CHUNK_SIZE,
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+    });
+    await service.putChunk({
+      authenticatedDeviceId: DEVICE_A,
+      request: r1.request,
+      stream: r1.stream,
+    });
+    const done = await service.status({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(done.missingSummary.complete, true);
+    assert.equal(done.missingSummary.next, undefined);
+    assert.equal(done.missingSummary.remainingFiles, 0);
+    assert.equal(done.missingSummary.remainingBytes, 0);
+    assert.equal(done.missingSummary.remainingChunks, 0);
+  });
+
+  it('hostile files shape on status path fail-closes (no guessing)', async () => {
+    const store = makeStore();
+    const realGet = store.getSession.bind(store);
+    store.getSession = async (input) => {
+      const s = await realGet(input);
+      // Hostile: corrupt complete flag / non-integer
+      return {
+        ...s,
+        files: [{ fileIndex: 0, size: 1, confirmedBytes: 0, confirmedChunks: 0, complete: 'nope' }],
+      };
+    };
+    const { service } = makeService({ store });
+    const proj = makeProjection({ files: [{ path: 'a.txt', size: 1, content: 'x' }] });
+    const created = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    // create used real store before override impact on create path — re-override already set.
+    // status uses hostile getSession:
+    await assert.rejects(
+      () =>
+        service.status({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: created.uploadId,
+        }),
+      (err) => {
+        assertLinkeCode(err, ERROR_CODES.UPLOAD_IO_ERROR, { statusCode: 500 });
+        return true;
+      },
+    );
+  });
+});
+
 // ── G. Real temp dataDir success path (C1–C4 + locks) ───────────────
 
 describe('G real temp dataDir create→chunk(s)→finalize', () => {
@@ -1573,16 +1741,25 @@ describe('G real temp dataDir create→chunk(s)→finalize', () => {
     })();
     assert.ok(fpBefore.length > 0, 'staging must exist before finalize');
 
-    await service.finalize({
+    const fin = await service.finalize({
       authenticatedDeviceId: DEVICE_A,
       uploadId: created.uploadId,
     });
+    assert.equal(fin.status, 'committed');
+    assert.equal(fin.uploadId, created.uploadId);
+    assert.equal(fin.snapshotId, SNAPSHOT_A);
+    assert.equal(fin.manifestDigest, proj.manifestDigest);
+    assert.equal(fin.deviceId, DEVICE_A);
+    assert.ok(fin.missingSummary);
+    assert.equal(fin.missingSummary.complete, true);
+    assert.equal(fin.missingSummary.next, undefined);
 
     const finalStatus = await service.status({
       authenticatedDeviceId: DEVICE_A,
       uploadId: created.uploadId,
     });
     assert.equal(finalStatus.status, 'committed');
+    assert.equal(finalStatus.missingSummary.complete, true);
 
     // COMPLETED marker present.
     assert.equal(await pathExists(finalCompletedAbs(DEVICE_A, SNAPSHOT_A)), true);
