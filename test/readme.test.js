@@ -56,6 +56,25 @@ function extractCurrentBadgeBlockquote(markdown) {
 const V140_SIGNATURE =
   'V1.40 local multi-process audit integrity write exclusive lock implementation';
 
+/**
+ * Exact V1.40 release/close failure ops-boundary atoms (honesty surface).
+ * Required on current badge / V1.40 version-table row / concurrency surface.
+ */
+const RELEASE_CLOSE_FAIL_CLOSES = 'release/close failure fail-closes';
+const TASK_MUTATION_MAY_ALREADY_APPLIED = 'task mutation may already be applied';
+const CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE =
+  'caller retry has no idempotent/exactly-once guarantee';
+const NO_DETERMINISTIC_IN_BAND_FD_RECLAIM =
+  'no deterministic in-band fd reclaim before process exit';
+
+/** Absolute overclaims forbidden on V1.40 current README surface only. */
+const FORBIDDEN_ABSOLUTE_V140_PHRASES = Object.freeze([
+  'stuck lock',
+  'restart required',
+  'fd always remains open',
+  'automatic recovery',
+]);
+
 /** Exact historical V1.39 signature — retained write-admission base. */
 const V139_SIGNATURE =
   'V1.39 safety-critical audit write-admission fail-closed implementation';
@@ -2020,6 +2039,32 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
         && /not auto-detect|not auto-detected|not auto-reject|not auto-rejected|not delivered|out of contract/i.test(badge),
       'top badge must bound network FS (not auto-detected/auto-rejected / not delivered)',
     );
+    // V1.40 release/close failure ops boundary (honesty; non-absolute)
+    assert.ok(
+      badge.includes(RELEASE_CLOSE_FAIL_CLOSES),
+      'top badge must include "release/close failure fail-closes"',
+    );
+    assert.ok(
+      badge.includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
+      'top badge must include "task mutation may already be applied"',
+    );
+    assert.ok(
+      badge.includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
+      'top badge must include "caller retry has no idempotent/exactly-once guarantee"',
+    );
+    assert.ok(
+      badge.includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
+      'top badge must include "no deterministic in-band fd reclaim before process exit"',
+    );
+    {
+      const badgeLower = badge.toLowerCase();
+      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
+        assert.ok(
+          !badgeLower.includes(phrase.toLowerCase()),
+          `top badge must not claim absolute "${phrase}"`,
+        );
+      }
+    }
     assert.ok(
       badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
       'top badge must include exact post-outcome still best-effort phrase',
@@ -2155,6 +2200,46 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
       /network FS|network-FS|网络文件系统|NFS/i.test(readme),
       'README must mention network FS boundary',
     );
+    // V1.40 concurrency surface must disclose release/close failure ops boundary
+    const concurrencySurfaces = [];
+    for (const line of readme.split('\n')) {
+      if (
+        /Concurrency\s*\/\s*Audit integrity/i.test(line)
+        && /V1\.40/i.test(line)
+      ) {
+        concurrencySurfaces.push(line);
+      }
+    }
+    assert.ok(
+      concurrencySurfaces.length >= 1,
+      'README must have at least one Concurrency / Audit integrity V1.40 surface line',
+    );
+    const concurrencyJoined = concurrencySurfaces.join('\n');
+    assert.ok(
+      concurrencyJoined.includes(RELEASE_CLOSE_FAIL_CLOSES),
+      'Concurrency V1.40 surface must include "release/close failure fail-closes"',
+    );
+    assert.ok(
+      concurrencyJoined.includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
+      'Concurrency V1.40 surface must include "task mutation may already be applied"',
+    );
+    assert.ok(
+      concurrencyJoined.includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
+      'Concurrency V1.40 surface must include "caller retry has no idempotent/exactly-once guarantee"',
+    );
+    assert.ok(
+      concurrencyJoined.includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
+      'Concurrency V1.40 surface must include "no deterministic in-band fd reclaim before process exit"',
+    );
+    {
+      const concLower = concurrencyJoined.toLowerCase();
+      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
+        assert.ok(
+          !concLower.includes(phrase.toLowerCase()),
+          `Concurrency V1.40 surface must not claim absolute "${phrase}"`,
+        );
+      }
+    }
   });
 
   it('version table marks V1.40 current, V1.39 historical write-admission, V1.38 historical monitor, V1.37 historical dual-write, V1.36 historical cross-store, V1.35 journal foundation, keeps V1.34/V1.33/V1.32', () => {
@@ -2185,6 +2270,32 @@ describe('README — V1.40 local multi-process audit integrity write exclusive l
       !v140RowMatch[0].includes(STALE_MULTI_PROCESS_YET),
       'V1.40 current table row must not keep remaining "not multi-process exclusive lock yet"',
     );
+    // V1.40 release/close failure ops boundary on current version-table row
+    assert.ok(
+      v140RowMatch[0].includes(RELEASE_CLOSE_FAIL_CLOSES),
+      'V1.40 current table row must include "release/close failure fail-closes"',
+    );
+    assert.ok(
+      v140RowMatch[0].includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
+      'V1.40 current table row must include "task mutation may already be applied"',
+    );
+    assert.ok(
+      v140RowMatch[0].includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
+      'V1.40 current table row must include "caller retry has no idempotent/exactly-once guarantee"',
+    );
+    assert.ok(
+      v140RowMatch[0].includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
+      'V1.40 current table row must include "no deterministic in-band fd reclaim before process exit"',
+    );
+    {
+      const rowLower = v140RowMatch[0].toLowerCase();
+      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
+        assert.ok(
+          !rowLower.includes(phrase.toLowerCase()),
+          `V1.40 current table row must not claim absolute "${phrase}"`,
+        );
+      }
+    }
     assertReadmeContains(
       /\| V1\.40 \| 当前版本 \|[^|]*(local multi-process audit integrity write exclusive lock|lockf|same-dataDir local multi-process)[^|]*(T6d\.3 still partial|not T6d\.3 complete|not M6d Exit|not production-hardening ready|not Gold)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
       'V1.40 should be current multi-process write exclusive lock milestone',

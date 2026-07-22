@@ -82,6 +82,27 @@ const STALE_SLASH_AGGREGATE =
 const V140_SIGNATURE =
   'V1.40 local multi-process audit integrity write exclusive lock implementation';
 
+/**
+ * Exact V1.40 release/close failure ops-boundary atoms (honesty surface).
+ * Required on production-hardening evidence + nextStep current prefix.
+ * Conditional / non-absolute: do NOT claim stuck lock / restart required /
+ * fd always remains open / automatic recovery.
+ */
+const RELEASE_CLOSE_FAIL_CLOSES = 'release/close failure fail-closes';
+const TASK_MUTATION_MAY_ALREADY_APPLIED = 'task mutation may already be applied';
+const CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE =
+  'caller retry has no idempotent/exactly-once guarantee';
+const NO_DETERMINISTIC_IN_BAND_FD_RECLAIM =
+  'no deterministic in-band fd reclaim before process exit';
+
+/** Absolute overclaims forbidden on V1.40 current production-hardening surface. */
+const FORBIDDEN_ABSOLUTE_V140_PHRASES = Object.freeze([
+  'stuck lock',
+  'restart required',
+  'fd always remains open',
+  'automatic recovery',
+]);
+
 /** Exact historical V1.39 signature — retained write-admission base. */
 const V139_SIGNATURE =
   'V1.39 safety-critical audit write-admission fail-closed implementation';
@@ -874,6 +895,46 @@ describe('Gold Readiness Report', () => {
       /SIGKILL/i.test(hardeningEvidence) && /inode/i.test(hardeningEvidence),
       'production-hardening evidence must mention holder/waiter SIGKILL and inode permanence',
     );
+    // V1.40 release/close failure ops boundary — exact evidence atoms (RED→GREEN honesty)
+    assert.ok(
+      hardeningItem.evidence.includes(RELEASE_CLOSE_FAIL_CLOSES),
+      'production-hardening evidence must exact-include "release/close failure fail-closes"',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
+      'production-hardening evidence must exact-include "task mutation may already be applied"',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
+      'production-hardening evidence must exact-include "caller retry has no idempotent/exactly-once guarantee"',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
+      'production-hardening evidence must exact-include "no deterministic in-band fd reclaim before process exit"',
+    );
+    // Forbid absolute overclaims on V1.40 current evidence surface (not historical segments)
+    {
+      const currentEvidenceText = hardeningItem.evidence
+        .filter((e) => {
+          const s = String(e);
+          return (
+            !s.startsWith('V1.39 ')
+            && !s.startsWith('V1.38 ')
+            && !s.startsWith('V1.37 ')
+            && !s.startsWith('V1.36 ')
+            && !s.startsWith('V1.35 ')
+            && !s.startsWith('V1.34 ')
+          );
+        })
+        .join(' ')
+        .toLowerCase();
+      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
+        assert.ok(
+          !currentEvidenceText.includes(phrase.toLowerCase()),
+          `production-hardening V1.40 current evidence must not claim absolute "${phrase}"`,
+        );
+      }
+    }
     assert.ok(
       /local only/i.test(hardeningEvidence),
       'production-hardening evidence must state local only',
@@ -1263,6 +1324,33 @@ describe('Gold Readiness Report', () => {
       /same-dataDir local multi-process|local multi-process exclusive/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must claim local multi-process exclusive serialization',
     );
+    // V1.40 release/close failure ops boundary on nextStep current prefix
+    {
+      const nextCurrent = productionHardeningCurrentPrefix(hardeningItem.nextStep);
+      assert.ok(
+        nextCurrent.includes(RELEASE_CLOSE_FAIL_CLOSES),
+        'production-hardening nextStep current prefix must include "release/close failure fail-closes"',
+      );
+      assert.ok(
+        nextCurrent.includes(TASK_MUTATION_MAY_ALREADY_APPLIED),
+        'production-hardening nextStep current prefix must include "task mutation may already be applied"',
+      );
+      assert.ok(
+        nextCurrent.includes(CALLER_RETRY_NO_IDEMPOTENT_EXACTLY_ONCE),
+        'production-hardening nextStep current prefix must include "caller retry has no idempotent/exactly-once guarantee"',
+      );
+      assert.ok(
+        nextCurrent.includes(NO_DETERMINISTIC_IN_BAND_FD_RECLAIM),
+        'production-hardening nextStep current prefix must include "no deterministic in-band fd reclaim before process exit"',
+      );
+      const nextCurrentLower = nextCurrent.toLowerCase();
+      for (const phrase of FORBIDDEN_ABSOLUTE_V140_PHRASES) {
+        assert.ok(
+          !nextCurrentLower.includes(phrase.toLowerCase()),
+          `production-hardening nextStep current prefix must not claim absolute "${phrase}"`,
+        );
+      }
+    }
     assert.ok(
       /not distributed|no distributed/i.test(hardeningItem.nextStep),
       'production-hardening nextStep must deny distributed',
