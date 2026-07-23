@@ -221,7 +221,9 @@ describe('G0b import zero side effects and direct main fail-closed', () => {
     assert.equal(line.role, 'controller');
     assert.equal(line.status, 'FAIL');
     assert.equal(line.phase, 'main');
-    assert.doesNotMatch(child.stdout, /token|fingerprint|private|\/Users|BEGIN |10\.|192\./i);
+    // Full-IP validation (assertNoSensitiveData) avoids matching ISO timestamps at second 10.
+    assert.doesNotThrow(() => assertNoSensitiveData(line));
+    assert.doesNotMatch(child.stdout, /token|fingerprint|private|\/Users|BEGIN /i);
     assert.doesNotMatch(child.stderr, /token|fingerprint|enrollment|BEGIN /i);
   });
 
@@ -363,7 +365,9 @@ describe('G0b real-LAN hardware gate default skip + report absent', () => {
     const result = await harness.runPhase('upload-full');
     assert.equal(result.status, 'BLOCKED');
     assert.equal(result.role, 'endpoint');
-    assert.doesNotMatch(JSON.stringify(result), /https?:\/\/|token|fingerprint|\/Users|10\./i);
+    // Full-IP validation (assertNoSensitiveData) avoids matching ISO timestamps at second 10.
+    assert.doesNotThrow(() => assertNoSensitiveData(result));
+    assert.doesNotMatch(JSON.stringify(result), /https?:\/\/|token|fingerprint|\/Users/i);
   });
 
   it('default CI (gate off) does not open real harness side effects', async () => {
