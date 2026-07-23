@@ -7,19 +7,23 @@ import { createAgentListener } from './agent-listener.js';
 import { DeviceRegistry } from './device-registry.js';
 import { KeychainStore } from './keychain-store.js';
 import { TlsIdentityStore } from './tls-identity-store.js';
-import { recordHeartbeat } from './storage.js';
+import { getSnapshotManifest, recordHeartbeat } from './storage.js';
 import { createFixedWindowRateLimiter, parseRateLimitPerMinute } from './rate-limit.js';
 import { parseAuditRetentionMaxEvents } from './audit-log.js';
 import { ensureSafeDataRoot, ensureSafeRelativeDir } from './safe-data-files.js';
-import { createUploadSessionStore } from './upload-session-store.js';
+import { createUploadSessionStore as defaultCreateUploadSessionStore } from './upload-session-store.js';
 import {
   parseChunkHeaders,
   ingestChunkBody,
   commitChunk,
 } from './upload-chunk-ingest.js';
 import { preflightCapacity, verifyAndCommitSession } from './upload-commit.js';
-import { createUploadLocks } from './upload-locks.js';
+import { createUploadLocks as defaultCreateUploadLocks } from './upload-locks.js';
 import { createUploadService } from './upload-service.js';
+import { createRestoreSnapshotReader } from './restore-snapshot-reader.js';
+import { createRestoreTaskStore } from './restore-task-store.js';
+import { createRestoreChunkReader } from './restore-chunk-reader.js';
+import { createRestoreService } from './restore-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -28,6 +32,7 @@ const DEFAULT_MANAGEMENT_PORT = 3000;
 const DEFAULT_MANAGEMENT_HOST = '127.0.0.1';
 const DEFAULT_AGENT_RATE_LIMIT = Object.freeze({ maxRequests: 60, windowMs: 60_000 });
 const DEFAULT_AGENT_UPLOAD_RATE_LIMIT = Object.freeze({ maxRequests: 1200, windowMs: 60_000 });
+const DEFAULT_AGENT_RESTORE_RATE_LIMIT = Object.freeze({ maxRequests: 1200, windowMs: 60_000 });
 const DEFAULT_MAX_GLOBAL_TRANSFERS = 4;
 const MIN_MAX_GLOBAL_TRANSFERS = 1;
 const MAX_MAX_GLOBAL_TRANSFERS = 16;
@@ -255,7 +260,11 @@ function parseEnvPort(raw, fallback, label) {
  *   acceptTlsFingerprintChange?: boolean,
  *   agentRateLimit?: { maxRequests: number, windowMs: number },
  *   agentUploadRateLimit?: { maxRequests: number, windowMs: number },
+ *   agentRestoreRateLimit?: { maxRequests: number, windowMs: number },
  *   maxGlobalTransfers?: number,
+ *   createUploadLocks?: typeof defaultCreateUploadLocks,
+ *   createUploadSessionStore?: typeof defaultCreateUploadSessionStore,
+ *   getSnapshotManifestFn?: typeof getSnapshotManifest,
  *   listenServer?: typeof listen,
  *   managementServerFactory?: Function,
  *   agentServerFactory?: Function,
@@ -290,7 +299,11 @@ export async function startController({
   acceptTlsFingerprintChange = false,
   agentRateLimit = DEFAULT_AGENT_RATE_LIMIT,
   agentUploadRateLimit = DEFAULT_AGENT_UPLOAD_RATE_LIMIT,
+  agentRestoreRateLimit = DEFAULT_AGENT_RESTORE_RATE_LIMIT,
   maxGlobalTransfers = DEFAULT_MAX_GLOBAL_TRANSFERS,
+  createUploadLocks = defaultCreateUploadLocks,
+  createUploadSessionStore = defaultCreateUploadSessionStore,
+  getSnapshotManifestFn = getSnapshotManifest,
   listenServer = listen,
   managementServerFactory = createManagementServer,
   agentServerFactory = createAgentListener,
@@ -320,6 +333,9 @@ export async function startController({
   // Independent upload path-aware limiter (1200/min default); never shares legacy 60/min.
   const agentUploadLimiter = createFixedWindowRateLimiter(agentUploadRateLimit)
     || createFixedWindowRateLimiter(DEFAULT_AGENT_UPLOAD_RATE_LIMIT);
+  // Independent restore path-aware limiter (1200/min default); third bucket, never shared.
+  const agentRestoreLimiter = createFixedWindowRateLimiter(agentRestoreRateLimit)
+    || createFixedWindowRateLimiter(DEFAULT_AGENT_RESTORE_RATE_LIMIT);
   // maxGlobalTransfers fail-closed 1..16 before Keychain / listen / half-service.
   const resolvedMaxGlobalTransfers = assertMaxGlobalTransfers(maxGlobalTransfers);
 
@@ -349,15 +365,52 @@ export async function startController({
     await registry.acceptControllerFingerprint(identity.fingerprint);
   }
 
-  // Production upload assembly after safe data root: store + locks + service with real statfs.
+  // Production upload + restore assembly after safe data root.
+  // Exactly one shared createUploadLocks instance for upload putChunk + restore getChunk.
   // Shared now clock; listener never steals dataDir from registry.
   const uploadNow = () => new Date();
-  const uploadStore = createUploadSessionStore({ dataDir, now: uploadNow });
-  const uploadLocks = createUploadLocks({ maxGlobalTransfers: resolvedMaxGlobalTransfers });
+  const locksFactory = typeof createUploadLocks === 'function'
+    ? createUploadLocks
+    : defaultCreateUploadLocks;
+  const storeFactory = typeof createUploadSessionStore === 'function'
+    ? createUploadSessionStore
+    : defaultCreateUploadSessionStore;
+  const snapshotManifestFn = typeof getSnapshotManifestFn === 'function'
+    ? getSnapshotManifestFn
+    : getSnapshotManifest;
+
+  const uploadStore = storeFactory({ dataDir, now: uploadNow });
+  const sharedLocks = locksFactory({ maxGlobalTransfers: resolvedMaxGlobalTransfers });
+
+  // Restore stack: snapshot reader → task store → chunk reader → service.
+  // findActiveUpload freezes on uploadStore.findActiveSession (not alternate method names).
+  const restoreSnapshotReader = createRestoreSnapshotReader({
+    dataDir,
+    getSnapshotManifestFn: snapshotManifestFn,
+  });
+  const restoreTaskStore = createRestoreTaskStore({
+    dataDir,
+    now: uploadNow,
+    storageReader: restoreSnapshotReader,
+  });
+  const restoreChunkReader = createRestoreChunkReader({
+    dataDir,
+    taskStore: restoreTaskStore,
+    snapshotReader: restoreSnapshotReader,
+  });
+  const restoreService = createRestoreService({
+    taskStore: restoreTaskStore,
+    storageReader: restoreChunkReader,
+    locks: sharedLocks,
+    findActiveUpload: async (id) => (await uploadStore.findActiveSession(id)) !== null,
+    now: uploadNow,
+  });
+
+  // Explicit findActiveRestore (must not rely on C5 default async () => false).
   const uploadService = createUploadService({
     dataDir,
     store: uploadStore,
-    locks: uploadLocks,
+    locks: sharedLocks,
     ingest: {
       parseChunkHeaders,
       ingestChunkBody,
@@ -370,6 +423,7 @@ export async function startController({
       verifyAndCommitSession,
     },
     now: uploadNow,
+    findActiveRestore: (id) => restoreTaskStore.hasActiveRestore(id),
   });
 
   const status = {
@@ -388,12 +442,14 @@ export async function startController({
       rateLimit: agentLimiter,
       uploadRateLimit: agentUploadLimiter,
       uploadService,
+      restoreRateLimit: agentRestoreLimiter,
+      restoreService,
       onHeartbeat: ({ deviceId, hostname, remoteAddress }) => (
         recordHeartbeat(dataDir, deviceId, hostname, remoteAddress)
       ),
     });
   } catch (error) {
-    // Agent factory / upload injection failure: no management, no public half-start.
+    // Agent factory / upload/restore injection failure: no management, no public half-start.
     throw error;
   }
 
@@ -431,6 +487,7 @@ export async function startController({
       rateLimit,
       auditRetention,
       deviceAdministration,
+      restoreService,
     });
     await listenServer(managementServer, managementPort, managementHost);
     status.managementListening = true;

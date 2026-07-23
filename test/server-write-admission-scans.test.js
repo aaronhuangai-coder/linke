@@ -1277,6 +1277,76 @@ describe('C3 S9: AUDIT_DELIVERY_UNAVAILABLE unique new code; registry exact 88',
 // S10 — V1.38 monitor contract frozen (source honesty; full tests in GREEN cmd)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * C6 RED — restore-tasks management routes must sit after central write-admission gate.
+ * Source-order honesty only: proves create/cancel handlers exist after gate and are not
+ * registered as open mutation before admission. Behavioral coverage lives in
+ * server-write-admission.test.js / server.test.js.
+ */
+describe('C6 S-restore: loopback restore-tasks after admission gate (RED)', () => {
+  it('server source registers restore-tasks create/cancel after central admission gate', async () => {
+    const server = await readText(PATHS.server);
+    const masked = maskJsNonCode(server);
+    const codeWithStrings = maskJsCommentsOnly(server);
+
+    const blocks = findIsApiWriteRouteIfBlocks(server);
+    const admissionBlocks = blocks.filter((b) => hasCallSite(b.body, REQUIRED_HELPER));
+    assert.equal(admissionBlocks.length, 1, 'exact-one admission gate block');
+    const gate = admissionBlocks[0];
+
+    const afterGateStrings = codeWithStrings.slice(gate.bodyEnd);
+    // Production must register both create and cancel restore-tasks handlers after gate.
+    assert.ok(
+      /restore-tasks/.test(afterGateStrings),
+      'restore-tasks handler must appear after central write-admission gate',
+    );
+    assert.ok(
+      /restore-tasks/.test(afterGateStrings)
+      && /cancel/.test(afterGateStrings),
+      'restore-tasks cancel handler must appear after gate',
+    );
+
+    // Fail-closed half surface: restoreService option must be consulted (not open always).
+    assert.ok(
+      /\brestoreService\b/.test(masked),
+      'createServer must accept/consult restoreService for dual-gate management surface',
+    );
+
+    // Write-route classification helpers may mention restore-tasks before the gate.
+    // Honesty pin: real handler route literals and service mutation call sites must
+    // both appear after the central admission await (not a whole-file first-literal oracle).
+    const admissionAwait = masked.search(
+      new RegExp(`\\bawait\\s+${escapeRegExp(REQUIRED_HELPER)}\\s*\\(`),
+    );
+    assert.ok(admissionAwait >= 0, 'admission await present');
+
+    const afterAdmissionMasked = masked.slice(admissionAwait);
+    const afterAdmissionStrings = codeWithStrings.slice(admissionAwait);
+
+    // Handler path literals (create + cancel) after admission.
+    assert.ok(
+      /\/api\/devices\/.*restore-tasks/.test(afterAdmissionStrings)
+      || /restore-tasks/.test(afterAdmissionStrings),
+      'handler restore-tasks route literal must appear after admission await',
+    );
+    assert.ok(
+      /cancel/.test(afterAdmissionStrings)
+      && /restore-tasks/.test(afterAdmissionStrings),
+      'cancel restore-tasks handler must appear after admission await',
+    );
+
+    // Service mutation call sites after admission (not open write before gate).
+    const createTaskCall = afterAdmissionMasked.search(
+      /\.createTask\s*\(|resolvedRestoreService\.createTask\s*\(/,
+    );
+    const cancelTaskCall = afterAdmissionMasked.search(
+      /\.cancelTask\s*\(|resolvedRestoreService\.cancelTask\s*\(/,
+    );
+    assert.ok(createTaskCall >= 0, 'createTask call site must exist after admission await');
+    assert.ok(cancelTaskCall >= 0, 'cancelTask call site must exist after admission await');
+  });
+});
+
 describe('C3 S10: V1.38 monitor source contract frozen (10-key / exit / zero-write)', () => {
   it('S10. exit helper body healthy→0 alert→2 no return 1; zero-write; no error-codes; no setInterval', async () => {
     const monitor = await readText(PATHS.monitor);

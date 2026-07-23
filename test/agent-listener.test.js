@@ -47,6 +47,8 @@ function closeServer(server) {
  *   rateLimit?: { check: Function },
  *   uploadRateLimit?: { check: Function },
  *   uploadService?: object,
+ *   restoreRateLimit?: { check: Function },
+ *   restoreService?: object,
  *   timers?: { now?: Function, setTimeout?: Function, clearTimeout?: Function },
  * }} [options]
  */
@@ -67,6 +69,8 @@ async function startAgentFixture(options = {}) {
     rateLimit: options.rateLimit,
     uploadRateLimit: options.uploadRateLimit,
     uploadService: options.uploadService,
+    restoreRateLimit: options.restoreRateLimit,
+    restoreService: options.restoreService,
     ...(options.timers ? { timers: options.timers } : {}),
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -1382,6 +1386,213 @@ describe('C6 G0a deadline + upload isolation (RED)', () => {
       });
       assertPublicError(up, 404, 'device-route-not-found');
       assert.equal(uploadServiceCalls, 0, 'upload service must not be touched without complete limiter');
+    } finally {
+      await local.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C6 G0c restore isolation (RED): third limiter bucket + dual-gate surface
+// ---------------------------------------------------------------------------
+
+describe('C6 G0c restore isolation on agent-listener (RED)', () => {
+  it('without restoreService, all /agent/restore/* paths stay fixed 404 on real TLS', async () => {
+    const local = await startAgentFixture({
+      restoreRateLimit: { check: () => ({ allowed: true }) },
+    });
+    try {
+      const paths = [
+        ['POST', '/agent/restore/tasks/claim'],
+        ['GET', '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+        ['GET', '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/files/0/chunks/0'],
+        ['POST', '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/progress'],
+        ['POST', '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/receipts'],
+        ['POST', '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/cleanup'],
+      ];
+      for (const [method, path] of paths) {
+        const res = await local.requestAgent(method, path, {
+          body: method === 'GET' ? undefined : '{}',
+          headers: {
+            authorization: `Bearer ${'t'.repeat(43)}`,
+            'x-linke-device-id': 'mac-x',
+            'x-linke-protocol-version': '2',
+            'content-type': 'application/json',
+          },
+        });
+        assertPublicError(res, 404, 'device-route-not-found');
+      }
+      assert.equal(local.server.requestTimeout, 0);
+      assert.equal(local.server.headersTimeout, 10_000);
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it('complete restoreService without complete restoreRateLimit stays 404; G0a enroll untouched', async () => {
+    let restoreServiceCalls = 0;
+    const restoreService = {
+      claim: async () => {
+        restoreServiceCalls += 1;
+        return { task: null };
+      },
+      getTask: async () => {
+        restoreServiceCalls += 1;
+        return { taskId: 'x' };
+      },
+      getChunk: async () => {
+        restoreServiceCalls += 1;
+        return { body: Buffer.alloc(0), headers: {} };
+      },
+      updateProgress: async () => {
+        restoreServiceCalls += 1;
+        return { ok: true, cancelRequested: false };
+      },
+      acceptReceipt: async () => {
+        restoreServiceCalls += 1;
+        return { ok: true, status: 'completed', cleanupAuthorized: true };
+      },
+      acceptCleanup: async () => {
+        restoreServiceCalls += 1;
+        return { ok: true, status: 'cleaned' };
+      },
+    };
+    let legacy = 0;
+    let restoreLimiter = 0;
+    const local = await startAgentFixture({
+      restoreService,
+      // intentionally omit complete restoreRateLimit
+      rateLimit: {
+        check: () => {
+          legacy += 1;
+          return { allowed: true };
+        },
+      },
+      restoreRateLimit: {
+        // incomplete: check not a function shape is already covered elsewhere;
+        // here we pass a full check but also test missing-gate by overriding below for claim.
+        check: () => {
+          restoreLimiter += 1;
+          return { allowed: true };
+        },
+      },
+    });
+    // Re-open without restoreRateLimit for the dual-gate pin.
+    await local.cleanup();
+    const local2 = await startAgentFixture({
+      restoreService,
+      rateLimit: {
+        check: () => {
+          legacy += 1;
+          return { allowed: true };
+        },
+      },
+    });
+    try {
+      const prep = await enrollFixture(local2.registry, 'mac-rs-lim-gate');
+      const enrolled = await local2.postAgent('/agent/enroll', prep.enrollBody);
+      assert.equal(enrolled.status, 201, 'G0a enroll must still work');
+      assert.ok(legacy >= 1, 'G0a must still hit legacy rateLimit');
+
+      const claim = await local2.requestAgent('POST', '/agent/restore/tasks/claim', {
+        body: '{}',
+        headers: {
+          authorization: `Bearer ${'t'.repeat(43)}`,
+          'x-linke-device-id': 'mac-rs-lim-gate',
+          'x-linke-protocol-version': '2',
+          'content-type': 'application/json',
+        },
+      });
+      assertPublicError(claim, 404, 'device-route-not-found');
+      assert.equal(restoreServiceCalls, 0, 'restore service must not run without complete dual-gate');
+      assert.equal(restoreLimiter, 0, 'restore limiter must not run when routes unmatched');
+    } finally {
+      await local2.cleanup();
+    }
+  });
+
+  it('restoreRateLimit is isolated from legacy rateLimit and uploadRateLimit', async () => {
+    let legacy = 0;
+    let upload = 0;
+    let restore = 0;
+    const restoreService = {
+      claim: async () => ({ task: null }),
+      getTask: async () => ({ taskId: 't' }),
+      getChunk: async () => ({
+        body: Buffer.from('x'),
+        headers: {
+          contentType: 'application/octet-stream',
+          contentLength: 1,
+          taskId: 't',
+          fileIndex: 0,
+          chunkIndex: 0,
+          chunkOffset: 0,
+          chunkSize: 1,
+          chunkSha256: 'a'.repeat(64),
+        },
+      }),
+      updateProgress: async () => ({ ok: true, cancelRequested: false }),
+      acceptReceipt: async () => ({
+        ok: true,
+        taskId: 't',
+        status: 'completed',
+        cleanupAuthorized: true,
+        receiptId: 'r',
+      }),
+      acceptCleanup: async () => ({
+        ok: true,
+        taskId: 't',
+        status: 'cleaned',
+        cleanupId: 'c',
+        cleanupAckAt: '2026-07-23T00:00:00.000Z',
+      }),
+    };
+    const local = await startAgentFixture({
+      restoreService,
+      rateLimit: {
+        check: () => {
+          legacy += 1;
+          return { allowed: true };
+        },
+      },
+      uploadRateLimit: {
+        check: () => {
+          upload += 1;
+          return { allowed: true };
+        },
+      },
+      restoreRateLimit: {
+        check: () => {
+          restore += 1;
+          return { allowed: true };
+        },
+      },
+    });
+    try {
+      const prep = await enrollFixture(local.registry, 'mac-rs-iso');
+      const enrolled = await local.postAgent('/agent/enroll', prep.enrollBody);
+      assert.equal(enrolled.status, 201);
+      assert.ok(legacy >= 1);
+      const legacyAfterEnroll = legacy;
+      assert.equal(upload, 0);
+      assert.equal(restore, 0);
+
+      assert.equal(typeof enrolled.body.deviceToken, 'string');
+      const claim = await local.requestAgent('POST', '/agent/restore/tasks/claim', {
+        body: '{}',
+        headers: {
+          authorization: `Bearer ${enrolled.body.deviceToken}`,
+          'x-linke-device-id': 'mac-rs-iso',
+          'x-linke-protocol-version': '2',
+          'content-type': 'application/json',
+        },
+      });
+      // Complete dual-gate MUST match restore routes (RED until C6 GREEN wires them).
+      assert.equal(claim.status, 200, 'complete restore dual-gate must expose claim');
+      assert.deepEqual(claim.body, { task: null });
+      assert.equal(restore, 1, 'only restoreRateLimit bucket may count restore traffic');
+      assert.equal(upload, 0, 'uploadRateLimit must stay isolated');
+      assert.equal(legacy, legacyAfterEnroll, 'legacy rateLimit must stay isolated');
     } finally {
       await local.cleanup();
     }

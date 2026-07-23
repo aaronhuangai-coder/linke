@@ -778,3 +778,125 @@ describe('V1.39 C1 write-admission — outer catch mapping', () => {
     });
   });
 });
+
+/**
+ * C6 RED — restore-tasks create/cancel are write routes with required admission.
+ * Concrete pathnames must hit the central gate before body/service mutation.
+ */
+describe('C6 write-admission — restore-tasks create/cancel (RED)', () => {
+  const DEVICE_ID = 'mac-rs-admit';
+  const TASK_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const SNAPSHOT_ID = '550e8400-e29b-41d4-a716-4466554400aa';
+  const WRITE_TOKEN = 'admit-restore-write-token';
+
+  const RESTORE_CREATE_PATH = `/api/devices/${DEVICE_ID}/restore-tasks`;
+  const RESTORE_CANCEL_PATH = `/api/devices/${DEVICE_ID}/restore-tasks/${TASK_ID}/cancel`;
+
+  it('isApiWriteRoute matches restore create/cancel concrete paths; GET status is not write', () => {
+    assert.equal(isApiWriteRoute('POST', RESTORE_CREATE_PATH), true);
+    assert.equal(isApiWriteRoute('POST', RESTORE_CANCEL_PATH), true);
+    assert.equal(
+      isApiWriteRoute('GET', `/api/devices/${DEVICE_ID}/restore-tasks/${TASK_ID}`),
+      false,
+    );
+  });
+
+  it('create/cancel: write-token auth then required admission before createTask/cancelTask', async () => {
+    let createTaskCalls = 0;
+    let cancelTaskCalls = 0;
+    const restoreService = {
+      async createTask() {
+        createTaskCalls += 1;
+        return {
+          taskId: TASK_ID,
+          deviceId: DEVICE_ID,
+          snapshotId: SNAPSHOT_ID,
+          manifestDigest: 'a'.repeat(64),
+          relativeTarget: 'apps/demo',
+          status: 'pending',
+          fileCount: 1,
+          totalBytes: 1,
+          createdAt: '2026-07-23T12:00:00.000Z',
+        };
+      },
+      async cancelTask() {
+        cancelTaskCalls += 1;
+        return { taskId: TASK_ID, status: 'cancelled', cancelRequested: true };
+      },
+      async getStatus() {
+        return { taskId: TASK_ID, status: 'pending', cancelRequested: false };
+      },
+    };
+
+    await withServer({
+      writeToken: WRITE_TOKEN,
+      restoreService,
+    }, async ({ port, dataDir }) => {
+      const before = (await listAdmissionEvents(dataDir)).length;
+
+      const createRes = await postJson(
+        port,
+        RESTORE_CREATE_PATH,
+        { snapshotId: SNAPSHOT_ID, relativeTarget: 'apps/demo' },
+        WRITE_TOKEN,
+      );
+      assert.ok([200, 201].includes(createRes.status), `create status ${createRes.status}`);
+      assert.equal(createTaskCalls, 1);
+      const afterCreate = await listAdmissionEvents(dataDir);
+      assert.equal(afterCreate.length, before + 1, 'exact-one admission on create');
+      assertAdmissionShape(afterCreate[0], { method: 'POST', path: RESTORE_CREATE_PATH });
+      assert.ok(!(await readFile(eventsAbs(dataDir), 'utf8')).includes(WRITE_TOKEN));
+
+      const cancelRes = await postJson(port, RESTORE_CANCEL_PATH, {}, WRITE_TOKEN);
+      assert.ok([200, 202].includes(cancelRes.status), `cancel status ${cancelRes.status}`);
+      assert.equal(cancelTaskCalls, 1);
+      const afterCancel = await listAdmissionEvents(dataDir);
+      assert.equal(afterCancel.length, before + 2, 'exact-one admission on cancel');
+      assertAdmissionShape(afterCancel[0], { method: 'POST', path: RESTORE_CANCEL_PATH });
+    });
+  });
+
+  it('invalid dual-write state: restore create/cancel 503; createTask/cancelTask zero', async () => {
+    let createTaskCalls = 0;
+    let cancelTaskCalls = 0;
+    const restoreService = {
+      async createTask() {
+        createTaskCalls += 1;
+        throw new Error('must not mutate');
+      },
+      async cancelTask() {
+        cancelTaskCalls += 1;
+        throw new Error('must not mutate');
+      },
+    };
+    await withTempRoot('rs-adm-bad', async (dataDir) => {
+      await makeInvalidDualWriteState(dataDir);
+      const server = createServer({
+        dataDir,
+        writeToken: WRITE_TOKEN,
+        restoreService,
+      });
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      try {
+        const port = server.address().port;
+        for (const path of [RESTORE_CREATE_PATH, RESTORE_CANCEL_PATH]) {
+          const res = await postJson(
+            port,
+            path,
+            path === RESTORE_CREATE_PATH
+              ? { snapshotId: SNAPSHOT_ID, relativeTarget: 'apps/demo' }
+              : {},
+            WRITE_TOKEN,
+          );
+          assert.equal(res.status, 503, path);
+          assert.deepEqual(res.json, { error: 'audit-delivery-unavailable' });
+          assertNoLeakage(res.text, dataDir, WRITE_TOKEN);
+        }
+        assert.equal(createTaskCalls, 0);
+        assert.equal(cancelTaskCalls, 0);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+  });
+});

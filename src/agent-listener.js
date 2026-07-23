@@ -14,6 +14,8 @@ const UPLOAD_CREATE_TOTAL_MS = 30_000;
 const UPLOAD_STATUS_TOTAL_MS = 15_000;
 const UPLOAD_CHUNK_TOTAL_MS = 120_000;
 const UPLOAD_CHUNK_IDLE_MS = 15_000;
+const RESTORE_JSON_TOTAL_MS = 15_000;
+const RESTORE_CHUNK_TOTAL_MS = 120_000;
 
 const RETRY_AFTER_MIN_SEC = 1;
 const RETRY_AFTER_MAX_SEC = 30;
@@ -25,6 +27,15 @@ const UPLOAD_SERVICE_METHODS = Object.freeze([
   'putChunk',
   'finalize',
   'abort',
+]);
+
+const RESTORE_SERVICE_METHODS = Object.freeze([
+  'claim',
+  'getTask',
+  'getChunk',
+  'updateProgress',
+  'acceptReceipt',
+  'acceptCleanup',
 ]);
 
 /** Top-level allowlist for successful upload JSON responses (design §9.3). */
@@ -72,6 +83,69 @@ const BOUNDARY_KEYS = Object.freeze([
   'offset',
   'confirmedBytes',
   'complete',
+]);
+
+/** Claim task summary allowlist (design §8.4). */
+const RESTORE_CLAIM_TASK_KEYS = Object.freeze([
+  'taskId',
+  'snapshotId',
+  'manifestDigest',
+  'relativeTarget',
+  'status',
+  'fileCount',
+  'totalBytes',
+  'chunkSize',
+  'createdAt',
+  'claimedAt',
+  'cancelRequested',
+]);
+
+/** GET task allowlist (design §8.5). */
+const RESTORE_TASK_KEYS = Object.freeze([
+  'taskId',
+  'snapshotId',
+  'manifestDigest',
+  'relativeTarget',
+  'status',
+  'cancelRequested',
+  'cleanupAuthorized',
+  'fileCount',
+  'totalBytes',
+  'chunkSize',
+  'createdAt',
+  'claimedAt',
+  'completedAt',
+  'updatedAt',
+  'files',
+]);
+
+const RESTORE_FILE_ENTRY_KEYS = Object.freeze([
+  'fileIndex',
+  'path',
+  'size',
+  'sha256',
+  'chunkCount',
+]);
+
+const RESTORE_PROGRESS_KEYS = Object.freeze([
+  'ok',
+  'cancelRequested',
+]);
+
+const RESTORE_RECEIPT_ACK_KEYS = Object.freeze([
+  'ok',
+  'taskId',
+  'status',
+  'cleanupAuthorized',
+  'receiptId',
+]);
+
+const RESTORE_CLEANUP_ACK_KEYS = Object.freeze([
+  'ok',
+  'taskId',
+  'status',
+  'cleanupId',
+  'cleanupAckAt',
 ]);
 
 const DEVICE_ID_HEADER_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -154,11 +228,31 @@ function rateLimitHeaders(decision) {
 }
 
 /**
- * Fixed bounded Retry-After for upload-backpressure (not IP device-rate-limited).
+ * Fixed bounded Retry-After for upload/restore backpressure (not IP device-rate-limited).
  * @returns {Record<string, string>}
  */
 function backpressureHeaders() {
   return { 'retry-after': BACKPRESSURE_RETRY_AFTER_SEC };
+}
+
+/**
+ * Emit a single binary response with fixed cache and length headers.
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} statusCode
+ * @param {Buffer} body
+ * @param {Record<string, string>} [extraHeaders]
+ */
+function sendBinary(res, statusCode, body, extraHeaders = {}) {
+  if (res.headersSent || res.writableEnded) return;
+  const status = safeHttpStatus(statusCode, 500);
+  const buf = Buffer.isBuffer(body) ? body : Buffer.alloc(0);
+  res.writeHead(status, {
+    'content-type': 'application/octet-stream',
+    'content-length': buf.length,
+    'cache-control': 'no-store',
+    ...extraHeaders,
+  });
+  res.end(buf);
 }
 
 /**
@@ -620,6 +714,98 @@ function projectUploadSuccess(value) {
 }
 
 /**
+ * Project a restore file entry (exact allowlist; path is snapshot-root-relative only).
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function projectRestoreFileEntry(value) {
+  return projectPlainAllowlist(value, RESTORE_FILE_ENTRY_KEYS);
+}
+
+/**
+ * Project GET task / claim task object with nested files[] allowlist.
+ * @param {unknown} value
+ * @param {readonly string[]} allowedKeys
+ * @returns {Record<string, unknown>}
+ */
+function projectRestoreObject(value, allowedKeys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return Object.freeze({});
+  }
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const key of allowedKeys) {
+    let has = false;
+    try {
+      has = Object.prototype.hasOwnProperty.call(value, key);
+    } catch {
+      continue;
+    }
+    if (!has) continue;
+    let raw;
+    try {
+      raw = /** @type {Record<string, unknown>} */ (value)[key];
+    } catch {
+      continue;
+    }
+    if (key === 'files') {
+      if (!Array.isArray(raw)) continue;
+      /** @type {Record<string, unknown>[]} */
+      const files = [];
+      for (const entry of raw) {
+        const projected = projectRestoreFileEntry(entry);
+        if (projected) files.push(projected);
+      }
+      out.files = files;
+      continue;
+    }
+    if (isSafeJsonPrimitive(raw)) {
+      out[key] = raw;
+    }
+  }
+  return Object.freeze(out);
+}
+
+/**
+ * Safe projection of restore service success results by route kind.
+ * @param {string} kind
+ * @param {unknown} value
+ * @returns {Record<string, unknown>}
+ */
+function projectRestoreSuccess(kind, value) {
+  if (kind === 'claim') {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return Object.freeze({ task: null });
+    }
+    let task;
+    try {
+      task = /** @type {{ task?: unknown }} */ (value).task;
+    } catch {
+      return Object.freeze({ task: null });
+    }
+    if (task === null || task === undefined) {
+      return Object.freeze({ task: null });
+    }
+    return Object.freeze({
+      task: projectRestoreObject(task, RESTORE_CLAIM_TASK_KEYS),
+    });
+  }
+  if (kind === 'getTask') {
+    return projectRestoreObject(value, RESTORE_TASK_KEYS);
+  }
+  if (kind === 'progress') {
+    return projectRestoreObject(value, RESTORE_PROGRESS_KEYS);
+  }
+  if (kind === 'receipts') {
+    return projectRestoreObject(value, RESTORE_RECEIPT_ACK_KEYS);
+  }
+  if (kind === 'cleanup') {
+    return projectRestoreObject(value, RESTORE_CLEANUP_ACK_KEYS);
+  }
+  return Object.freeze({});
+}
+
+/**
  * Resolve injectable timer surface; hostile/partial falls back per-function to global.
  * @param {unknown} timers
  * @returns {{
@@ -725,6 +911,56 @@ function resolveUploadRateLimit(uploadRateLimit) {
     return null;
   }
   return /** @type {{ check: Function }} */ (uploadRateLimit);
+}
+
+/**
+ * Complete restoreService surface: non-array object with six function methods.
+ * Hostile getters / incomplete methods / thrown traps → null (no half-registration).
+ * @param {unknown} restoreService
+ * @returns {object | null}
+ */
+function resolveRestoreService(restoreService) {
+  if (restoreService == null) return null;
+  if (typeof restoreService !== 'object' || Array.isArray(restoreService)) return null;
+  try {
+    for (const method of RESTORE_SERVICE_METHODS) {
+      const fn = /** @type {Record<string, unknown>} */ (restoreService)[method];
+      if (typeof fn !== 'function') return null;
+    }
+  } catch {
+    return null;
+  }
+  return restoreService;
+}
+
+/**
+ * Complete restoreRateLimit surface: non-array object with function check.
+ * missing/null/array/incomplete/hostile getter → null (no half-registration).
+ * @param {unknown} restoreRateLimit
+ * @returns {{ check: Function } | null}
+ */
+function resolveRestoreRateLimit(restoreRateLimit) {
+  if (restoreRateLimit == null) return null;
+  if (typeof restoreRateLimit !== 'object' || Array.isArray(restoreRateLimit)) return null;
+  try {
+    const check = /** @type {{ check?: unknown }} */ (restoreRateLimit).check;
+    if (typeof check !== 'function') return null;
+  } catch {
+    return null;
+  }
+  return /** @type {{ check: Function }} */ (restoreRateLimit);
+}
+
+/**
+ * Strict non-negative decimal integer path segment (no leading zeros; safe int).
+ * @param {string} raw
+ * @returns {number | null}
+ */
+function parseStrictNonNegIndex(raw) {
+  if (typeof raw !== 'string' || !/^(0|[1-9]\d*)$/.test(raw)) return null;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
 }
 
 /**
@@ -878,6 +1114,229 @@ function matchUploadRoute(method, url) {
 }
 
 /**
+ * Strict restore route match (no query / trailing slash / decode speculation).
+ * Indices are raw path segments; handler validates strict non-neg decimal safe ints.
+ * @param {string | undefined} method
+ * @param {string | undefined} url
+ * @returns {{
+ *   kind: string,
+ *   taskId?: string,
+ *   fileIndexRaw?: string,
+ *   chunkIndexRaw?: string,
+ * } | null}
+ */
+function matchRestoreRoute(method, url) {
+  if (typeof method !== 'string' || typeof url !== 'string') return null;
+  if (url.includes('?')) return null;
+
+  if (method === 'POST' && url === '/agent/restore/tasks/claim') {
+    return { kind: 'claim' };
+  }
+
+  const taskGet = /^\/agent\/restore\/tasks\/([^/]+)$/.exec(url);
+  if (method === 'GET' && taskGet) {
+    return { kind: 'getTask', taskId: taskGet[1] };
+  }
+
+  const chunk = /^\/agent\/restore\/tasks\/([^/]+)\/files\/([^/]+)\/chunks\/([^/]+)$/.exec(url);
+  if (method === 'GET' && chunk) {
+    return {
+      kind: 'chunk',
+      taskId: chunk[1],
+      fileIndexRaw: chunk[2],
+      chunkIndexRaw: chunk[3],
+    };
+  }
+
+  const action = /^\/agent\/restore\/tasks\/([^/]+)\/(progress|receipts|cleanup)$/.exec(url);
+  if (method === 'POST' && action) {
+    const actionName = action[2];
+    return {
+      kind: actionName === 'progress'
+        ? 'progress'
+        : actionName === 'receipts'
+          ? 'receipts'
+          : 'cleanup',
+      taskId: action[1],
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Claim body: empty stream or exact `{}` only; unknown keys → restore-task-invalid.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {{ isAborted?: () => boolean }} [options]
+ * @returns {Promise<Record<string, unknown>>}
+ */
+function readClaimBody(req, options = {}) {
+  const isAborted = typeof options.isAborted === 'function' ? options.isAborted : () => false;
+  const maxBytes = MAX_AGENT_JSON_BODY_BYTES;
+
+  return new Promise((resolve, reject) => {
+    if (isAborted()) {
+      reject(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+      return;
+    }
+
+    const declared = req.headers['content-length'];
+    if (typeof declared === 'string' && declared.length > 0 && !declared.includes(',')) {
+      const length = Number(declared);
+      if (Number.isFinite(length) && length === 0) {
+        releaseRequestStream(req);
+        resolve(Object.freeze({}));
+        return;
+      }
+      if (Number.isFinite(length) && length > maxBytes) {
+        releaseRequestStream(req);
+        reject(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        return;
+      }
+    }
+
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+
+    const detach = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+    };
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      chunks.length = 0;
+      detach();
+      releaseRequestStream(req);
+      reject(error);
+    };
+
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      detach();
+      resolve(value);
+    };
+
+    const onData = (chunk) => {
+      if (settled || isAborted()) {
+        if (!settled && isAborted()) {
+          fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        }
+        return;
+      }
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > maxBytes) {
+        fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      if (isAborted()) {
+        fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        return;
+      }
+      const raw = Buffer.concat(chunks);
+      chunks.length = 0;
+      if (raw.length === 0) {
+        succeed(Object.freeze({}));
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(raw.toString('utf8'));
+      } catch {
+        fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        return;
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+        return;
+      }
+      let keys;
+      try {
+        keys = Object.keys(parsed);
+      } catch {
+        fail(new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID));
+        return;
+      }
+      if (keys.length !== 0) {
+        fail(new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID));
+        return;
+      }
+      succeed(Object.freeze({}));
+    };
+
+    const onError = () => {
+      fail(new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode: 400 }));
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
+
+/**
+ * Progress body exact keys: fileIndex / chunkIndex / receivedBytes (safe ints ≥ 0).
+ * @param {Record<string, unknown>} parsed
+ * @returns {{ fileIndex: number, chunkIndex: number, receivedBytes: number }}
+ */
+function parseProgressBody(parsed) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  let keys;
+  try {
+    keys = Object.keys(parsed);
+  } catch {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  if (keys.length !== 3) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  const keySet = new Set(keys);
+  if (
+    !keySet.has('fileIndex')
+    || !keySet.has('chunkIndex')
+    || !keySet.has('receivedBytes')
+  ) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  let fileIndex;
+  let chunkIndex;
+  let receivedBytes;
+  try {
+    fileIndex = /** @type {{ fileIndex?: unknown }} */ (parsed).fileIndex;
+    chunkIndex = /** @type {{ chunkIndex?: unknown }} */ (parsed).chunkIndex;
+    receivedBytes = /** @type {{ receivedBytes?: unknown }} */ (parsed).receivedBytes;
+  } catch {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  if (typeof fileIndex !== 'number' || !Number.isSafeInteger(fileIndex) || fileIndex < 0) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  if (typeof chunkIndex !== 'number' || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  if (
+    typeof receivedBytes !== 'number'
+    || !Number.isSafeInteger(receivedBytes)
+    || receivedBytes < 0
+  ) {
+    throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+  }
+  return { fileIndex, chunkIndex, receivedBytes };
+}
+
+/**
  * Per-request idempotent settle + deadline timers + request-scoped AbortSignal.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
@@ -999,11 +1458,39 @@ function createSettleGate(req, res, timers) {
     const headers = {};
     if (
       error instanceof LinkeError
-      && error.code === ERROR_CODES.UPLOAD_BACKPRESSURE
+      && (
+        error.code === ERROR_CODES.UPLOAD_BACKPRESSURE
+        || error.code === ERROR_CODES.RESTORE_BACKPRESSURE
+      )
     ) {
       Object.assign(headers, backpressureHeaders());
     }
     return settle(failure.statusCode, { error: failure.code }, headers);
+  };
+
+  /**
+   * Single-settle binary success path (restore chunk GET).
+   * @param {number} statusCode
+   * @param {Buffer} body
+   * @param {Record<string, string>} [extraHeaders]
+   * @returns {boolean}
+   */
+  const settleBinary = (statusCode, body, extraHeaders = {}) => {
+    if (settled) return false;
+    settled = true;
+    clearTimers();
+    runCleanups();
+    try {
+      sendBinary(res, statusCode, body, extraHeaders);
+    } catch {
+      // last-resort: response may already be closed
+    }
+    try {
+      releaseRequestStream(req);
+    } catch {
+      // ignore
+    }
+    return true;
   };
 
   /**
@@ -1101,6 +1588,7 @@ function createSettleGate(req, res, timers) {
     signal: requestSignal,
     cancel,
     settle,
+    settleBinary,
     settleError,
     race,
     armTotal,
@@ -1135,6 +1623,15 @@ function createSettleGate(req, res, timers) {
  *     finalize: Function,
  *     abort: Function,
  *   },
+ *   restoreRateLimit?: { check: (clientKey: string) => { allowed: boolean, retryAfterMs?: number } },
+ *   restoreService?: {
+ *     claim: Function,
+ *     getTask: Function,
+ *     getChunk: Function,
+ *     updateProgress: Function,
+ *     acceptReceipt: Function,
+ *     acceptCleanup: Function,
+ *   },
  *   timers?: {
  *     now?: () => number,
  *     setTimeout?: (fn: Function, ms: number, ...args: unknown[]) => unknown,
@@ -1150,6 +1647,8 @@ export function createAgentListener({
   rateLimit,
   uploadRateLimit,
   uploadService,
+  restoreRateLimit,
+  restoreService,
   timers,
 } = {}) {
   if (!identity?.keyPem || !identity?.certPem || !registry) {
@@ -1160,6 +1659,10 @@ export function createAgentListener({
   const resolvedUploadService = resolveUploadService(uploadService);
   const resolvedUploadRateLimit = resolveUploadRateLimit(uploadRateLimit);
   const uploadRoutesEnabled = resolvedUploadService != null && resolvedUploadRateLimit != null;
+  // Dual-gate: complete restoreService AND complete restoreRateLimit.check.
+  const resolvedRestoreService = resolveRestoreService(restoreService);
+  const resolvedRestoreRateLimit = resolveRestoreRateLimit(restoreRateLimit);
+  const restoreRoutesEnabled = resolvedRestoreService != null && resolvedRestoreRateLimit != null;
   const resolvedTimers = resolveTimers(timers);
 
   const server = createHttpsServer({
@@ -1173,6 +1676,8 @@ export function createAgentListener({
       rateLimit,
       uploadRateLimit: uploadRoutesEnabled ? resolvedUploadRateLimit : null,
       uploadService: uploadRoutesEnabled ? resolvedUploadService : null,
+      restoreRateLimit: restoreRoutesEnabled ? resolvedRestoreRateLimit : null,
+      restoreService: restoreRoutesEnabled ? resolvedRestoreService : null,
       timers: resolvedTimers,
     }).catch(() => {
       try {
@@ -1198,6 +1703,8 @@ export function createAgentListener({
  *   rateLimit?: { check: Function },
  *   uploadRateLimit?: { check: Function },
  *   uploadService: object | null,
+ *   restoreRateLimit?: { check: Function },
+ *   restoreService: object | null,
  *   timers: ReturnType<typeof resolveTimers>,
  * }} deps
  */
@@ -1208,6 +1715,8 @@ async function handleAgentRequest(req, res, deps) {
     rateLimit,
     uploadRateLimit,
     uploadService,
+    restoreRateLimit,
+    restoreService,
     timers,
   } = deps;
 
@@ -1220,6 +1729,17 @@ async function handleAgentRequest(req, res, deps) {
       registry,
       uploadRateLimit,
       uploadService,
+      timers,
+    });
+  }
+
+  const restoreRoute = restoreService ? matchRestoreRoute(method, url) : null;
+
+  if (restoreRoute && restoreService) {
+    return handleRestoreRequest(req, res, restoreRoute, {
+      registry,
+      restoreRateLimit,
+      restoreService,
       timers,
     });
   }
@@ -1453,6 +1973,211 @@ async function handleUploadRequest(req, res, route, deps) {
       }));
       if (gate.isSettled()) return undefined;
       return gate.settle(200, projectUploadSuccess(result));
+    }
+
+    return gate.settle(404, { error: ERROR_CODES.DEVICE_ROUTE_NOT_FOUND });
+  } catch (error) {
+    if (gate.isSettled()) return undefined;
+    return gate.settleError(error);
+  }
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {{
+ *   kind: string,
+ *   taskId?: string,
+ *   fileIndexRaw?: string,
+ *   chunkIndexRaw?: string,
+ * }} route
+ * @param {{
+ *   registry: object,
+ *   restoreRateLimit: { check: Function },
+ *   restoreService: object,
+ *   timers: ReturnType<typeof resolveTimers>,
+ * }} deps
+ */
+async function handleRestoreRequest(req, res, route, deps) {
+  const { registry, restoreRateLimit, restoreService, timers } = deps;
+  const gate = createSettleGate(req, res, timers);
+  const signal = gate.signal;
+
+  const totalMs = route.kind === 'chunk'
+    ? RESTORE_CHUNK_TOTAL_MS
+    : RESTORE_JSON_TOTAL_MS;
+
+  /** Arm total after auth so deadline tests can observe service entry + signal abort. */
+  const armRestoreTotal = () => {
+    gate.armTotal(totalMs, () => {
+      gate.cancel();
+      gate.settle(400, { error: ERROR_CODES.DEVICE_REQUEST_INVALID });
+    });
+  };
+
+  try {
+    // 0. Path-aware pre-auth restore limiter only (never legacy / upload buckets).
+    const verdict = evaluateRateLimit(restoreRateLimit, req.socket.remoteAddress || 'unknown');
+    if (verdict.kind === 'error') {
+      return gate.settle(500, { error: ERROR_CODES.DEVICE_INTERNAL_ERROR });
+    }
+    if (verdict.kind === 'limit') {
+      return gate.settle(
+        429,
+        { error: ERROR_CODES.DEVICE_RATE_LIMITED },
+        rateLimitHeaders(verdict.decision),
+      );
+    }
+
+    // 1–2. Auth triad + authenticate before body / taskId service lookup.
+    const triad = parseUploadAuthTriad(req);
+    const device = await gate.race(registry.authenticate({
+      deviceId: triad.deviceId,
+      token: triad.token,
+      protocolVersion: triad.protocolVersion,
+    }));
+    if (gate.isSettled()) return undefined;
+
+    const authenticatedDeviceId = device && typeof device.deviceId === 'string'
+      ? device.deviceId
+      : null;
+    if (typeof authenticatedDeviceId !== 'string' || authenticatedDeviceId.length === 0) {
+      throw new LinkeError(ERROR_CODES.DEVICE_TOKEN_INVALID, { statusCode: 401 });
+    }
+
+    // Deadline covers post-auth body + service work (chunk 120s / JSON 15s).
+    armRestoreTotal();
+
+    if (route.kind === 'claim') {
+      await gate.race(readClaimBody(req, { isAborted: gate.isSettled }));
+      if (gate.isSettled()) return undefined;
+      const result = await gate.race(restoreService.claim({
+        deviceId: authenticatedDeviceId,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+      return gate.settle(200, projectRestoreSuccess('claim', result));
+    }
+
+    if (route.kind === 'getTask') {
+      const result = await gate.race(restoreService.getTask({
+        deviceId: authenticatedDeviceId,
+        taskId: route.taskId,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+      return gate.settle(200, projectRestoreSuccess('getTask', result));
+    }
+
+    if (route.kind === 'chunk') {
+      const fileIndex = parseStrictNonNegIndex(route.fileIndexRaw || '');
+      const chunkIndex = parseStrictNonNegIndex(route.chunkIndexRaw || '');
+      if (fileIndex === null || chunkIndex === null) {
+        throw new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+      }
+      // getChunk owns locks.runTransfer; route never calls runTransfer itself.
+      const result = await gate.race(restoreService.getChunk({
+        deviceId: authenticatedDeviceId,
+        taskId: route.taskId,
+        fileIndex,
+        chunkIndex,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+
+      let body;
+      let headers;
+      try {
+        body = /** @type {{ body?: unknown }} */ (result)?.body;
+        headers = /** @type {{ headers?: unknown }} */ (result)?.headers;
+      } catch {
+        throw new LinkeError(ERROR_CODES.RESTORE_STATE_INVALID);
+      }
+      if (!Buffer.isBuffer(body)) {
+        throw new LinkeError(ERROR_CODES.RESTORE_STATE_INVALID);
+      }
+      if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
+        throw new LinkeError(ERROR_CODES.RESTORE_STATE_INVALID);
+      }
+
+      /** @type {Record<string, string>} */
+      const outHeaders = {
+        'cache-control': 'no-store',
+      };
+      try {
+        const h = /** @type {Record<string, unknown>} */ (headers);
+        if (typeof h.taskId === 'string') outHeaders['x-linke-task-id'] = h.taskId;
+        if (Number.isSafeInteger(h.fileIndex)) {
+          outHeaders['x-linke-file-index'] = String(h.fileIndex);
+        }
+        if (Number.isSafeInteger(h.chunkIndex)) {
+          outHeaders['x-linke-chunk-index'] = String(h.chunkIndex);
+        }
+        if (Number.isSafeInteger(h.chunkOffset) || h.chunkOffset === 0) {
+          outHeaders['x-linke-chunk-offset'] = String(h.chunkOffset);
+        }
+        if (Number.isSafeInteger(h.chunkSize) || h.chunkSize === 0) {
+          outHeaders['x-linke-chunk-size'] = String(h.chunkSize);
+        }
+        if (typeof h.chunkSha256 === 'string') {
+          outHeaders['x-linke-chunk-sha256'] = h.chunkSha256;
+        }
+      } catch {
+        throw new LinkeError(ERROR_CODES.RESTORE_STATE_INVALID);
+      }
+
+      return gate.settleBinary(200, body, outHeaders);
+    }
+
+    if (route.kind === 'progress') {
+      const body = await gate.race(readAgentBody(req, {
+        maxBytes: MAX_AGENT_JSON_BODY_BYTES,
+        isAborted: gate.isSettled,
+      }));
+      if (gate.isSettled()) return undefined;
+      const progress = parseProgressBody(body);
+      const result = await gate.race(restoreService.updateProgress({
+        deviceId: authenticatedDeviceId,
+        taskId: route.taskId,
+        fileIndex: progress.fileIndex,
+        chunkIndex: progress.chunkIndex,
+        receivedBytes: progress.receivedBytes,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+      return gate.settle(200, projectRestoreSuccess('progress', result));
+    }
+
+    if (route.kind === 'receipts') {
+      const body = await gate.race(readAgentBody(req, {
+        maxBytes: MAX_AGENT_JSON_BODY_BYTES,
+        isAborted: gate.isSettled,
+      }));
+      if (gate.isSettled()) return undefined;
+      const result = await gate.race(restoreService.acceptReceipt({
+        deviceId: authenticatedDeviceId,
+        taskId: route.taskId,
+        receipt: body,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+      return gate.settle(200, projectRestoreSuccess('receipts', result));
+    }
+
+    if (route.kind === 'cleanup') {
+      const body = await gate.race(readAgentBody(req, {
+        maxBytes: MAX_AGENT_JSON_BODY_BYTES,
+        isAborted: gate.isSettled,
+      }));
+      if (gate.isSettled()) return undefined;
+      const result = await gate.race(restoreService.acceptCleanup({
+        deviceId: authenticatedDeviceId,
+        taskId: route.taskId,
+        cleanupReceipt: body,
+        signal,
+      }));
+      if (gate.isSettled()) return undefined;
+      return gate.settle(200, projectRestoreSuccess('cleanup', result));
     }
 
     return gate.settle(404, { error: ERROR_CODES.DEVICE_ROUTE_NOT_FOUND });

@@ -84,11 +84,175 @@ export function formatApiRoute(route) {
 }
 
 /**
+ * G0c restore-tasks write paths (pattern match; not listed in frozen API_WRITE_ROUTES).
+ * @param {string} method
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+function isRestoreTasksWriteRoute(method, pathname) {
+  if (method !== 'POST' || typeof pathname !== 'string') return false;
+  if (/^\/api\/devices\/[^/]+\/restore-tasks$/.test(pathname)) return true;
+  if (/^\/api\/devices\/[^/]+\/restore-tasks\/[^/]+\/cancel$/.test(pathname)) return true;
+  return false;
+}
+
+/**
  * 判断请求是否命中注册表中的写入接口；空 method 按非写入请求处理。
+ * G0c: restore-tasks create/cancel are write routes via pattern (API_WRITE_ROUTES stays length 6).
  */
 export function isApiWriteRoute(method, pathname) {
   const normalizedMethod = String(method || '').toUpperCase();
-  return API_WRITE_ROUTES.some((route) => route.method === normalizedMethod && route.path === pathname);
+  if (API_WRITE_ROUTES.some((route) => route.method === normalizedMethod && route.path === pathname)) {
+    return true;
+  }
+  return isRestoreTasksWriteRoute(normalizedMethod, pathname);
+}
+
+/**
+ * Resolve complete restoreService surface for management restore task routes.
+ * Incomplete / hostile → null (no half-exposure).
+ * @param {unknown} restoreService
+ * @returns {object | null}
+ */
+function resolveManagementRestoreService(restoreService) {
+  if (restoreService == null) return null;
+  if (typeof restoreService !== 'object' || Array.isArray(restoreService)) return null;
+  try {
+    for (const method of ['createTask', 'getStatus', 'cancelTask']) {
+      const fn = /** @type {Record<string, unknown>} */ (restoreService)[method];
+      if (typeof fn !== 'function') return null;
+    }
+  } catch {
+    return null;
+  }
+  return restoreService;
+}
+
+/**
+ * Management create/status summary allowlist (design §8.1).
+ * @param {unknown} value
+ * @returns {Record<string, unknown>}
+ */
+function projectRestoreManagementSummary(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  // Real store returns { httpHint, taskSummary }; mocks may return summary directly.
+  let source = value;
+  try {
+    const nested = /** @type {{ taskSummary?: unknown }} */ (value).taskSummary;
+    if (nested !== null && typeof nested === 'object' && !Array.isArray(nested)) {
+      source = nested;
+    }
+  } catch {
+    source = value;
+  }
+  const keys = [
+    'taskId',
+    'deviceId',
+    'snapshotId',
+    'manifestDigest',
+    'relativeTarget',
+    'status',
+    'fileCount',
+    'totalBytes',
+    'createdAt',
+    'updatedAt',
+    'cancelRequested',
+    'cleanupAuthorized',
+  ];
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const key of keys) {
+    let has = false;
+    try {
+      has = Object.prototype.hasOwnProperty.call(source, key);
+    } catch {
+      continue;
+    }
+    if (!has) continue;
+    let raw;
+    try {
+      raw = /** @type {Record<string, unknown>} */ (source)[key];
+    } catch {
+      continue;
+    }
+    if (
+      raw === null
+      || typeof raw === 'string'
+      || typeof raw === 'boolean'
+      || (typeof raw === 'number' && Number.isFinite(raw))
+    ) {
+      out[key] = raw;
+    }
+  }
+  return out;
+}
+
+/**
+ * Cancel response allowlist (design §9.4).
+ * @param {unknown} value
+ * @returns {Record<string, unknown>}
+ */
+function projectRestoreCancelSummary(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const keys = ['taskId', 'status', 'cancelRequested'];
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const key of keys) {
+    let has = false;
+    try {
+      has = Object.prototype.hasOwnProperty.call(value, key);
+    } catch {
+      continue;
+    }
+    if (!has) continue;
+    let raw;
+    try {
+      raw = /** @type {Record<string, unknown>} */ (value)[key];
+    } catch {
+      continue;
+    }
+    if (
+      raw === null
+      || typeof raw === 'string'
+      || typeof raw === 'boolean'
+      || (typeof raw === 'number' && Number.isFinite(raw))
+    ) {
+      out[key] = raw;
+    }
+  }
+  return out;
+}
+
+/**
+ * Map management restore LinkeError / plain code errors to public {error} body.
+ * @param {unknown} err
+ * @returns {{ statusCode: number, code: string } | null}
+ */
+function mapRestoreManagementError(err) {
+  if (err instanceof LinkeError) {
+    const statusCode = Number.isInteger(err.statusCode) && err.statusCode >= 400 && err.statusCode <= 599
+      ? err.statusCode
+      : 500;
+    return { statusCode, code: err.code };
+  }
+  if (err && typeof err === 'object') {
+    const code = /** @type {{ code?: unknown }} */ (err).code;
+    const statusCode = /** @type {{ statusCode?: unknown }} */ (err).statusCode;
+    if (
+      typeof code === 'string'
+      && code.length > 0
+      && Number.isInteger(statusCode)
+      && /** @type {number} */ (statusCode) >= 400
+      && /** @type {number} */ (statusCode) <= 599
+    ) {
+      return { statusCode: /** @type {number} */ (statusCode), code };
+    }
+  }
+  return null;
 }
 
 function sendJSON(res, status, data) {
@@ -580,6 +744,7 @@ export function createServer({
   rateLimit,
   auditRetention,
   deviceAdministration,
+  restoreService,
 } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
@@ -589,6 +754,8 @@ export function createServer({
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
   const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken);
   const hasDeviceAdministration = isDeviceAdministrationService(deviceAdministration);
+  // Dual-gate: incomplete restoreService → management restore task paths stay 404.
+  const resolvedRestoreService = resolveManagementRestoreService(restoreService);
 
   const server = createHttpServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -1735,6 +1902,118 @@ export function createServer({
         const snapshots = await listSnapshots(dataDir, deviceId);
         const plan = buildRetentionDryRunPlan(deviceId, snapshots, { keepLast });
         return sendJSON(res, 200, plan);
+      }
+
+      // ── G0c restore-tasks management (after central write-admission gate) ──
+      // Create / cancel are write routes (admission already ran above when matched).
+      // GET status is read-only. Management create does NOT probe active upload.
+      if (resolvedRestoreService) {
+        // POST /api/devices/:deviceId/restore-tasks
+        const restoreCreateMatch = pathname.match(/^\/api\/devices\/([^/]+)\/restore-tasks$/);
+        if (method === 'POST' && restoreCreateMatch) {
+          const deviceId = decodeURIComponent(restoreCreateMatch[1]);
+          let body;
+          try {
+            body = await readBody(req);
+          } catch (err) {
+            const mapped = mapRestoreManagementError(err)
+              || (err && err.statusCode === 413
+                ? { statusCode: 413, code: ERROR_CODES.DEVICE_REQUEST_INVALID }
+                : err && err.statusCode === 400
+                  ? { statusCode: 400, code: ERROR_CODES.DEVICE_REQUEST_INVALID }
+                  : { statusCode: 400, code: ERROR_CODES.RESTORE_TASK_INVALID });
+            return sendNoStoreJSON(res, mapped.statusCode, { error: mapped.code });
+          }
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            return sendNoStoreJSON(res, 400, { error: ERROR_CODES.RESTORE_TASK_INVALID });
+          }
+          const keys = Object.keys(body);
+          if (
+            keys.length !== 2
+            || !Object.prototype.hasOwnProperty.call(body, 'snapshotId')
+            || !Object.prototype.hasOwnProperty.call(body, 'relativeTarget')
+          ) {
+            return sendNoStoreJSON(res, 400, { error: ERROR_CODES.RESTORE_TASK_INVALID });
+          }
+          try {
+            const result = await resolvedRestoreService.createTask({
+              deviceId,
+              snapshotId: body.snapshotId,
+              relativeTarget: body.relativeTarget,
+            });
+            let httpStatus = 201;
+            try {
+              const hint = /** @type {{ httpHint?: unknown, httpStatus?: unknown }} */ (result)?.httpHint
+                ?? /** @type {{ httpStatus?: unknown }} */ (result)?.httpStatus;
+              if (hint === 200 || hint === 201) httpStatus = hint;
+            } catch {
+              httpStatus = 201;
+            }
+            return sendNoStoreJSON(res, httpStatus, projectRestoreManagementSummary(result));
+          } catch (err) {
+            const mapped = mapRestoreManagementError(err);
+            if (mapped) {
+              return sendNoStoreJSON(res, mapped.statusCode, { error: mapped.code });
+            }
+            throw err;
+          }
+        }
+
+        // GET /api/devices/:deviceId/restore-tasks/:taskId
+        const restoreGetMatch = pathname.match(/^\/api\/devices\/([^/]+)\/restore-tasks\/([^/]+)$/);
+        if (method === 'GET' && restoreGetMatch) {
+          const deviceId = decodeURIComponent(restoreGetMatch[1]);
+          const taskId = decodeURIComponent(restoreGetMatch[2]);
+          try {
+            const result = await resolvedRestoreService.getStatus({ deviceId, taskId });
+            return sendNoStoreJSON(res, 200, projectRestoreManagementSummary(result));
+          } catch (err) {
+            const mapped = mapRestoreManagementError(err);
+            if (mapped) {
+              return sendNoStoreJSON(res, mapped.statusCode, { error: mapped.code });
+            }
+            throw err;
+          }
+        }
+
+        // POST /api/devices/:deviceId/restore-tasks/:taskId/cancel
+        const restoreCancelMatch = pathname.match(
+          /^\/api\/devices\/([^/]+)\/restore-tasks\/([^/]+)\/cancel$/,
+        );
+        if (method === 'POST' && restoreCancelMatch) {
+          const deviceId = decodeURIComponent(restoreCancelMatch[1]);
+          const taskId = decodeURIComponent(restoreCancelMatch[2]);
+          // Consume optional body; cancel body is empty object or omit.
+          try {
+            await readBody(req);
+          } catch (err) {
+            const mapped = mapRestoreManagementError(err)
+              || (err && err.statusCode === 413
+                ? { statusCode: 413, code: ERROR_CODES.DEVICE_REQUEST_INVALID }
+                : err && err.statusCode === 400
+                  ? { statusCode: 400, code: ERROR_CODES.DEVICE_REQUEST_INVALID }
+                  : { statusCode: 400, code: ERROR_CODES.RESTORE_TASK_INVALID });
+            return sendNoStoreJSON(res, mapped.statusCode, { error: mapped.code });
+          }
+          try {
+            const result = await resolvedRestoreService.cancelTask({ deviceId, taskId });
+            let httpStatus = 200;
+            try {
+              const hint = /** @type {{ httpHint?: unknown, httpStatus?: unknown }} */ (result)?.httpHint
+                ?? /** @type {{ httpStatus?: unknown }} */ (result)?.httpStatus;
+              if (hint === 200 || hint === 202) httpStatus = hint;
+            } catch {
+              httpStatus = 200;
+            }
+            return sendNoStoreJSON(res, httpStatus, projectRestoreCancelSummary(result));
+          } catch (err) {
+            const mapped = mapRestoreManagementError(err);
+            if (mapped) {
+              return sendNoStoreJSON(res, mapped.statusCode, { error: mapped.code });
+            }
+            throw err;
+          }
+        }
       }
 
       // ── Static Web Console ──────────────────────────────────

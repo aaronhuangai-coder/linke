@@ -1,7 +1,9 @@
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
-import { access, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -13,7 +15,11 @@ import {
   closeServer,
 } from '../src/controller-runtime.js';
 import { DeviceRegistry } from '../src/device-registry.js';
-import { ERROR_CODES } from '../src/error-codes.js';
+import { ERROR_CODES, LinkeError } from '../src/error-codes.js';
+import { createUploadLocks } from '../src/upload-locks.js';
+import { createUploadSessionStore } from '../src/upload-session-store.js';
+import { getSnapshotManifest, safeDevicePath } from '../src/storage.js';
+import { projectCanonicalUploadManifest } from '../src/upload-manifest.js';
 
 /** Open runtimes closed in after() so a failed assertion never leaks listeners. */
 const openRuntimes = new Set();
@@ -2287,6 +2293,799 @@ describe('C6 controller-runtime upload wiring (RED)', () => {
         /private|agent host/i,
       );
       assert.equal(factoryCalled, false);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C6 G0c restore runtime wiring (RED)
+// Design §8 + C55 production wiring + plan C6 Step 4
+// ---------------------------------------------------------------------------
+
+const C6_RT_SNAPSHOT_ID = '550e8400-e29b-41d4-a716-4466554400bb';
+const C6_RT_SNAPSHOT_B = '550e8400-e29b-41d4-a716-4466554400bc';
+const C6_RT_T0 = '2026-07-22T12:00:00.000Z';
+const C6_RT_ZERO_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/**
+ * Assert LinkeError with exact public code (no near-tautology typeof/object checks).
+ * @param {unknown} error
+ * @param {string} code
+ */
+function assertC6LinkeCode(error, code) {
+  assert.ok(error instanceof LinkeError, `expected LinkeError for ${code}, got ${error}`);
+  assert.equal(error.code, code);
+  assert.equal(error.message, code);
+}
+
+/**
+ * Build a zero-file or single-file upload projection for runtime uploadService.create.
+ * @param {{ deviceId: string, snapshotId?: string, files?: { path: string, size: number, content?: Buffer }[] }} opts
+ */
+function makeC6UploadProjection(opts) {
+  const deviceId = opts.deviceId;
+  const snapshotId = opts.snapshotId ?? C6_RT_SNAPSHOT_ID;
+  const files = opts.files ?? [];
+  const entries = files.map((f) => {
+    const content = f.content ?? (f.size === 0 ? Buffer.alloc(0) : Buffer.alloc(f.size, 0x61));
+    assert.equal(content.length, f.size);
+    const sha256 = f.size === 0
+      ? C6_RT_ZERO_SHA
+      : createHash('sha256').update(content).digest('hex');
+    return { path: f.path, size: f.size, sha256, content };
+  });
+  const totalBytes = entries.reduce((s, e) => s + e.size, 0);
+  const input = {
+    schemaVersion: 2,
+    snapshotId,
+    deviceId,
+    createdAt: C6_RT_T0,
+    files: entries.map((e) => e.path),
+    integrity: {
+      algorithm: 'sha256',
+      totalBytes,
+      entries: entries.map((e) => ({ path: e.path, size: e.size, sha256: e.sha256 })),
+    },
+  };
+  const { manifest, manifestDigest } = projectCanonicalUploadManifest(input, {
+    authenticatedDeviceId: deviceId,
+  });
+  return { manifest, manifestDigest, entries, totalBytes, deviceId, snapshotId };
+}
+
+/**
+ * Plant a local (non remote-upload) committed snapshot fixture under dataDir.
+ * Readable via production getSnapshotManifest → createRestoreSnapshotReader path.
+ * @param {string} dataDir
+ * @param {{ deviceId: string, snapshotId?: string, fileRel?: string, fileContent?: string }} opts
+ */
+async function plantC6LocalSnapshotFixture(dataDir, opts) {
+  const deviceId = opts.deviceId;
+  const snapshotId = opts.snapshotId ?? C6_RT_SNAPSHOT_ID;
+  const fileRel = opts.fileRel ?? 'docs/readme.txt';
+  const fileContent = opts.fileContent ?? 'runtime-restore-fixture';
+  const fileBytes = Buffer.byteLength(fileContent, 'utf8');
+  const fileSha = createHash('sha256').update(fileContent, 'utf8').digest('hex');
+  const { deviceRel } = safeDevicePath(dataDir, deviceId);
+  const base = join(dataDir, deviceRel, 'snapshots', snapshotId);
+  await mkdir(join(base, 'files'), { recursive: true });
+  // nested parents if needed
+  const fileAbs = join(base, 'files', fileRel);
+  await mkdir(join(fileAbs, '..'), { recursive: true });
+  await writeFile(fileAbs, fileContent, 'utf8');
+
+  const rawManifest = {
+    schemaVersion: 2,
+    snapshotId,
+    deviceId,
+    createdAt: C6_RT_T0,
+    hostname: 'c6-runtime-fixture',
+    sourcePath: '/tmp/c6-runtime-source',
+    files: [fileRel],
+    integrity: {
+      algorithm: 'sha256',
+      totalBytes: fileBytes,
+      entries: [{ path: fileRel, size: fileBytes, sha256: fileSha }],
+    },
+  };
+  await writeFile(join(base, 'manifest.json'), JSON.stringify(rawManifest, null, 2), 'utf8');
+
+  const indexPath = join(dataDir, deviceRel, 'snapshots.json');
+  await mkdir(join(dataDir, deviceRel), { recursive: true });
+  /** @type {unknown[]} */
+  let list = [];
+  try {
+    list = JSON.parse(await readFile(indexPath, 'utf8'));
+  } catch {
+    list = [];
+  }
+  if (!Array.isArray(list)) list = [];
+  list = list.filter((e) => e && /** @type {any} */ (e).snapshotId !== snapshotId);
+  list.push({
+    snapshotId,
+    createdAt: C6_RT_T0,
+    hostname: 'c6-runtime-fixture',
+    sourcePath: '/tmp/c6-runtime-source',
+    fileCount: 1,
+  });
+  await writeFile(indexPath, JSON.stringify(list, null, 2), 'utf8');
+
+  // Independent digest oracle via production projector (local raw → clean → digest).
+  const clean = {
+    schemaVersion: 2,
+    snapshotId,
+    deviceId,
+    createdAt: C6_RT_T0,
+    hostname: 'c6-runtime-fixture',
+    sourcePath: '/tmp/c6-runtime-source',
+    files: [fileRel],
+    integrity: {
+      algorithm: 'sha256',
+      totalBytes: fileBytes,
+      entries: [{ path: fileRel, size: fileBytes, sha256: fileSha }],
+    },
+  };
+  const { manifestDigest } = projectCanonicalUploadManifest(clean, {
+    authenticatedDeviceId: deviceId,
+  });
+  return {
+    deviceId,
+    snapshotId,
+    manifestDigest,
+    fileCount: 1,
+    totalBytes: fileBytes,
+    fileRel,
+    fileContent,
+  };
+}
+
+/**
+ * Extract task summary from createTask result (store returns {httpHint, taskSummary}).
+ * @param {any} created
+ */
+function c6TaskSummary(created) {
+  if (!created || typeof created !== 'object') return null;
+  if (created.taskSummary && typeof created.taskSummary === 'object') return created.taskSummary;
+  return created;
+}
+
+describe('C6 controller-runtime restore wiring (RED)', () => {
+  it('injects complete restoreService + restoreRateLimit + shared locks probes into factories', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-rs-wire-'));
+    /** @type {any} */
+    let agentCaptured = null;
+    /** @type {any} */
+    let managementCaptured = null;
+    /** @type {ReturnType<typeof createUploadLocks> | null} */
+    let capturedLocks = null;
+    let createLocksCalls = 0;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        maxGlobalTransfers: 1,
+        // Optional factory DI (same spirit as agentServerFactory). When honored,
+        // assert exactly one shared createUploadLocks instance. Primary pin below
+        // is behavioral (putChunk holds the only live-transfer slot).
+        createUploadLocks: (opts) => {
+          createLocksCalls += 1;
+          capturedLocks = createUploadLocks(opts);
+          return capturedLocks;
+        },
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          agentCaptured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: (options) => {
+          managementCaptured = options;
+          return trackedServer([], 'management');
+        },
+      });
+      openRuntimes.add(runtime);
+      try {
+        assert.ok(agentCaptured, 'agentServerFactory must be called');
+        assert.ok(
+          agentCaptured.restoreRateLimit
+          && typeof agentCaptured.restoreRateLimit.check === 'function',
+          'restoreRateLimit must be injected independently',
+        );
+        assert.notEqual(agentCaptured.restoreRateLimit, agentCaptured.rateLimit);
+        assert.notEqual(agentCaptured.restoreRateLimit, agentCaptured.uploadRateLimit);
+
+        const rs = agentCaptured.restoreService;
+        const uploadService = agentCaptured.uploadService;
+        assert.ok(rs && typeof rs === 'object', 'restoreService must be injected');
+        assert.ok(uploadService && typeof uploadService === 'object', 'uploadService must be injected');
+        for (const m of [
+          'claim',
+          'getTask',
+          'getChunk',
+          'updateProgress',
+          'acceptReceipt',
+          'acceptCleanup',
+          'createTask',
+          'cancelTask',
+          'getStatus',
+          'hasActiveRestore',
+        ]) {
+          assert.equal(typeof rs[m], 'function', `restoreService.${m}`);
+        }
+
+        assert.ok(managementCaptured, 'managementServerFactory must be called');
+        assert.ok(
+          managementCaptured.restoreService,
+          'management must receive restoreService for restore-tasks routes',
+        );
+        // Same instance reference: agent + management restoreService.
+        assert.equal(
+          managementCaptured.restoreService,
+          agentCaptured.restoreService,
+          'agent and management must share one restoreService instance',
+        );
+
+        // Optional factory pin: if production forwards createUploadLocks, it must be once.
+        if (createLocksCalls > 0) {
+          assert.equal(createLocksCalls, 1, 'exactly one createUploadLocks for upload+restore');
+          assert.ok(capturedLocks);
+          assert.equal(capturedLocks.maxGlobalTransfers, 1);
+        }
+
+        // Behavioral shared live-transfer budget (primary, no private locks required):
+        // maxGlobalTransfers=1 → hold via upload putChunk hang → restore getChunk must be
+        // exact RESTORE_BACKPRESSURE. Separate lock sets would leave restore free.
+        const deviceId = 'shared-lock-device';
+        const content = Buffer.from('x');
+        const proj = makeC6UploadProjection({
+          deviceId,
+          snapshotId: C6_RT_SNAPSHOT_B,
+          files: [{ path: 'hold.bin', size: content.length, content }],
+        });
+        const session = await uploadService.create({
+          authenticatedDeviceId: deviceId,
+          manifest: proj.manifest,
+          claimedManifestDigest: proj.manifestDigest,
+        });
+        assert.equal(typeof session.uploadId, 'string');
+
+        const sha256 = createHash('sha256').update(content).digest('hex');
+        const pairs = [
+          ['Authorization', 'Bearer test-token-not-secret'],
+          ['X-Linke-Device-Id', deviceId],
+          ['X-Linke-Protocol-Version', '2'],
+          ['Content-Length', String(content.length)],
+          ['X-Linke-Upload-Id', session.uploadId],
+          ['X-Linke-Snapshot-Id', proj.snapshotId],
+          ['X-Linke-Manifest-Digest', proj.manifestDigest],
+          ['X-Linke-File-Index', '0'],
+          ['X-Linke-Chunk-Index', '0'],
+          ['X-Linke-Chunk-Offset', '0'],
+          ['X-Linke-Chunk-Size', String(content.length)],
+          ['X-Linke-Chunk-Sha256', sha256],
+        ];
+        /** @type {string[]} */
+        const rawHeaders = [];
+        for (const [k, v] of pairs) rawHeaders.push(k, v);
+
+        // Hang body after headers so putChunk keeps the sole runTransfer slot.
+        const hangStream = new Readable({
+          read() {
+            /* never push — holds ingest inside runTransfer */
+          },
+        });
+        const putP = uploadService.putChunk({
+          authenticatedDeviceId: deviceId,
+          request: {
+            rawHeaders,
+            url: `/agent/upload/sessions/${session.uploadId}/chunks`,
+            method: 'POST',
+          },
+          stream: hangStream,
+        });
+        // Yield until putChunk has entered runTransfer (slot held).
+        for (let turn = 0; turn < 64; turn += 1) {
+          await new Promise((r) => setImmediate(r));
+          await Promise.resolve();
+        }
+
+        await assert.rejects(
+          () => rs.getChunk({
+            deviceId,
+            taskId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+          (error) => {
+            assertC6LinkeCode(error, ERROR_CODES.RESTORE_BACKPRESSURE);
+            return true;
+          },
+        );
+
+        // Active upload session on same device: claim is exact RESTORE_TASK_CONFLICT
+        // (admission), never RESTORE_BACKPRESSURE (live-transfer slots). Slot fullness
+        // alone does not change claim; upload nonterminal does.
+        await assert.rejects(
+          () => rs.claim({ deviceId }),
+          (error) => {
+            assertC6LinkeCode(error, ERROR_CODES.RESTORE_TASK_CONFLICT);
+            assert.notEqual(
+              /** @type {any} */ (error)?.code,
+              ERROR_CODES.RESTORE_BACKPRESSURE,
+            );
+            return true;
+          },
+        );
+
+        hangStream.destroy(new Error('test-release-slot'));
+        await putP.then(() => {}, () => {});
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('production restoreRateLimit default 1200/min isolated from legacy 60 and upload 1200', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-rs-lim-'));
+    /** @type {any} */
+    let captured = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          captured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        const legacy = captured.rateLimit;
+        const upload = captured.uploadRateLimit;
+        const restore = captured.restoreRateLimit;
+        assert.ok(legacy && upload && restore);
+        assert.notEqual(legacy, upload);
+        assert.notEqual(upload, restore);
+        assert.notEqual(legacy, restore);
+        const client = '10.9.8.7';
+        for (let i = 0; i < 60; i += 1) {
+          assert.equal(legacy.check(client).allowed, true, `legacy ${i + 1}`);
+        }
+        assert.equal(legacy.check(client).allowed, false, 'legacy 61 denied');
+        for (let i = 0; i < 1200; i += 1) {
+          assert.equal(upload.check(client).allowed, true, `upload ${i + 1}`);
+        }
+        assert.equal(upload.check(client).allowed, false, 'upload 1201 denied');
+        for (let i = 0; i < 1200; i += 1) {
+          assert.equal(restore.check(client).allowed, true, `restore ${i + 1}`);
+        }
+        assert.equal(restore.check(client).allowed, false, 'restore 1201 denied');
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('upload findActiveRestore is explicit; restore findActiveUpload calls uploadStore.findActiveSession', async () => {
+    // Pin production wiring without source-scan oracle:
+    // a) seed active/pending restore → same-device upload create → exact UPLOAD_SESSION_CONFLICT
+    //    (proves explicit findActiveRestore, not C5 default async () => false)
+    // b) seed active upload session → same-device restore claim → exact RESTORE_TASK_CONFLICT
+    //    + findActiveSession spy call count ≥ 1
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-probes-'));
+    /** @type {any} */
+    let agentCaptured = null;
+    let findActiveSessionCalls = 0;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        // Optional store factory DI: wrap findActiveSession for production pin call count.
+        createUploadSessionStore: (opts) => {
+          const store = createUploadSessionStore(opts);
+          const orig = store.findActiveSession.bind(store);
+          return {
+            ...store,
+            findActiveSession: async (deviceId) => {
+              findActiveSessionCalls += 1;
+              return orig(deviceId);
+            },
+          };
+        },
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          agentCaptured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        const uploadService = agentCaptured.uploadService;
+        const restoreService = agentCaptured.restoreService;
+        assert.ok(uploadService, 'uploadService required');
+        assert.ok(restoreService, 'restoreService required for bidirectional probes');
+
+        // ── a) explicit findActiveRestore ─────────────────────────────
+        const deviceRestore = 'probe-restore-device';
+        const fixtureA = await plantC6LocalSnapshotFixture(dataDir, {
+          deviceId: deviceRestore,
+          snapshotId: C6_RT_SNAPSHOT_ID,
+          fileContent: 'probe-a-body',
+        });
+        const createdRestore = await restoreService.createTask({
+          deviceId: deviceRestore,
+          snapshotId: fixtureA.snapshotId,
+          relativeTarget: 'apps/demo',
+        });
+        const summaryA = c6TaskSummary(createdRestore);
+        assert.ok(summaryA && typeof summaryA === 'object', 'createTask must return summary object');
+        assert.equal(typeof summaryA.taskId, 'string');
+        assert.match(summaryA.taskId, /^[0-9a-f-]{36}$/i);
+        assert.equal(summaryA.status, 'pending');
+        assert.equal(summaryA.manifestDigest, fixtureA.manifestDigest);
+        assert.equal(summaryA.fileCount, fixtureA.fileCount);
+        assert.equal(summaryA.totalBytes, fixtureA.totalBytes);
+
+        assert.equal(await restoreService.hasActiveRestore(deviceRestore), true);
+
+        const projBlocked = makeC6UploadProjection({
+          deviceId: deviceRestore,
+          snapshotId: C6_RT_SNAPSHOT_B,
+          files: [],
+        });
+        await assert.rejects(
+          () => uploadService.create({
+            authenticatedDeviceId: deviceRestore,
+            manifest: projBlocked.manifest,
+            claimedManifestDigest: projBlocked.manifestDigest,
+          }),
+          (error) => {
+            assertC6LinkeCode(error, ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+            return true;
+          },
+        );
+
+        // ── b) findActiveUpload → uploadStore.findActiveSession ───────
+        // Clean device: active upload session + pending restore (createTask ignores upload).
+        // claim must exact RESTORE_TASK_CONFLICT and call findActiveSession ≥ 1.
+        const deviceUploadOnly = 'probe-upload-only';
+        const projOnly = makeC6UploadProjection({
+          deviceId: deviceUploadOnly,
+          snapshotId: C6_RT_SNAPSHOT_B,
+          files: [],
+        });
+        const session = await uploadService.create({
+          authenticatedDeviceId: deviceUploadOnly,
+          manifest: projOnly.manifest,
+          claimedManifestDigest: projOnly.manifestDigest,
+        });
+        assert.equal(typeof session.uploadId, 'string');
+        assert.equal(session.status, 'initialized');
+
+        const fixtureOnly = await plantC6LocalSnapshotFixture(dataDir, {
+          deviceId: deviceUploadOnly,
+          snapshotId: C6_RT_SNAPSHOT_ID,
+          fileContent: 'probe-only-body',
+        });
+        const pendingOnly = await restoreService.createTask({
+          deviceId: deviceUploadOnly,
+          snapshotId: fixtureOnly.snapshotId,
+          relativeTarget: 'apps/claim-target',
+        });
+        assert.equal(c6TaskSummary(pendingOnly)?.status, 'pending');
+
+        findActiveSessionCalls = 0;
+        await assert.rejects(
+          () => restoreService.claim({ deviceId: deviceUploadOnly }),
+          (error) => {
+            assertC6LinkeCode(error, ERROR_CODES.RESTORE_TASK_CONFLICT);
+            return true;
+          },
+        );
+        assert.ok(
+          findActiveSessionCalls >= 1,
+          `findActiveUpload must call uploadStore.findActiveSession (≥1), got ${findActiveSessionCalls}`,
+        );
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('half restore dependency must not public-start; missing restoreService surface fails closed', async () => {
+    // Production assembly always builds restore stack; test pin: agent factory must receive
+    // restore dual-gate or reject before management listen.
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-rs-half-'));
+    let managementListening = false;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          // Fail closed if production half-omits restore dual-gate.
+          assert.ok(options.restoreService, 'must not public-start without restoreService');
+          assert.ok(
+            options.restoreRateLimit && typeof options.restoreRateLimit.check === 'function',
+            'must not public-start without restoreRateLimit',
+          );
+          for (const m of ['claim', 'getTask', 'getChunk', 'updateProgress', 'acceptReceipt', 'acceptCleanup']) {
+            assert.equal(typeof options.restoreService[m], 'function', m);
+          }
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: (options) => {
+          managementListening = true;
+          assert.ok(options.restoreService, 'management half-start without restoreService forbidden');
+          return trackedServer([], 'management');
+        },
+      });
+      openRuntimes.add(runtime);
+      try {
+        assert.equal(managementListening, true);
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('production uses createRestoreSnapshotReader + getSnapshotManifest; create summary has real digest fields', async () => {
+    // Positive fixture pin: real local snapshot → createTask success with exact
+    // manifestDigest / fileCount / totalBytes; getSnapshotManifest spy ≥ 1 call.
+    // Negative missing-snapshot alone cannot substitute this positive oracle.
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-snap-'));
+    /** @type {any} */
+    let managementCaptured = null;
+    /** @type {any} */
+    let agentCaptured = null;
+    let getSnapshotManifestCalls = 0;
+    const deviceId = 'snap-reader-device';
+    const fixture = await plantC6LocalSnapshotFixture(dataDir, {
+      deviceId,
+      snapshotId: C6_RT_SNAPSHOT_ID,
+      fileContent: 'snapshot-reader-positive',
+    });
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        // Injectable production factory pin (createRestoreSnapshotReader getSnapshotManifestFn).
+        getSnapshotManifestFn: async (...args) => {
+          getSnapshotManifestCalls += 1;
+          return getSnapshotManifest(...args);
+        },
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          agentCaptured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: (options) => {
+          managementCaptured = options;
+          return trackedServer([], 'management');
+        },
+      });
+      openRuntimes.add(runtime);
+      try {
+        const restoreService = agentCaptured?.restoreService || managementCaptured?.restoreService;
+        assert.ok(restoreService, 'restoreService required for snapshot-reader production pin');
+
+        getSnapshotManifestCalls = 0;
+        const created = await restoreService.createTask({
+          deviceId,
+          snapshotId: fixture.snapshotId,
+          relativeTarget: 'apps/demo',
+        });
+        const summary = c6TaskSummary(created);
+        assert.ok(summary && typeof summary === 'object');
+        assert.equal(typeof summary.taskId, 'string');
+        assert.match(summary.taskId, /^[0-9a-f-]{36}$/i);
+        assert.equal(summary.status, 'pending');
+        assert.equal(summary.snapshotId, fixture.snapshotId);
+        assert.equal(summary.deviceId, deviceId);
+        assert.equal(
+          summary.manifestDigest,
+          fixture.manifestDigest,
+          'create summary manifestDigest must equal fixture digest oracle',
+        );
+        assert.equal(summary.fileCount, fixture.fileCount);
+        assert.equal(summary.totalBytes, fixture.totalBytes);
+        assert.ok(
+          getSnapshotManifestCalls >= 1,
+          `getSnapshotManifest must be called ≥1 via production reader, got ${getSnapshotManifestCalls}`,
+        );
+
+        // Missing snapshot remains fail-closed (domain error, not TypeError) — complement, not substitute.
+        await assert.rejects(
+          () => restoreService.createTask({
+            deviceId,
+            snapshotId: '550e8400-e29b-41d4-a716-4466554400cc',
+            relativeTarget: 'apps/missing',
+          }),
+          (error) => {
+            assert.ok(error instanceof LinkeError);
+            assert.notEqual(error.name, 'TypeError');
+            assert.ok(
+              error.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+              || error.code === ERROR_CODES.RESTORE_TASK_INVALID
+              || error.code === ERROR_CODES.RESTORE_STATE_INVALID,
+            );
+            return true;
+          },
+        );
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('same-device race: only one of upload create / restore claim wins; different devices parallel', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-rt-race-'));
+    /** @type {any} */
+    let agentCaptured = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          agentCaptured = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: () => trackedServer([], 'management'),
+      });
+      openRuntimes.add(runtime);
+      try {
+        const uploadService = agentCaptured.uploadService;
+        const restoreService = agentCaptured.restoreService;
+        assert.ok(uploadService, 'uploadService required');
+        assert.ok(restoreService, 'restoreService required for race pin');
+
+        // ── Same device: pending restore competes with upload create ──
+        const deviceA = 'race-device-same';
+        const fixtureA = await plantC6LocalSnapshotFixture(dataDir, {
+          deviceId: deviceA,
+          snapshotId: C6_RT_SNAPSHOT_ID,
+          fileContent: 'race-same-body',
+        });
+        const pending = await restoreService.createTask({
+          deviceId: deviceA,
+          snapshotId: fixtureA.snapshotId,
+          relativeTarget: 'apps/race',
+        });
+        const pendingSummary = c6TaskSummary(pending);
+        assert.equal(pendingSummary?.status, 'pending');
+        assert.equal(typeof pendingSummary?.taskId, 'string');
+
+        const projA = makeC6UploadProjection({
+          deviceId: deviceA,
+          snapshotId: C6_RT_SNAPSHOT_B,
+          files: [],
+        });
+        const uploadP = uploadService.create({
+          authenticatedDeviceId: deviceA,
+          manifest: projA.manifest,
+          claimedManifestDigest: projA.manifestDigest,
+        });
+        const claimP = restoreService.claim({ deviceId: deviceA });
+        const settled = await Promise.allSettled([uploadP, claimP]);
+        assert.equal(settled.length, 2);
+        for (const s of settled) {
+          assert.ok(s.status === 'fulfilled' || s.status === 'rejected', 'must not hang');
+        }
+
+        const uploadSettled = settled[0];
+        const claimSettled = settled[1];
+        const uploadOk = uploadSettled.status === 'fulfilled'
+          && typeof /** @type {any} */ (uploadSettled).value?.uploadId === 'string';
+        const claimOk = claimSettled.status === 'fulfilled'
+          && /** @type {any} */ (claimSettled).value?.task != null
+          && /** @type {any} */ (claimSettled).value.task.status === 'active';
+
+        assert.equal(
+          Number(uploadOk) + Number(claimOk),
+          1,
+          'same-device race: exactly one of upload create / restore claim must succeed',
+        );
+
+        if (uploadOk) {
+          assert.equal(claimSettled.status, 'rejected');
+          assertC6LinkeCode(
+            /** @type {PromiseRejectedResult} */ (claimSettled).reason,
+            ERROR_CODES.RESTORE_TASK_CONFLICT,
+          );
+        } else {
+          assert.equal(uploadSettled.status, 'rejected');
+          assertC6LinkeCode(
+            /** @type {PromiseRejectedResult} */ (uploadSettled).reason,
+            ERROR_CODES.UPLOAD_SESSION_CONFLICT,
+          );
+          assert.equal(claimOk, true);
+          assert.equal(
+            /** @type {any} */ (claimSettled).value.task.taskId,
+            pendingSummary.taskId,
+          );
+        }
+
+        // ── Different devices: parallel upload create + restore claim both ok ──
+        const deviceB = 'race-device-b';
+        const deviceC = 'race-device-c';
+        const fixtureC = await plantC6LocalSnapshotFixture(dataDir, {
+          deviceId: deviceC,
+          snapshotId: C6_RT_SNAPSHOT_ID,
+          fileContent: 'race-c-body',
+        });
+        const pendingC = await restoreService.createTask({
+          deviceId: deviceC,
+          snapshotId: fixtureC.snapshotId,
+          relativeTarget: 'apps/parallel',
+        });
+        assert.equal(c6TaskSummary(pendingC)?.status, 'pending');
+
+        const projB = makeC6UploadProjection({
+          deviceId: deviceB,
+          snapshotId: C6_RT_SNAPSHOT_B,
+          files: [],
+        });
+        const [uploadB, claimC] = await Promise.all([
+          uploadService.create({
+            authenticatedDeviceId: deviceB,
+            manifest: projB.manifest,
+            claimedManifestDigest: projB.manifestDigest,
+          }),
+          restoreService.claim({ deviceId: deviceC }),
+        ]);
+        assert.equal(typeof uploadB.uploadId, 'string');
+        assert.equal(uploadB.status, 'initialized');
+        assert.ok(claimC?.task);
+        assert.equal(claimC.task.status, 'active');
+        assert.equal(claimC.task.taskId, c6TaskSummary(pendingC).taskId);
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

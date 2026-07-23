@@ -3413,3 +3413,149 @@ describe('C7 — real service status missingSummary + finalize committed identit
     }
   });
 });
+
+// ===========================================================================
+// C6 G0c reverse gate: active restore → upload create admission only
+// ===========================================================================
+
+describe('C6 G0c reverse gate — active restore blocks upload create only (RED)', () => {
+  it('active restore: upload create → unique upload-session-conflict; chunk not extended', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-up-rs-gate-'));
+    const registry = new DeviceRegistry({ dataDir });
+    const device = await enrollDevice(registry, 'up-rs-gate');
+    let createCalls = 0;
+    let putChunkCalls = 0;
+    const uploadService = {
+      async create(input) {
+        createCalls += 1;
+        // Production GREEN: createUploadService with findActiveRestore → conflict.
+        // Route test freezes HTTP projection of that admission failure.
+        throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+      },
+      async status() {
+        return {
+          uploadId: 'u',
+          status: 'initialized',
+          deviceId: device.deviceId,
+          snapshotId: 'snap',
+          manifestDigest: 'd'.repeat(64),
+        };
+      },
+      async putChunk() {
+        putChunkCalls += 1;
+        // Chunk path is NOT part of the new active-restore admission surface.
+        // Impossible-state / missing session remains prior G0b semantics (not this gate).
+        throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
+      },
+      async finalize() {
+        throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
+      },
+      async abort() {
+        throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
+      },
+    };
+    const fx = await startUploadFixture({
+      registry,
+      uploadService,
+      uploadRateLimit: { check: () => ({ allowed: true }) },
+    });
+    try {
+      const createRes = await fx.requestAgent('POST', '/agent/upload/sessions', {
+        body: JSON.stringify(tinyCreateBody(device.deviceId)),
+        headers: { ...authHeaders(device), 'content-type': 'application/json' },
+      });
+      assertPublicError(createRes, 409, ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+      assert.equal(createCalls, 1);
+      assertNoRetryAfter(createRes.headers);
+
+      // Do NOT extend reverse-gate semantics onto chunk: still session-not-found (or prior code),
+      // never re-labeled as a new "active restore" chunk impossible-state code.
+      const chunkRes = await fx.requestAgent(
+        'POST',
+        '/agent/upload/sessions/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/chunks',
+        {
+          body: Buffer.from('x'),
+          headers: {
+            ...authHeaders(device),
+            'content-type': 'application/octet-stream',
+            'content-length': '1',
+            'x-linke-upload-id': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            'x-linke-snapshot-id': '550e8400-e29b-41d4-a716-4466554400aa',
+            'x-linke-manifest-digest': 'a'.repeat(64),
+            'x-linke-file-index': '0',
+            'x-linke-chunk-index': '0',
+            'x-linke-chunk-offset': '0',
+            'x-linke-chunk-size': '1',
+            'x-linke-chunk-sha256': 'c'.repeat(64),
+          },
+        },
+      );
+      assert.equal(putChunkCalls, 1);
+      assert.notEqual(chunkRes.body?.error, ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+      assertPublicError(chunkRes, 404, ERROR_CODES.UPLOAD_SESSION_NOT_FOUND);
+    } finally {
+      await fx.cleanup();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('production-shaped create with findActiveRestore true projects upload-session-conflict only on create', async () => {
+    // Behavior pin: when real createUploadService is used with findActiveRestore → true,
+    // HTTP create must be 409 upload-session-conflict. Chunk remains outside this gate.
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-c6-up-rs-real-'));
+    const registry = new DeviceRegistry({ dataDir });
+    const device = await enrollDevice(registry, 'up-rs-real');
+    const store = createUploadSessionStore({ dataDir });
+    const locks = createUploadLocks({ maxGlobalTransfers: 4 });
+    let findActiveRestoreCalls = 0;
+    const uploadService = createUploadService({
+      dataDir,
+      store,
+      locks,
+      ingest: { parseChunkHeaders, ingestChunkBody, commitChunk },
+      commit: {
+        preflightCapacity: (dir, totalBytes, options = {}) =>
+          preflightCapacity(dir, totalBytes, {
+            ...options,
+            deps: {
+              ...(options.deps || {}),
+              statfs: async () => ({
+                type: 0,
+                bsize: 4096,
+                blocks: 1e12,
+                bfree: 1e12,
+                bavail: 1e12,
+                files: 0,
+                ffree: 0,
+              }),
+            },
+          }),
+        verifyAndCommitSession,
+      },
+      now: () => new Date('2026-07-23T12:00:00.000Z'),
+      findActiveRestore: async () => {
+        findActiveRestoreCalls += 1;
+        return true;
+      },
+    });
+    const fx = await startUploadFixture({
+      registry,
+      uploadService,
+      uploadRateLimit: { check: () => ({ allowed: true }) },
+    });
+    try {
+      const envelope = tinyCreateBody(device.deviceId);
+      const createRes = await fx.requestAgent('POST', '/agent/upload/sessions', {
+        body: JSON.stringify(envelope),
+        headers: { ...authHeaders(device), 'content-type': 'application/json' },
+      });
+      assertPublicError(createRes, 409, ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+      assert.ok(findActiveRestoreCalls >= 1, 'create admission must probe findActiveRestore');
+      assert.ok(!createRes.raw.includes(dataDir));
+      assertNoForbiddenKeys(createRes.body);
+    } finally {
+      await fx.cleanup();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
