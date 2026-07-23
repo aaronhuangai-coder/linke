@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact positive signature ceiling for V1.41. */
+/** Exact positive signature ceiling for V1.42. */
+const V142_SIGNATURE =
+  'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+/** Exact historical V1.41 signature — retained G0b base; must not be erased. */
 const V141_SIGNATURE =
   'V1.41 G0b resumable manifest v2 snapshot upload implementation';
 
@@ -90,7 +94,7 @@ function extractCurrentSurface(readme) {
   const currentRow = lines.find(
     (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
   );
-  assert.ok(currentRow, 'README version table current row for V1.40 must exist');
+  assert.ok(currentRow, 'README version table current row for V1.42 must exist');
   return { badge, currentRow, currentSurface: `${badge}\n${currentRow}`, lines };
 }
 
@@ -100,9 +104,11 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.41 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.41');
+  it('LINKE_RELEASE_VERSION is the V1.42 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.42');
+    assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
   });
 
@@ -131,27 +137,27 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.41 exact signature and honesty boundaries', async () => {
+  it('README current surface carries V1.42 exact signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.41 signature MUST be on currentSurface (badge + V1.41 row only)
+    // Exact V1.42 signature MUST be on currentSurface (badge + V1.42 row only)
     assert.ok(
-      currentSurface.includes(V141_SIGNATURE),
-      `README currentSurface must include exact signature: ${V141_SIGNATURE}`,
+      currentSurface.includes(V142_SIGNATURE),
+      `README currentSurface must include exact signature: ${V142_SIGNATURE}`,
     );
     assert.ok(
-      currentSurface.includes('G0b real-LAN evidence absent')
+      currentSurface.includes('G0c real-LAN evidence absent')
         || currentSurface.includes('real-LAN evidence absent'),
-      'current surface must state G0b real-LAN evidence absent',
+      'current surface must state G0c real-LAN evidence absent',
     );
     assert.ok(
       /auto harness complete|auto complete|automatic harness/i.test(currentSurface),
       'current surface must mention auto harness',
     );
     assert.ok(
-      !/G0b real-LAN complete/i.test(currentSurface),
-      'current surface must not claim G0b real-LAN complete',
+      !/G0c real-LAN complete/i.test(currentSurface),
+      'current surface must not claim G0c real-LAN complete',
     );
 
     // Required honesty boundaries MUST each exact-include on currentSurface
@@ -161,6 +167,16 @@ describe('Release Version Consistency', () => {
         `README currentSurface must exact-include honesty boundary: ${phrase}`,
       );
     }
+
+    // V1.41 historical G0b base retained on table
+    const v141Row = lines.find(
+      (line) => line.includes('| V1.41 |') && line.includes('历史版本'),
+    );
+    assert.ok(v141Row, 'README version table must retain V1.41 as 历史版本');
+    assert.ok(
+      v141Row.includes(V141_SIGNATURE),
+      'V1.41 historical row must retain exact V1.41 G0b signature',
+    );
 
     // V1.40 historical process-lock base retained on table
     const v140Row = lines.find(

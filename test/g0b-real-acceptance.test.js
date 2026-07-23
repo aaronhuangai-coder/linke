@@ -382,16 +382,26 @@ describe('G0b real-LAN hardware gate default skip + report absent', () => {
   });
 });
 
-describe('G0b V1.41 version / Gold / README honesty', () => {
-  it('LINKE_RELEASE_VERSION is exactly V1.41 (signature not embedded)', () => {
-    assert.equal(LINKE_RELEASE_VERSION, 'V1.41');
+const V142_SIGNATURE =
+  'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+describe('G0b V1.42 current surface + V1.41 historical honesty (G0b real-LAN remains absent)', () => {
+  it('LINKE_RELEASE_VERSION is exactly V1.42 (signature not embedded; G0b signature historical)', () => {
+    assert.equal(LINKE_RELEASE_VERSION, 'V1.42');
+    assert.notEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
+    assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    // Historical G0b signature constant must remain exact.
+    assert.equal(
+      V141_SIGNATURE,
+      'V1.41 G0b resumable manifest v2 snapshot upload implementation',
+    );
   });
 
-  it('Gold remains blocked 4/4/1/9; statuses frozen; V1.41 evidence honest', () => {
+  it('Gold remains blocked 4/4/1/9; statuses frozen; V1.42 current + V1.41 G0b historical', () => {
     const report = buildGoldReadinessReport({ now: new Date('2026-07-22T12:00:00.000Z') });
-    assert.equal(report.version, 'V1.41');
+    assert.equal(report.version, 'V1.42');
     assert.equal(report.status, 'blocked');
     assert.deepEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
 
@@ -411,63 +421,72 @@ describe('G0b V1.41 version / Gold / README honesty', () => {
     const hardening = report.items.find((i) => i.id === 'production-hardening');
     assert.ok(hardening);
     const evidenceText = hardening.evidence.join('\n');
-    assert.ok(evidenceText.includes(V141_SIGNATURE));
+    assert.ok(evidenceText.includes(V142_SIGNATURE));
+    assert.ok(evidenceText.includes(V141_SIGNATURE), 'retain V1.41 G0b historical baseline');
     assert.ok(evidenceText.includes(V140_SIGNATURE), 'retain V1.40 historical baseline');
     assert.ok(
       evidenceText.includes('auto harness complete ≠ real-LAN complete')
         || /auto harness complete is not real-LAN complete|auto complete ≠ real-LAN complete|auto complete is not real-LAN complete/i.test(evidenceText)
         || evidenceText.includes('auto harness complete is not real-LAN complete'),
     );
+    // G0b real-LAN remains absent (historical boundary — must not claim G0b real-LAN complete)
     assert.ok(
       evidenceText.includes('G0b real-LAN evidence absent')
         || evidenceText.includes('real-LAN evidence absent'),
     );
     assert.ok(
       evidenceText.includes('not G0b real-LAN complete')
-        || /not.*G0b real-LAN complete/i.test(evidenceText),
+        || /not.*G0b real-LAN complete/i.test(evidenceText)
+        || evidenceText.includes('G0b real-LAN evidence absent')
+        || evidenceText.includes('G0c real-LAN evidence absent'),
     );
     assert.ok(evidenceText.includes('not Gold') || evidenceText.includes('Gold remains blocked'));
     assert.ok(evidenceText.includes('Gold remains blocked 4/4/1/9'));
 
-    assert.ok(hardening.nextStep.startsWith('V1.41'));
+    assert.ok(hardening.nextStep.startsWith('V1.42'));
+    assert.ok(hardening.nextStep.includes(V142_SIGNATURE));
     assert.ok(hardening.nextStep.includes(V141_SIGNATURE));
     assert.ok(hardening.nextStep.includes(V140_SIGNATURE)
       || /V1\.40 historical/.test(hardening.nextStep));
-    assert.ok(/real-LAN evidence absent|G0b real-LAN evidence absent/i.test(hardening.nextStep));
-    assert.ok(
-      hardening.nextStep.includes('not G0b real-LAN complete')
-        || /not.*G0b real-LAN complete/i.test(hardening.nextStep),
-    );
+    assert.ok(/real-LAN evidence absent|G0b real-LAN evidence absent|G0c real-LAN evidence absent/i.test(hardening.nextStep));
     assert.ok(/Gold remains blocked 4\/4\/1\/9/.test(hardening.nextStep));
   });
 
-  it('README current surface is V1.41 honest; V1.40 historical; G0b section present', async () => {
+  it('README current surface is V1.42/G0c; V1.41 historical; G0b real-LAN absent retained', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const firstLine = readme.split('\n')[0].trim();
-    assert.equal(firstLine, '# Linke V1.41');
-    assert.ok(readme.includes('**当前版本：V1.41**'));
+    assert.equal(firstLine, '# Linke V1.42');
+    assert.ok(readme.includes('**当前版本：V1.42**'));
 
     const lines = readme.split('\n');
-    const currentRow = lines.find((l) => l.includes('| V1.41 |') && l.includes('当前版本'));
-    assert.ok(currentRow, 'V1.41 current version table row');
-    assert.ok(currentRow.includes(V141_SIGNATURE));
+    const currentRow = lines.find((l) => l.includes('| V1.42 |') && l.includes('当前版本'));
+    assert.ok(currentRow, 'V1.42 current version table row');
+    assert.ok(currentRow.includes(V142_SIGNATURE));
     assert.ok(
       currentRow.includes('auto harness complete is not real-LAN complete')
-        || /auto.*not.*real-LAN complete/i.test(currentRow),
+        || /auto.*not.*real-LAN complete/i.test(currentRow)
+        || currentRow.includes('auto harness complete ≠ real-LAN complete'),
     );
     assert.ok(
-      currentRow.includes('G0b real-LAN evidence absent')
+      currentRow.includes('G0c real-LAN evidence absent')
         || /real-LAN evidence absent/i.test(currentRow),
     );
-    assert.ok(/G0b real-LAN remains incomplete/i.test(currentRow));
     assert.ok(currentRow.includes('Gold remains blocked 4/4/1/9'));
-    assert.ok(!/G0b real-LAN complete(?!)/.test(currentRow) || /G0b real-LAN remains incomplete/.test(currentRow));
+
+    const v141Row = lines.find((l) => l.includes('| V1.41 |') && l.includes('历史版本'));
+    assert.ok(v141Row, 'V1.41 historical row retained');
+    assert.ok(v141Row.includes(V141_SIGNATURE));
+    assert.ok(
+      v141Row.includes('G0b real-LAN evidence absent')
+        || /real-LAN evidence absent|G0b real-LAN remains incomplete/i.test(v141Row),
+      'V1.41 historical must retain G0b real-LAN absent boundary',
+    );
 
     const v140Row = lines.find((l) => l.includes('| V1.40 |') && l.includes('历史版本'));
     assert.ok(v140Row, 'V1.40 historical row retained');
     assert.ok(v140Row.includes(V140_SIGNATURE));
 
-    // Compact G0b acceptance section
+    // Compact G0b acceptance section (historical harness) still present
     assert.ok(/G0b/i.test(readme));
     assert.ok(readme.includes('LINKE_REAL_G0B_UPLOAD_ACCEPTANCE'));
     assert.ok(
@@ -481,7 +500,13 @@ describe('G0b V1.41 version / Gold / README honesty', () => {
     assert.ok(
       /no PASS report|report absent|real-LAN evidence absent|无.*PASS.*报告/i.test(readme),
     );
+    // Must not claim G0b real-LAN complete (historical boundary)
     assert.ok(!readme.includes('G0b real-LAN complete')
-      || /G0b real-LAN remains incomplete|不得.*G0b real-LAN complete/.test(readme));
+      || /G0b real-LAN remains incomplete|不得.*G0b real-LAN complete|not G0b real-LAN complete/.test(readme));
+    // Must not claim G0c real-LAN complete either (use remains-incomplete / evidence-absent)
+    assert.ok(
+      !/G0c real-LAN complete/i.test(readme)
+      || /G0c real-LAN remains incomplete|G0c real-LAN evidence absent/.test(readme),
+    );
   });
 });

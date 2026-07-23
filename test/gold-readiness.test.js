@@ -78,7 +78,11 @@ const GOLD_REMAINS_BLOCKED_4419 = 'Gold remains blocked 4/4/1/9';
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
 
-/** Exact V1.41 signature ceiling. */
+/** Exact V1.42 signature ceiling. */
+const V142_SIGNATURE =
+  'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+/** Exact historical V1.41 signature. */
 const V141_SIGNATURE =
   'V1.41 G0b resumable manifest v2 snapshot upload implementation';
 
@@ -166,7 +170,7 @@ const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
  */
 function productionHardeningCurrentPrefix(text) {
   // Current segment ends before first pre-V1.40 historical base marker.
-  // V1.41 lead-in + V1.40 historical base remain in the current honesty prefix.
+  // V1.42 lead-in + V1.41/V1.40 historical bases remain in the current honesty prefix.
   return String(text).split(/V1\.39 historical|V1\.38 historical|V1\.37 historical/)[0];
 }
 
@@ -323,13 +327,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.41', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.41');
+  it('expects LINKE_RELEASE_VERSION to be V1.42', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.42');
   });
 
-  it('expects report.version to be V1.41', () => {
+  it('expects report.version to be V1.42', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.41');
+    assert.strictEqual(report.version, 'V1.42');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -339,7 +343,7 @@ describe('Gold Readiness Report', () => {
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.41 does not change statuses)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.42 does not change statuses)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -845,21 +849,25 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
-    // V1.41 honesty: G0b auto harness delivered; real-LAN evidence absent; T6d.3 still partial
+    // V1.42 honesty: G0c auto harness delivered; real-LAN evidence absent; T6d.3 still partial
     assert.ok(
-      hardeningEvidence.includes(V141_SIGNATURE),
-      'production-hardening evidence must include V1.41 exact signature ceiling',
+      hardeningEvidence.includes(V142_SIGNATURE),
+      'production-hardening evidence must include V1.42 exact signature ceiling',
     );
     assert.ok(
-      hardeningItem.evidence.includes(V141_SIGNATURE)
-        || hardeningItem.evidence[0] === V141_SIGNATURE
-        || hardeningEvidence.indexOf(V141_SIGNATURE) < hardeningEvidence.indexOf(V140_SIGNATURE),
-      'production-hardening evidence must place V1.41 signature before V1.40 historical base',
+      hardeningItem.evidence.includes(V142_SIGNATURE)
+        || hardeningItem.evidence[0] === V142_SIGNATURE
+        || hardeningEvidence.indexOf(V142_SIGNATURE) < hardeningEvidence.indexOf(V141_SIGNATURE),
+      'production-hardening evidence must place V1.42 signature before V1.41 historical base',
     );
     assert.ok(
-      hardeningEvidence.includes('G0b real-LAN evidence absent')
+      hardeningEvidence.includes('G0c real-LAN evidence absent')
         || hardeningEvidence.includes('real-LAN evidence absent'),
       'production-hardening evidence must state real-LAN evidence absent',
+    );
+    assert.ok(
+      hardeningEvidence.includes(V141_SIGNATURE),
+      'production-hardening evidence must retain V1.41 historical signature',
     );
     assert.ok(
       hardeningEvidence.includes(V140_SIGNATURE),
@@ -1312,10 +1320,14 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realRunnerWiringReady:false'));
     assert.ok(hardeningEvidence.includes('runnerWiringContractReady:false'));
     assert.ok(hardeningEvidence.includes('executionEligible:false'));
-    // V1.41 nextStep leads with G0b honesty + exact signature
+    // V1.42 nextStep leads with G0c honesty + exact signature
     assert.ok(
-      hardeningItem.nextStep.startsWith('V1.41'),
-      'production-hardening nextStep must lead with V1.41',
+      hardeningItem.nextStep.startsWith('V1.42'),
+      'production-hardening nextStep must lead with V1.42',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(V142_SIGNATURE),
+      'production-hardening nextStep must include V1.42 exact signature',
     );
     assert.ok(
       hardeningItem.nextStep.includes(V141_SIGNATURE),
@@ -1386,12 +1398,16 @@ describe('Gold Readiness Report', () => {
       hardeningItem.nextStep.includes('not end-to-end production audit delivery'),
       'production-hardening nextStep must deny end-to-end production audit delivery',
     );
-    // V1.41 current nextStep prefix must not keep stale multi-process denials
+    // V1.42 current nextStep prefix must not keep stale multi-process denials
     {
       const nextCurrent = productionHardeningCurrentPrefix(hardeningItem.nextStep);
       assert.ok(
+        nextCurrent.includes(V142_SIGNATURE),
+        'production-hardening nextStep current prefix must include V1.42 signature',
+      );
+      assert.ok(
         nextCurrent.includes(V141_SIGNATURE),
-        'production-hardening nextStep current prefix must include V1.41 signature',
+        'production-hardening nextStep current prefix must include V1.41 historical signature',
       );
       assert.ok(
         !nextCurrent.includes(STALE_CURRENT_MULTI_PROCESS_DENY),

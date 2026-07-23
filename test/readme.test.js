@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.41**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：V1.42**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.41**';
+  const startMarker = '> **当前版本：V1.42**';
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -52,7 +52,11 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact V1.41 signature ceiling. */
+/** Exact V1.42 signature ceiling. */
+const V142_SIGNATURE =
+  'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+/** Exact historical V1.41 signature. */
 const V141_SIGNATURE =
   'V1.41 G0b resumable manifest v2 snapshot upload implementation';
 
@@ -1944,10 +1948,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
-  it('title and badge claim V1.41 as current', () => {
-    assertReadmeContains(/# Linke V1\.41/, 'README title should mention V1.41');
-    assertReadmeContains(/\*\*当前版本：V1\.41\*\*/, 'README badge should mention V1.41');
+describe('README — V1.42 G0c endpoint-pull restore honesty', () => {
+  it('title and badge claim V1.42 as current', () => {
+    assertReadmeContains(/# Linke V1\.42/, 'README title should mention V1.42');
+    assertReadmeContains(/\*\*当前版本：V1\.42\*\*/, 'README badge should mention V1.42');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.41\*\*/, 'README badge must not still claim V1.41 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.41$/m, 'README title must not still claim V1.41 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.40\*\*/, 'README badge must not still claim V1.40 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.40$/m, 'README title must not still claim V1.40 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.39\*\*/, 'README badge must not still claim V1.39 as current');
@@ -2016,20 +2022,20 @@ describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.41 G0b signature ceiling and honest boundaries', () => {
+  it('badge mentions V1.42 G0c signature ceiling and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.41 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.41 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes('| V1.42 | 当前版本 |'),
+      'extracted badge must not contain version table row "| V1.42 | 当前版本 |" (cross-region bleed guard)',
     );
     assert.ok(
-      badge.includes(V141_SIGNATURE),
-      'top badge must include V1.41 exact signature ceiling',
+      badge.includes(V142_SIGNATURE),
+      'top badge must include V1.42 exact signature ceiling',
     );
     assert.ok(
-      badge.includes('G0b real-LAN evidence absent') || badge.includes('real-LAN evidence absent'),
+      badge.includes('G0c real-LAN evidence absent') || badge.includes('real-LAN evidence absent'),
       'top badge must state real-LAN evidence absent',
     );
     assert.ok(
@@ -2037,12 +2043,12 @@ describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
       'top badge must mention auto harness',
     );
     assert.ok(
-      !/G0b real-LAN complete/i.test(badge),
-      'top badge must not claim G0b real-LAN complete',
+      !/G0c real-LAN complete/i.test(badge),
+      'top badge must not claim G0c real-LAN complete',
     );
     assert.ok(
-      /G0b|resumable|local multi-process|same-dataDir local multi-process/i.test(badge),
-      'top badge must claim G0b delivery or retained multi-process lock base',
+      /G0c|endpoint-pull|local multi-process|same-dataDir local multi-process/i.test(badge),
+      'top badge must claim G0c delivery or retained multi-process lock base',
     );
     assert.ok(
       badge.includes('not Gold') || badge.includes('Gold remains blocked 4/4/1/9'),
@@ -2156,7 +2162,7 @@ describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
       'helper canary: missing badge start must fail',
     );
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.41** a\n> **当前版本：V1.41** b\n'),
+      () => extractCurrentBadgeBlockquote('> **当前版本：V1.42** a\n> **当前版本：V1.42** b\n'),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
@@ -2221,34 +2227,41 @@ describe('README — V1.41 G0b resumable snapshot upload honesty', () => {
     }
   });
 
-  it('version table marks V1.41 current, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
-    // V1.41 current row — independently lock exact signature and honesty
-    const v141RowMatch = readme.match(/\| V1\.41 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v141RowMatch, 'V1.41 current version table row must exist');
+  it('version table marks V1.42 current, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
+    // V1.42 current row — independently lock exact signature and honesty
+    const v142RowMatch = readme.match(/\| V1\.42 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v142RowMatch, 'V1.42 current version table row must exist');
     assert.ok(
-      v141RowMatch[0].includes(V141_SIGNATURE),
-      'V1.41 current table row must include exact V1.41 signature',
+      v142RowMatch[0].includes(V142_SIGNATURE),
+      'V1.42 current table row must include exact V1.42 signature',
     );
     assert.ok(
-      v141RowMatch[0].includes('not production-hardening ready'),
-      'V1.41 current table row must include exact "not production-hardening ready"',
+      v142RowMatch[0].includes('not production-hardening ready'),
+      'V1.42 current table row must include exact "not production-hardening ready"',
     );
     assert.ok(
-      v141RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
-      'V1.41 current table row must include exact Gold remains blocked 4/4/1/9',
+      v142RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
+      'V1.42 current table row must include exact Gold remains blocked 4/4/1/9',
     );
     assert.ok(
-      v141RowMatch[0].includes('G0b real-LAN evidence absent')
-        || v141RowMatch[0].includes('real-LAN evidence absent'),
-      'V1.41 current table row must state real-LAN evidence absent',
+      v142RowMatch[0].includes('G0c real-LAN evidence absent')
+        || v142RowMatch[0].includes('real-LAN evidence absent'),
+      'V1.42 current table row must state real-LAN evidence absent',
     );
     assert.ok(
-      !/G0b real-LAN complete/i.test(v141RowMatch[0]),
-      'V1.41 current table row must not claim G0b real-LAN complete',
+      !/G0c real-LAN complete/i.test(v142RowMatch[0]),
+      'V1.42 current table row must not claim G0c real-LAN complete',
     );
     assertReadmeContains(
-      /\| V1\.41 \| 当前版本 \|[^|]*(G0b resumable manifest v2 snapshot upload)[^|]*(auto harness complete|real-LAN evidence absent|not G0b real-LAN complete)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
-      'V1.41 should be current G0b resumable upload milestone',
+      /\| V1\.42 \| 当前版本 \|[^|]*(G0c endpoint-pull restore with crash-recoverable rollback anchor)[^|]*(auto harness complete|real-LAN evidence absent|G0c real-LAN remains incomplete)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
+      'V1.42 should be current G0c endpoint-pull restore milestone',
+    );
+    // V1.41 historical row — retain G0b signature
+    const v141HistMatch = readme.match(/\| V1\.41 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v141HistMatch, 'V1.41 historical version table row must exist');
+    assert.ok(
+      v141HistMatch[0].includes(V141_SIGNATURE),
+      'V1.41 historical table row must retain exact V1.41 G0b signature',
     );
     // V1.40 historical row — retain process-lock signature/facts
     const v140HistMatch = readme.match(/\| V1\.40 \| 历史版本 \|[^|\n]*/);
