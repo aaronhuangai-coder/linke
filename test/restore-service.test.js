@@ -44,6 +44,7 @@ import {
   generateControllerPrivateKey,
   createOpenSslCertificate,
 } from '../src/tls-identity-store.js';
+import { RESTORE_CHUNK_SIZE } from '../src/restore-schemas.js';
 
 const DEVICE_A = 'device-alpha-001';
 const DEVICE_B = 'device-beta-002';
@@ -485,7 +486,7 @@ describe('C non-binary methods do not call runTransfer', () => {
     assert.equal(findCalls, 0, 'createTask must not call findActiveUpload');
   });
 
-  it('delegates exact data needed by restore-task-store for get/progress/receipt/cleanup/cancel/status', async () => {
+  it('delegates exact domain fields to restore-task-store for get/progress/receipt/cleanup/cancel/status', async () => {
     const { store, calls } = makeTaskStore();
     const service = createRestoreService({
       taskStore: store,
@@ -523,6 +524,7 @@ describe('C non-binary methods do not call runTransfer', () => {
       taskId: TASK_A,
       receipt,
     });
+    assert.equal(calls.acceptReceipt[0].receipt, receipt, 'receipt identity must not drift');
 
     const cleanupReceipt = Object.freeze({ schemaVersion: 1, cleanupId: 'c1' });
     await service.acceptCleanup({
@@ -535,6 +537,11 @@ describe('C non-binary methods do not call runTransfer', () => {
       taskId: TASK_A,
       cleanupReceipt,
     });
+    assert.equal(
+      calls.acceptCleanup[0].cleanupReceipt,
+      cleanupReceipt,
+      'cleanupReceipt identity must not drift',
+    );
 
     await service.cancelTask({ deviceId: DEVICE_A, taskId: TASK_A });
     assert.deepEqual(calls.cancel[0], { deviceId: DEVICE_A, taskId: TASK_A });
@@ -556,6 +563,214 @@ describe('C non-binary methods do not call runTransfer', () => {
       snapshotId: SNAPSHOT_A,
       relativeTarget: 'docs/other',
     });
+  });
+});
+
+// ── C8 production integration hotfix (P0) ───────────────────────────
+
+describe('C8 hotfix P0 — getTask chunkSize + signal domain projection', () => {
+  it('getTask injects frozen chunkSize=RESTORE_CHUNK_SIZE when taskStore view omits it', async () => {
+    const { store } = makeTaskStore({
+      get: async (input) => {
+        // Production getView shape: no chunkSize (design §8.5 requires it on wire).
+        return {
+          taskId: input.taskId,
+          deviceId: input.deviceId,
+          snapshotId: SNAPSHOT_A,
+          manifestDigest: 'a'.repeat(64),
+          relativeTarget: 'apps/target-a',
+          status: 'active',
+          cancelRequested: false,
+          cleanupAuthorized: false,
+          fileCount: 1,
+          totalBytes: 4,
+          createdAt: T0,
+          claimedAt: T0,
+          completedAt: null,
+          updatedAt: T0,
+        };
+      },
+      buildTaskFilesPayload: async () => ({
+        files: [
+          {
+            fileIndex: 0,
+            path: 'a.txt',
+            size: 4,
+            sha256: createHash('sha256').update('data').digest('hex'),
+            chunkCount: 1,
+          },
+        ],
+      }),
+    });
+    const service = createRestoreService({
+      taskStore: store,
+      locks: createUploadLocks({ maxGlobalTransfers: 4 }),
+      storageReader: makeStorageReader().reader,
+      findActiveUpload: async () => false,
+    });
+
+    const out = await service.getTask({ deviceId: DEVICE_A, taskId: TASK_A });
+    assert.equal(out.chunkSize, RESTORE_CHUNK_SIZE);
+    assert.equal(out.chunkSize, 8_388_608);
+    assert.ok(Object.isFrozen(out), 'getTask result must remain frozen');
+    assert.ok(Array.isArray(out.files));
+    assert.ok(Object.isFrozen(out.files));
+    assert.equal(out.files.length, 1);
+    assert.equal(out.files[0].path, 'a.txt');
+    // Must not invent a second source of truth when store already has chunkSize.
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(out, 'chunkSize'),
+      true,
+    );
+  });
+
+  it('updateProgress projects exact domain keys only; drops signal + unknown canary; value identity preserved', async () => {
+    /** @type {unknown[]} */
+    const spyInputs = [];
+    const { store } = makeTaskStore({
+      updateProgress: async (input) => {
+        spyInputs.push(input);
+        return { ok: true, cancelRequested: false };
+      },
+    });
+    const service = createRestoreService({
+      taskStore: store,
+      locks: createUploadLocks({ maxGlobalTransfers: 4 }),
+      storageReader: makeStorageReader().reader,
+      findActiveUpload: async () => false,
+    });
+
+    const signal = new AbortController().signal;
+    const domain = {
+      deviceId: DEVICE_A,
+      taskId: TASK_A,
+      fileIndex: 0,
+      chunkIndex: 1,
+      receivedBytes: 42,
+    };
+    await service.updateProgress({
+      ...domain,
+      signal,
+      canaryExtra: 'must-not-reach-store',
+    });
+
+    assert.equal(spyInputs.length, 1);
+    const passed = /** @type {Record<string, unknown>} */ (spyInputs[0]);
+    assert.deepEqual(Object.keys(passed).sort(), [
+      'chunkIndex',
+      'deviceId',
+      'fileIndex',
+      'receivedBytes',
+      'taskId',
+    ]);
+    assert.equal(passed.deviceId, DEVICE_A);
+    assert.equal(passed.taskId, TASK_A);
+    assert.equal(passed.fileIndex, 0);
+    assert.equal(passed.chunkIndex, 1);
+    assert.equal(passed.receivedBytes, 42);
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'signal'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'canaryExtra'), false);
+  });
+
+  it('acceptReceipt projects exact domain keys only; receipt identity preserved; signal stripped', async () => {
+    /** @type {unknown[]} */
+    const spyInputs = [];
+    const { store } = makeTaskStore({
+      acceptReceipt: async (input) => {
+        spyInputs.push(input);
+        return {
+          ok: true,
+          taskId: input.taskId,
+          status: 'completed',
+          cleanupAuthorized: true,
+          receiptId: '550e8400-e29b-41d4-a716-446655440021',
+        };
+      },
+    });
+    const service = createRestoreService({
+      taskStore: store,
+      locks: createUploadLocks({ maxGlobalTransfers: 4 }),
+      storageReader: makeStorageReader().reader,
+      findActiveUpload: async () => false,
+    });
+
+    const receipt = Object.freeze({
+      schemaVersion: 1,
+      receiptId: '550e8400-e29b-41d4-a716-446655440099',
+      outcome: 'completed',
+    });
+    const signal = new AbortController().signal;
+    await service.acceptReceipt({
+      deviceId: DEVICE_A,
+      taskId: TASK_A,
+      receipt,
+      signal,
+      canaryExtra: 'must-not-reach-store',
+    });
+
+    assert.equal(spyInputs.length, 1);
+    const passed = /** @type {Record<string, unknown>} */ (spyInputs[0]);
+    assert.deepEqual(Object.keys(passed).sort(), ['deviceId', 'receipt', 'taskId']);
+    assert.equal(passed.deviceId, DEVICE_A);
+    assert.equal(passed.taskId, TASK_A);
+    assert.equal(passed.receipt, receipt, 'receipt identity must not drift');
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'signal'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'canaryExtra'), false);
+  });
+
+  it('acceptCleanup projects exact domain keys only; cleanupReceipt identity preserved; signal stripped', async () => {
+    /** @type {unknown[]} */
+    const spyInputs = [];
+    const { store } = makeTaskStore({
+      acceptCleanup: async (input) => {
+        spyInputs.push(input);
+        return {
+          ok: true,
+          taskId: input.taskId,
+          status: 'cleaned',
+          cleanupId: '550e8400-e29b-41d4-a716-446655440031',
+          cleanupAckAt: T0,
+        };
+      },
+    });
+    const service = createRestoreService({
+      taskStore: store,
+      locks: createUploadLocks({ maxGlobalTransfers: 4 }),
+      storageReader: makeStorageReader().reader,
+      findActiveUpload: async () => false,
+    });
+
+    const cleanupReceipt = Object.freeze({
+      schemaVersion: 1,
+      cleanupId: '550e8400-e29b-41d4-a716-446655440088',
+      outcome: 'cancelled',
+      receiptId: null,
+    });
+    const signal = new AbortController().signal;
+    await service.acceptCleanup({
+      deviceId: DEVICE_A,
+      taskId: TASK_A,
+      cleanupReceipt,
+      signal,
+      canaryExtra: 'must-not-reach-store',
+    });
+
+    assert.equal(spyInputs.length, 1);
+    const passed = /** @type {Record<string, unknown>} */ (spyInputs[0]);
+    assert.deepEqual(Object.keys(passed).sort(), [
+      'cleanupReceipt',
+      'deviceId',
+      'taskId',
+    ]);
+    assert.equal(passed.deviceId, DEVICE_A);
+    assert.equal(passed.taskId, TASK_A);
+    assert.equal(
+      passed.cleanupReceipt,
+      cleanupReceipt,
+      'cleanupReceipt identity must not drift',
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'signal'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(passed, 'canaryExtra'), false);
   });
 });
 

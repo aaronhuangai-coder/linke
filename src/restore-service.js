@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
+import { RESTORE_CHUNK_SIZE } from './restore-schemas.js';
 
 const INVALID_SERVICE_OPTIONS = 'invalid createRestoreService options';
 
@@ -212,7 +213,42 @@ export function createRestoreService(options) {
   }
 
   /**
+   * Project only exact domain own fields (listener may attach AbortSignal + extras).
+   * Does not mutate input. Hostile getters are skipped per-key.
+   *
+   * @param {unknown} input
+   * @param {readonly string[]} keys
+   * @returns {Record<string, unknown>}
+   */
+  function projectExactDomainFields(input, keys) {
+    // Plain object (not null-prototype): matches listener domain bags and
+    // preserves value identity for receipt/cleanupReceipt without prototype drift.
+    /** @type {Record<string, unknown>} */
+    const out = {};
+    if (!isNonNullObject(input)) return out;
+    const src = /** @type {Record<string, unknown>} */ (input);
+    for (const key of keys) {
+      if (typeof key !== 'string') continue;
+      let has = false;
+      try {
+        has = Object.prototype.hasOwnProperty.call(src, key);
+      } catch {
+        continue;
+      }
+      if (!has) continue;
+      try {
+        out[key] = src[key];
+      } catch {
+        // skip hostile getters
+      }
+    }
+    return out;
+  }
+
+  /**
    * Safe task summary + files[] (with path). Does not mutate store results.
+   * Design §8.5: GET task body must include immutable chunkSize = RESTORE_CHUNK_SIZE.
+   * taskStore getView may omit it; service is the wire assembly boundary.
    *
    * @param {{ deviceId: string, taskId: string }} input
    */
@@ -222,6 +258,9 @@ export function createRestoreService(options) {
     const task = await taskStore.get({ deviceId, taskId });
     const filesPayload = await taskStore.buildTaskFilesPayload(deviceId, taskId);
     const out = cleanShallowCopy(task);
+    // Always surface design-fixed chunk size on service getTask wire (do not
+    // rewrite taskStore view; do not trust/echo a non-constant store value).
+    out.chunkSize = RESTORE_CHUNK_SIZE;
     let files;
     try {
       files = isNonNullObject(filesPayload)
@@ -255,27 +294,41 @@ export function createRestoreService(options) {
   }
 
   /**
-   * Exact delegation: updateProgress.
+   * Domain projection → taskStore.updateProgress (exact keys only; strip signal).
    * @param {unknown} input
    */
   async function updateProgress(input) {
-    return taskStore.updateProgress(input);
+    return taskStore.updateProgress(projectExactDomainFields(input, [
+      'deviceId',
+      'taskId',
+      'fileIndex',
+      'chunkIndex',
+      'receivedBytes',
+    ]));
   }
 
   /**
-   * Exact delegation: acceptReceipt.
+   * Domain projection → taskStore.acceptReceipt (exact keys only; strip signal).
    * @param {unknown} input
    */
   async function acceptReceipt(input) {
-    return taskStore.acceptReceipt(input);
+    return taskStore.acceptReceipt(projectExactDomainFields(input, [
+      'deviceId',
+      'taskId',
+      'receipt',
+    ]));
   }
 
   /**
-   * Exact delegation: acceptCleanup.
+   * Domain projection → taskStore.acceptCleanup (exact keys only; strip signal).
    * @param {unknown} input
    */
   async function acceptCleanup(input) {
-    return taskStore.acceptCleanup(input);
+    return taskStore.acceptCleanup(projectExactDomainFields(input, [
+      'deviceId',
+      'taskId',
+      'cleanupReceipt',
+    ]));
   }
 
   /**
