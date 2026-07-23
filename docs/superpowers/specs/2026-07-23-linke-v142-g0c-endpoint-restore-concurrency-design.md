@@ -1024,8 +1024,11 @@ published  (verification failed)
 
 **Plan**
 
-1. claim 获得 task 或 resume 本地 nonterminal STATE。
-2. GET task 对齐 file 表（**含 path**）与 digests；缓存 path 仅用于 staging 相对布局。
+1. **claim 获得 task OR resume 本地 nonterminal STATE**（二者择一，不可颠倒）：
+   - 入口先从 `endpointDataDir` **安全发现**本 device 的本地 nonterminal STATE（`ensureSafeDataRoot` + `ensureSafeRelativeDir(root,'restore-tasks')` + bounded `readdir(withFileTypes)`，上限例如 **10_000** entries，超界 → `restore-state-invalid`；排序确保确定性；UUID symlink / 非目录 / 坏 STATE → `restore-state-invalid`；同设备多个 nonterminal → `restore-task-conflict`）。
+   - **若存在**本地 nonterminal STATE：**完全不调用 claim**；直接 `GET /agent/restore/tasks/:taskId` 对齐 task；校验 durable STATE 与 GET task 的 `taskId/deviceId/snapshotId/manifestDigest/relativeTarget/fileCount/totalBytes/chunkSize` 全等，不一致 fail-close。
+   - **若无**本地 nonterminal STATE：才 `claim` → `GET task` → preflight → fingerprint → `openOrCreateState`。
+2. GET task 对齐 file 表（**含 path**）与 digests；缓存 path 仅用于 staging 相对布局。正常 restart：Controller task 已 `active`、claim 会 conflict；存在本地 STATE 时必须 0 claim。
 
 **Preflight**
 
@@ -1036,8 +1039,9 @@ published  (verification failed)
 5. 容量（§12.5）：
    `requiredBytes = remainingStagingBytes + max(64 MiB, ceil(totalBytes * 0.05))`
    首次 `remainingStagingBytes = totalBytes`。**不得**再加 `oldTargetBytes`（old target 已占用 free 空间；rename 成 anchor **不复制** blocks；quarantine/anchor rename **不额外复制**）。`statfs` 不可用 → **507** `restore-capacity-insufficient`。
-6. 若 target 存在：计算 old fingerprints，`originalTargetExisted=true`。
-   若 target 不存在：`originalTargetExisted=false`；**禁止**创建伪 anchor。
+   **仅**在实际接收 / 新任务需要时做 capacity gate；**post-anchor crash recovery 不得**被无关的 staging capacity gate 阻断。
+6. **新任务**（无本地 STATE）：若 target 存在：计算 old fingerprints，`originalTargetExisted=true`；若 target 不存在：`originalTargetExisted=false`；**禁止**创建伪 anchor。
+   **已有 durable STATE（resume）**：preflight 仍做路径/ancestor/dev 安全计算，但 `originalTargetExisted` / old fingerprints **必须使用 durable STATE**，**不得**从当前 FS 覆盖；**不再** `openOrCreateState`。publish ctx 必须使用 durable STATE 的 `originalTargetExisted` 与 old fingerprints，**不能**用 live `paths.originalTargetExisted`（target→anchor 后 live FS 会 identity mismatch）。
 7. 同设备本地已有另一 active restore STATE → `restore-task-conflict`。
 8. 进入 `anchor-intent` 前最后一次刷新 `cancelRequested`（§9.4）。
 
@@ -1045,8 +1049,12 @@ published  (verification failed)
 
 1. phase=`receiving`。
 2. 按 fileIndex 顺序拉取 chunk；使用 `files[].path` 在 staging 下创建相对布局（no-follow）。
-3. 每 chunk：Content-Length、size、SHA-256 全匹配；失败 → `restore-integrity-failed`；不 retry。
+3. 每 chunk：`Content-Length`、实际 size、exact-one `X-Linke-Chunk-Sha256`、body SHA **一致**；失败 → `restore-integrity-failed`；不 retry。
+   - GET task `files[]` **frozen exact keys** 仅含整文件 `sha256`，**无** per-chunk digest（C7 contract clarification；**不暗改 wire**）。
+   - 单分块：client 传整文件 `expectedSha256`，四者全等（expectedLength / Content-Length / expectedSha256 / header / body）。
+   - 多分块：省略 a priori `expectedSha256`；仍须 exact-one header 合法 lower hex；body SHA === header；engine 用返回 digest 写 staging；最终 `verifyStagingTree` 对 GET task 整文件 sha 做 end-to-end gate。
 4. progress 有界上报；观察 `cancelRequested`。
+5. **Retry attempt isolation**：单/多分块的 body parts 必须在**每次** network attempt 新建；attempt1 `onChunk(partial)` 后 `RESTORE_INTERRUPTED`，attempt2 full success **不得**拼接旧 partial，不得误报 integrity。
 
 **Verify（staging）**
 
@@ -1303,9 +1311,11 @@ requiredBytes =
 | 项 | 规则 |
 | --- | --- |
 | 尺寸 | 固定 8 MiB 语义（§8.6） |
-| 匹配 | headers identity、`Content-Length`、实际 size、SHA-256 **全部**一致 |
+| 匹配 | exact-one `Content-Length` + exact-one `X-Linke-Chunk-Sha256`（合法 lower hex64）+ 实际 body size + body SHA-256 **全部**一致 |
+| `expectedSha256`（client API） | **可选**（C7 contract clarification，由 GET task `files[]` frozen shape 导出；**不暗改 wire**）。`undefined` 仅用于无预先 per-chunk digest 的 multi-chunk；若已提供则必须 `header === expectedSha256` 且 body === header。`null`/坏格式 → **socket 前** fail-close。返回 `{bytesReceived, sha256}` 中 `sha256` 为已校验的 header/body digest |
 | under-read / over-read / early EOF | **fail-close** `restore-integrity-failed` |
 | 空文件 | 不发 GET chunk |
+| attempt isolation | 每次 network attempt 独立 body 缓冲；不得跨 attempt 拼接 partial |
 
 ### 13.3 Retry budget
 

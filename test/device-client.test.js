@@ -1704,3 +1704,1384 @@ describe('secret-safe device CLI', () => {
     assert.strictEqual(keychainSets, 0);
   });
 });
+
+// =============================================================================
+// C7 G0c — requestPinnedDownload (streaming pinned chunk GET)
+// Authority: design §§13.1–13.4, 8.6 + plan C7 RED Steps 1/10/10b
+// Production export absent at RED → loadRequestPinnedDownload fails readably.
+// requestPinnedBinary remains the bounded JSON helper; do not assume it becomes streaming.
+// =============================================================================
+
+const C7_TOKEN = 'c7-download-fixture-token-32chars!!';
+const C7_DEVICE = 'device-c7-download';
+const C7_ZERO_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const C7_SECRET_BODY = 'SECRET-BEARING-TLS-BODY-token=c7-secret-token-value-XYZ';
+const C7_CHUNK_PATH = '/agent/restore/tasks/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeee0001/files/0/chunks/0';
+
+/**
+ * Dynamic load — avoid static top-level import of missing export killing all suites.
+ * @returns {Promise<(opts: object) => Promise<{ bytesReceived: number, sha256: string }>>}
+ */
+async function loadRequestPinnedDownload() {
+  const mod = await import('../src/device-client.js');
+  assert.equal(
+    typeof mod.requestPinnedDownload,
+    'function',
+    'C7 requestPinnedDownload must be exported from src/device-client.js',
+  );
+  assert.equal(
+    typeof mod.requestPinnedBinary,
+    'function',
+    'C7 must retain requestPinnedBinary as bounded helper (not replace with streaming-only)',
+  );
+  return mod.requestPinnedDownload;
+}
+
+/**
+ * Count case-insensitive header occurrences from Node rawHeaders.
+ * @param {string[] | undefined} rawHeaders
+ * @param {string} name
+ */
+function countRawHeader(rawHeaders, name) {
+  const target = name.toLowerCase();
+  let n = 0;
+  if (!Array.isArray(rawHeaders)) return 0;
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    if (String(rawHeaders[i]).toLowerCase() === target) n += 1;
+  }
+  return n;
+}
+
+/**
+ * @param {Buffer} body
+ * @param {Record<string, string | number>} [extra]
+ */
+function sendChunkOk(res, body, extra = {}) {
+  const sha = createHash('sha256').update(body).digest('hex');
+  res.writeHead(200, {
+    'content-type': 'application/octet-stream',
+    'content-length': body.length,
+    'cache-control': 'no-store',
+    'x-linke-chunk-sha256': sha,
+    ...extra,
+  });
+  res.end(body);
+}
+
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} status
+ * @param {object} body
+ * @param {Record<string, string>} [extraHeaders]
+ */
+function sendDownloadErrorJson(res, status, body, extraHeaders = {}) {
+  const data = JSON.stringify(body);
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(data),
+    ...extraHeaders,
+  });
+  res.end(data);
+}
+
+/**
+ * @param {unknown} error
+ * @returns {string}
+ */
+function downloadErrorText(error) {
+  if (!error || typeof error !== 'object') return String(error);
+  const err = /** @type {Error & { code?: string, retryAfterSec?: number, statusCode?: unknown }} */ (error);
+  const own = Object.keys(err)
+    .filter((k) => k !== 'stack')
+    .map((k) => String(/** @type {Record<string, unknown>} */ (err)[k]));
+  return `${err}\n${err.message || ''}\n${err.code || ''}\n${err.statusCode ?? ''}\n${err.retryAfterSec ?? ''}\n${own.join('\n')}`;
+}
+
+describe('C7 G0c requestPinnedDownload', () => {
+  it('C7 exports requestPinnedDownload; requestPinnedBinary export + 64KiB bound still present', async () => {
+    const mod = await import('../src/device-client.js');
+    assert.equal(typeof mod.requestPinnedBinary, 'function');
+    assert.equal(mod.MAX_PINNED_JSON_RESPONSE_BYTES, 64 * 1024);
+    assert.equal(typeof mod.requestPinnedDownload, 'function');
+  });
+
+  it('C7 pin failure: onChunk never called; secret body never accepted; fixed device-tls-fingerprint-mismatch', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    let onChunkCalls = 0;
+    /** @type {Buffer[]} */
+    const delivered = [];
+    const server = await startHttpsFixture((req, res) => {
+      void req;
+      // Hostile: attempt to push secret-bearing body on mismatch path (client must not accept).
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': Buffer.byteLength(C7_SECRET_BODY),
+        'x-linke-chunk-sha256': createHash('sha256').update(C7_SECRET_BODY).digest('hex'),
+      });
+      res.end(C7_SECRET_BODY);
+    });
+    try {
+      await assert.rejects(
+        requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: 'f'.repeat(64),
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: Buffer.byteLength(C7_SECRET_BODY),
+          expectedSha256: createHash('sha256').update(C7_SECRET_BODY).digest('hex'),
+          onChunk: (chunk) => {
+            onChunkCalls += 1;
+            delivered.push(Buffer.from(chunk));
+          },
+        }),
+        (error) => {
+          const text = downloadErrorText(error);
+          // Registered code is device-tls-fingerprint-mismatch (contains the
+          // substring "fingerprint"); leak checks exclude the code/message itself.
+          const leakText = text
+            .split(ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH)
+            .join('');
+          return error.name === 'LinkeError'
+            && error.code === ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH
+            && error.message === ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH
+            && onChunkCalls === 0
+            && delivered.length === 0
+            && !leakText.includes(C7_SECRET_BODY)
+            && !leakText.includes(C7_TOKEN)
+            && !leakText.includes('c7-secret-token')
+            && !leakText.includes('f'.repeat(64))
+            && !/certificate|SSL|TLS alert|self[- ]signed/i.test(leakText);
+        },
+      );
+      assert.equal(onChunkCalls, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('C7 pin success: GET no body; path strict leading-slash; triad exact-one in rawHeaders; no file-path header', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const payload = Buffer.from('c7-pin-success-bytes');
+    /** @type {{ method?: string, url?: string, rawHeaders?: string[], headers?: object }} */
+    let seen = {};
+    let requestBodyBytes = 0;
+    const server = await startHttpsFixture((req, res) => {
+      seen = {
+        method: req.method,
+        url: req.url,
+        rawHeaders: req.rawHeaders,
+        headers: req.headers,
+      };
+      req.on('data', (c) => {
+        requestBodyBytes += c.length;
+      });
+      req.on('end', () => {
+        sendChunkOk(res, payload);
+      });
+    });
+    try {
+      const sha = createHash('sha256').update(payload).digest('hex');
+      /** @type {Buffer[]} */
+      const chunks = [];
+      const result = await requestPinnedDownload({
+        agentUrl: server.url,
+        path: C7_CHUNK_PATH,
+        tlsFingerprint: server.fingerprint,
+        token: C7_TOKEN,
+        deviceId: C7_DEVICE,
+        protocolVersion: 2,
+        expectedLength: payload.length,
+        expectedSha256: sha,
+        onChunk: (c) => {
+          chunks.push(Buffer.from(c));
+        },
+      });
+      assert.equal(seen.method, 'GET');
+      assert.equal(seen.url, C7_CHUNK_PATH);
+      assert.ok(String(seen.url).startsWith('/'));
+      assert.equal(requestBodyBytes, 0);
+      assert.equal(countRawHeader(seen.rawHeaders, 'authorization'), 1);
+      assert.equal(countRawHeader(seen.rawHeaders, 'x-linke-device-id'), 1);
+      assert.equal(countRawHeader(seen.rawHeaders, 'x-linke-protocol-version'), 1);
+      assert.equal(seen.headers?.authorization, `Bearer ${C7_TOKEN}`);
+      assert.equal(seen.headers?.['x-linke-device-id'], C7_DEVICE);
+      assert.equal(seen.headers?.['x-linke-protocol-version'], '2');
+      // File path must never enter URL/header (chunk uses fileIndex/chunkIndex only).
+      const headerBlob = JSON.stringify(seen.headers || {});
+      assert.ok(!headerBlob.includes('nested/'));
+      assert.ok(!headerBlob.includes('apps/demo'));
+      assert.ok(!/x-linke-file-path|x-file-path|x-restore-path/i.test(headerBlob));
+      assert.equal(result.bytesReceived, payload.length);
+      assert.equal(result.sha256, sha);
+      assert.deepEqual(Buffer.concat(chunks), payload);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('C7 Content-Length + X-Linke-Chunk-Sha256 must exact-match expectedLength/expectedSha256 and actual body', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const payload = Buffer.from('exact-match-chunk-body-c7');
+    const trueSha = createHash('sha256').update(payload).digest('hex');
+
+    // Happy exact match
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendChunkOk(res, payload);
+      });
+      try {
+        const result = await requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: payload.length,
+          expectedSha256: trueSha,
+          onChunk: () => {},
+        });
+        assert.equal(result.bytesReceived, payload.length);
+        assert.equal(result.sha256, trueSha);
+      } finally {
+        await server.close();
+      }
+    }
+
+    // Header Content-Length ≠ expectedLength
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': payload.length + 1,
+          'x-linke-chunk-sha256': trueSha,
+        });
+        res.end(payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            expectedSha256: trueSha,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // Header digest ≠ expectedSha256
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': payload.length,
+          'x-linke-chunk-sha256': 'a'.repeat(64),
+        });
+        res.end(payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            expectedSha256: trueSha,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 under-read / over-read / early EOF / corrupt digest → restore-integrity-failed; no late onChunk', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const payload = Buffer.from('0123456789abcdef'); // 16 bytes
+    const trueSha = createHash('sha256').update(payload).digest('hex');
+    const short8 = payload.subarray(0, 8);
+    const sha8 = createHash('sha256').update(short8).digest('hex');
+
+    // under-read: Content-Length claims 16, body ends at 8
+    {
+      let onChunkCalls = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': 16,
+          'x-linke-chunk-sha256': trueSha,
+        });
+        res.write(payload.subarray(0, 8));
+        res.end();
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 16,
+            expectedSha256: trueSha,
+            onChunk: () => {
+              onChunkCalls += 1;
+            },
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422,
+        );
+        const after = onChunkCalls;
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(onChunkCalls, after, 'no late onChunk after integrity settle');
+      } finally {
+        await server.close();
+      }
+    }
+
+    // over-read oracle (P1-4):
+    // Node HTTP framing contract (client-side):
+    //   1) Server advertises Content-Length: 8 and X-Linke-Chunk-Sha256=sha8, expectedLength=8.
+    //   2) Server then writes 16 body bytes on the raw TLS socket (past CL).
+    //   3) Node HTTP parser surfaces HPE_CLOSED_CONNECTION / incomplete message on the
+    //      response stream (event order: headers → partial data → parser error / close).
+    // Implementation MUST map this to RESTORE_INTEGRITY_FAILED (retryable=false, 422).
+    // MUST NOT resolve as a truncated success {bytesReceived:8, sha256:sha8}.
+    // MUST NOT map to RESTORE_INTERRUPTED. Do not assert raw error text externally.
+    {
+      let onChunkCalls = 0;
+      let settled = false;
+      /** @type {{ bytesReceived: number, sha256: string } | null} */
+      let resolved = null;
+      const server = await startHttpsFixture((req, res) => {
+        void res;
+        // Raw TLS/HTTP response — bypass ServerResponse CL enforcement so client
+        // truly observes CL=8 with 16 body bytes (HPE_CLOSED_CONNECTION path).
+        const head = [
+          'HTTP/1.1 200 OK',
+          'Content-Type: application/octet-stream',
+          'Content-Length: 8',
+          `X-Linke-Chunk-Sha256: ${sha8}`,
+          'Cache-Control: no-store',
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n');
+        req.socket.write(head);
+        req.socket.write(payload); // 16 bytes after CL=8
+        req.socket.end();
+      });
+      try {
+        await assert.rejects(
+          (async () => {
+            resolved = await requestPinnedDownload({
+              agentUrl: server.url,
+              path: C7_CHUNK_PATH,
+              tlsFingerprint: server.fingerprint,
+              token: C7_TOKEN,
+              deviceId: C7_DEVICE,
+              protocolVersion: 2,
+              expectedLength: 8,
+              expectedSha256: sha8,
+              onChunk: () => {
+                if (settled) assert.fail('late onChunk after integrity failure');
+                onChunkCalls += 1;
+              },
+            });
+            return resolved;
+          })(),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422
+            && e.code !== ERROR_CODES.RESTORE_INTERRUPTED,
+        );
+        settled = true;
+        // Explicit anti-oracle: never a silent truncated success of the CL=8 prefix.
+        assert.equal(resolved, null, 'over-read must not resolve successfully');
+        assert.notDeepEqual(
+          resolved,
+          { bytesReceived: 8, sha256: sha8 },
+          'over-read must never settle as {bytesReceived:8,sha256:sha8}',
+        );
+        await new Promise((r) => setTimeout(r, 20));
+        void onChunkCalls;
+      } finally {
+        await server.close();
+      }
+    }
+
+    // early EOF / cut socket mid-body with known expectedLength not fully received (P2-6):
+    // destroy/cut after partial write → ONLY RESTORE_INTEGRITY_FAILED, retryable=false, 422.
+    // RESTORE_INTERRUPTED is NOT an allowed mapping when expectedLength is known and short.
+    {
+      let onChunkAfterFail = 0;
+      let failed = false;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': 16,
+          'x-linke-chunk-sha256': trueSha,
+        });
+        // Flush headers+partial body to the client before destroying; an immediate
+        // destroy races the TLS flush and looks like "no response" (interrupt).
+        res.write(payload.subarray(0, 4), () => {
+          res.socket?.destroy();
+        });
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 16,
+            expectedSha256: trueSha,
+            onChunk: () => {
+              if (failed) onChunkAfterFail += 1;
+            },
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422
+            && e.code !== ERROR_CODES.RESTORE_INTERRUPTED,
+        );
+        failed = true;
+        await new Promise((r) => setTimeout(r, 30));
+        assert.equal(onChunkAfterFail, 0);
+      } finally {
+        await server.close();
+      }
+    }
+
+    // corrupt body digest vs header/expected
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        const wrong = Buffer.from('WRONG-DIGEST-BODY!!');
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': wrong.length,
+          'x-linke-chunk-sha256': trueSha, // lies
+        });
+        res.end(wrong);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: Buffer.byteLength('WRONG-DIGEST-BODY!!'),
+            expectedSha256: trueSha,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 idleTimeout reset only on nonempty data; total timeout independent; single-settle late events', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const partA = Buffer.from('AAAA');
+    const partB = Buffer.from('BBBB');
+    const full = Buffer.concat([partA, partB]);
+    const sha = createHash('sha256').update(full).digest('hex');
+
+    // nonempty data resets idle: two spaced writes within idle window complete
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': full.length,
+          'x-linke-chunk-sha256': sha,
+        });
+        res.write(partA);
+        setTimeout(() => {
+          res.write(partB);
+          res.end();
+        }, 40);
+      });
+      try {
+        const result = await requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: full.length,
+          expectedSha256: sha,
+          timeoutMs: 5_000,
+          idleTimeoutMs: 80,
+          onChunk: () => {},
+        });
+        assert.equal(result.bytesReceived, full.length);
+        assert.equal(result.sha256, sha);
+      } finally {
+        await server.close();
+      }
+    }
+
+    // idle timeout fires when no data arrives
+    {
+      let onChunkCalls = 0;
+      let settleCount = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': 8,
+          'x-linke-chunk-sha256': createHash('sha256').update(Buffer.alloc(8)).digest('hex'),
+        });
+        // Flush headers so the client starts idle before any body bytes.
+        // Without flush, Node may coalesce headers with the late write.
+        if (typeof res.flushHeaders === 'function') res.flushHeaders();
+        // Never write body until after idle should have fired.
+        setTimeout(() => {
+          // Late data after client should have settled.
+          try {
+            res.write(Buffer.alloc(8));
+            res.end();
+          } catch {
+            // ignore
+          }
+        }, 200);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 8,
+            expectedSha256: createHash('sha256').update(Buffer.alloc(8)).digest('hex'),
+            timeoutMs: 5_000,
+            idleTimeoutMs: 40,
+            onChunk: () => {
+              onChunkCalls += 1;
+            },
+          }).then(
+            (v) => {
+              settleCount += 1;
+              return v;
+            },
+            (e) => {
+              settleCount += 1;
+              throw e;
+            },
+          ),
+          (e) => e.code === ERROR_CODES.RESTORE_INTERRUPTED
+            && e.retryable === true
+            && e.statusCode === null,
+        );
+        await new Promise((r) => setTimeout(r, 250));
+        assert.equal(settleCount, 1, 'single-settle');
+        assert.equal(onChunkCalls, 0, 'no onChunk after idle timeout / late write');
+      } finally {
+        await server.close();
+      }
+    }
+
+    // total timeout not extended by data: keep sending within idle but past total
+    {
+      let onChunkCalls = 0;
+      let settleCount = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        const big = Buffer.alloc(4, 0x61);
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': 1000,
+          'x-linke-chunk-sha256': 'b'.repeat(64),
+        });
+        let n = 0;
+        const tick = () => {
+          if (n >= 30) return;
+          n += 1;
+          try {
+            res.write(big);
+          } catch {
+            return;
+          }
+          setTimeout(tick, 25);
+        };
+        tick();
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 1000,
+            expectedSha256: 'b'.repeat(64),
+            timeoutMs: 90,
+            idleTimeoutMs: 200,
+            onChunk: () => {
+              onChunkCalls += 1;
+            },
+          }).then(
+            (v) => {
+              settleCount += 1;
+              return v;
+            },
+            (e) => {
+              settleCount += 1;
+              throw e;
+            },
+          ),
+          (e) => e.code === ERROR_CODES.RESTORE_INTERRUPTED && e.retryable === true,
+        );
+        const after = onChunkCalls;
+        await new Promise((r) => setTimeout(r, 120));
+        assert.equal(settleCount, 1);
+        assert.equal(onChunkCalls, after, 'no late onChunk after total timeout settle');
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 onChunk async backpressure: next chunk waits; throw/reject fail-closes without further callbacks', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const p1 = Buffer.from('part-one-xxxxx');
+    const p2 = Buffer.from('part-two-yyyyy');
+    const full = Buffer.concat([p1, p2]);
+    const sha = createHash('sha256').update(full).digest('hex');
+
+    // backpressure: second delivery must wait for first promise
+    {
+      /** @type {string[]} */
+      const order = [];
+      let releaseFirst;
+      const firstGate = new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': full.length,
+          'x-linke-chunk-sha256': sha,
+        });
+        res.write(p1);
+        setImmediate(() => {
+          res.write(p2);
+          res.end();
+        });
+      });
+      try {
+        const pending = requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: full.length,
+          expectedSha256: sha,
+          onChunk: async (chunk) => {
+            order.push(`enter:${chunk.length}`);
+            if (order.filter((x) => x.startsWith('enter:')).length === 1) {
+              await firstGate;
+            }
+            order.push(`leave:${chunk.length}`);
+          },
+        });
+        // Allow first enter, ensure second has not entered yet.
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepEqual(
+          order.filter((x) => x.startsWith('enter:')),
+          [`enter:${p1.length}`],
+          'second onChunk must wait for first promise',
+        );
+        releaseFirst();
+        const result = await pending;
+        assert.equal(result.bytesReceived, full.length);
+        assert.ok(order.includes(`enter:${p2.length}`));
+        // p1/p2 may share equal byte length — use enter indices, not indexOf(length).
+        const enterIdx = [];
+        const leaveIdx = [];
+        for (let i = 0; i < order.length; i += 1) {
+          if (order[i].startsWith('enter:')) enterIdx.push(i);
+          if (order[i].startsWith('leave:')) leaveIdx.push(i);
+        }
+        assert.equal(enterIdx.length, 2);
+        assert.equal(leaveIdx.length, 2);
+        assert.ok(leaveIdx[0] < enterIdx[1], 'first leave must precede second enter');
+      } finally {
+        await server.close();
+      }
+    }
+
+    // onChunk throw fail-close
+    {
+      let calls = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendChunkOk(res, full);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: full.length,
+            expectedSha256: sha,
+            onChunk: () => {
+              calls += 1;
+              throw new Error('onChunk-boom-must-not-leak-path-/Users/secret');
+            },
+          }),
+          (e) => {
+            const text = downloadErrorText(e);
+            return (e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+              || e.code === ERROR_CODES.DEVICE_REQUEST_INVALID
+              || e.code === ERROR_CODES.RESTORE_INTERRUPTED)
+              && !text.includes('/Users/secret')
+              && !text.includes('onChunk-boom');
+          },
+        );
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(calls, 1, 'no further onChunk after throw');
+      } finally {
+        await server.close();
+      }
+    }
+
+    // onChunk reject fail-close
+    {
+      let calls = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        // split into two writes so second would be attempted without fail-close
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': full.length,
+          'x-linke-chunk-sha256': sha,
+        });
+        res.write(p1);
+        setImmediate(() => {
+          res.write(p2);
+          res.end();
+        });
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: full.length,
+            expectedSha256: sha,
+            onChunk: async () => {
+              calls += 1;
+              if (calls === 1) {
+                await Promise.reject(new Error('reject-secret-token=abc'));
+              }
+            },
+          }),
+          (e) => {
+            const text = downloadErrorText(e);
+            return !text.includes('reject-secret-token') && !text.includes('abc');
+          },
+        );
+        await new Promise((r) => setTimeout(r, 30));
+        assert.equal(calls, 1, 'no further onChunk after reject');
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 parameter fail-closed before socket (length/sha/timeouts/signal/protocol/device/token/path)', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    let accepted = 0;
+    const server = await startHttpsFixture((req, res) => {
+      accepted += 1;
+      void req;
+      sendChunkOk(res, Buffer.from('x'));
+    });
+    const base = {
+      agentUrl: server.url,
+      path: C7_CHUNK_PATH,
+      tlsFingerprint: server.fingerprint,
+      token: C7_TOKEN,
+      deviceId: C7_DEVICE,
+      protocolVersion: 2,
+      expectedLength: 1,
+      expectedSha256: createHash('sha256').update(Buffer.from('x')).digest('hex'),
+      onChunk: () => {},
+    };
+    try {
+      const illegal = [
+        { expectedLength: -1 },
+        { expectedLength: 1.5 },
+        { expectedLength: Number.MAX_SAFE_INTEGER + 1 },
+        { expectedLength: '8' },
+        { expectedSha256: 'ABCDEF' + 'a'.repeat(58) }, // upper not allowed
+        { expectedSha256: 'a'.repeat(63) },
+        { expectedSha256: 'g'.repeat(64) },
+        { timeoutMs: 0 },
+        { timeoutMs: -5 },
+        { timeoutMs: 300_001 },
+        { idleTimeoutMs: 0 },
+        { idleTimeoutMs: -1 },
+        { idleTimeoutMs: 300_001 },
+        { signal: { aborted: 'nope' } },
+        { signal: {} },
+        { protocolVersion: 1.5 },
+        { protocolVersion: '2' },
+        { deviceId: '' },
+        { token: '' },
+        { path: 'agent/no-leading-slash' },
+        { path: '' },
+        { path: 'relative/path' },
+        { onChunk: null },
+        { onChunk: undefined },
+      ];
+      for (const patch of illegal) {
+        const before = accepted;
+        await assert.rejects(
+          async () => requestPinnedDownload({ ...base, ...patch }),
+          (e) => e instanceof Error
+            && (e.code === ERROR_CODES.DEVICE_REQUEST_INVALID
+              || e.code === ERROR_CODES.DEVICE_TOKEN_INVALID
+              || e.code === ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH
+              || e.code === ERROR_CODES.RESTORE_TASK_INVALID
+              || e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED),
+          `illegal ${JSON.stringify(patch)}`,
+        );
+        assert.equal(accepted, before, `must fail before socket for ${JSON.stringify(patch)}`);
+      }
+      // already-aborted signal fails closed before request
+      {
+        const ac = new AbortController();
+        ac.abort();
+        const before = accepted;
+        // Wrap: sync fail-closed throw must surface as rejection to assert.rejects.
+        await assert.rejects(
+          async () => requestPinnedDownload({ ...base, signal: ac.signal }),
+          (e) => e.code === ERROR_CODES.DEVICE_REQUEST_INVALID,
+        );
+        assert.equal(accepted, before);
+      }
+
+      // expectedSha256 null / bad format still fail-close before socket (optional field)
+      {
+        for (const bad of [null, '', 'ABCDEF' + 'a'.repeat(58), 'a'.repeat(63), 123]) {
+          const before = accepted;
+          await assert.rejects(
+            async () => requestPinnedDownload({ ...base, expectedSha256: bad }),
+            (e) => e.code === ERROR_CODES.DEVICE_REQUEST_INVALID
+              && e.retryable === false,
+            `bad expectedSha256 ${String(bad)}`,
+          );
+          assert.equal(accepted, before, `must fail before socket for expectedSha256=${String(bad)}`);
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('C7 expectedSha256 optional: omit succeeds with exact-one header===body; bad/missing/dup header or body mismatch → integrity', async () => {
+    // C7 contract clarification: GET task files[] has no per-chunk digest.
+    // Multi-chunk may omit expectedSha256; still exact-one X-Linke-Chunk-Sha256 + body match.
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+    const payload = Buffer.from('optional-expected-sha-body-c7');
+    const trueSha = createHash('sha256').update(payload).digest('hex');
+
+    // omit expectedSha256: header/body agree → success; returned sha256 is verified digest
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendChunkOk(res, payload);
+      });
+      try {
+        /** @type {Buffer[]} */
+        const got = [];
+        const result = await requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: payload.length,
+          // expectedSha256 intentionally omitted
+          onChunk: (c) => {
+            got.push(Buffer.from(c));
+          },
+        });
+        assert.equal(result.bytesReceived, payload.length);
+        assert.equal(result.sha256, trueSha);
+        assert.deepEqual(Buffer.concat(got), payload);
+      } finally {
+        await server.close();
+      }
+    }
+
+    // provided expectedSha256 still required-when-provided: header/body/expected 全等
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendChunkOk(res, payload);
+      });
+      try {
+        const result = await requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: payload.length,
+          expectedSha256: trueSha,
+          onChunk: () => {},
+        });
+        assert.equal(result.sha256, trueSha);
+      } finally {
+        await server.close();
+      }
+    }
+
+    // missing chunk-sha header → integrity (omit expected)
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': payload.length,
+        });
+        res.end(payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED
+            && e.retryable === false
+            && e.statusCode === 422,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // duplicate X-Linke-Chunk-Sha256 → integrity
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        // rawHeaders-style duplicate via setHeader twice is hard; write raw response
+        const head = [
+          'HTTP/1.1 200 OK',
+          'Content-Type: application/octet-stream',
+          `Content-Length: ${payload.length}`,
+          `X-Linke-Chunk-Sha256: ${trueSha}`,
+          `X-Linke-Chunk-Sha256: ${trueSha}`,
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n');
+        req.socket.write(head);
+        req.socket.write(payload);
+        req.socket.end();
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // bad format header (upper hex) → integrity
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': payload.length,
+          'x-linke-chunk-sha256': trueSha.toUpperCase(),
+        });
+        res.end(payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // body hash ≠ header digest (omit expected) → integrity
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': payload.length,
+          'x-linke-chunk-sha256': 'a'.repeat(64),
+        });
+        res.end(payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // provided expectedSha256 but header differs → integrity (required-when-provided retained)
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendChunkOk(res, payload);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: payload.length,
+            expectedSha256: 'b'.repeat(64),
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 error mapping: interrupt/timeout; 429 dual codes + Retry-After; bounded error JSON no leak', async () => {
+    const requestPinnedDownload = await loadRequestPinnedDownload();
+
+    // disconnect → restore-interrupted
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        void res;
+        req.socket?.destroy();
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 4,
+            expectedSha256: createHash('sha256').update(Buffer.from('abcd')).digest('hex'),
+            onChunk: () => {},
+            timeoutMs: 2_000,
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_INTERRUPTED
+            && e.retryable === true
+            && e.statusCode === null
+            && !downloadErrorText(e).includes(C7_TOKEN),
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // 429 device-rate-limited with Retry-After clamp 1..30
+    {
+      let n = 0;
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        n += 1;
+        if (n === 1) {
+          return sendDownloadErrorJson(
+            res,
+            429,
+            { error: ERROR_CODES.DEVICE_RATE_LIMITED },
+            { 'retry-after': '99' },
+          );
+        }
+        return sendDownloadErrorJson(
+          res,
+          429,
+          { error: ERROR_CODES.RESTORE_BACKPRESSURE },
+          { 'retry-after': '0' },
+        );
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 1,
+            expectedSha256: C7_ZERO_SHA,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.DEVICE_RATE_LIMITED
+            && e.statusCode === 429
+            && e.retryable === true
+            && e.retryAfterSec === 30,
+        );
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 1,
+            expectedSha256: C7_ZERO_SHA,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.RESTORE_BACKPRESSURE
+            && e.statusCode === 429
+            && e.retryable === true
+            && e.retryAfterSec === 1,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // 429 wrong code → non-retry, no retryAfterSec
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendDownloadErrorJson(
+          res,
+          429,
+          { error: ERROR_CODES.RESTORE_TASK_CONFLICT },
+          { 'retry-after': '5' },
+        );
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 1,
+            expectedSha256: C7_ZERO_SHA,
+            onChunk: () => {},
+          }),
+          (e) => e.code === ERROR_CODES.DEVICE_REQUEST_INVALID
+            && e.retryAfterSec === undefined
+            && e.code !== ERROR_CODES.RESTORE_BACKPRESSURE,
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // error JSON with secrets stays bounded and non-leaking; onChunk 0
+    {
+      let onChunkCalls = 0;
+      const leak = {
+        error: ERROR_CODES.RESTORE_TASK_INVALID,
+        token: C7_TOKEN,
+        path: '/Users/private/secret-restore-target',
+        stack: 'Error: raw\n    at /Users/private/x.js:1:1',
+        body: 'a'.repeat(200_000),
+      };
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        sendDownloadErrorJson(res, 400, leak);
+      });
+      try {
+        await assert.rejects(
+          requestPinnedDownload({
+            agentUrl: server.url,
+            path: C7_CHUNK_PATH,
+            tlsFingerprint: server.fingerprint,
+            token: C7_TOKEN,
+            deviceId: C7_DEVICE,
+            protocolVersion: 2,
+            expectedLength: 1,
+            expectedSha256: C7_ZERO_SHA,
+            onChunk: () => {
+              onChunkCalls += 1;
+            },
+          }),
+          (e) => {
+            const text = downloadErrorText(e);
+            return e instanceof Error
+              && onChunkCalls === 0
+              && !text.includes(C7_TOKEN)
+              && !text.includes('/Users/private')
+              && !text.includes('raw\n')
+              && !text.includes('a'.repeat(1000));
+          },
+        );
+      } finally {
+        await server.close();
+      }
+    }
+
+    // AbortSignal single-settle without raw AbortError leak
+    {
+      const server = await startHttpsFixture((req, res) => {
+        void req;
+        void res;
+      });
+      const ac = new AbortController();
+      try {
+        const pending = requestPinnedDownload({
+          agentUrl: server.url,
+          path: C7_CHUNK_PATH,
+          tlsFingerprint: server.fingerprint,
+          token: C7_TOKEN,
+          deviceId: C7_DEVICE,
+          protocolVersion: 2,
+          expectedLength: 4,
+          expectedSha256: createHash('sha256').update(Buffer.from('abcd')).digest('hex'),
+          onChunk: () => {},
+          signal: ac.signal,
+          timeoutMs: 30_000,
+        });
+        ac.abort();
+        await assert.rejects(
+          pending,
+          (e) => {
+            const text = downloadErrorText(e);
+            return e.code === ERROR_CODES.DEVICE_REQUEST_INVALID
+              && !text.includes('AbortError')
+              && !text.includes('This operation was aborted');
+          },
+        );
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it('C7 requestPinnedBinary regression pin: still works for JSON GET and does not require onChunk', async () => {
+    // Ensures streaming API addition does not break bounded helper shape used as requestJson.
+    const server = await startHttpsFixture((req, res) => {
+      void req;
+      sendJson(res, 200, { ok: true, via: 'binary-json' });
+    });
+    try {
+      const response = await requestPinnedBinary({
+        agentUrl: server.url,
+        path: '/agent/restore/tasks/claim',
+        tlsFingerprint: server.fingerprint,
+        method: 'POST',
+        token: C7_TOKEN,
+        deviceId: C7_DEVICE,
+        body: {},
+        bodyMode: 'json',
+        timeoutMs: 5_000,
+      });
+      assert.deepEqual(response, { ok: true, via: 'binary-json' });
+    } finally {
+      await server.close();
+    }
+  });
+});

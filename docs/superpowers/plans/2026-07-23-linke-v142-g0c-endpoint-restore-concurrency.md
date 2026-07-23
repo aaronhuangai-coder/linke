@@ -1522,6 +1522,8 @@ Expected: **PASS**
 - Create: `src/restore-endpoint-engine.js`（**固定独立文件**；禁止并入 device-client）
 - Create: `test/restore-client.test.js`
 - Create: `test/restore-concurrency.test.js`
+- Modify: `docs/superpowers/specs/2026-07-23-linke-v142-g0c-endpoint-restore-concurrency-design.md`（**multi-chunk frozen-wire / local-resume** contract clarification）
+- Modify: `docs/superpowers/plans/2026-07-23-linke-v142-g0c-endpoint-restore-concurrency.md`（**multi-chunk frozen-wire / local-resume** contract clarification；本文件 C7 Interfaces/流程）
 
 **Interfaces (target):**
 
@@ -1535,7 +1537,7 @@ export async function requestPinnedDownload(input: {
   deviceId: string,
   protocolVersion: number,
   expectedLength: number,
-  expectedSha256: string,
+  expectedSha256?: string, // optional — C7 contract clarification from files[] frozen shape
   onChunk: (chunk: Buffer) => void | Promise<void>,
   timeoutMs?: number,      // default 120_000
   idleTimeoutMs?: number,  // default 15_000
@@ -1545,7 +1547,11 @@ export async function requestPinnedDownload(input: {
 // 行为冻结：
 // 1. pin 验证成功前不得调用 onChunk，不得 accept/落盘 secret-bearing body
 // 2. mandatory exact-one triad headers
-// 3. 校验 Content-Length 与 X-Linke-Chunk-Sha256（或契约头）与 expectedLength/expectedSha256 全等
+// 3. exact-one Content-Length + exact-one X-Linke-Chunk-Sha256（合法 lower hex64）
+//    - body SHA 必须 === header digest；返回 sha256 为已校验 header/body digest
+//    - expectedSha256 **可选**：undefined 仅 multi-chunk（files[] 无 per-chunk digest）；
+//      若提供则 header === expectedSha256（单分块整文件 sha 四者全等）
+//    - null/坏格式 → socket 前 DEVICE_REQUEST_INVALID（不改 wire）
 // 4. nonempty data 重置 idle timer（idleTimeoutMs）
 // 5. total timer timeoutMs
 // 6. single settle；late events 无二次 onChunk/无二次 reject
@@ -1560,7 +1566,7 @@ export async function runEndpointRestore(input: {
   deviceId: string,
   protocolVersion: number,
   restoreRoot: string,
-  endpointDataDir: string,
+  endpointDataDir: string, // required — local nonterminal STATE discovery root
   retryBudget?: number, // default 8
   stateStore: object,
   publish: {
@@ -1578,9 +1584,17 @@ export async function runEndpointRestore(input: {
   signal?: AbortSignal,
 }): Promise<{ outcome: 'completed' | 'rolled-back' | 'cancelled' }>;
 
-// 流程：claim/getTask/progress/receipt/cleanup → requestJson；
-//       chunk → download only
-// Retry: network budget default 8；integrity/path/capacity/state/publish/rollback → no retry
+// 流程（design §10.4 Plan）：
+//   1) 安全发现 endpointDataDir/restore-tasks 本 device nonterminal STATE
+//      （ensureSafeDataRoot + ensureSafeRelativeDir + bounded readdir；不改 C3 surface）
+//   2) 若存在 → 0 claim；GET task 对齐；durable originalTargetExisted/fingerprints；不 openOrCreate
+//   3) 若不存在 → claim → GET → preflight → fingerprint live FS → openOrCreate
+//   4) progress/receipt/cleanup → requestJson；chunk → download only
+//   5) multi-chunk 省略 expectedSha256；返回 digest 写 staging；verifyStagingTree 整文件 e2e
+//   6) publish ctx 使用 durable STATE originalTargetExisted/old fingerprints（非 live paths）
+//   7) capacity gate 仅 planned/receiving；post-anchor recovery 不阻断
+// Retry: network budget default 8；parts 每次 attempt 新建（P1-1 isolation）
+//       integrity/path/capacity/state/publish/rollback → no retry
 // 耗尽 → local RESTORE_RESUME_EXHAUSTED (HTTP N/A)
 ```
 
@@ -1643,6 +1657,8 @@ Expected: **PASS**
 - `src/restore-endpoint-engine.js`
 - `test/restore-client.test.js`
 - `test/restore-concurrency.test.js`
+- `docs/superpowers/specs/2026-07-23-linke-v142-g0c-endpoint-restore-concurrency-design.md`（multi-chunk frozen-wire / local-resume contract clarification）
+- `docs/superpowers/plans/2026-07-23-linke-v142-g0c-endpoint-restore-concurrency.md`（multi-chunk frozen-wire / local-resume contract clarification）
 
 **建议 commit:**
 `feat: add pinned G0c restore client with cancel and concurrency tests`

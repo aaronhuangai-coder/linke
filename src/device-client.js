@@ -1544,6 +1544,619 @@ export function requestPinnedBinary({
   });
 }
 
+/** Default total timeout for pinned streaming download (ms). */
+const DOWNLOAD_DEFAULT_TIMEOUT_MS = 120_000;
+/** Default idle timeout for pinned streaming download (ms); reset only on nonempty data. */
+const DOWNLOAD_DEFAULT_IDLE_TIMEOUT_MS = 15_000;
+/** Header name for chunk digest (lowercase). */
+const CHUNK_SHA_HEADER = 'x-linke-chunk-sha256';
+const SHA256_HEX64_RE = /^[a-f0-9]{64}$/;
+
+/**
+ * Restore-integrity fail-close (known-length short/over/mismatch). Non-retry, HTTP 422.
+ * @returns {LinkeError}
+ */
+function restoreIntegrityError() {
+  return new LinkeError(ERROR_CODES.RESTORE_INTEGRITY_FAILED, {
+    statusCode: 422,
+    retryable: false,
+  });
+}
+
+/**
+ * Transient download interrupt (disconnect / idle / total timeout before integrity gate).
+ * @returns {LinkeError}
+ */
+function restoreInterruptedError() {
+  return new LinkeError(ERROR_CODES.RESTORE_INTERRUPTED, {
+    statusCode: null,
+    retryable: true,
+  });
+}
+
+/**
+ * Map non-2xx JSON error body for pinned download (429 dual codes include restore-backpressure).
+ * Never attaches body/token/path text to the error.
+ * @param {number} statusCode
+ * @param {unknown} response
+ * @param {unknown} [headers]
+ * @returns {LinkeError}
+ */
+function errorFromDownloadHttpResponse(statusCode, response, headers) {
+  if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599) {
+    return localRequestInvalidError();
+  }
+
+  if (statusCode === 507) {
+    if (
+      isPlainResponseObject(response)
+      && response.error === ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT
+    ) {
+      return new LinkeError(ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT, {
+        statusCode: 507,
+        retryable: false,
+      });
+    }
+    return localRequestInvalidError();
+  }
+
+  if (statusCode === 429) {
+    if (!isPlainResponseObject(response) || typeof response.error !== 'string') {
+      return localRequestInvalidError();
+    }
+    if (
+      response.error === ERROR_CODES.DEVICE_RATE_LIMITED
+      || response.error === ERROR_CODES.RESTORE_BACKPRESSURE
+    ) {
+      const err = new LinkeError(/** @type {string} */ (response.error), {
+        statusCode: 429,
+        retryable: true,
+      });
+      const retryAfterSec = parseBoundedRetryAfterSec(headers);
+      if (retryAfterSec !== null) {
+        err.retryAfterSec = retryAfterSec;
+      }
+      return err;
+    }
+    return localRequestInvalidError();
+  }
+
+  if (!isPlainResponseObject(response) || typeof response.error !== 'string') {
+    return new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID, { statusCode });
+  }
+
+  let publicCode = ERROR_CODES.DEVICE_REQUEST_INVALID;
+  try {
+    publicCode = assertRegisteredErrorCode(response.error);
+  } catch {
+    publicCode = ERROR_CODES.DEVICE_REQUEST_INVALID;
+  }
+  return new LinkeError(publicCode, { statusCode });
+}
+
+/**
+ * Count case-insensitive header name occurrences in Node rawHeaders.
+ * @param {string[] | undefined} rawHeaders
+ * @param {string} nameLower
+ * @returns {number}
+ */
+function countRawHeaderName(rawHeaders, nameLower) {
+  if (!Array.isArray(rawHeaders)) return 0;
+  let n = 0;
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    if (String(rawHeaders[i]).toLowerCase() === nameLower) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Read first matching header value from rawHeaders (case-insensitive name).
+ * @param {string[] | undefined} rawHeaders
+ * @param {string} nameLower
+ * @returns {string | null}
+ */
+function firstRawHeaderValue(rawHeaders, nameLower) {
+  if (!Array.isArray(rawHeaders)) return null;
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    if (String(rawHeaders[i]).toLowerCase() === nameLower) {
+      return String(rawHeaders[i + 1] ?? '');
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize idle timeout: positive integer within hard upper bound.
+ * @param {unknown} idleTimeoutMs
+ * @returns {number}
+ */
+function normalizeIdleTimeoutMs(idleTimeoutMs) {
+  if (!Number.isInteger(idleTimeoutMs)
+    || idleTimeoutMs < 1
+    || idleTimeoutMs > MAX_PINNED_REQUEST_TIMEOUT_MS) {
+    throw new LinkeError(ERROR_CODES.DEVICE_REQUEST_INVALID);
+  }
+  return idleTimeoutMs;
+}
+
+/**
+ * Certificate-pinned HTTPS GET streaming download for G0c restore chunks.
+ * Pin succeeds before any body is accepted or onChunk is called.
+ * Does not replace {@link requestPinnedBinary} (bounded JSON helper).
+ *
+ * C7 contract clarification (files[] frozen shape has whole-file sha only, no
+ * per-chunk digest): `expectedSha256` is optional.
+ * - undefined: multi-chunk without a priori per-chunk digest; still requires
+ *   exact-one `X-Linke-Chunk-Sha256` (lower hex64) and body SHA === header.
+ * - provided string: header === expectedSha256 AND body SHA === header (four-way
+ *   with expectedLength/Content-Length for single-chunk whole-file sha).
+ * - null / bad format: fail-close before socket (DEVICE_REQUEST_INVALID).
+ * Returned `sha256` is always the verified header/body digest.
+ *
+ * @param {{
+ *   agentUrl: string,
+ *   path: string,
+ *   tlsFingerprint: string,
+ *   token: string,
+ *   deviceId: string,
+ *   protocolVersion?: number,
+ *   expectedLength: number,
+ *   expectedSha256?: string,
+ *   onChunk: (chunk: Buffer) => void | Promise<void>,
+ *   timeoutMs?: number,
+ *   idleTimeoutMs?: number,
+ *   signal?: AbortSignal,
+ * }} options
+ * @returns {Promise<{ bytesReceived: number, sha256: string }>}
+ */
+export function requestPinnedDownload({
+  agentUrl,
+  path,
+  tlsFingerprint,
+  token,
+  deviceId,
+  protocolVersion = DEVICE_PROTOCOL_VERSION,
+  expectedLength,
+  expectedSha256,
+  onChunk,
+  timeoutMs = DOWNLOAD_DEFAULT_TIMEOUT_MS,
+  idleTimeoutMs = DOWNLOAD_DEFAULT_IDLE_TIMEOUT_MS,
+  signal,
+}) {
+  // ---- fail-close before any socket ----
+  const url = parseAgentUrl(agentUrl);
+  const expectedPin = Buffer.from(normalizeFingerprint(tlsFingerprint), 'hex');
+  const safeTimeoutMs = normalizeTimeoutMs(timeoutMs);
+  const safeIdleMs = normalizeIdleTimeoutMs(idleTimeoutMs);
+  const safeProtocol = normalizeProtocolVersionHeader(protocolVersion);
+  assertAuthTriadInputs(deviceId, token);
+
+  if (typeof path !== 'string' || path.length === 0 || !path.startsWith('/')) {
+    throw requestInvalidError();
+  }
+  if (!Number.isSafeInteger(expectedLength) || expectedLength < 0) {
+    throw requestInvalidError();
+  }
+  // expectedSha256 optional (C7 multi-chunk). null/non-hex still fail before socket.
+  const hasExpectedSha = expectedSha256 !== undefined;
+  if (hasExpectedSha) {
+    if (typeof expectedSha256 !== 'string' || !SHA256_HEX64_RE.test(expectedSha256)) {
+      throw requestInvalidError();
+    }
+  }
+  if (typeof onChunk !== 'function') {
+    throw requestInvalidError();
+  }
+
+  const abortSignal = normalizeAbortSignal(signal);
+
+  /** @type {Record<string, string>} */
+  const headers = {
+    authorization: `Bearer ${token}`,
+    'x-linke-device-id': deviceId,
+    'x-linke-protocol-version': String(safeProtocol),
+  };
+
+  return new Promise((resolve, reject) => {
+    let pinned = false;
+    let settled = false;
+    /** @type {(() => void) | null} */
+    let removeAbortListener = null;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let totalTimer = null;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let idleTimer = null;
+    /** @type {import('node:http').ClientRequest | undefined} */
+    let req;
+    /** @type {import('node:http').IncomingMessage | undefined} */
+    let activeRes;
+    let bytesReceived = 0;
+    const hash = createHash('sha256');
+    let headersAccepted = false;
+    let knownLengthIntegrity = false;
+    /** Verified exact-one X-Linke-Chunk-Sha256 after header accept (lower hex64). */
+    let headerSha256 = /** @type {string | null} */ (null);
+    let delivering = false;
+    let deliveryFailed = false;
+    /** @type {Buffer[]} */
+    const pendingChunks = [];
+    let endSeen = false;
+
+    const clearTimers = () => {
+      if (totalTimer !== null) {
+        clearTimeout(totalTimer);
+        totalTimer = null;
+      }
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+    };
+
+    const settle = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      if (removeAbortListener) {
+        try {
+          removeAbortListener();
+        } catch {
+          // ignore
+        }
+        removeAbortListener = null;
+      }
+      fn();
+    };
+
+    const failClosed = (error) => {
+      settle(() => {
+        try {
+          if (activeRes) {
+            activeRes.removeAllListeners('data');
+            activeRes.removeAllListeners('end');
+            activeRes.removeAllListeners('error');
+            activeRes.removeAllListeners('aborted');
+            activeRes.removeAllListeners('close');
+            try {
+              activeRes.destroy();
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // ignore
+        }
+        try {
+          if (req) req.destroy();
+        } catch {
+          // ignore
+        }
+        reject(error instanceof LinkeError ? error : requestInvalidError());
+      });
+    };
+
+    const resetIdleTimer = () => {
+      if (settled) return;
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      // Idle / total timeouts are always RESTORE_INTERRUPTED (design §13.4).
+      // Known-length short body on connection end → integrity (separate paths).
+      idleTimer = setTimeout(() => {
+        failClosed(restoreInterruptedError());
+      }, safeIdleMs);
+    };
+
+    /**
+     * Serial onChunk backpressure: pause socket while awaiting async onChunk.
+     * @returns {Promise<void>}
+     */
+    const pumpDeliveries = async () => {
+      if (delivering || settled || deliveryFailed) return;
+      delivering = true;
+      try {
+        while (pendingChunks.length > 0 && !settled && !deliveryFailed) {
+          const chunk = /** @type {Buffer} */ (pendingChunks.shift());
+          try {
+            await onChunk(chunk);
+          } catch {
+            deliveryFailed = true;
+            failClosed(localRequestInvalidError());
+            return;
+          }
+        }
+        if (settled || deliveryFailed) return;
+        if (endSeen && pendingChunks.length === 0) {
+          if (bytesReceived !== expectedLength) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          if (typeof headerSha256 !== 'string' || !SHA256_HEX64_RE.test(headerSha256)) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          const actualSha = hash.digest('hex');
+          // Body must equal exact-one header digest (always).
+          if (actualSha !== headerSha256) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          // When a priori expectedSha256 provided, also require header/body === expected.
+          if (hasExpectedSha && actualSha !== expectedSha256) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          settle(() => resolve({ bytesReceived, sha256: actualSha }));
+          return;
+        }
+        try {
+          if (activeRes && typeof activeRes.resume === 'function') {
+            activeRes.resume();
+          }
+        } catch {
+          // ignore
+        }
+      } finally {
+        delivering = false;
+        if (!settled && !deliveryFailed && pendingChunks.length > 0) {
+          void pumpDeliveries();
+        }
+      }
+    };
+
+    try {
+      req = httpsRequest({
+        protocol: 'https:',
+        hostname: url.hostname,
+        port: url.port || 443,
+        path,
+        method: 'GET',
+        agent: false,
+        rejectUnauthorized: false,
+        headers,
+      }, (res) => {
+        if (settled) return;
+        activeRes = res;
+
+        if (!pinned) {
+          failClosed(new LinkeError(ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH));
+          return;
+        }
+
+        const status = res.statusCode;
+        const raw = res.rawHeaders;
+
+        if (!isSuccessStatus(status)) {
+          const errChunks = [];
+          let errBytes = 0;
+          let oversized = false;
+          res.on('data', (chunk) => {
+            if (settled || oversized) return;
+            const buf = Buffer.from(chunk);
+            errBytes += buf.length;
+            if (errBytes > MAX_PINNED_JSON_RESPONSE_BYTES) {
+              oversized = true;
+              errChunks.length = 0;
+              res.destroy();
+              failClosed(localRequestInvalidError());
+              return;
+            }
+            errChunks.push(buf);
+          });
+          res.on('end', () => {
+            if (settled || oversized) return;
+            let response = {};
+            if (errChunks.length > 0) {
+              try {
+                response = JSON.parse(Buffer.concat(errChunks).toString('utf8'));
+              } catch {
+                failClosed(localRequestInvalidError());
+                return;
+              }
+            }
+            failClosed(errorFromDownloadHttpResponse(
+              /** @type {number} */ (status),
+              response,
+              res.headers,
+            ));
+          });
+          res.on('error', () => {
+            if (!settled) failClosed(restoreInterruptedError());
+          });
+          return;
+        }
+
+        if (countRawHeaderName(raw, 'content-length') !== 1) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+        if (countRawHeaderName(raw, CHUNK_SHA_HEADER) !== 1) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+        const clRaw = firstRawHeaderValue(raw, 'content-length');
+        const shaRaw = firstRawHeaderValue(raw, CHUNK_SHA_HEADER);
+        if (clRaw === null || shaRaw === null) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+        const clNum = Number(clRaw);
+        if (!Number.isSafeInteger(clNum) || clNum !== expectedLength) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+        if (typeof shaRaw !== 'string' || !SHA256_HEX64_RE.test(shaRaw)) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+        // When provided, expectedSha256 must equal the exact-one header (required-when-provided).
+        if (hasExpectedSha && shaRaw !== expectedSha256) {
+          failClosed(restoreIntegrityError());
+          return;
+        }
+
+        headerSha256 = shaRaw;
+        headersAccepted = true;
+        knownLengthIntegrity = true;
+        resetIdleTimer();
+
+        res.on('data', (chunk) => {
+          if (settled || deliveryFailed) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (buf.length === 0) return;
+
+          resetIdleTimer();
+
+          if (bytesReceived + buf.length > expectedLength) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+
+          bytesReceived += buf.length;
+          try {
+            hash.update(buf);
+          } catch {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          pendingChunks.push(buf);
+          try {
+            if (typeof res.pause === 'function') res.pause();
+          } catch {
+            // ignore
+          }
+          void pumpDeliveries();
+        });
+
+        res.on('end', () => {
+          if (settled || deliveryFailed) return;
+          endSeen = true;
+          if (bytesReceived !== expectedLength) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          void pumpDeliveries();
+        });
+
+        const onPrematureClose = () => {
+          if (settled || deliveryFailed || endSeen) return;
+          if (headersAccepted && knownLengthIntegrity) {
+            failClosed(restoreIntegrityError());
+          } else {
+            failClosed(restoreInterruptedError());
+          }
+        };
+        res.on('aborted', onPrematureClose);
+        res.on('close', () => {
+          if (settled || deliveryFailed || endSeen) return;
+          if (headersAccepted && knownLengthIntegrity && bytesReceived < expectedLength) {
+            failClosed(restoreIntegrityError());
+          }
+        });
+        res.on('error', (err) => {
+          if (settled || deliveryFailed) return;
+          const code = err && typeof err === 'object'
+            ? /** @type {{ code?: string }} */ (err).code
+            : undefined;
+          if (
+            headersAccepted
+            && knownLengthIntegrity
+            && (
+              code === 'HPE_CLOSED_CONNECTION'
+              || code === 'HPE_INVALID_CONSTANT'
+              || code === 'ERR_STREAM_PREMATURE_CLOSE'
+              || bytesReceived !== expectedLength
+            )
+          ) {
+            failClosed(restoreIntegrityError());
+            return;
+          }
+          failClosed(restoreInterruptedError());
+        });
+      });
+    } catch {
+      failClosed(restoreInterruptedError());
+      return;
+    }
+
+    req.once('error', (error) => {
+      if (settled) return;
+      if (error instanceof LinkeError) {
+        failClosed(error);
+        return;
+      }
+      // After response headers with known expected length, any transport cut is
+      // known-length integrity (under-read / aborted / HPE_*), not interrupt.
+      if (headersAccepted && knownLengthIntegrity) {
+        failClosed(restoreIntegrityError());
+        return;
+      }
+      failClosed(restoreInterruptedError());
+    });
+
+    if (abortSignal) {
+      const onAbort = () => {
+        try {
+          req.destroy(localRequestInvalidError());
+        } catch {
+          // ignore
+        }
+        failClosed(localRequestInvalidError());
+      };
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+      removeAbortListener = () => {
+        try {
+          abortSignal.removeEventListener('abort', onAbort);
+        } catch {
+          // ignore
+        }
+      };
+    }
+
+    totalTimer = setTimeout(() => {
+      if (settled) return;
+      try {
+        req.destroy();
+      } catch {
+        // ignore
+      }
+      failClosed(restoreInterruptedError());
+    }, safeTimeoutMs);
+
+    try {
+      req.once('socket', (socket) => {
+        socket.once('secureConnect', () => {
+          try {
+            const rawCert = socket.getPeerCertificate(true)?.raw;
+            const actual = rawCert
+              ? createHash('sha256').update(rawCert).digest()
+              : Buffer.alloc(0);
+            if (
+              actual.length !== expectedPin.length
+              || !timingSafeEqual(actual, expectedPin)
+            ) {
+              req.destroy(new LinkeError(ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH));
+              return;
+            }
+            pinned = true;
+            req.end();
+          } catch {
+            req.destroy(new LinkeError(ERROR_CODES.DEVICE_TLS_FINGERPRINT_MISMATCH));
+          }
+        });
+      });
+    } catch {
+      try {
+        req.destroy(restoreInterruptedError());
+      } catch {
+        // ignore
+      }
+      failClosed(restoreInterruptedError());
+    }
+  });
+}
+
 /**
  * Explicit abort of an in-progress upload session (same mandatory auth triad).
  * Idempotent on the server; client does not auto-preempt other sessions.
