@@ -155,6 +155,67 @@ function parseOneSanitizedLine(child, label) {
   return result;
 }
 
+/**
+ * One-shot child exit capture installed immediately after spawn.
+ * close is recorded as soon as it fires; waitForExit only arms the kill deadline.
+ * If close already happened, waitForExit returns the real code/buffers without faking timeout.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {() => { stdout: string, stderr: string }} getBuffers
+ */
+function installChildExitCapture(child, getBuffers) {
+  let settled = false;
+  /** @type {{ code: number | null, stdout: string, stderr: string } | null} */
+  let result = null;
+  /** @type {((r: { code: number | null, stdout: string, stderr: string }) => void) | null} */
+  let pendingResolve = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let deadlineTimer = null;
+
+  const settle = (code) => {
+    if (settled) return;
+    settled = true;
+    if (deadlineTimer !== null) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    }
+    const buffers = getBuffers();
+    result = { code, stdout: buffers.stdout, stderr: buffers.stderr };
+    if (pendingResolve) {
+      pendingResolve(result);
+      pendingResolve = null;
+    }
+  };
+
+  // Capture close immediately so a fast child cannot drop the event before waitForExit.
+  child.once('close', (code) => settle(code));
+
+  return {
+    /**
+     * Wait for exit. Arms kill deadline only when called (after stop signal).
+     * Already-closed children resolve immediately with the real exit code.
+     * @param {{ timeoutMs?: number }} [opts]
+     * @returns {Promise<{ code: number | null, stdout: string, stderr: string }>}
+     */
+    waitForExit({ timeoutMs = 30_000 } = {}) {
+      if (settled && result) {
+        return Promise.resolve(result);
+      }
+      return new Promise((resolve) => {
+        pendingResolve = resolve;
+        deadlineTimer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+          settle(null);
+        }, timeoutMs);
+      });
+    },
+  };
+}
+
 describe('G0c auto-common exact public surface', () => {
   it('exports exact gates, scenarios, schema helpers; import zero side effects', async () => {
     const common = await importHelper(COMMON_PATH);
@@ -298,6 +359,11 @@ describe('G0c auto child-process topology + six scenarios', () => {
       controllerChild.stderr.on('data', (c) => {
         controllerStderr += c;
       });
+      // Install close capture immediately — before any await — so fast exits are not lost.
+      const controllerExitCapture = installChildExitCapture(controllerChild, () => ({
+        stdout: controllerStdout,
+        stderr: controllerStderr,
+      }));
 
       // Wait for ready marker written by controller child.
       const readyPath = join(runDir, '.g0c-auto-ready.json');
@@ -406,27 +472,9 @@ describe('G0c auto child-process topology + six scenarios', () => {
         assert.notEqual(endpointB.pid, endpointA2.pid);
       }
 
-      // Signal controller to shut down.
+      // Signal controller to shut down. Deadline starts only after stop is written.
       await writeFile(join(runDir, '.g0c-auto-stop'), 'stop\n', { mode: 0o600 });
-      const controllerExit = await new Promise((resolveClose) => {
-        let settled = false;
-        const t = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          try {
-            controllerChild.kill('SIGKILL');
-          } catch {
-            // ignore
-          }
-          resolveClose({ code: null, stdout: controllerStdout, stderr: controllerStderr });
-        }, 30_000);
-        controllerChild.on('close', (code) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(t);
-          resolveClose({ code, stdout: controllerStdout, stderr: controllerStderr });
-        });
-      });
+      const controllerExit = await controllerExitCapture.waitForExit({ timeoutMs: 30_000 });
 
       const controllerLine = parseOneSanitizedLine(
         {
@@ -561,6 +609,62 @@ describe('G0c auto child-process topology + six scenarios', () => {
       assert.notEqual(row.endpointAPid, row.endpointBPid);
       assert.equal(row.result.status, 'PASS');
     }
+  });
+
+  it('fast-exit child: close before later await returns real code (no lost event / no fake timeout)', async () => {
+    // Deterministic regression for the historical race: writeFile/await then on('close').
+    // Child exits immediately; we deliberately wait until close has already fired, then await.
+    const child = spawn(
+      process.execPath,
+      [
+        '-e',
+        "process.stdout.write(JSON.stringify({ role: 'probe', status: 'PASS' }) + '\\n'); process.exit(0);",
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: childEnv({}),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
+    child.stderr.on('data', (c) => {
+      stderr += c;
+    });
+    const capture = installChildExitCapture(child, () => ({ stdout, stderr }));
+
+    // Ensure the process has fully closed before waitForExit (close-before-await).
+    await new Promise((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve(undefined);
+        return;
+      }
+      child.once('exit', () => resolve(undefined));
+      child.once('error', reject);
+    });
+    // Yield so the 'close' listener can run before we call waitForExit.
+    await new Promise((r) => setImmediate(r));
+    assert.notEqual(child.exitCode, null, 'precondition: child must already have exited');
+
+    const started = Date.now();
+    const exit = await capture.waitForExit({ timeoutMs: 30_000 });
+    const elapsedMs = Date.now() - started;
+
+    assert.equal(exit.code, 0, `must return real exit code, not timeout null; stderr=${exit.stderr}`);
+    assert.ok(
+      elapsedMs < 5_000,
+      `must not wait full 30s deadline after close already fired; elapsedMs=${elapsedMs}`,
+    );
+    assert.equal(exit.stderr, '', `stderr must be exact empty; got ${JSON.stringify(exit.stderr)}`);
+    const line = parseOneSanitizedLine(
+      { code: exit.code, stdout: exit.stdout, stderr: exit.stderr, pid: child.pid },
+      'fast-exit-close-before-await',
+    );
+    assert.equal(line.role, 'probe');
+    assert.equal(line.status, 'PASS');
   });
 });
 
