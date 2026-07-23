@@ -8,7 +8,10 @@ import { randomUUID as defaultRandomUUID } from 'node:crypto';
 import { chmod, readdir as defaultReaddir } from 'node:fs/promises';
 import { types as utilTypes } from 'node:util';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
-import { assertStrictRelativeTarget } from './restore-path.js';
+import {
+  assertSnapshotRootRelativeFilePath,
+  assertStrictRelativeTarget,
+} from './restore-path.js';
 import {
   MAX_RESTORE_TASK_JSON_BYTES,
   RESTORE_CHUNK_SIZE,
@@ -41,6 +44,12 @@ const FILE_ENTRY_KEYS = Object.freeze([
   'chunkCount',
 ]);
 const CREATE_KEYS = Object.freeze(['deviceId', 'snapshotId', 'relativeTarget']);
+const RESOLVE_CHUNK_KEYS = Object.freeze([
+  'deviceId',
+  'taskId',
+  'fileIndex',
+  'chunkIndex',
+]);
 const NONTERMINAL = new Set(['pending', 'active']);
 
 /**
@@ -1474,6 +1483,91 @@ export function createRestoreTaskStore(options) {
     });
   }
 
+  /**
+   * C5.5: resolve active-task chunk coordinates into a frozen immutable descriptor.
+   * Known non-active → conflict (not progress's task-invalid). No snapshot I/O.
+   * @param {unknown} input
+   */
+  async function resolveChunkRead(input) {
+    const fields = readOwnStringDataFields(input, RESOLVE_CHUNK_KEYS.length);
+    if (!fields || !hasExactKeys(fields, RESOLVE_CHUNK_KEYS)) failTaskInvalid();
+
+    const deviceId = assertDeviceId(fields.deviceId);
+    const taskId = assertUuid(fields.taskId);
+    const fileIndex = fields.fileIndex;
+    const chunkIndex = fields.chunkIndex;
+    if (typeof fileIndex !== 'number' || !Number.isSafeInteger(fileIndex) || fileIndex < 0) {
+      failTaskInvalid();
+    }
+    if (typeof chunkIndex !== 'number' || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0) {
+      failTaskInvalid();
+    }
+
+    return withDeviceLock(deviceId, async () => {
+      const bundle = await loadTaskBundle(deviceId, taskId, { missing: 'not-found' });
+      const { task, status, files } = bundle;
+
+      // Known same-device non-active is unique conflict (≠ progress's task-invalid).
+      if (status.status !== 'active') failConflict();
+
+      if (fileIndex >= files.length) failTaskInvalid();
+      const file = files[fileIndex];
+      if (file.chunkCount === 0) failTaskInvalid();
+      if (chunkIndex >= file.chunkCount) failTaskInvalid();
+
+      // chunkOffset = chunkIndex * 8 MiB must remain a safe integer.
+      const chunkOffset = chunkIndex * RESTORE_CHUNK_SIZE;
+      if (!Number.isSafeInteger(chunkOffset) || chunkOffset < 0) failTaskInvalid();
+      if (chunkOffset >= file.size) failTaskInvalid();
+
+      const remaining = file.size - chunkOffset;
+      if (!Number.isSafeInteger(remaining) || remaining <= 0) failTaskInvalid();
+      const chunkSize =
+        remaining >= RESTORE_CHUNK_SIZE ? RESTORE_CHUNK_SIZE : remaining;
+      if (
+        typeof chunkSize !== 'number'
+        || !Number.isSafeInteger(chunkSize)
+        || chunkSize < 1
+        || chunkSize > RESTORE_CHUNK_SIZE
+      ) {
+        failTaskInvalid();
+      }
+      if (chunkIndex < file.chunkCount - 1 && chunkSize !== RESTORE_CHUNK_SIZE) {
+        failTaskInvalid();
+      }
+
+      // Depth validation on persisted path — fail-closed before any snapshot I/O.
+      let safePath;
+      try {
+        safePath = assertSnapshotRootRelativeFilePath(file.path);
+      } catch (error) {
+        if (
+          error instanceof LinkeError
+          && error.code === ERROR_CODES.RESTORE_PATH_INVALID
+        ) {
+          throw error;
+        }
+        // Corrupt / unexpected failure from path layer — no leak.
+        failStateInvalid();
+      }
+
+      return deepFreeze({
+        deviceId,
+        taskId,
+        snapshotId: task.snapshotId,
+        manifestDigest: task.manifestDigest,
+        fileIndex,
+        chunkIndex,
+        path: safePath,
+        fileSize: file.size,
+        fileSha256: file.sha256,
+        chunkCount: file.chunkCount,
+        chunkOffset,
+        chunkSize,
+      });
+    });
+  }
+
   return Object.freeze({
     create,
     get,
@@ -1486,5 +1580,6 @@ export function createRestoreTaskStore(options) {
     readTaskImmutable,
     buildTaskFilesPayload,
     hasActiveRestore,
+    resolveChunkRead,
   });
 }

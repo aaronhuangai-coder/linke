@@ -63,7 +63,24 @@ const STORE_SURFACE = Object.freeze([
   'hasActiveRestore',
   'listAdmissionNonterminal',
   'readTaskImmutable',
+  'resolveChunkRead',
   'updateProgress',
+]);
+
+/** Exact frozen keys returned by resolveChunkRead (C5.5 design). */
+const CHUNK_READ_DESCRIPTOR_KEYS = Object.freeze([
+  'chunkCount',
+  'chunkIndex',
+  'chunkOffset',
+  'chunkSize',
+  'deviceId',
+  'fileIndex',
+  'fileSha256',
+  'fileSize',
+  'manifestDigest',
+  'path',
+  'snapshotId',
+  'taskId',
 ]);
 
 const TASK_DISK_KEYS = Object.freeze([
@@ -1849,6 +1866,709 @@ describe('hostile inputs and concurrency', () => {
           statusCode: 400,
         });
       }
+    }
+  });
+});
+
+// ── 15. resolveChunkRead (C5.5) ────────────────────────────────────
+
+/**
+ * Independent chunk geometry oracle (not production algorithm).
+ * @param {number} size
+ * @param {number} chunkIndex
+ */
+function expectedChunkGeometry(size, chunkIndex) {
+  const chunkCount = size === 0 ? 0 : Math.ceil(size / CHUNK);
+  const chunkOffset = chunkIndex * CHUNK;
+  const remaining = size - chunkOffset;
+  const chunkSize = remaining >= CHUNK ? CHUNK : remaining;
+  return { chunkCount, chunkOffset, chunkSize };
+}
+
+/**
+ * @param {object} desc
+ * @param {{
+ *   deviceId: string,
+ *   taskId: string,
+ *   snapshotId: string,
+ *   manifestDigest: string,
+ *   fileIndex: number,
+ *   chunkIndex: number,
+ *   path: string,
+ *   fileSize: number,
+ *   fileSha256: string,
+ *   chunkCount: number,
+ *   chunkOffset: number,
+ *   chunkSize: number,
+ * }} expected
+ */
+function assertExactChunkDescriptor(desc, expected) {
+  assert.equal(typeof desc, 'object');
+  assert.ok(desc !== null && !Array.isArray(desc));
+  assert.deepEqual(Object.keys(desc).sort(), [...CHUNK_READ_DESCRIPTOR_KEYS].sort());
+  assert.equal(desc.deviceId, expected.deviceId);
+  assert.equal(desc.taskId, expected.taskId);
+  assert.equal(desc.snapshotId, expected.snapshotId);
+  assert.equal(desc.manifestDigest, expected.manifestDigest);
+  assert.equal(desc.fileIndex, expected.fileIndex);
+  assert.equal(desc.chunkIndex, expected.chunkIndex);
+  assert.equal(desc.path, expected.path);
+  assert.equal(desc.fileSize, expected.fileSize);
+  assert.equal(desc.fileSha256, expected.fileSha256);
+  assert.equal(desc.chunkCount, expected.chunkCount);
+  assert.equal(desc.chunkOffset, expected.chunkOffset);
+  assert.equal(desc.chunkSize, expected.chunkSize);
+  assert.ok(Number.isSafeInteger(desc.chunkOffset));
+  assert.ok(Number.isSafeInteger(desc.chunkSize));
+  assert.ok(desc.chunkSize >= 1);
+  assert.ok(desc.chunkSize <= CHUNK);
+  if (desc.chunkIndex < desc.chunkCount - 1) {
+    assert.equal(desc.chunkSize, CHUNK, 'non-final chunk must be exact 8 MiB');
+  } else {
+    assert.ok(desc.chunkSize >= 1 && desc.chunkSize <= CHUNK, 'final chunk 1..8 MiB');
+  }
+  assertDeepFrozen(desc);
+  assertNoSensitiveLeak(desc, 'chunk descriptor');
+}
+
+function filesJsonAbs(deviceId, taskId) {
+  return join(taskDirAbs(deviceId, taskId), 'FILES.json');
+}
+
+describe('resolveChunkRead — surface + active exact descriptor', () => {
+  it('public surface includes resolveChunkRead; active returns frozen exact descriptor', async () => {
+    const readable = makeReadable({
+      manifestDigest: DIGEST_A,
+      files: [
+        { path: 'empty.bin', size: 0, sha256: ZERO_SHA },
+        { path: 'docs/big.bin', size: CHUNK + 100, sha256: SHA_C },
+        { path: 'exact8.bin', size: CHUNK, sha256: SHA_B },
+      ],
+    });
+    const store = openStore({
+      dataDir: /** @type {string} */ (dataDir),
+      storageReader: makeStorageReader(readable),
+    });
+    assert.ok(Object.isFrozen(store));
+    assert.deepEqual(Object.keys(store).sort(), [...STORE_SURFACE]);
+    assert.equal(typeof store.resolveChunkRead, 'function');
+
+    const created = await store.create({
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+      relativeTarget: TARGET_A,
+    });
+    const taskId = created.taskSummary.taskId;
+    await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+
+    // fileIndex 1 = CHUNK+100 → two chunks: full 8MiB + tail 100
+    const d0 = await store.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId,
+      fileIndex: 1,
+      chunkIndex: 0,
+    });
+    const geo0 = expectedChunkGeometry(CHUNK + 100, 0);
+    assertExactChunkDescriptor(d0, {
+      deviceId: DEVICE_A,
+      taskId,
+      snapshotId: SNAPSHOT_A,
+      manifestDigest: DIGEST_A,
+      fileIndex: 1,
+      chunkIndex: 0,
+      path: 'docs/big.bin',
+      fileSize: CHUNK + 100,
+      fileSha256: SHA_C,
+      chunkCount: geo0.chunkCount,
+      chunkOffset: geo0.chunkOffset,
+      chunkSize: geo0.chunkSize,
+    });
+    assert.equal(d0.chunkOffset, 0);
+    assert.equal(d0.chunkSize, CHUNK);
+    assert.equal(d0.chunkCount, 2);
+
+    const d1 = await store.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId,
+      fileIndex: 1,
+      chunkIndex: 1,
+    });
+    const geo1 = expectedChunkGeometry(CHUNK + 100, 1);
+    assertExactChunkDescriptor(d1, {
+      deviceId: DEVICE_A,
+      taskId,
+      snapshotId: SNAPSHOT_A,
+      manifestDigest: DIGEST_A,
+      fileIndex: 1,
+      chunkIndex: 1,
+      path: 'docs/big.bin',
+      fileSize: CHUNK + 100,
+      fileSha256: SHA_C,
+      chunkCount: geo1.chunkCount,
+      chunkOffset: geo1.chunkOffset,
+      chunkSize: geo1.chunkSize,
+    });
+    assert.equal(d1.chunkOffset, CHUNK);
+    assert.equal(d1.chunkSize, 100);
+
+    // exact 8 MiB single chunk
+    const dExact = await store.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId,
+      fileIndex: 2,
+      chunkIndex: 0,
+    });
+    assert.equal(dExact.chunkSize, CHUNK);
+    assert.equal(dExact.chunkOffset, 0);
+    assert.equal(dExact.chunkCount, 1);
+    assert.equal(dExact.path, 'exact8.bin');
+    assertDeepFrozen(dExact);
+
+    // Mutating returned descriptor must throw (deep freeze)
+    assert.throws(() => {
+      /** @type {Record<string, unknown>} */ (d0).path = 'mutated';
+    }, TypeError);
+  });
+});
+
+describe('resolveChunkRead — non-active status → unique RESTORE_TASK_CONFLICT', () => {
+  /**
+   * progress on non-active is RESTORE_TASK_INVALID; resolveChunkRead must NOT reuse that —
+   * known same-device non-active → unique RESTORE_TASK_CONFLICT (409).
+   */
+  it('pending/completed/rolled-back/cancelled/cleaned are conflict only (never task-invalid)', async () => {
+    const readable = makeReadable({
+      files: [{ path: 'b.bin', size: CHUNK + 1, sha256: SHA_B }],
+    });
+
+    async function createClaimed() {
+      const store = openStore({
+        dataDir: /** @type {string} */ (dataDir),
+        storageReader: makeStorageReader(readable),
+      });
+      const created = await store.create({
+        deviceId: DEVICE_A,
+        snapshotId: SNAPSHOT_A,
+        relativeTarget: TARGET_A,
+      });
+      const taskId = created.taskSummary.taskId;
+      return { store, taskId };
+    }
+
+    // ── pending ──
+    {
+      const { store, taskId } = await createClaimed();
+      // still pending (no claim)
+      await expectCode(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        ERROR_CODES.RESTORE_TASK_CONFLICT,
+        { statusCode: 409, retryable: false },
+      );
+      // Contrast: progress uses task-invalid on pending
+      await expectCode(
+        () =>
+          store.updateProgress({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+            receivedBytes: 1,
+          }),
+        ERROR_CODES.RESTORE_TASK_INVALID,
+        { statusCode: 400 },
+      );
+      // free admission
+      await store.cancel({ deviceId: DEVICE_A, taskId });
+    }
+
+    // ── cancelled (terminal cancel without cleanup) ──
+    {
+      const { store, taskId } = await createClaimed();
+      await store.cancel({ deviceId: DEVICE_A, taskId });
+      const st = await readJson(statusJsonAbs(DEVICE_A, taskId));
+      assert.equal(st.status, 'cancelled');
+      await expectCode(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        ERROR_CODES.RESTORE_TASK_CONFLICT,
+        { statusCode: 409 },
+      );
+      // ensure not TASK_INVALID
+      await assert.rejects(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        (err) => {
+          assert.ok(err instanceof LinkeError);
+          assert.notEqual(err.code, ERROR_CODES.RESTORE_TASK_INVALID);
+          assert.equal(err.code, ERROR_CODES.RESTORE_TASK_CONFLICT);
+          return true;
+        },
+      );
+    }
+
+    // ── completed ──
+    {
+      const { store, taskId } = await createClaimed();
+      await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+      const task = await store.readTaskImmutable(DEVICE_A, taskId);
+      await store.acceptReceipt({
+        deviceId: DEVICE_A,
+        taskId,
+        receipt: completedReceipt({
+          taskId,
+          deviceId: DEVICE_A,
+          snapshotId: task.snapshotId,
+          manifestDigest: task.manifestDigest,
+          relativeTarget: task.relativeTarget,
+          totalBytes: task.totalBytes,
+          fileCount: task.fileCount,
+        }),
+      });
+      assert.equal((await readJson(statusJsonAbs(DEVICE_A, taskId))).status, 'completed');
+      await expectCode(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        ERROR_CODES.RESTORE_TASK_CONFLICT,
+        { statusCode: 409 },
+      );
+      assert.notEqual(ERROR_CODES.RESTORE_TASK_CONFLICT, ERROR_CODES.RESTORE_TASK_INVALID);
+
+      // ── cleaned ──
+      await store.acceptCleanup({
+        deviceId: DEVICE_A,
+        taskId,
+        cleanupReceipt: cleanupCompleted({ taskId, deviceId: DEVICE_A }),
+      });
+      assert.equal((await readJson(statusJsonAbs(DEVICE_A, taskId))).status, 'cleaned');
+      await expectCode(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        ERROR_CODES.RESTORE_TASK_CONFLICT,
+        { statusCode: 409 },
+      );
+    }
+
+    // ── rolled-back ──
+    {
+      const { store, taskId } = await createClaimed();
+      await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+      const task = await store.readTaskImmutable(DEVICE_A, taskId);
+      await store.acceptReceipt({
+        deviceId: DEVICE_A,
+        taskId,
+        receipt: rolledBackReceipt({
+          taskId,
+          deviceId: DEVICE_A,
+          snapshotId: task.snapshotId,
+          manifestDigest: task.manifestDigest,
+          relativeTarget: task.relativeTarget,
+          totalBytes: task.totalBytes,
+          fileCount: task.fileCount,
+        }),
+      });
+      assert.equal((await readJson(statusJsonAbs(DEVICE_A, taskId))).status, 'rolled-back');
+      await expectCode(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        ERROR_CODES.RESTORE_TASK_CONFLICT,
+        { statusCode: 409 },
+      );
+      await assert.rejects(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        (err) => {
+          assert.equal(err.code, ERROR_CODES.RESTORE_TASK_CONFLICT);
+          assert.notEqual(err.code, ERROR_CODES.RESTORE_TASK_INVALID);
+          return true;
+        },
+      );
+    }
+  });
+});
+
+describe('resolveChunkRead — not-found / cross-device / bad input / bounds / safe-int', () => {
+  it('cross-device and unknown task → restore-task-not-found', async () => {
+    const store = openStore({
+      dataDir: /** @type {string} */ (dataDir),
+      storageReader: makeStorageReader(
+        makeReadable({ files: [{ path: 'b.bin', size: CHUNK + 1, sha256: SHA_B }] }),
+      ),
+    });
+    const created = await store.create({
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+      relativeTarget: TARGET_A,
+    });
+    const taskId = created.taskSummary.taskId;
+    await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+
+    await expectCode(
+      () =>
+        store.resolveChunkRead({
+          deviceId: DEVICE_B,
+          taskId,
+          fileIndex: 0,
+          chunkIndex: 0,
+        }),
+      ERROR_CODES.RESTORE_TASK_NOT_FOUND,
+      { statusCode: 404, leakTokens: [DEVICE_A, taskId] },
+    );
+    await expectCode(
+      () =>
+        store.resolveChunkRead({
+          deviceId: DEVICE_A,
+          taskId: '550e8400-e29b-41d4-a716-446655449999',
+          fileIndex: 0,
+          chunkIndex: 0,
+        }),
+      ERROR_CODES.RESTORE_TASK_NOT_FOUND,
+      { statusCode: 404 },
+    );
+  });
+
+  it('rejects bad inputs, empty-file chunks, out-of-range, and huge safe-int last-chunk boundary', async () => {
+    // Normal geometry file for most cases
+    const store = openStore({
+      dataDir: /** @type {string} */ (dataDir),
+      storageReader: makeStorageReader(
+        makeReadable({
+          files: [
+            { path: 'empty.bin', size: 0, sha256: ZERO_SHA },
+            { path: 'mid.bin', size: CHUNK * 2 + 3, sha256: SHA_B },
+          ],
+        }),
+      ),
+    });
+    const created = await store.create({
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+      relativeTarget: TARGET_A,
+    });
+    const taskId = created.taskSummary.taskId;
+    await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+
+    const badInputs = [
+      null,
+      undefined,
+      [],
+      'x',
+      { deviceId: DEVICE_A, taskId, fileIndex: 1 }, // missing chunkIndex
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: 1,
+        chunkIndex: 0,
+        extra: true,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: 1.5,
+        chunkIndex: 0,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: -1,
+        chunkIndex: 0,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: 1,
+        chunkIndex: -1,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: 1,
+        chunkIndex: 1.25,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: Number.NaN,
+        chunkIndex: 0,
+      },
+      {
+        deviceId: DEVICE_A,
+        taskId,
+        fileIndex: 1,
+        chunkIndex: Number.POSITIVE_INFINITY,
+      },
+    ];
+    for (const bad of badInputs) {
+      await expectCode(
+        () => store.resolveChunkRead(/** @type {any} */ (bad)),
+        ERROR_CODES.RESTORE_TASK_INVALID,
+        { statusCode: 400 },
+      );
+    }
+
+    // empty file: chunkCount 0 → any chunkIndex invalid
+    await expectCode(
+      () =>
+        store.resolveChunkRead({
+          deviceId: DEVICE_A,
+          taskId,
+          fileIndex: 0,
+          chunkIndex: 0,
+        }),
+      ERROR_CODES.RESTORE_TASK_INVALID,
+      { statusCode: 400 },
+    );
+
+    // fileIndex out of range
+    await expectCode(
+      () =>
+        store.resolveChunkRead({
+          deviceId: DEVICE_A,
+          taskId,
+          fileIndex: 99,
+          chunkIndex: 0,
+        }),
+      ERROR_CODES.RESTORE_TASK_INVALID,
+      { statusCode: 400 },
+    );
+
+    // chunkIndex out of range (mid.bin: size=2*CHUNK+3 → 3 chunks, valid 0..2)
+    await expectCode(
+      () =>
+        store.resolveChunkRead({
+          deviceId: DEVICE_A,
+          taskId,
+          fileIndex: 1,
+          chunkIndex: 3,
+        }),
+      ERROR_CODES.RESTORE_TASK_INVALID,
+      { statusCode: 400 },
+    );
+
+    // Valid mid still works (control)
+    const ok = await store.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId,
+      fileIndex: 1,
+      chunkIndex: 2,
+    });
+    assert.equal(ok.chunkOffset, CHUNK * 2);
+    assert.equal(ok.chunkSize, 3);
+
+    // Positive safe-int boundary: MAX_SAFE_INTEGER fileSize last chunkOffset is still safe.
+    // lastChunkIndex * CHUNK = 2^53 - 2^23, which remains a safe integer; any legal
+    // chunkOffset for a legal safe fileSize must stay within Number.isSafeInteger.
+    const hugeSize = Number.MAX_SAFE_INTEGER; // 9007199254740991
+    const hugeGeoLast = expectedChunkGeometry(hugeSize, 0);
+    const hugeChunkCount = hugeGeoLast.chunkCount; // ceil(size/CHUNK) = 1073741824
+    const lastChunkIndex = hugeChunkCount - 1; // 1073741823
+    const lastGeo = expectedChunkGeometry(hugeSize, lastChunkIndex);
+    assert.equal(
+      Number.isSafeInteger(lastGeo.chunkOffset),
+      true,
+      'oracle: last offset must be safe integer',
+    );
+    assert.ok(lastGeo.chunkOffset < hugeSize, 'oracle: last offset < fileSize');
+    assert.equal(lastGeo.chunkSize, CHUNK - 1, 'oracle: last chunk remaining is CHUNK-1');
+    assert.equal(lastGeo.chunkOffset, lastChunkIndex * CHUNK);
+    assert.equal(lastGeo.chunkCount, hugeChunkCount);
+
+    // Free previous admission (cancel active)
+    await store.cancel({ deviceId: DEVICE_A, taskId });
+    await store.acceptCleanup({
+      deviceId: DEVICE_A,
+      taskId,
+      cleanupReceipt: cleanupCancelled({ taskId, deviceId: DEVICE_A }),
+    });
+
+    const hugeStore = openStore({
+      dataDir: /** @type {string} */ (dataDir),
+      storageReader: makeStorageReader(
+        makeReadable({
+          manifestDigest: DIGEST_B,
+          files: [{ path: 'huge.bin', size: hugeSize, sha256: SHA_C }],
+        }),
+      ),
+    });
+    const hugeCreated = await hugeStore.create({
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_B,
+      relativeTarget: TARGET_B,
+    });
+    const hugeTaskId = hugeCreated.taskSummary.taskId;
+    await hugeStore.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+
+    // Last legal chunk must succeed with exact boundary geometry
+    const last = await hugeStore.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId: hugeTaskId,
+      fileIndex: 0,
+      chunkIndex: lastChunkIndex,
+    });
+    assertExactChunkDescriptor(last, {
+      deviceId: DEVICE_A,
+      taskId: hugeTaskId,
+      snapshotId: SNAPSHOT_B,
+      manifestDigest: DIGEST_B,
+      fileIndex: 0,
+      chunkIndex: lastChunkIndex,
+      path: 'huge.bin',
+      fileSize: hugeSize,
+      fileSha256: SHA_C,
+      chunkCount: lastGeo.chunkCount,
+      chunkOffset: lastGeo.chunkOffset,
+      chunkSize: lastGeo.chunkSize,
+    });
+    assert.equal(last.chunkOffset, lastChunkIndex * CHUNK);
+    assert.equal(last.chunkSize, CHUNK - 1);
+    assert.ok(Number.isSafeInteger(last.chunkOffset));
+    assert.ok(last.chunkOffset < last.fileSize);
+
+    // chunkIndex === chunkCount remains out of range
+    await expectCode(
+      () =>
+        hugeStore.resolveChunkRead({
+          deviceId: DEVICE_A,
+          taskId: hugeTaskId,
+          fileIndex: 0,
+          chunkIndex: hugeChunkCount,
+        }),
+      ERROR_CODES.RESTORE_TASK_INVALID,
+      { statusCode: 400 },
+    );
+
+    // First chunk of huge file: offset 0 is safe — must succeed if size metadata accepted
+    const first = await hugeStore.resolveChunkRead({
+      deviceId: DEVICE_A,
+      taskId: hugeTaskId,
+      fileIndex: 0,
+      chunkIndex: 0,
+    });
+    assert.equal(first.chunkOffset, 0);
+    assert.equal(first.chunkSize, CHUNK);
+    assert.ok(Number.isSafeInteger(first.chunkOffset));
+  });
+});
+
+describe('resolveChunkRead — FILES path depth validation without I/O', () => {
+  it('tampered FILES path fails closed without reading snapshot bytes / escape canary', async () => {
+    const store = openStore({
+      dataDir: /** @type {string} */ (dataDir),
+      storageReader: makeStorageReader(
+        makeReadable({
+          files: [{ path: 'docs/safe.txt', size: 12, sha256: SHA_C }],
+        }),
+      ),
+    });
+    const created = await store.create({
+      deviceId: DEVICE_A,
+      snapshotId: SNAPSHOT_A,
+      relativeTarget: TARGET_A,
+    });
+    const taskId = created.taskSummary.taskId;
+    await store.claimNext({ deviceId: DEVICE_A, hasActiveUpload: false });
+
+    // Canary outside task/snapshot trees: if path escape were followed, content would change.
+    const canaryAbs = join(/** @type {string} */ (dataDir), 'escape-canary.bin');
+    await writeFile(canaryAbs, 'CANARY-UNTOUCHED', 'utf8');
+
+    // Also plant a fake "snapshot file" that must not be opened via escaped path.
+    const { deviceRel } = safeDevicePath(/** @type {string} */ (dataDir), DEVICE_A);
+    const snapFiles = join(
+      /** @type {string} */ (dataDir),
+      deviceRel,
+      'snapshots',
+      SNAPSHOT_A,
+      'files',
+    );
+    await mkdir(snapFiles, { recursive: true });
+    const snapFileAbs = join(snapFiles, 'docs', 'safe.txt');
+    await mkdir(join(snapFiles, 'docs'), { recursive: true });
+    await writeFile(snapFileAbs, 'SNAP-CONTENT', 'utf8');
+    const snapMtimeBefore = (await lstat(snapFileAbs)).mtimeMs;
+
+    const hostilePaths = ['../escape-canary.bin', '/etc/passwd', 'docs/../../escape-canary.bin', 'a//b.txt', 'docs/'];
+    for (const hostile of hostilePaths) {
+      const filesAbs = filesJsonAbs(DEVICE_A, taskId);
+      const original = await readJson(filesAbs);
+      await writeJson(filesAbs, {
+        ...original,
+        files: [
+          {
+            fileIndex: 0,
+            path: hostile,
+            size: 12,
+            sha256: SHA_C,
+            chunkCount: 1,
+          },
+        ],
+      });
+
+      await assert.rejects(
+        () =>
+          store.resolveChunkRead({
+            deviceId: DEVICE_A,
+            taskId,
+            fileIndex: 0,
+            chunkIndex: 0,
+          }),
+        (err) => {
+          assert.ok(err instanceof LinkeError, 'must be LinkeError');
+          // Path depth fail-closed: path-invalid (validator) or state-invalid (disk corruption map).
+          // Never success; never integrity-failed (that is reader I/O layer); never task-not-found.
+          assert.ok(
+            err.code === ERROR_CODES.RESTORE_PATH_INVALID
+              || err.code === ERROR_CODES.RESTORE_STATE_INVALID
+              || err.code === ERROR_CODES.RESTORE_TASK_INVALID,
+            `unexpected code ${err.code}`,
+          );
+          assert.notEqual(err.code, ERROR_CODES.RESTORE_TASK_NOT_FOUND);
+          assertLinkeCode(err, err.code, {
+            leakTokens: [hostile, canaryAbs, snapFileAbs, '/etc/passwd', 'escape-canary'],
+          });
+          return true;
+        },
+      );
+
+      // No canary mutation / no snapshot open side-effect
+      assert.equal(await readFile(canaryAbs, 'utf8'), 'CANARY-UNTOUCHED');
+      assert.equal(await readFile(snapFileAbs, 'utf8'), 'SNAP-CONTENT');
+      assert.equal((await lstat(snapFileAbs)).mtimeMs, snapMtimeBefore);
     }
   });
 });
