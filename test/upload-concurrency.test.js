@@ -385,7 +385,8 @@ describe('backpressure + IP limiter bounds (no infinite queue)', () => {
     const manA = makeManifest(filesA, { deviceId: DEVICE_A, snapshotId: SNAP_A });
     const rootA = await writeSnapshotRoot(filesA);
 
-    // Hold the single global transfer slot so create gets upload-backpressure.
+    // C5: create does not take runTransfer; putChunk does. Hold the sole global
+    // transfer slot, then assert create still succeeds and putChunk backpressures.
     let releaseHold = () => {};
     const holdPromise = new Promise((resolve) => {
       releaseHold = resolve;
@@ -401,67 +402,100 @@ describe('backpressure + IP limiter bounds (no infinite queue)', () => {
     }
     assert.equal(holdEntered, true);
 
-    let sawBackpressure = false;
-    let attempts = 0;
-    const maxAttempts = 5;
-    for (let i = 0; i < maxAttempts; i += 1) {
-      attempts += 1;
-      try {
-        await requestPinnedBinary({
-          agentUrl,
-          path: '/agent/upload/sessions',
-          tlsFingerprint: identity.fingerprint,
-          token: deviceA.token,
-          deviceId: DEVICE_A,
-          body: {
-            manifest: manA.manifest,
-            manifestDigest: manA.manifestDigest,
-          },
-          bodyMode: 'json',
-          timeoutMs: 10_000,
-        });
-      } catch (error) {
-        assert.ok(error instanceof LinkeError);
-        if (error.code === ERROR_CODES.UPLOAD_BACKPRESSURE) {
-          sawBackpressure = true;
-          assert.equal(error.statusCode, 429);
-          assert.equal(error.retryable, true);
-          assert.notEqual(error.code, ERROR_CODES.DEVICE_RATE_LIMITED);
-          // Bounded Retry-After when present
-          if (typeof error.retryAfterSec === 'number') {
-            assert.ok(error.retryAfterSec >= 1 && error.retryAfterSec <= 30);
+    try {
+      // create remains free under full live-binary semaphore (C5 contract).
+      const created = await requestPinnedBinary({
+        agentUrl,
+        path: '/agent/upload/sessions',
+        tlsFingerprint: identity.fingerprint,
+        token: deviceA.token,
+        deviceId: DEVICE_A,
+        body: {
+          manifest: manA.manifest,
+          manifestDigest: manA.manifestDigest,
+        },
+        bodyMode: 'json',
+        timeoutMs: 10_000,
+      });
+      assert.equal(typeof created.uploadId, 'string');
+      assert.ok(created.uploadId.length > 0);
+
+      const chunkBody = manA.entries[0].content;
+      assert.ok(Buffer.isBuffer(chunkBody) && chunkBody.length > 0);
+      const chunkSha256 = createHash('sha256').update(chunkBody).digest('hex');
+      const uploadId = /** @type {string} */ (created.uploadId);
+
+      let sawBackpressure = false;
+      let attempts = 0;
+      const maxAttempts = 5;
+      for (let i = 0; i < maxAttempts; i += 1) {
+        attempts += 1;
+        try {
+          await requestPinnedBinary({
+            agentUrl,
+            path: `/agent/upload/sessions/${encodeURIComponent(uploadId)}/chunks`,
+            tlsFingerprint: identity.fingerprint,
+            method: 'POST',
+            token: deviceA.token,
+            deviceId: DEVICE_A,
+            body: chunkBody,
+            bodyMode: 'buffer',
+            contentType: 'application/octet-stream',
+            extraHeaders: {
+              'x-linke-upload-id': uploadId,
+              'x-linke-snapshot-id': SNAP_A,
+              'x-linke-manifest-digest': manA.manifestDigest,
+              'x-linke-file-index': '0',
+              'x-linke-chunk-index': '0',
+              'x-linke-chunk-offset': '0',
+              'x-linke-chunk-size': String(chunkBody.length),
+              'x-linke-chunk-sha256': chunkSha256,
+            },
+            timeoutMs: 10_000,
+          });
+        } catch (error) {
+          assert.ok(error instanceof LinkeError);
+          if (error.code === ERROR_CODES.UPLOAD_BACKPRESSURE) {
+            sawBackpressure = true;
+            assert.equal(error.statusCode, 429);
+            assert.equal(error.retryable, true);
+            assert.notEqual(error.code, ERROR_CODES.DEVICE_RATE_LIMITED);
+            // Bounded Retry-After when present
+            if (typeof error.retryAfterSec === 'number') {
+              assert.ok(error.retryAfterSec >= 1 && error.retryAfterSec <= 30);
+            }
+            break;
           }
-          break;
         }
       }
+      assert.equal(sawBackpressure, true, 'must observe upload-backpressure on putChunk under full semaphore');
+      assert.ok(attempts <= maxAttempts, 'no infinite queue');
+
+      // Client upload path must also terminate with backpressure or resume-exhausted (bounded).
+      await assert.rejects(
+        uploadSnapshotResumable({
+          agentUrl,
+          tlsFingerprint: identity.fingerprint,
+          deviceId: DEVICE_A,
+          credentialStore: storeA,
+          snapshotRoot: rootA,
+          manifest: manA.manifest,
+          manifestDigest: manA.manifestDigest,
+          maxResumeAttempts: 2,
+          delayMs: async () => {},
+        }),
+        (e) => e instanceof LinkeError
+          && (
+            e.code === ERROR_CODES.UPLOAD_BACKPRESSURE
+            || e.code === ERROR_CODES.UPLOAD_RESUME_EXHAUSTED
+          )
+          && (e.code !== ERROR_CODES.UPLOAD_RESUME_EXHAUSTED || e.statusCode === null),
+      );
+    } finally {
+      releaseHold();
+      await held;
+      await rm(rootA, { recursive: true, force: true });
     }
-    assert.equal(sawBackpressure, true, 'must observe upload-backpressure under full semaphore');
-    assert.ok(attempts <= maxAttempts, 'no infinite queue');
-
-    // Client upload path must also terminate with backpressure or resume-exhausted (bounded).
-    await assert.rejects(
-      uploadSnapshotResumable({
-        agentUrl,
-        tlsFingerprint: identity.fingerprint,
-        deviceId: DEVICE_A,
-        credentialStore: storeA,
-        snapshotRoot: rootA,
-        manifest: manA.manifest,
-        manifestDigest: manA.manifestDigest,
-        maxResumeAttempts: 2,
-        delayMs: async () => {},
-      }),
-      (e) => e instanceof LinkeError
-        && (
-          e.code === ERROR_CODES.UPLOAD_BACKPRESSURE
-          || e.code === ERROR_CODES.UPLOAD_RESUME_EXHAUSTED
-        )
-        && (e.code !== ERROR_CODES.UPLOAD_RESUME_EXHAUSTED || e.statusCode === null),
-    );
-
-    releaseHold();
-    await held;
-    await rm(rootA, { recursive: true, force: true });
   });
 
   it('upload IP limiter 429 is device-rate-limited (≠ backpressure) and client does not infinite-queue', async () => {

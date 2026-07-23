@@ -1,15 +1,17 @@
 /**
- * C5 RED — Upload locks / backpressure (no public routes).
- * Targets public API of src/upload-locks.js (not yet implemented).
- * Authority: design §4.3 / §10 + plan C5.
+ * C5 — Shared live-binary transfer locks / backpressure (no public routes).
+ * Authority: design §12 / plan C5 + 附录 D.
  *
- * Frozen public surface (minimal, C6-reusable):
+ * Frozen public surface (keep export/API; do not invent new method names):
  *   createUploadLocks({ maxGlobalTransfers = 4 }) → frozen object:
  *     - maxGlobalTransfers: number (readonly snapshot of effective cap)
- *     - runTransfer(task): Promise  — global active-transfer semaphore
+ *     - runTransfer(task): Promise  — global LIVE BINARY semaphore only
+ *         * G0b putChunk + G0c restore getChunk (chunk GET) only
  *         * acquires slot immediately; full → unique LinkeError
  *           upload-backpressure (429, retryable=true); NEVER queues
  *         * task sync throw / async reject / success all release in finally
+ *         * claim / create / status / finalize / abort / progress / receipt
+ *           MUST NOT use runTransfer (service-level; proven in service tests)
  *     - runDevice(deviceId, task): Promise — per-device keyed FIFO queue
  *     - runSession(deviceId, uploadId, task): Promise — per-session FIFO
  *     - runSnapshot(deviceId, snapshotId, task): Promise — per-snapshot FIFO
@@ -20,9 +22,8 @@
  *
  * Config: effective maxGlobalTransfers only 1..16 (default 4). Outside that
  * range OR non-integer / non-number / hostile → constructor fail-closed with
- * fixed sanitized Error (NOT runtime upload-backpressure 429). No silent clamp.
- *
- * Expected RED: ERR_MODULE_NOT_FOUND for upload-locks.js until GREEN.
+ * fixed sanitized Error('invalid maxGlobalTransfers') (NOT runtime 429).
+ * 0 and 17 must throw; no silent clamp.
  */
 
 import { describe, it } from 'node:test';

@@ -1,55 +1,32 @@
 /**
- * C5 RED — Upload service orchestration (pure domain; no HTTP routes).
- * Targets public API of src/upload-service.js (not yet implemented).
- * Authority: design §4.3 / §4.4 / §8.1–§8.3 / §9.5 / §10 + plan C5.
+ * C5 — Upload service orchestration (pure domain; no HTTP routes).
+ * Authority: design §12 / plan C5 P1-1 + P1-2 + 附录 D.
  *
  * Frozen public surface:
- *   createUploadService({ dataDir, store, locks, ingest, commit, now })
+ *   createUploadService({
+ *     dataDir, store, locks, ingest, commit, now, // now required
+ *     findActiveRestore?, // optional; default async () => false (C5 compat)
+ *   })
  *     → frozen object with EXACTLY five methods:
  *       create / status / putChunk / finalize / abort
  *
- *   create({ authenticatedDeviceId, manifest, claimedManifestDigest })
- *     - project via C1 (or store's projection path); totalBytes from projector
- *     - commit.preflightCapacity(dataDir, totalBytes) MUST succeed BEFORE
- *       store.createSession; capacity failure never creates a session
- *     - second active on same device: pass-through upload-session-conflict +
- *       safe locator (uploadId/status/snapshotId/manifestDigest only)
- *     - after abort, create is allowed
- *     - device/digest mismatch → unique upload-manifest-invalid
+ * Live-binary slot ownership (P1-1 — shared with restore getChunk):
+ *   create   → locks.runDevice only; NO runTransfer
+ *   status   → no runTransfer
+ *   putChunk → runTransfer then runSession (ONLY upload binary slot holder)
+ *   finalize → runSession then runSnapshot; NO runTransfer
+ *   abort    → runSession only; NO runTransfer
+ * When all 4 global slots held: create/status/finalize/abort must NOT fail with
+ * upload-backpressure; putChunk MUST.
  *
- *   status({ authenticatedDeviceId, uploadId })
- *     - only those two fields to store.getSession
- *     - cross-device / missing → upload-session-not-found (pass-through)
- *     - safe summary only (no path/host/sourcePath/token)
- *
- *   putChunk({ authenticatedDeviceId, request, stream })
- *     - pure inputs C6 can pass: authenticated device + request/rawHeaders + stream
- *     - order: parseChunkHeaders → store.getSession → ingestChunkBody (bounded)
- *       → SHA-256 → commitChunk with tempPublish writing ONLY
- *       repo/devices/<safe slug>/upload-sessions/<uploadId>/.staging/files/<fileIndex>/chunk-<chunkIndex>.part
- *       via safe-data-files atomic / no-follow; store boundary advances only after publish
- *     - never compose disk paths from client path fields
- *     - wrapped in global runTransfer + per-session runSession
- *     - global full → immediate upload-backpressure; no stream read / no lookup
- *
- *   finalize({ authenticatedDeviceId, uploadId })
- *     - global + per-session + per-snapshot then
- *       commit.verifyAndCommitSession({ store, dataDir, deviceId, uploadId, now })
- *     - global full → no lookup / no commit
- *
- *   abort({ authenticatedDeviceId, uploadId })
- *     - per-session only (NO global transfer slot — minimal frozen semantics)
- *     - store.abortSession; aborted idempotent; committed → upload-commit-conflict
- *
- * Global transfer occupancy (frozen minimal):
- *   create / putChunk / finalize → take global transfer slot
- *   status / abort → do NOT take global transfer slot
+ * Bidirectional admission (P1-2):
+ *   create enters ONE locks.runDevice(deviceId, cb); inside that same callback
+ *   await findActiveRestore; if true → LinkeError(UPLOAD_SESSION_CONFLICT);
+ *   else existing active-upload check + createSession in same critical section.
  *
  * Production exposure (C5): default createAgentListener still 404 on all
  * /agent/upload/* typical paths (behavior test; no source string scan).
- *
- * Expected RED: ERR_MODULE_NOT_FOUND for upload-service.js until GREEN.
- * Listener 404 may already be green and must not mask overall RED.
+ * No public restore routes in C5.
  */
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
@@ -317,15 +294,89 @@ function makeService(overrides = {}) {
   const ingest = overrides.ingest ?? realIngest();
   const commit = overrides.commit ?? realCommit(overrides.statfs);
   const now = overrides.now ?? (() => clock.now());
-  const service = createUploadService({
+  /** @type {Record<string, unknown>} */
+  const opts = {
     dataDir: overrides.dataDir ?? dataDir,
     store,
     locks,
     ingest,
     commit,
     now,
-  });
+  };
+  // Optional C5 P1-2 probe: only forward when caller supplies it (default lives in production).
+  if (Object.prototype.hasOwnProperty.call(overrides, 'findActiveRestore')) {
+    opts.findActiveRestore = overrides.findActiveRestore;
+  }
+  const service = createUploadService(/** @type {any} */ (opts));
   return { service, store, locks, ingest, commit };
+}
+
+/**
+ * Wrap real locks with transfer/device call counters for P1-1 / P1-2 spies.
+ * @param {ReturnType<typeof createUploadLocks>} base
+ */
+function spyLocks(base) {
+  /** @type {{ transfer: number, device: number, session: number, snapshot: number }} */
+  const counts = { transfer: 0, device: 0, session: 0, snapshot: 0 };
+  /** @type {string[]} */
+  const order = [];
+  const locks = {
+    maxGlobalTransfers: base.maxGlobalTransfers,
+    runTransfer: async (fn) => {
+      counts.transfer += 1;
+      order.push('transfer');
+      return base.runTransfer(fn);
+    },
+    runDevice: async (id, fn) => {
+      counts.device += 1;
+      order.push('device');
+      return base.runDevice(id, async () => {
+        order.push('device-critical');
+        return fn();
+      });
+    },
+    runSession: async (d, u, fn) => {
+      counts.session += 1;
+      order.push('session');
+      return base.runSession(d, u, fn);
+    },
+    runSnapshot: async (d, s, fn) => {
+      counts.snapshot += 1;
+      order.push('snapshot');
+      return base.runSnapshot(d, s, fn);
+    },
+  };
+  return { locks, counts, order };
+}
+
+/**
+ * Hold N global transfer slots open until release() is called.
+ * @param {ReturnType<typeof createUploadLocks>} locks
+ * @param {number} n
+ */
+async function holdGlobalSlots(locks, n) {
+  /** @type {ReturnType<typeof deferred>[]} */
+  const gates = [];
+  /** @type {Promise<unknown>[]} */
+  const held = [];
+  let started = 0;
+  for (let i = 0; i < n; i += 1) {
+    const g = deferred();
+    gates.push(g);
+    held.push(
+      locks.runTransfer(async () => {
+        started += 1;
+        await g.promise;
+      }),
+    );
+  }
+  await waitUntil(() => started === n, `${n} global slots held`);
+  return {
+    release: async () => {
+      for (const g of gates) g.resolve();
+      await Promise.all(held);
+    },
+  };
 }
 
 function sessionDirAbs(deviceId, uploadId) {
@@ -716,16 +767,11 @@ describe('B create', () => {
     );
   });
 
-  it('create takes global transfer slot; full → backpressure without createSession', async () => {
+  it('P1-1: create does NOT take global transfer slot; works while slots full', async () => {
+    // C5: create is runDevice-only (admission + createSession). Global full must
+    // never yield upload-backpressure on create.
     const locks = createUploadLocks({ maxGlobalTransfers: 1 });
-    const gate = deferred();
-    const started = deferred();
-    // Occupy the single global slot via locks directly.
-    const held = locks.runTransfer(async () => {
-      started.resolve();
-      await gate.promise;
-    });
-    await started.promise;
+    const held = await holdGlobalSlots(locks, 1);
 
     let createCalls = 0;
     let preflightCalls = 0;
@@ -743,26 +789,17 @@ describe('B create', () => {
     };
     const { service } = makeService({ store, locks, commit });
     const proj = makeProjection();
-    await assert.rejects(
-      () =>
-        service.create({
-          authenticatedDeviceId: DEVICE_A,
-          manifest: proj.manifest,
-          claimedManifestDigest: proj.manifestDigest,
-        }),
-      (err) => {
-        assertLinkeCode(err, ERROR_CODES.UPLOAD_BACKPRESSURE, {
-          statusCode: 429,
-          retryable: true,
-        });
-        return true;
-      },
-    );
-    assert.equal(createCalls, 0);
-    assert.equal(preflightCalls, 0, 'must not preflight when global full');
+    const summary = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    assert.equal(summary.status, 'initialized');
+    assert.equal(createCalls, 1);
+    assert.equal(preflightCalls, 1);
+    assert.equal(typeof summary.uploadId, 'string');
 
-    gate.resolve();
-    await held;
+    await held.release();
   });
 });
 
@@ -1247,7 +1284,7 @@ describe('D putChunk', () => {
 // ── E. finalize ─────────────────────────────────────────────────────
 
 describe('E finalize', () => {
-  it('wraps verifyAndCommitSession with global + session + snapshot locks', async () => {
+  it('P1-1: wraps verifyAndCommitSession with session + snapshot only (no runTransfer)', async () => {
     /** @type {string[]} */
     const order = [];
     const baseLocks = createUploadLocks({ maxGlobalTransfers: 4 });
@@ -1308,14 +1345,14 @@ describe('E finalize', () => {
     assert.ok(fin.missingSummary);
     assert.equal(fin.missingSummary.complete, true);
 
-    // Must include transfer + session + snapshot before commit (device optional).
-    assert.ok(order.includes('transfer'));
+    // P1-1: finalize is runSession → runSnapshot only; never runTransfer.
+    assert.equal(order.includes('transfer'), false, 'finalize must not call runTransfer');
     assert.ok(order.includes('session'));
     assert.ok(order.includes('snapshot'));
     assert.ok(order.includes('commit'));
-    assert.ok(order.indexOf('transfer') < order.indexOf('commit'));
     assert.ok(order.indexOf('session') < order.indexOf('commit'));
     assert.ok(order.indexOf('snapshot') < order.indexOf('commit'));
+    assert.ok(order.indexOf('session') < order.indexOf('snapshot'));
 
     assert.ok(commitArgs);
     assert.equal(commitArgs.dataDir, dataDir);
@@ -1356,59 +1393,45 @@ describe('E finalize', () => {
     );
   });
 
-  it('global full → backpressure without lookup or commit', async () => {
+  it('P1-1: finalize works while global slots full (never upload-backpressure)', async () => {
     const locks = createUploadLocks({ maxGlobalTransfers: 1 });
-    const { service: boot } = makeService({ locks: createUploadLocks({ maxGlobalTransfers: 4 }) });
-    const proj = makeProjection();
-    const created = await boot.create({
+    // Bootstrap session while free (create must not need transfer slot under P1-1).
+    const store = makeStore();
+    /** @type {string | undefined} */
+    let uploadId;
+    const commit = {
+      preflightCapacity: async () => {},
+      verifyAndCommitSession: async () => {
+        assert.equal(typeof uploadId, 'string');
+        await store.markVerifying({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+        });
+        await store.markCommitted({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+        });
+        return undefined;
+      },
+    };
+    const { service } = makeService({ store, locks, commit });
+    const proj = makeProjection({ files: [{ path: 'z.txt', size: 0 }] });
+    const created = await service.create({
       authenticatedDeviceId: DEVICE_A,
       manifest: proj.manifest,
       claimedManifestDigest: proj.manifestDigest,
     });
+    uploadId = created.uploadId;
 
-    let commitCalls = 0;
-    let getCalls = 0;
-    const store = makeStore();
-    const realGet = store.getSession.bind(store);
-    store.getSession = async (input) => {
-      getCalls += 1;
-      return realGet(input);
-    };
-    const commit = {
-      preflightCapacity: async () => {},
-      verifyAndCommitSession: async () => {
-        commitCalls += 1;
-      },
-    };
-
-    const gate = deferred();
-    const started = deferred();
-    const held = locks.runTransfer(async () => {
-      started.resolve();
-      await gate.promise;
+    const held = await holdGlobalSlots(locks, 1);
+    const fin = await service.finalize({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
     });
-    await started.promise;
+    assert.equal(fin.status, 'committed');
+    assert.notEqual(fin?.code, ERROR_CODES.UPLOAD_BACKPRESSURE);
 
-    const { service } = makeService({ store, locks, commit });
-    await assert.rejects(
-      () =>
-        service.finalize({
-          authenticatedDeviceId: DEVICE_A,
-          uploadId: created.uploadId,
-        }),
-      (err) => {
-        assertLinkeCode(err, ERROR_CODES.UPLOAD_BACKPRESSURE, {
-          statusCode: 429,
-          retryable: true,
-        });
-        return true;
-      },
-    );
-    assert.equal(commitCalls, 0);
-    assert.equal(getCalls, 0);
-
-    gate.resolve();
-    await held;
+    await held.release();
   });
 
   it('errors are desensitized LinkeError (message===code); no path leak', async () => {
@@ -2223,5 +2246,296 @@ describe('H AbortSignal propagation and cooperative cancel (RED)', () => {
       uploadId: created.uploadId,
     });
     assert.equal(after.status, 'initialized', 'aborted signal must not mark session aborted on disk');
+  });
+});
+
+// ── I. P1-1 live-binary slot ownership (create/finalize free; putChunk only) ─
+
+describe('I P1-1 live-binary slot ownership', () => {
+  it('create/finalize runTransfer call count is 0; putChunk uses runTransfer', async () => {
+    const base = createUploadLocks({ maxGlobalTransfers: 4 });
+    const { locks, counts } = spyLocks(base);
+    const store = makeStore();
+    /** @type {string | undefined} */
+    let uploadId;
+    const commit = {
+      preflightCapacity: async () => {},
+      verifyAndCommitSession: async () => {
+        assert.equal(typeof uploadId, 'string');
+        await store.markVerifying({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+        });
+        await store.markCommitted({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId,
+        });
+      },
+    };
+    const { service } = makeService({ store, locks, commit });
+    const content = Buffer.from('p1-1-bytes');
+    const proj = makeProjection({
+      files: [{ path: 'p.txt', size: content.length, content }],
+    });
+
+    counts.transfer = 0;
+    const created = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    uploadId = created.uploadId;
+    assert.equal(counts.transfer, 0, 'create must not call runTransfer');
+    assert.ok(counts.device >= 1, 'create must enter runDevice');
+
+    counts.transfer = 0;
+    const { request, stream } = makeChunkRequest({
+      uploadId: created.uploadId,
+      manifestDigest: proj.manifestDigest,
+      content,
+    });
+    await service.putChunk({
+      authenticatedDeviceId: DEVICE_A,
+      request,
+      stream,
+    });
+    assert.ok(counts.transfer >= 1, 'putChunk must call runTransfer');
+
+    counts.transfer = 0;
+    await service.finalize({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(counts.transfer, 0, 'finalize must not call runTransfer');
+  });
+
+  it('all 4 slots held: create/status/finalize/abort never upload-backpressure; putChunk does', async () => {
+    const locks = createUploadLocks({ maxGlobalTransfers: 4 });
+    const store = makeStore();
+    /** @type {string | undefined} */
+    let finalizeUploadId;
+    const commit = {
+      preflightCapacity: async () => {},
+      verifyAndCommitSession: async () => {
+        assert.equal(typeof finalizeUploadId, 'string');
+        await store.markVerifying({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: finalizeUploadId,
+        });
+        await store.markCommitted({
+          authenticatedDeviceId: DEVICE_A,
+          uploadId: finalizeUploadId,
+        });
+      },
+    };
+    const { service } = makeService({ store, locks, commit });
+    const content = Buffer.from('slot-full');
+    const proj = makeProjection({
+      files: [{ path: 's.bin', size: 0 }],
+    });
+
+    // Bootstrap session for status/finalize/abort/putChunk while free.
+    const created = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    finalizeUploadId = created.uploadId;
+
+    const held = await holdGlobalSlots(locks, 4);
+
+    // create on a different device must still succeed (no transfer slot).
+    const projB = makeProjection({
+      deviceId: DEVICE_B,
+      snapshotId: SNAPSHOT_B,
+      files: [{ path: 'b.txt', size: 0 }],
+    });
+    const createdB = await service.create({
+      authenticatedDeviceId: DEVICE_B,
+      manifest: projB.manifest,
+      claimedManifestDigest: projB.manifestDigest,
+    });
+    assert.equal(createdB.status, 'initialized');
+
+    const st = await service.status({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(st.uploadId, created.uploadId);
+
+    const fin = await service.finalize({
+      authenticatedDeviceId: DEVICE_A,
+      uploadId: created.uploadId,
+    });
+    assert.equal(fin.status, 'committed');
+
+    // Abort the DEVICE_B session while full — must not be backpressure.
+    const ab = await service.abort({
+      authenticatedDeviceId: DEVICE_B,
+      uploadId: createdB.uploadId,
+    });
+    assert.equal(ab.status, 'aborted');
+
+    // putChunk on a fresh session: create first while full, then putChunk fails.
+    const projC = makeProjection({
+      deviceId: DEVICE_A,
+      snapshotId: '550e8400-e29b-41d4-a716-446655440099',
+      files: [{ path: 'c.bin', size: content.length, content }],
+    });
+    // DEVICE_A just finalized — free for new create.
+    const createdC = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: projC.manifest,
+      claimedManifestDigest: projC.manifestDigest,
+    });
+    const chunk = makeChunkRequest({
+      uploadId: createdC.uploadId,
+      manifestDigest: projC.manifestDigest,
+      content,
+      snapshotId: '550e8400-e29b-41d4-a716-446655440099',
+    });
+    await assert.rejects(
+      () =>
+        service.putChunk({
+          authenticatedDeviceId: DEVICE_A,
+          request: chunk.request,
+          stream: chunk.stream,
+        }),
+      (err) => {
+        assertLinkeCode(err, ERROR_CODES.UPLOAD_BACKPRESSURE, {
+          statusCode: 429,
+          retryable: true,
+          leakTokens: [dataDir, createdC.uploadId, TOKEN],
+        });
+        return true;
+      },
+    );
+
+    await held.release();
+  });
+});
+
+// ── J. P1-2 findActiveRestore + same runDevice critical section ─────
+
+describe('J P1-2 findActiveRestore bidirectional admission', () => {
+  it('findActiveRestore true → unique upload-session-conflict; no createSession', async () => {
+    let findCalls = 0;
+    let createCalls = 0;
+    const store = makeStore();
+    const realCreate = store.createSession.bind(store);
+    store.createSession = async (input) => {
+      createCalls += 1;
+      return realCreate(input);
+    };
+    const { service } = makeService({
+      store,
+      findActiveRestore: async (deviceId) => {
+        findCalls += 1;
+        assert.equal(deviceId, DEVICE_A);
+        return true;
+      },
+    });
+    const proj = makeProjection();
+    await assert.rejects(
+      () =>
+        service.create({
+          authenticatedDeviceId: DEVICE_A,
+          manifest: proj.manifest,
+          claimedManifestDigest: proj.manifestDigest,
+        }),
+      (err) => {
+        assertLinkeCode(err, ERROR_CODES.UPLOAD_SESSION_CONFLICT, {
+          statusCode: 409,
+          retryable: false,
+          leakTokens: [dataDir, TOKEN, 'restore', '/Users'],
+        });
+        return true;
+      },
+    );
+    assert.ok(findCalls >= 1, 'must probe findActiveRestore');
+    assert.equal(createCalls, 0, 'must not createSession when restore active');
+  });
+
+  it('omitted findActiveRestore defaults to false; create keeps old success path', async () => {
+    // No findActiveRestore in options — production default async () => false.
+    const { service } = makeService();
+    const proj = makeProjection({ files: [{ path: 'ok.txt', size: 0 }] });
+    const summary = await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+    assert.equal(summary.status, 'initialized');
+    assert.equal(typeof summary.uploadId, 'string');
+  });
+
+  it('order/critical-section canary: probe + createSession inside one runDevice; runTransfer=0', async () => {
+    /** @type {string[]} */
+    const order = [];
+    const base = createUploadLocks({ maxGlobalTransfers: 4 });
+    const locks = {
+      maxGlobalTransfers: base.maxGlobalTransfers,
+      runTransfer: async (fn) => {
+        order.push('transfer');
+        return base.runTransfer(fn);
+      },
+      runDevice: async (id, fn) => {
+        order.push('device-enter');
+        try {
+          return await base.runDevice(id, async () => {
+            order.push('device-in');
+            return fn();
+          });
+        } finally {
+          order.push('device-exit');
+        }
+      },
+      runSession: (d, u, fn) => base.runSession(d, u, fn),
+      runSnapshot: (d, s, fn) => base.runSnapshot(d, s, fn),
+    };
+
+    const store = makeStore();
+    const realCreate = store.createSession.bind(store);
+    store.createSession = async (input) => {
+      order.push('createSession');
+      return realCreate(input);
+    };
+
+    let findCalls = 0;
+    const { service } = makeService({
+      store,
+      locks,
+      findActiveRestore: async (deviceId) => {
+        findCalls += 1;
+        order.push('findActiveRestore');
+        assert.equal(deviceId, DEVICE_A);
+        // Still inside critical section if device-in already pushed and device-exit not yet.
+        assert.ok(order.includes('device-in'));
+        assert.equal(order.includes('device-exit'), false);
+        return false;
+      },
+    });
+
+    const proj = makeProjection({ files: [{ path: 'crit.txt', size: 0 }] });
+    await service.create({
+      authenticatedDeviceId: DEVICE_A,
+      manifest: proj.manifest,
+      claimedManifestDigest: proj.manifestDigest,
+    });
+
+    assert.equal(findCalls, 1);
+    assert.equal(order.includes('transfer'), false, 'create must not call runTransfer');
+    assert.ok(order.includes('findActiveRestore'));
+    assert.ok(order.includes('createSession'));
+
+    const enterIdx = order.indexOf('device-enter');
+    const inIdx = order.indexOf('device-in');
+    const findIdx = order.indexOf('findActiveRestore');
+    const createIdx = order.indexOf('createSession');
+    const exitIdx = order.indexOf('device-exit');
+    assert.ok(enterIdx >= 0 && inIdx > enterIdx);
+    assert.ok(findIdx > inIdx, 'findActiveRestore must run inside runDevice callback');
+    assert.ok(createIdx > findIdx, 'createSession after probe in same critical section');
+    assert.ok(exitIdx > createIdx, 'device-exit only after createSession');
   });
 });

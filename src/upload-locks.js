@@ -1,6 +1,7 @@
 /**
- * G0b C5 — Process-local upload locks / backpressure.
+ * G0b/G0c C5 — Process-local live-binary transfer locks / backpressure.
  * Global active-transfer semaphore (fail-fast, never queues) + keyed FIFO runners.
+ * runTransfer is live binary only: G0b putChunk + G0c restore getChunk.
  * Pure domain; no HTTP routes.
  */
 
@@ -105,7 +106,9 @@ function createKeyedRunner(normalizeKey, serializeKey) {
 }
 
 /**
- * Process-local upload lock factory.
+ * Process-local live-binary transfer lock factory.
+ * Global semaphore (runTransfer) covers only live binary: putChunk + restore getChunk.
+ * Default maxGlobalTransfers=4; valid range 1..16; fail-fast (no queue) when full.
  *
  * @param {{ maxGlobalTransfers?: number }} [options]
  * @returns {Readonly<{
@@ -155,8 +158,10 @@ export function createUploadLocks(options) {
   let activeTransfers = 0;
 
   /**
-   * Global active-transfer semaphore. Acquires immediately or rejects with
-   * upload-backpressure (never queues). Releases in finally for all outcomes.
+   * Global live-binary transfer semaphore (G0b putChunk + G0c getChunk only).
+   * Acquires immediately or rejects with upload-backpressure (never queues).
+   * Releases in finally for all outcomes (success / sync throw / async reject).
+   * Non-binary paths (create/status/finalize/abort/claim/progress/receipt) must not call this.
    *
    * @param {() => unknown} task
    * @returns {Promise<unknown>}

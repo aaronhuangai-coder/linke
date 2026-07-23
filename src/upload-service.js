@@ -1,6 +1,7 @@
 /**
- * G0b C5 — Upload service orchestration (pure domain; no HTTP routes).
+ * G0b/G0c C5 — Upload service orchestration (pure domain; no HTTP routes).
  * Wires C1–C4 store/ingest/commit under C5 locks. Production routes remain C6.
+ * Live-binary slot: putChunk only (runTransfer). create/finalize use keyed locks only.
  */
 
 import { createHash } from 'node:crypto';
@@ -308,6 +309,7 @@ function attachMissingSummary(summary) {
  *     verifyAndCommitSession: Function,
  *   },
  *   now: () => Date,
+ *   findActiveRestore?: (deviceId: string) => boolean | Promise<boolean>,
  * }} options
  * @returns {Readonly<{
  *   create: Function,
@@ -330,6 +332,8 @@ export function createUploadService(options) {
   let commit;
   /** @type {() => Date} */
   let now;
+  /** @type {(deviceId: string) => boolean | Promise<boolean>} */
+  let findActiveRestore;
 
   try {
     if (!isNonNullObject(options)) failInvalidOptions();
@@ -387,14 +391,29 @@ export function createUploadService(options) {
     const nowRaw = /** @type {{ now?: unknown }} */ (options).now;
     if (!isFunction(nowRaw)) failInvalidOptions();
     now = /** @type {() => Date} */ (nowRaw);
+
+    // Optional C5 P1-2 probe: default async () => false when omitted.
+    let hasFindActiveRestore = false;
+    try {
+      hasFindActiveRestore = Object.prototype.hasOwnProperty.call(options, 'findActiveRestore');
+    } catch {
+      failInvalidOptions();
+    }
+    if (!hasFindActiveRestore) {
+      findActiveRestore = async () => false;
+    } else {
+      const findRaw = /** @type {{ findActiveRestore?: unknown }} */ (options).findActiveRestore;
+      if (!isFunction(findRaw)) failInvalidOptions();
+      findActiveRestore = /** @type {(deviceId: string) => boolean | Promise<boolean>} */ (findRaw);
+    }
   } catch (error) {
     if (error instanceof Error && error.message === INVALID_SERVICE_OPTIONS) throw error;
     failInvalidOptions();
   }
 
   /**
-   * Create upload session: project → preflightCapacity → createSession.
-   * Occupies global transfer + per-device FIFO.
+   * Create upload session: findActiveRestore → project → preflightCapacity → createSession.
+   * Per-device FIFO only (no global transfer slot). Probe + mutation share one critical section.
    *
    * @param {{
    *   authenticatedDeviceId: string,
@@ -413,48 +432,57 @@ export function createUploadService(options) {
     }
 
     throwIfAborted(signal);
-    return locks.runTransfer(async () => {
+    return locks.runDevice(authenticatedDeviceId, async () => {
       throwIfAborted(signal);
-      return locks.runDevice(authenticatedDeviceId, async () => {
-        throwIfAborted(signal);
-        let projected;
-        try {
-          projected = projectCanonicalUploadManifest(input.manifest, {
-            authenticatedDeviceId,
-            claimedManifestDigest: input.claimedManifestDigest,
-          });
-        } catch (error) {
-          rethrowSafe(error);
-        }
 
-        const totalBytes = projected.manifest?.integrity?.totalBytes;
-        if (!Number.isSafeInteger(totalBytes) || totalBytes < 0) {
-          throw new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
-        }
+      // Bidirectional admission: probe before any createSession mutation.
+      let restoreActive;
+      try {
+        restoreActive = await findActiveRestore(authenticatedDeviceId);
+      } catch (error) {
+        rethrowSafe(error);
+      }
+      if (restoreActive === true) {
+        throw new LinkeError(ERROR_CODES.UPLOAD_SESSION_CONFLICT);
+      }
 
-        throwIfAborted(signal);
-        try {
-          await commit.preflightCapacity(dataDir, totalBytes);
-        } catch (error) {
-          rethrowSafe(error);
-        }
+      let projected;
+      try {
+        projected = projectCanonicalUploadManifest(input.manifest, {
+          authenticatedDeviceId,
+          claimedManifestDigest: input.claimedManifestDigest,
+        });
+      } catch (error) {
+        rethrowSafe(error);
+      }
 
-        // After project/preflight, before store.createSession mutation.
+      const totalBytes = projected.manifest?.integrity?.totalBytes;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes < 0) {
+        throw new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
+      }
+
+      throwIfAborted(signal);
+      try {
+        await commit.preflightCapacity(dataDir, totalBytes);
+      } catch (error) {
+        rethrowSafe(error);
+      }
+
+      // After project/preflight, before store.createSession mutation.
+      throwIfAborted(signal);
+      try {
+        const session = await store.createSession({
+          authenticatedDeviceId,
+          snapshotId: projected.manifest.snapshotId,
+          manifestDigest: projected.manifestDigest,
+          canonicalManifest: projected.manifest,
+          signal,
+        });
         throwIfAborted(signal);
-        try {
-          const session = await store.createSession({
-            authenticatedDeviceId,
-            snapshotId: projected.manifest.snapshotId,
-            manifestDigest: projected.manifestDigest,
-            canonicalManifest: projected.manifest,
-            signal,
-          });
-          throwIfAborted(signal);
-          return attachMissingSummary(session);
-        } catch (error) {
-          rethrowSafe(error);
-        }
-      });
+        return attachMissingSummary(session);
+      } catch (error) {
+        rethrowSafe(error);
+      }
     });
   }
 
@@ -645,7 +673,7 @@ export function createUploadService(options) {
   }
 
   /**
-   * Finalize: global → per-session → per-snapshot → verifyAndCommitSession.
+   * Finalize: per-session → per-snapshot → verifyAndCommitSession (no global transfer slot).
    *
    * @param {{ authenticatedDeviceId: string, uploadId: string, signal?: AbortSignal }} input
    */
@@ -663,66 +691,63 @@ export function createUploadService(options) {
     }
 
     throwIfAborted(signal);
-    return locks.runTransfer(async () => {
+    return locks.runSession(authenticatedDeviceId, uploadId, async () => {
       throwIfAborted(signal);
-      return locks.runSession(authenticatedDeviceId, uploadId, async () => {
+      let session;
+      try {
+        session = await store.getSession({
+          authenticatedDeviceId,
+          uploadId,
+          signal,
+        });
+      } catch (error) {
+        rethrowSafe(error);
+      }
+
+      throwIfAborted(signal);
+      const snapshotId = session?.snapshotId;
+      if (typeof snapshotId !== 'string' || snapshotId.length === 0) {
+        failIo();
+      }
+
+      throwIfAborted(signal);
+      return locks.runSnapshot(authenticatedDeviceId, snapshotId, async () => {
         throwIfAborted(signal);
-        let session;
         try {
-          session = await store.getSession({
-            authenticatedDeviceId,
+          await commit.verifyAndCommitSession({
+            store,
+            dataDir,
+            deviceId: authenticatedDeviceId,
             uploadId,
+            now,
             signal,
           });
+          throwIfAborted(signal);
+          // Re-read after commit; only status=committed is a success summary.
+          const after = await store.getSession({
+            authenticatedDeviceId,
+            uploadId,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          throwIfAborted(signal);
+          if (
+            !isNonNullObject(after)
+            || /** @type {{ status?: unknown }} */ (after).status !== 'committed'
+          ) {
+            failIo();
+          }
+          // Identity must still match the session we committed.
+          if (
+            /** @type {{ uploadId?: unknown }} */ (after).uploadId !== uploadId
+            || /** @type {{ deviceId?: unknown }} */ (after).deviceId !== authenticatedDeviceId
+            || /** @type {{ snapshotId?: unknown }} */ (after).snapshotId !== snapshotId
+          ) {
+            failIo();
+          }
+          return attachMissingSummary(after);
         } catch (error) {
           rethrowSafe(error);
         }
-
-        throwIfAborted(signal);
-        const snapshotId = session?.snapshotId;
-        if (typeof snapshotId !== 'string' || snapshotId.length === 0) {
-          failIo();
-        }
-
-        throwIfAborted(signal);
-        return locks.runSnapshot(authenticatedDeviceId, snapshotId, async () => {
-          throwIfAborted(signal);
-          try {
-            await commit.verifyAndCommitSession({
-              store,
-              dataDir,
-              deviceId: authenticatedDeviceId,
-              uploadId,
-              now,
-              signal,
-            });
-            throwIfAborted(signal);
-            // Re-read after commit; only status=committed is a success summary.
-            const after = await store.getSession({
-              authenticatedDeviceId,
-              uploadId,
-              ...(signal !== undefined ? { signal } : {}),
-            });
-            throwIfAborted(signal);
-            if (
-              !isNonNullObject(after)
-              || /** @type {{ status?: unknown }} */ (after).status !== 'committed'
-            ) {
-              failIo();
-            }
-            // Identity must still match the session we committed.
-            if (
-              /** @type {{ uploadId?: unknown }} */ (after).uploadId !== uploadId
-              || /** @type {{ deviceId?: unknown }} */ (after).deviceId !== authenticatedDeviceId
-              || /** @type {{ snapshotId?: unknown }} */ (after).snapshotId !== snapshotId
-            ) {
-              failIo();
-            }
-            return attachMissingSummary(after);
-          } catch (error) {
-            rethrowSafe(error);
-          }
-        });
       });
     });
   }
