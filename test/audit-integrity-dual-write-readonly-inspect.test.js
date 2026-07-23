@@ -746,9 +746,10 @@ describe('C1 read-only dual-write inspector', () => {
     });
   });
 
-  // V1.41: registry pin 62→74 (G0b +12 upload); membership SoT unchanged.
-  it('20. reasonCode membership SoT: non-null codes are registered; ERROR_CODES closed-set 74', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 74);
+  // V1.42: registry pin 74→88 (G0c +14 restore = 88); membership SoT unchanged.
+  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
+  it('20. reasonCode membership SoT: non-null codes are registered; ERROR_CODES closed-set 88', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 88);
     await withTempRoot('reason-member', async (root) => {
       await mkdir(join(root, 'audit'), { recursive: true });
       await writeFile(stateAbs(root), '{bad\n', { mode: 0o600 });
@@ -1217,9 +1218,10 @@ describe('C1 read-only dual-write inspector', () => {
     });
   });
 
-  // V1.41: registry 62→74 (G0b +12 upload); cold path still does not init.
-  it('40. cold uninitialized does not init; ERROR_CODES count remains 74', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 74);
+  // V1.42: registry 74→88 (G0c +14 restore = 88); cold path still does not init.
+  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
+  it('40. cold uninitialized does not init; ERROR_CODES count remains 88', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 88);
     await withTempRoot('no-init', async (root) => {
       const { inspectAuditIntegrityDualWriteReadOnly } = await loadCoordinator();
       await inspectAuditIntegrityDualWriteReadOnly(root);

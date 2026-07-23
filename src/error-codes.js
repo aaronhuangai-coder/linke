@@ -88,6 +88,23 @@ export const ERROR_CODES = Object.freeze({
   UPLOAD_IO_ERROR: 'upload-io-error',
   // Client-local only (HTTP N/A). Distinct from DATA_RESUME_EXHAUSTED.
   UPLOAD_RESUME_EXHAUSTED: 'upload-resume-exhausted',
+  // V1.42 G0c endpoint-pull restore (+14). String-only kebab values; no domain metadata.
+  // 74 + 14 restore = 88.
+  RESTORE_TASK_INVALID: 'restore-task-invalid',
+  RESTORE_TASK_NOT_FOUND: 'restore-task-not-found',
+  RESTORE_TASK_CONFLICT: 'restore-task-conflict',
+  RESTORE_STATE_INVALID: 'restore-state-invalid',
+  RESTORE_PATH_INVALID: 'restore-path-invalid',
+  RESTORE_INTEGRITY_FAILED: 'restore-integrity-failed',
+  RESTORE_CAPACITY_INSUFFICIENT: 'restore-capacity-insufficient',
+  RESTORE_BACKPRESSURE: 'restore-backpressure',
+  RESTORE_INTERRUPTED: 'restore-interrupted',
+  RESTORE_PUBLISH_CONFLICT: 'restore-publish-conflict',
+  RESTORE_ROLLBACK_REQUIRED: 'restore-rollback-required',
+  RESTORE_ROLLBACK_FAILED: 'restore-rollback-failed',
+  RESTORE_CLEANUP_FAILED: 'restore-cleanup-failed',
+  // Client-local only (HTTP N/A). Distinct from DATA_RESUME_EXHAUSTED / UPLOAD_RESUME_EXHAUSTED.
+  RESTORE_RESUME_EXHAUSTED: 'restore-resume-exhausted',
 });
 
 /**
@@ -110,6 +127,28 @@ export const UPLOAD_ERROR_HTTP_CONTRACT = Object.freeze({
   [ERROR_CODES.UPLOAD_RESUME_EXHAUSTED]: Object.freeze({ statusCode: null, retryable: false }),
 });
 
+/**
+ * Independent frozen HTTP/retryable contract for G0c restore error codes.
+ * Not part of ERROR_CODES (which remains string-only). statusCode null = client-local N/A.
+ * @type {Readonly<Record<string, Readonly<{ statusCode: number | null, retryable: boolean }>>>}
+ */
+export const RESTORE_ERROR_HTTP_CONTRACT = Object.freeze({
+  [ERROR_CODES.RESTORE_TASK_INVALID]: Object.freeze({ statusCode: 400, retryable: false }),
+  [ERROR_CODES.RESTORE_TASK_NOT_FOUND]: Object.freeze({ statusCode: 404, retryable: false }),
+  [ERROR_CODES.RESTORE_TASK_CONFLICT]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.RESTORE_STATE_INVALID]: Object.freeze({ statusCode: 500, retryable: false }),
+  [ERROR_CODES.RESTORE_PATH_INVALID]: Object.freeze({ statusCode: 400, retryable: false }),
+  [ERROR_CODES.RESTORE_INTEGRITY_FAILED]: Object.freeze({ statusCode: 422, retryable: false }),
+  [ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT]: Object.freeze({ statusCode: 507, retryable: false }),
+  [ERROR_CODES.RESTORE_BACKPRESSURE]: Object.freeze({ statusCode: 429, retryable: true }),
+  [ERROR_CODES.RESTORE_INTERRUPTED]: Object.freeze({ statusCode: null, retryable: true }),
+  [ERROR_CODES.RESTORE_PUBLISH_CONFLICT]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.RESTORE_ROLLBACK_REQUIRED]: Object.freeze({ statusCode: 409, retryable: false }),
+  [ERROR_CODES.RESTORE_ROLLBACK_FAILED]: Object.freeze({ statusCode: 500, retryable: false }),
+  [ERROR_CODES.RESTORE_CLEANUP_FAILED]: Object.freeze({ statusCode: 500, retryable: false }),
+  [ERROR_CODES.RESTORE_RESUME_EXHAUSTED]: Object.freeze({ statusCode: null, retryable: false }),
+});
+
 const REGISTERED_ERROR_CODES = new Set(Object.values(ERROR_CODES));
 
 /**
@@ -126,17 +165,20 @@ export function assertRegisteredErrorCode(code) {
  * Error whose public message is always a registered, sanitized code.
  * Unregistered code or message inputs are rejected without echoing raw text.
  *
- * Upload codes present in {@link UPLOAD_ERROR_HTTP_CONTRACT} use the contract as
- * base defaults for both omitted options and `{}` / partial options. Only **own**
- * properties with value **!== undefined** override individual fields (prototype
- * inheritance does not count; own `undefined` matches old destructuring defaults).
- * Non-upload codes keep 500/false base defaults. Explicit `null` is a real status
- * value; `retryable: null|false` becomes Boolean false.
+ * Codes present in {@link UPLOAD_ERROR_HTTP_CONTRACT} or
+ * {@link RESTORE_ERROR_HTTP_CONTRACT} use the matching contract as base defaults
+ * for both omitted options and `{}` / partial options. Only **own** properties
+ * with value **!== undefined** override individual fields (prototype inheritance
+ * does not count; own `undefined` matches old destructuring defaults).
+ * Codes without a contract keep 500/false base defaults. Explicit `null` is a real
+ * status value; `retryable: null|false` becomes Boolean false.
  *
- * Client-local `upload-resume-exhausted` is stronger: final statusCode is always
- * null. Explicit non-null statusCode fails closed with a fixed internal Error
+ * Client-local resume-exhausted codes (`upload-resume-exhausted`,
+ * `restore-resume-exhausted`) are stronger: final statusCode is always null.
+ * Explicit non-null statusCode fails closed with a fixed internal Error
  * (never a serializable LinkeError, never echoes inputs). Own `statusCode: undefined`
- * falls back to contract null.
+ * falls back to contract null. `restore-interrupted` uses contract null/true defaults
+ * but is not force-null-locked.
  *
  * @param {string} code - Must be a registered ERROR_CODES value.
  * @param {{ statusCode?: number | null, retryable?: boolean }} [options]
@@ -152,13 +194,15 @@ export class LinkeError extends Error {
     this.name = 'LinkeError';
     this.code = registeredCode;
 
-    const contract = UPLOAD_ERROR_HTTP_CONTRACT[registeredCode];
-    const isUpload = contract !== undefined;
+    const contract =
+      UPLOAD_ERROR_HTTP_CONTRACT[registeredCode]
+      ?? RESTORE_ERROR_HTTP_CONTRACT[registeredCode];
+    const hasContract = contract !== undefined;
 
     /** @type {number | null} */
-    const baseStatus = isUpload ? contract.statusCode : 500;
+    const baseStatus = hasContract ? contract.statusCode : 500;
     /** @type {boolean} */
-    const baseRetryable = isUpload ? Boolean(contract.retryable) : false;
+    const baseRetryable = hasContract ? Boolean(contract.retryable) : false;
 
     /** @type {number | null} */
     let statusCode = baseStatus;
@@ -184,8 +228,11 @@ export class LinkeError extends Error {
       }
     }
 
-    // Client-local only: must never become a serializable non-null HTTP status.
-    if (registeredCode === ERROR_CODES.UPLOAD_RESUME_EXHAUSTED) {
+    // Client-local resume-exhausted only: must never become a serializable non-null HTTP status.
+    if (
+      registeredCode === ERROR_CODES.UPLOAD_RESUME_EXHAUSTED
+      || registeredCode === ERROR_CODES.RESTORE_RESUME_EXHAUSTED
+    ) {
       if (statusCode !== null) {
         // Fixed internal error — not LinkeError; do not echo options/status values.
         throw new Error('invalid LinkeError options');

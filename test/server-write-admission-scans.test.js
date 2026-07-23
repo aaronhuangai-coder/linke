@@ -1,12 +1,12 @@
 /**
- * V1.39 C3 — write-admission scans / honesty / closed-set 74
- * (V1.40 mechanical registry pin: 61→62 unique +1 process-lock).
+ * V1.39 C3 — write-admission scans / honesty / closed-set 88
+ * (V1.42 mechanical registry pin: 74→88 = +14 restore; historical V1.40 61→62).
  *
  * Static honesty gates for pre-side-effect required admission:
  *   server central gate + required helper remap+throw
  *   agent required NAS start (not best-effort swallow helper)
  *   post-outcome best-effort honesty retained
- *   ERROR_CODES closed-set 74; current test tree stale 62 (V1.40) locks cleared
+ *   ERROR_CODES closed-set 88; current test tree stale 74 (V1.41) locks cleared
  *
  * Reads explicit allowlisted production paths + recursive test/ *.js for
  * current closed-set locks. No git. No secret dirs.
@@ -48,17 +48,18 @@ const ADMISSION_TYPE = 'api.write.admission.started';
 
 /**
  * Stale closed-set digit pair assembled at runtime so this file never holds a contiguous lock.
- * V1.41 semantics: stale = immediate prior release closed-set (V1.40 = 62);
- * current = V1.41 = 74. Historical V1.39=61 remains fact but is no longer the stale target.
+ * V1.42 semantics: stale = immediate prior release closed-set (V1.41 = 74);
+ * current = V1.42 = 88 = 74 + 14 restore. Historical V1.39=61 and V1.40=62
+ * remain facts but are no longer the stale target.
  */
 function staleClosedSetCount() {
-  // Prior closed-set (V1.40) = 62.
-  return Number(['6', '2'].join(''));
+  // Prior closed-set (V1.41 G0b) = 74.
+  return Number(['7', '4'].join(''));
 }
 
 function currentClosedSetCount() {
-  // Current closed-set (V1.41) = 74 = V1.40 62 + 12 G0b upload codes.
-  return Number(['7', '4'].join(''));
+  // Current closed-set (V1.42) = 88 = V1.41 74 + 14 G0c restore codes.
+  return Number(['8', '8'].join(''));
 }
 
 function escapeRegExp(s) {
@@ -1194,20 +1195,21 @@ describe('C3 S7: production scans reject comment/string/decoy (wired via helpers
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// S8 — closed-set 74 runtime + full test tree stale 62 (V1.40) locks = 0
-// (V1.41 G0b +12; admission business gates unchanged)
+// S8 — closed-set 88 runtime + full test tree stale 74 (V1.41) locks = 0
+// (V1.42 G0c +14 restore; admission business gates unchanged)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('C3 S8: ERROR_CODES length 74; full test/ tree stale 62 locks cleared', () => {
-  it('S8a. runtime Object.keys(ERROR_CODES).length === 74 (import real registry)', () => {
+describe('C3 S8: ERROR_CODES length 88; full test/ tree stale 74 locks cleared', () => {
+  it('S8a. runtime Object.keys(ERROR_CODES).length === 88 (import real registry)', () => {
     assert.equal(Object.keys(ERROR_CODES).length, currentClosedSetCount());
   });
 
-  it('S8a2. V1.41 helpers: stale prior=62, current=74; fixture 62 stale, 74 not, historical 61 text not current pin', () => {
+  it('S8a2. V1.42 helpers: stale prior=74, current=88; fixture 74 stale, 88 not; historical 61/62 text not pins', () => {
     const stale = staleClosedSetCount();
     const cur = currentClosedSetCount();
-    assert.equal(stale, Number(['6', '2'].join('')));
-    assert.equal(cur, Number(['7', '4'].join('')));
+    // stale=74 (V1.41), current=88 (74+14 restore). Historical V1.39=61 / V1.40=62.
+    assert.equal(stale, Number(['7', '4'].join('')));
+    assert.equal(cur, Number(['8', '8'].join('')));
 
     const staleFixture = `assert.equal(Object.keys(ERROR_CODES).length, ${stale});`;
     assert.ok(findStructuralClosedSetLengthLocks(staleFixture, stale).length >= 1);
@@ -1217,9 +1219,11 @@ describe('C3 S8: ERROR_CODES length 74; full test/ tree stale 62 locks cleared',
     assert.deepEqual(findStructuralClosedSetLengthLocks(currentFixture, stale), []);
     assert.deepEqual(findStaleClosedSetLocksInSource(currentFixture), []);
 
-    // Historical V1.39 fact text must not be treated as a current/stale pin of 62.
+    // Historical V1.39/V1.40 fact text must not be treated as a current/stale pin of 74.
     const historical61 = '// V1.39 closed-set was 61 before process-lock unique +1';
     assert.deepEqual(findStaleClosedSetLocksInSource(historical61), []);
+    const historical62 = '// V1.40 closed-set was 62 before G0b upload +12 → 74';
+    assert.deepEqual(findStaleClosedSetLocksInSource(historical62), []);
   });
 
   it('S8b. recursive test/**/*.js current stale closed-set locks are zero', async () => {
@@ -1237,12 +1241,12 @@ describe('C3 S8: ERROR_CODES length 74; full test/ tree stale 62 locks cleared',
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// S9 — AUDIT_DELIVERY_UNAVAILABLE unique V1.39 code; registry exact 74
-// (V1.40 closed-set pin only; delivery code uniqueness unchanged)
+// S9 — AUDIT_DELIVERY_UNAVAILABLE unique V1.39 code; registry exact 88
+// (V1.42 closed-set pin; delivery code uniqueness unchanged)
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('C3 S9: AUDIT_DELIVERY_UNAVAILABLE unique new code; registry exact 74', () => {
-  it('S9. real ERROR_CODES import; exact 74; unique delivery code; value precise', async () => {
+describe('C3 S9: AUDIT_DELIVERY_UNAVAILABLE unique new code; registry exact 88', () => {
+  it('S9. real ERROR_CODES import; exact 88; unique delivery code; value precise', async () => {
     assert.equal(Object.keys(ERROR_CODES).length, currentClosedSetCount());
     assert.equal(
       ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE,

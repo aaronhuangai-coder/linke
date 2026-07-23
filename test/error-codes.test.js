@@ -5,11 +5,14 @@ import {
   LinkeError,
   assertRegisteredErrorCode,
   UPLOAD_ERROR_HTTP_CONTRACT,
+  RESTORE_ERROR_HTTP_CONTRACT,
 } from '../src/error-codes.js';
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 74 = existing 62 (V1.40) + 12 new V1.41 G0b upload-* codes.
+ * Count: 88 = 74 (V1.41 G0b) + 14 new V1.42 G0c restore-* codes.
+ *
+ * Historical: 74 = existing 62 (V1.40) + 12 new V1.41 G0b upload-* codes.
  *
  * - AUDIT_CHAIN_BROKEN already existed in the 45-set (structure/JSON/seq/prev/link);
  *   it is NOT counted as a new registration in this bump.
@@ -27,6 +30,9 @@ import {
  * - V1.40: AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE only (local multi-process write lock).
  * - V1.41 G0b: +12 upload-* string-only codes (no domain/object metadata on ERROR_CODES).
  * - UPLOAD_RESUME_EXHAUSTED is client-local only; ≠ DATA_RESUME_EXHAUSTED; HTTP N/A.
+ * - V1.42 G0c: +14 restore-* string-only codes + RESTORE_ERROR_HTTP_CONTRACT.
+ * - RESTORE_RESUME_EXHAUSTED is client-local only; ≠ DATA_RESUME_EXHAUSTED;
+ *   ≠ UPLOAD_RESUME_EXHAUSTED; HTTP N/A.
  */
 const EXPECTED_ERROR_CODES = {
   // --- existing 17 (regression pin) ---
@@ -123,6 +129,21 @@ const EXPECTED_ERROR_CODES = {
   UPLOAD_COMMIT_CONFLICT: 'upload-commit-conflict',
   UPLOAD_IO_ERROR: 'upload-io-error',
   UPLOAD_RESUME_EXHAUSTED: 'upload-resume-exhausted',
+  // --- new 14 (V1.42 G0c endpoint-pull restore; string-only restore-* values) ---
+  RESTORE_TASK_INVALID: 'restore-task-invalid',
+  RESTORE_TASK_NOT_FOUND: 'restore-task-not-found',
+  RESTORE_TASK_CONFLICT: 'restore-task-conflict',
+  RESTORE_STATE_INVALID: 'restore-state-invalid',
+  RESTORE_PATH_INVALID: 'restore-path-invalid',
+  RESTORE_INTEGRITY_FAILED: 'restore-integrity-failed',
+  RESTORE_CAPACITY_INSUFFICIENT: 'restore-capacity-insufficient',
+  RESTORE_BACKPRESSURE: 'restore-backpressure',
+  RESTORE_INTERRUPTED: 'restore-interrupted',
+  RESTORE_PUBLISH_CONFLICT: 'restore-publish-conflict',
+  RESTORE_ROLLBACK_REQUIRED: 'restore-rollback-required',
+  RESTORE_ROLLBACK_FAILED: 'restore-rollback-failed',
+  RESTORE_CLEANUP_FAILED: 'restore-cleanup-failed',
+  RESTORE_RESUME_EXHAUSTED: 'restore-resume-exhausted',
 };
 
 const ERROR_CODE_PREFIX_PATTERN =
@@ -167,6 +188,23 @@ const NEW_UPLOAD_CODES = [
   ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
 ];
 
+const NEW_RESTORE_CODES = [
+  ERROR_CODES.RESTORE_TASK_INVALID,
+  ERROR_CODES.RESTORE_TASK_NOT_FOUND,
+  ERROR_CODES.RESTORE_TASK_CONFLICT,
+  ERROR_CODES.RESTORE_STATE_INVALID,
+  ERROR_CODES.RESTORE_PATH_INVALID,
+  ERROR_CODES.RESTORE_INTEGRITY_FAILED,
+  ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT,
+  ERROR_CODES.RESTORE_BACKPRESSURE,
+  ERROR_CODES.RESTORE_INTERRUPTED,
+  ERROR_CODES.RESTORE_PUBLISH_CONFLICT,
+  ERROR_CODES.RESTORE_ROLLBACK_REQUIRED,
+  ERROR_CODES.RESTORE_ROLLBACK_FAILED,
+  ERROR_CODES.RESTORE_CLEANUP_FAILED,
+  ERROR_CODES.RESTORE_RESUME_EXHAUSTED,
+];
+
 /** design §7 HTTP/retryable contract — independent of string-only ERROR_CODES. */
 const EXPECTED_UPLOAD_HTTP_CONTRACT = Object.freeze({
   'upload-manifest-invalid': Object.freeze({ statusCode: 400, retryable: false }),
@@ -183,10 +221,28 @@ const EXPECTED_UPLOAD_HTTP_CONTRACT = Object.freeze({
   'upload-resume-exhausted': Object.freeze({ statusCode: null, retryable: false }),
 });
 
+/** design G0c RESTORE_ERROR_HTTP_CONTRACT — independent of string-only ERROR_CODES. */
+const EXPECTED_RESTORE_HTTP_CONTRACT = Object.freeze({
+  'restore-task-invalid': Object.freeze({ statusCode: 400, retryable: false }),
+  'restore-task-not-found': Object.freeze({ statusCode: 404, retryable: false }),
+  'restore-task-conflict': Object.freeze({ statusCode: 409, retryable: false }),
+  'restore-state-invalid': Object.freeze({ statusCode: 500, retryable: false }),
+  'restore-path-invalid': Object.freeze({ statusCode: 400, retryable: false }),
+  'restore-integrity-failed': Object.freeze({ statusCode: 422, retryable: false }),
+  'restore-capacity-insufficient': Object.freeze({ statusCode: 507, retryable: false }),
+  'restore-backpressure': Object.freeze({ statusCode: 429, retryable: true }),
+  'restore-interrupted': Object.freeze({ statusCode: null, retryable: true }),
+  'restore-publish-conflict': Object.freeze({ statusCode: 409, retryable: false }),
+  'restore-rollback-required': Object.freeze({ statusCode: 409, retryable: false }),
+  'restore-rollback-failed': Object.freeze({ statusCode: 500, retryable: false }),
+  'restore-cleanup-failed': Object.freeze({ statusCode: 500, retryable: false }),
+  'restore-resume-exhausted': Object.freeze({ statusCode: null, retryable: false }),
+});
+
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (74 entries = existing 62 + 12)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 74);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 74);
+  it('matches the exact closed-set ERROR_CODES registry (88 entries = 74 + 14 restore)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 88);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 88);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -275,13 +331,41 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
       ERROR_CODES.DATA_RESUME_EXHAUSTED,
     );
+    // V1.42 G0c restore codes exact values.
+    assert.strictEqual(ERROR_CODES.RESTORE_TASK_INVALID, 'restore-task-invalid');
+    assert.strictEqual(ERROR_CODES.RESTORE_TASK_NOT_FOUND, 'restore-task-not-found');
+    assert.strictEqual(ERROR_CODES.RESTORE_TASK_CONFLICT, 'restore-task-conflict');
+    assert.strictEqual(ERROR_CODES.RESTORE_STATE_INVALID, 'restore-state-invalid');
+    assert.strictEqual(ERROR_CODES.RESTORE_PATH_INVALID, 'restore-path-invalid');
+    assert.strictEqual(ERROR_CODES.RESTORE_INTEGRITY_FAILED, 'restore-integrity-failed');
+    assert.strictEqual(ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT, 'restore-capacity-insufficient');
+    assert.strictEqual(ERROR_CODES.RESTORE_BACKPRESSURE, 'restore-backpressure');
+    assert.strictEqual(ERROR_CODES.RESTORE_INTERRUPTED, 'restore-interrupted');
+    assert.strictEqual(ERROR_CODES.RESTORE_PUBLISH_CONFLICT, 'restore-publish-conflict');
+    assert.strictEqual(ERROR_CODES.RESTORE_ROLLBACK_REQUIRED, 'restore-rollback-required');
+    assert.strictEqual(ERROR_CODES.RESTORE_ROLLBACK_FAILED, 'restore-rollback-failed');
+    assert.strictEqual(ERROR_CODES.RESTORE_CLEANUP_FAILED, 'restore-cleanup-failed');
+    assert.strictEqual(ERROR_CODES.RESTORE_RESUME_EXHAUSTED, 'restore-resume-exhausted');
+    // Three resume-exhausted families remain distinct.
+    assert.notStrictEqual(
+      ERROR_CODES.RESTORE_RESUME_EXHAUSTED,
+      ERROR_CODES.DATA_RESUME_EXHAUSTED,
+    );
+    assert.notStrictEqual(
+      ERROR_CODES.RESTORE_RESUME_EXHAUSTED,
+      ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
+    );
+    assert.notStrictEqual(
+      ERROR_CODES.DATA_RESUME_EXHAUSTED,
+      ERROR_CODES.UPLOAD_RESUME_EXHAUSTED,
+    );
   });
 
   it('contains unique registered kebab-case codes', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 74);
+    assert.strictEqual(values.length, 88);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);
@@ -314,6 +398,20 @@ describe('Gold error-code registry', () => {
     }
   });
 
+  it('registers fourteen restore-* codes with unified prefix and LinkeError message===code', () => {
+    assert.strictEqual(NEW_RESTORE_CODES.length, 14);
+    assert.strictEqual(new Set(NEW_RESTORE_CODES).size, 14);
+    for (const code of NEW_RESTORE_CODES) {
+      assert.match(code, /^restore-[a-z0-9]+(?:-[a-z0-9]+)*$/);
+      assert.ok(code.startsWith('restore-'));
+      assert.strictEqual(assertRegisteredErrorCode(code), code);
+      const error = new LinkeError(code);
+      assert.strictEqual(error.message, code);
+      assert.strictEqual(error.code, code);
+      assert.strictEqual(error.name, 'LinkeError');
+    }
+  });
+
   it('exports deep-frozen UPLOAD_ERROR_HTTP_CONTRACT covering design §7', () => {
     assert.ok(Object.isFrozen(UPLOAD_ERROR_HTTP_CONTRACT));
     assert.deepStrictEqual(
@@ -338,6 +436,33 @@ describe('Gold error-code registry', () => {
     assert.notStrictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-resume-exhausted'].statusCode, 429);
     // capacity uses controlled numeric 507
     assert.strictEqual(UPLOAD_ERROR_HTTP_CONTRACT['upload-capacity-insufficient'].statusCode, 507);
+  });
+
+  it('exports deep-frozen RESTORE_ERROR_HTTP_CONTRACT covering design G0c table', () => {
+    assert.ok(Object.isFrozen(RESTORE_ERROR_HTTP_CONTRACT));
+    assert.deepStrictEqual(RESTORE_ERROR_HTTP_CONTRACT, EXPECTED_RESTORE_HTTP_CONTRACT);
+    assert.deepStrictEqual(
+      Object.keys(RESTORE_ERROR_HTTP_CONTRACT).sort(),
+      Object.keys(EXPECTED_RESTORE_HTTP_CONTRACT).sort(),
+    );
+    for (const code of NEW_RESTORE_CODES) {
+      const entry = RESTORE_ERROR_HTTP_CONTRACT[code];
+      assert.ok(entry, `missing restore contract for ${code}`);
+      assert.ok(Object.isFrozen(entry));
+      assert.deepStrictEqual(entry, EXPECTED_RESTORE_HTTP_CONTRACT[code]);
+    }
+    // retryable only backpressure + interrupted
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-backpressure'].retryable, true);
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-interrupted'].retryable, true);
+    for (const code of NEW_RESTORE_CODES) {
+      if (code === 'restore-backpressure' || code === 'restore-interrupted') continue;
+      assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT[code].retryable, false);
+    }
+    // client-local: null status for interrupted + resume-exhausted
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-interrupted'].statusCode, null);
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-resume-exhausted'].statusCode, null);
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-capacity-insufficient'].statusCode, 507);
+    assert.strictEqual(RESTORE_ERROR_HTTP_CONTRACT['restore-integrity-failed'].statusCode, 422);
   });
 
   it('registers the six new integrity-journal codes with LinkeError message===code', () => {
@@ -426,6 +551,30 @@ describe('Gold error-code registry', () => {
     const manifestInvalid = new LinkeError(ERROR_CODES.UPLOAD_MANIFEST_INVALID);
     assert.strictEqual(manifestInvalid.statusCode, 400);
     assert.strictEqual(manifestInvalid.retryable, false);
+  });
+
+  it('applies RESTORE_ERROR_HTTP_CONTRACT defaults when LinkeError options omitted', () => {
+    const resume = new LinkeError(ERROR_CODES.RESTORE_RESUME_EXHAUSTED);
+    assert.strictEqual(resume.statusCode, null);
+    assert.strictEqual(resume.retryable, false);
+    assert.strictEqual(resume.code, 'restore-resume-exhausted');
+
+    const interrupted = new LinkeError(ERROR_CODES.RESTORE_INTERRUPTED);
+    assert.strictEqual(interrupted.statusCode, null);
+    assert.strictEqual(interrupted.retryable, true);
+    assert.strictEqual(interrupted.code, 'restore-interrupted');
+
+    const backpressure = new LinkeError(ERROR_CODES.RESTORE_BACKPRESSURE);
+    assert.strictEqual(backpressure.statusCode, 429);
+    assert.strictEqual(backpressure.retryable, true);
+
+    const capacity = new LinkeError(ERROR_CODES.RESTORE_CAPACITY_INSUFFICIENT);
+    assert.strictEqual(capacity.statusCode, 507);
+    assert.strictEqual(capacity.retryable, false);
+
+    const taskInvalid = new LinkeError(ERROR_CODES.RESTORE_TASK_INVALID);
+    assert.strictEqual(taskInvalid.statusCode, 400);
+    assert.strictEqual(taskInvalid.retryable, false);
   });
 
   it('prefers UPLOAD_ERROR_HTTP_CONTRACT for empty/partial options; own props only override', () => {
@@ -546,6 +695,33 @@ describe('Gold error-code registry', () => {
         assert.ok(error instanceof Error);
         assert.ok(!(error instanceof LinkeError));
         assert.ok(!String(error.message).includes('429'));
+        return true;
+      },
+    );
+  });
+
+  it('forces client-local RESTORE_RESUME_EXHAUSTED statusCode null; rejects non-null with fixed Error', () => {
+    const okNull = new LinkeError(ERROR_CODES.RESTORE_RESUME_EXHAUSTED, {
+      statusCode: null,
+    });
+    assert.strictEqual(okNull.statusCode, null);
+    assert.strictEqual(okNull.retryable, false);
+
+    const okOmitted = new LinkeError(ERROR_CODES.RESTORE_RESUME_EXHAUSTED);
+    assert.strictEqual(okOmitted.statusCode, null);
+    assert.strictEqual(okOmitted.retryable, false);
+
+    assert.throws(
+      () =>
+        new LinkeError(ERROR_CODES.RESTORE_RESUME_EXHAUSTED, {
+          statusCode: 400,
+        }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.ok(!(error instanceof LinkeError), 'must not mint serializable LinkeError');
+        assert.strictEqual(error.message, 'invalid LinkeError options');
+        assert.ok(!String(error.message).includes('400'));
+        assert.ok(!String(error.message).includes('/Users/'));
         return true;
       },
     );

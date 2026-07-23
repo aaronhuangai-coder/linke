@@ -689,9 +689,10 @@ describe('C3 agent audit-integrity-monitor CLI', () => {
     assertInvalidArgs(result, ['--sneaky-path']);
   });
 
-  // V1.41: registry 62→74 (G0b +12 upload); this boundary does not add codes.
-  it('25. ERROR_CODES count remains 74', () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 74);
+  // V1.42: registry 74→88 (G0c +14 restore = 88); this boundary does not add codes.
+  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
+  it('25. ERROR_CODES count remains 88', () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 88);
   });
 
   it('26. regression: bare --h exit0; health still accepts --token value semantics elsewhere', async () => {
