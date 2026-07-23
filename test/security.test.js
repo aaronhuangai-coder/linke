@@ -63,6 +63,145 @@ async function pathExists(path) {
   }
 }
 
+/** Forbidden top-level audit keys that must never appear on events. */
+const AUDIT_FORBIDDEN_TOP_LEVEL_KEYS = [
+  'enrollmentCode',
+  'tlsFingerprint',
+  'agentUrl',
+  'code',
+  'token',
+];
+
+/** Sensitive key names that must not appear anywhere in audit JSON. */
+const AUDIT_SENSITIVE_KEY_PATTERN = /tokenDigest|codeDigest|enrollmentCode/i;
+
+/** Production controller hostname that must not leak into audit events. */
+const AUDIT_HOSTNAME_PATTERN = /linke-controller\.local/i;
+
+/**
+ * True when key names a port field (exact `port` or `*Port` / `*_port`).
+ * @param {string | null | undefined} key
+ * @returns {boolean}
+ */
+function isPortFieldKey(key) {
+  if (typeof key !== 'string' || key.length === 0) return false;
+  if (key === 'port') return true;
+  if (/Port$/.test(key)) return true;
+  if (/_port$/i.test(key)) return true;
+  return key.toLowerCase() === 'port';
+}
+
+/**
+ * True when a string embeds `port` as a URL / host-port component (`:3443`),
+ * not merely as a hex substring inside a UUID or similar token.
+ * @param {string} value
+ * @param {number} port
+ * @returns {boolean}
+ */
+function stringContainsPortInUrlOrHostPortContext(value, port) {
+  // Colon-delimited port; reject trailing digits so `:34430` is not a hit for 3443.
+  return new RegExp(`:${port}(?!\\d)`).test(value);
+}
+
+/**
+ * Structure-aware walk: port number only counts as a leak in URL/host-port
+ * values or under port-named fields. Does not treat bare hex `3443` in UUIDs
+ * as a leak.
+ * @param {unknown} value
+ * @param {number} port
+ * @param {string | null} [key]
+ * @returns {boolean}
+ */
+function valueContainsPortLeak(value, port, key = null) {
+  if (value == null) return false;
+
+  if (typeof value === 'number') {
+    return value === port && isPortFieldKey(key);
+  }
+
+  if (typeof value === 'string') {
+    if (stringContainsPortInUrlOrHostPortContext(value, port)) return true;
+    if (value === String(port) && isPortFieldKey(key)) return true;
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => valueContainsPortLeak(item, port, key));
+  }
+
+  if (typeof value === 'object') {
+    return Object.entries(value).some(([childKey, childValue]) => (
+      valueContainsPortLeak(childValue, port, childKey)
+    ));
+  }
+
+  return false;
+}
+
+/**
+ * Pure audit no-secret oracle. Full-string scan for hostnames, synthetic
+ * secrets, and sensitive key names (including inside id/requestId). Port
+ * `3443` is judged only in URL / host-port / port-field contexts so random
+ * UUIDs that happen to contain the hex digits `3443` do not false-positive.
+ *
+ * @param {unknown} events
+ * @param {{
+ *   syntheticCode?: string,
+ *   syntheticFingerprint?: string,
+ *   syntheticToken?: string,
+ *   syntheticPath?: string,
+ *   leakPort?: number,
+ * }} [options]
+ * @returns {boolean} true when secrets appear to be present
+ */
+function auditEventsContainSecrets(events, options = {}) {
+  const {
+    syntheticCode = '',
+    syntheticFingerprint = '',
+    syntheticToken = '',
+    syntheticPath = '',
+    leakPort = 3443,
+  } = options;
+
+  const list = Array.isArray(events) ? events : [];
+  const serialized = JSON.stringify(list);
+
+  // Full-string scans intentionally include id/requestId content so hostname,
+  // tokens, and paths hidden in those fields still fail closed.
+  if (syntheticCode && serialized.includes(syntheticCode)) return true;
+  if (syntheticFingerprint && serialized.includes(syntheticFingerprint)) return true;
+  if (syntheticToken && serialized.includes(syntheticToken)) return true;
+  if (syntheticPath && serialized.includes(syntheticPath)) return true;
+  if (AUDIT_HOSTNAME_PATTERN.test(serialized)) return true;
+  if (AUDIT_SENSITIVE_KEY_PATTERN.test(serialized)) return true;
+
+  // Bare port digits only via structure-aware walk (not global substring),
+  // so UUID/event id/requestId hex containing `3443` does not false-positive.
+  if (valueContainsPortLeak(list, leakPort)) return true;
+
+  for (const event of list) {
+    if (!event || typeof event !== 'object') continue;
+    for (const key of AUDIT_FORBIDDEN_TOP_LEVEL_KEYS) {
+      if (key in event) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Assert audit events contain no secrets (pure; throws on leak).
+ * @param {unknown} events
+ * @param {Parameters<typeof auditEventsContainSecrets>[1]} [options]
+ */
+function assertAuditEventsHaveNoSecrets(events, options) {
+  assert.strictEqual(
+    auditEventsContainSecrets(events, options),
+    false,
+    `audit events must not contain secrets: ${JSON.stringify(events)}`,
+  );
+}
+
 describe('Security — deviceId path traversal prevention', () => {
   let server, dataDir, port;
 
@@ -836,6 +975,92 @@ describe('Security — API request body and error hardening', () => {
   });
 });
 
+describe('Security — audit no-secret oracle (structure-aware)', () => {
+  // Captured flaky UUID: random requestId hex contained bare substring `3443`.
+  const UUID_WITH_3443_HEX = '88b808a4-1372-4f7c-895a-18f34434015d';
+  const ORACLE_OPTS = {
+    syntheticCode: 'one-time-code-SYNTHETIC-SECRET-9f3a',
+    syntheticFingerprint: 'a'.repeat(64),
+    syntheticToken: 'admin-write-token-SYNTHETIC',
+    syntheticPath: '/tmp/linke-secret-path-SYNTHETIC',
+  };
+
+  it('does not false-positive when id/requestId UUID contains hex substring 3443', () => {
+    const events = [
+      {
+        id: UUID_WITH_3443_HEX,
+        requestId: UUID_WITH_3443_HEX,
+        type: 'api.device-enrollment.success',
+        outcome: 'success',
+        statusCode: 200,
+        timestamp: '2026-07-13T00:00:00.000Z',
+      },
+    ];
+    assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), false);
+    assert.doesNotThrow(() => assertAuditEventsHaveNoSecrets(events, ORACLE_OPTS));
+  });
+
+  it('detects full agent URL leak https://linke-controller.local:3443', () => {
+    const events = [
+      {
+        id: 'safe-id',
+        requestId: 'safe-request',
+        message: 'https://linke-controller.local:3443',
+      },
+    ];
+    assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), true);
+    assert.throws(() => assertAuditEventsHaveNoSecrets(events, ORACLE_OPTS));
+  });
+
+  it('detects numeric port field leak port=3443', () => {
+    const events = [{ id: 'safe-id', requestId: 'safe-request', port: 3443 }];
+    assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), true);
+    assert.throws(() => assertAuditEventsHaveNoSecrets(events, ORACLE_OPTS));
+  });
+
+  it('detects string port field leak port="3443"', () => {
+    const events = [{ id: 'safe-id', requestId: 'safe-request', port: '3443' }];
+    assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), true);
+    assert.throws(() => assertAuditEventsHaveNoSecrets(events, ORACLE_OPTS));
+  });
+
+  it('detects sensitive keys tokenDigest/codeDigest/enrollmentCode', () => {
+    for (const key of ['tokenDigest', 'codeDigest', 'enrollmentCode']) {
+      const events = [{ id: 'safe-id', requestId: 'safe-request', [key]: 'x' }];
+      assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), true, key);
+      assert.throws(() => assertAuditEventsHaveNoSecrets(events, ORACLE_OPTS), key);
+    }
+  });
+
+  it('still detects hostname/token/path hidden inside id or requestId', () => {
+    assert.strictEqual(
+      auditEventsContainSecrets([
+        { id: `wrap-${'linke-controller.local'}-wrap`, requestId: 'safe' },
+      ], ORACLE_OPTS),
+      true,
+    );
+    assert.strictEqual(
+      auditEventsContainSecrets([
+        { id: 'safe', requestId: ORACLE_OPTS.syntheticToken },
+      ], ORACLE_OPTS),
+      true,
+    );
+    assert.strictEqual(
+      auditEventsContainSecrets([
+        { id: ORACLE_OPTS.syntheticPath, requestId: 'safe' },
+      ], ORACLE_OPTS),
+      true,
+    );
+  });
+
+  it('detects host-port URL without controller hostname (port context)', () => {
+    const events = [
+      { id: 'safe-id', requestId: 'safe-request', target: 'https://example.test:3443/path' },
+    ];
+    assert.strictEqual(auditEventsContainSecrets(events, ORACLE_OPTS), true);
+  });
+});
+
 describe('Security — loopback device administration routes', () => {
   const SYNTHETIC_CODE = 'one-time-code-SYNTHETIC-SECRET-9f3a';
   const SYNTHETIC_FINGERPRINT = 'a'.repeat(64);
@@ -889,19 +1114,12 @@ describe('Security — loopback device administration routes', () => {
 
   async function assertAuditHasNoSecrets(dataDir) {
     const events = await readAuditEvents(dataDir, { limit: 100 });
-    const serialized = JSON.stringify(events);
-    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_CODE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_FINGERPRINT));
-    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.doesNotMatch(serialized, /linke-controller\.local|3443|tokenDigest|codeDigest|enrollmentCode/i);
-    assert.doesNotMatch(serialized, new RegExp(SYNTHETIC_PATH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    for (const event of events) {
-      assert.ok(!('enrollmentCode' in event));
-      assert.ok(!('tlsFingerprint' in event));
-      assert.ok(!('agentUrl' in event));
-      assert.ok(!('code' in event));
-      assert.ok(!('token' in event));
-    }
+    assertAuditEventsHaveNoSecrets(events, {
+      syntheticCode: SYNTHETIC_CODE,
+      syntheticFingerprint: SYNTHETIC_FINGERPRINT,
+      syntheticToken: SYNTHETIC_TOKEN,
+      syntheticPath: SYNTHETIC_PATH,
+    });
     return events;
   }
 
