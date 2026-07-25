@@ -2012,12 +2012,22 @@ describe('C4 B: static/source freezes', () => {
     assert.equal(/\brecoverAudit\w*\s*\(/.test(masked), false);
   });
 
-  it('7. monitor static imports exact one dual-write specifier + binding inspectAuditIntegrityDualWriteReadOnly', async () => {
+  it('7. monitor static imports exact two public read-only inspectors (dual-write + rotation)', async () => {
     const src = await readText(PATHS.monitor);
     const specs = collectStaticImportSpecifiers(src);
-    assert.deepEqual(specs, ['./audit-integrity-dual-write.js']);
-    const bindings = collectImportedBindingsFromSpecifier(src, './audit-integrity-dual-write.js');
-    assert.deepEqual(bindings, ['inspectAuditIntegrityDualWriteReadOnly']);
+    // Source order: dual-write first, then rotation coordinator (not rotation-state).
+    assert.deepEqual(specs, [
+      './audit-integrity-dual-write.js',
+      './audit-integrity-rotation.js',
+    ]);
+    assert.deepEqual(
+      collectImportedBindingsFromSpecifier(src, './audit-integrity-dual-write.js'),
+      ['inspectAuditIntegrityDualWriteReadOnly'],
+    );
+    assert.deepEqual(
+      collectImportedBindingsFromSpecifier(src, './audit-integrity-rotation.js'),
+      ['inspectAuditIntegrityRotationReadOnly'],
+    );
 
     for (const needle of FORBIDDEN_MONITOR_IMPORT_NEEDLES) {
       assert.equal(
@@ -2032,6 +2042,7 @@ describe('C4 B: static/source freezes', () => {
       './agent.js',
       './audit-integrity-write-queue.js',
       './audit-integrity-dual-write-state.js',
+      './audit-integrity-rotation-state.js',
       './audit-integrity-journal.js',
       './audit-integrity-cross-store.js',
       './error-codes.js',
@@ -2285,10 +2296,10 @@ const t = \`case 'audit-integrity-monitor':\`;
     }
   });
 
-  // V1.42: registry pin 74→88 (G0c +14 restore = 88); monitor still no registry import.
-  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
-  it('16. ERROR_CODES exact 88; monitor does not import registry', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 88);
+  // V1.43 current=94 = V1.42 88 + 6 rotation; monitor still no registry import.
+  // Historical: V1.42 was 88 = V1.41 74 + 14 restore; V1.41 was 74 = V1.40 62 + 12 upload.
+  it('16. ERROR_CODES exact 94; monitor does not import registry', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 94);
     const src = await readText(PATHS.monitor);
     const specs = collectStaticImportSpecifiers(src);
     assert.equal(specs.includes('./error-codes.js'), false);

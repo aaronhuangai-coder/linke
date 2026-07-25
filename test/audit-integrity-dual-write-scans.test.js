@@ -1190,13 +1190,13 @@ describe('C6 K: audit-log no local queue/fast path; cold triple runtime', () => 
   });
 });
 
-// ── 12. ERROR_CODES exact 88 (V1.42 G0c 74 + 14 restore) ───────────────
+// ── 12. ERROR_CODES exact 94 (V1.42 88 + 6 V1.43 rotation) ───────────────
 
-describe('C6 L: ERROR_CODES exact 88 (registry runtime assertion)', () => {
-  // V1.42 G0c: registry exact 88 = 74 + 14 restore-* codes (not a process-lock-only bump).
-  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
-  it('12. ERROR_CODES registry length is exactly 88', () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 88);
+describe('C6 L: ERROR_CODES exact 94 (registry runtime assertion)', () => {
+  // V1.43: registry exact 94 = V1.42 88 + 6 audit-integrity-rotation-* codes.
+  // Historical: V1.42 G0c was 88 = 74 + 14 restore; V1.41 was 74 = 62 + 12 upload.
+  it('12. ERROR_CODES registry length is exactly 94', () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 94);
     // Dual-write codes present (not a registry mutation).
     assert.equal(
       ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_DIRECT_MUTATION_BLOCKED,

@@ -32,6 +32,8 @@
  *   supervisor-lifecycle-guarded-runner-execution-gate — show sanitized guarded runner execution gate
  *   audit-log           — show sanitized local audit events
  *   audit-integrity-monitor — run-once local audit integrity monitor (JSON on stdout; no network; no write)
+ *   audit-integrity-rotate — explicitly rotate the local audit integrity generation
+ *   audit-integrity-rotation-recover — explicitly recover a local audit integrity rotation
  *   release-readiness   — evaluate release readiness from health status
  *   gold-readiness      — show Gold readiness blocker scorecard
  *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
@@ -53,7 +55,9 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, and audit-integrity-monitor
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor, and explicit audit integrity rotation/recovery
+ *   --expected-generation-id <hex> Expected audit generation ID (rotate only; 32 lowercase hex)
+ *   --expected-head-digest <hex> Expected audit journal head digest (rotate only; 64 lowercase hex)
  *   --target <name>      NAS target name (nas-snapshot-replicate)
  *   --device-id <id>     Device ID for local snapshot lookup (nas-snapshot-replicate)
  *   --snapshot-id <id>   Snapshot ID for local snapshot lookup (nas-snapshot-replicate)
@@ -111,12 +115,40 @@ import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
 } from './audit-integrity-monitor.js';
+import {
+  recoverAuditIntegrityRotation,
+  rotateAuditIntegrityGeneration,
+} from './audit-integrity-rotation.js';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 
 const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
 const AUDIT_INTEGRITY_MONITOR_ARG_KEYS = new Set(['_', 'data-dir']);
 const AUDIT_INTEGRITY_MONITOR_ARGS_ERROR = 'audit-integrity-monitor arguments are invalid';
 const AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR = 'audit-integrity-monitor failed';
+const AUDIT_INTEGRITY_ROTATE_COMMAND = 'audit-integrity-rotate';
+const AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND = 'audit-integrity-rotation-recover';
+const AUDIT_INTEGRITY_ROTATE_ARGS_ERROR =
+  'audit-integrity-rotate arguments are invalid';
+const AUDIT_INTEGRITY_ROTATE_REFUSED_ERROR = 'audit-integrity-rotate refused';
+const AUDIT_INTEGRITY_ROTATE_EXECUTION_ERROR = 'audit-integrity-rotate failed';
+const AUDIT_INTEGRITY_ROTATION_RECOVER_ARGS_ERROR =
+  'audit-integrity-rotation-recover arguments are invalid';
+const AUDIT_INTEGRITY_ROTATION_RECOVER_REFUSED_ERROR =
+  'audit-integrity-rotation-recover refused';
+const AUDIT_INTEGRITY_ROTATION_RECOVER_EXECUTION_ERROR =
+  'audit-integrity-rotation-recover failed';
+const AUDIT_INTEGRITY_GENERATION_ID_RE = /^[0-9a-f]{32}$/;
+const AUDIT_INTEGRITY_HEAD_DIGEST_RE = /^[0-9a-f]{64}$/;
+const AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS = new Set([
+  AUDIT_INTEGRITY_MONITOR_COMMAND,
+  AUDIT_INTEGRITY_ROTATE_COMMAND,
+  AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND,
+]);
+const AUDIT_INTEGRITY_REFUSAL_CODES = new Set(
+  Object.values(ERROR_CODES).filter(
+    (code) => typeof code === 'string' && code.startsWith('audit-integrity-'),
+  ),
+);
 
 /**
  * Local strict argv contract for audit-integrity-monitor only.
@@ -138,7 +170,7 @@ function assertAuditIntegrityMonitorArgs(args, rawArgv) {
     || rawArgv[0] !== AUDIT_INTEGRITY_MONITOR_COMMAND
     || rawArgv[1] !== '--data-dir'
     || typeof rawArgv[2] !== 'string'
-    || rawArgv[2].length === 0
+    || rawArgv[2].trim().length === 0
     || rawArgv[2].startsWith('--')
   ) {
     throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
@@ -173,6 +205,84 @@ function assertAuditIntegrityMonitorArgs(args, rawArgv) {
   if (rawArgv[2] !== dataDir) {
     throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
   }
+}
+
+/**
+ * Parse the exact local audit-integrity-rotate argv surface.
+ * Raw positional validation rejects duplicates, aliases, reordered flags,
+ * extra tokens, prototype-polluting flags, and flag-like values.
+ *
+ * @param {string[]} rawArgv process.argv.slice(2); never echoed
+ * @returns {Readonly<{
+ *   dataDir: string,
+ *   expectedGenerationId: string,
+ *   expectedHeadDigest: string,
+ * }>}
+ */
+function parseAuditIntegrityRotateArgs(rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 7
+    || rawArgv[0] !== AUDIT_INTEGRITY_ROTATE_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+    || rawArgv[3] !== '--expected-generation-id'
+    || typeof rawArgv[4] !== 'string'
+    || !AUDIT_INTEGRITY_GENERATION_ID_RE.test(rawArgv[4])
+    || rawArgv[5] !== '--expected-head-digest'
+    || typeof rawArgv[6] !== 'string'
+    || !AUDIT_INTEGRITY_HEAD_DIGEST_RE.test(rawArgv[6])
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ROTATE_ARGS_ERROR);
+  }
+
+  return Object.freeze({
+    dataDir: rawArgv[2],
+    expectedGenerationId: rawArgv[4],
+    expectedHeadDigest: rawArgv[6],
+  });
+}
+
+/**
+ * Parse the exact local audit-integrity-rotation-recover argv surface.
+ *
+ * @param {string[]} rawArgv process.argv.slice(2); never echoed
+ * @returns {Readonly<{ dataDir: string }>}
+ */
+function parseAuditIntegrityRotationRecoverArgs(rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 3
+    || rawArgv[0] !== AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ROTATION_RECOVER_ARGS_ERROR);
+  }
+
+  return Object.freeze({ dataDir: rawArgv[2] });
+}
+
+/**
+ * Only registered audit-integrity error codes are public CLI refusals.
+ * Error messages alone never authorize exit 2.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isAuditIntegrityRefusal(error) {
+  return Boolean(
+    error
+    && typeof error === 'object'
+    && typeof /** @type {{ code?: unknown }} */ (error).code === 'string'
+    && AUDIT_INTEGRITY_REFUSAL_CODES.has(
+      /** @type {{ code: string }} */ (error).code,
+    ),
+  );
 }
 
 const NAS_REPLICATION_ARG_KEYS = new Set([
@@ -1110,6 +1220,8 @@ Commands:
   supervisor-lifecycle-guarded-runner-execution-gate Show sanitized supervisor lifecycle guarded runner execution gate
   audit-log           Show sanitized local audit events
   audit-integrity-monitor Run-once local audit integrity monitor (JSON on stdout; no network; no write)
+  audit-integrity-rotate Explicitly rotate the local audit integrity generation (local only)
+  audit-integrity-rotation-recover Explicitly recover a local audit integrity rotation (local only)
   release-readiness   Evaluate release readiness from health status
   gold-readiness      Show Gold readiness blocker scorecard
   device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
@@ -1144,7 +1256,9 @@ Options:
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-rotate, audit-integrity-rotation-recover)
+  --expected-generation-id <hex> Expected audit generation ID (audit-integrity-rotate; 32 lowercase hex)
+  --expected-head-digest <hex> Expected audit journal head digest (audit-integrity-rotate; 64 lowercase hex)
 `);
 }
 
@@ -1158,10 +1272,11 @@ export async function main() {
   const requestOptions = args.token && args.token !== true ? { authToken: args.token } : {};
   const apiRequest = (path, method, body) => request(server, path, method, body, requestOptions);
 
-  // audit-integrity-monitor owns --help/--h via local argv validator (exit 1 fixed phrase).
+  // Local audit-integrity commands own --help/--h via strict argv validators
+  // (exit 1 with their fixed phrase).
   // Other commands keep the existing early-help behavior unchanged.
   if (
-    command !== AUDIT_INTEGRITY_MONITOR_COMMAND
+    !AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS.has(command)
     && (!command || args.help || args.h || command === 'help')
   ) {
     printUsage();
@@ -1169,9 +1284,9 @@ export async function main() {
   }
 
   try {
-    // Skip global bare-token trap for audit-integrity-monitor so local argv
-    // validator owns `audit-integrity-monitor --token` (fixed phrase, exit 1).
-    if (command !== AUDIT_INTEGRITY_MONITOR_COMMAND && args.token === true) {
+    // Skip the global bare-token trap for strict local commands so their own
+    // validators own `--token` (fixed path-free phrase, exit 1).
+    if (!AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS.has(command) && args.token === true) {
       throw new Error('--token requires a value');
     }
 
@@ -1187,6 +1302,41 @@ export async function main() {
           // Programmer/runtime misuse after valid argv: fixed desensitized exit 1.
           // Never echo raw err.message / path / token; never forge alert JSON or exit 2.
           throw new Error(AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR);
+        }
+        break;
+      }
+
+      case 'audit-integrity-rotate': {
+        const parsed = parseAuditIntegrityRotateArgs(rawArgv);
+        try {
+          const receipt = await rotateAuditIntegrityGeneration(parsed.dataDir, {
+            expectedGenerationId: parsed.expectedGenerationId,
+            expectedHeadDigest: parsed.expectedHeadDigest,
+          });
+          process.stdout.write(`${JSON.stringify(receipt)}\n`);
+        } catch (error) {
+          if (isAuditIntegrityRefusal(error)) {
+            console.error(`Error: ${AUDIT_INTEGRITY_ROTATE_REFUSED_ERROR}`);
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ROTATE_EXECUTION_ERROR);
+        }
+        break;
+      }
+
+      case 'audit-integrity-rotation-recover': {
+        const parsed = parseAuditIntegrityRotationRecoverArgs(rawArgv);
+        try {
+          const receipt = await recoverAuditIntegrityRotation(parsed.dataDir);
+          process.stdout.write(`${JSON.stringify(receipt)}\n`);
+        } catch (error) {
+          if (isAuditIntegrityRefusal(error)) {
+            console.error(`Error: ${AUDIT_INTEGRITY_ROTATION_RECOVER_REFUSED_ERROR}`);
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ROTATION_RECOVER_EXECUTION_ERROR);
         }
         break;
       }

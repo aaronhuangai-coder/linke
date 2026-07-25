@@ -1,12 +1,15 @@
 /**
- * V1.38 read-only audit integrity run-once monitor report contract.
+ * V1.38/V1.43 read-only audit integrity run-once monitor report contract.
  *
- * ONLY imports public inspectAuditIntegrityDualWriteReadOnly.
+ * ONLY imports two public read-only inspectors:
+ *   inspectAuditIntegrityDualWriteReadOnly
+ *   inspectAuditIntegrityRotationReadOnly
  * Maps frozen observation → frozen report (design §3.3–§3.7).
  * Zero writes; no timers; no process.argv; no error-codes registry.
  */
 
 import { inspectAuditIntegrityDualWriteReadOnly } from './audit-integrity-dual-write.js';
+import { inspectAuditIntegrityRotationReadOnly } from './audit-integrity-rotation.js';
 
 /** Test-only Symbol; CLI MUST NOT accept wall-clock override. */
 export const AUDIT_INTEGRITY_MONITOR_TEST_CHECKED_AT = Symbol(
@@ -18,9 +21,21 @@ export const AUDIT_INTEGRITY_MONITOR_CONDITION_CODES = Object.freeze([
   'uninitialized',
   'state-missing',
   'recovery-required',
+  'rotation-recovery-required',
   'integrity-alert',
   'io-alert',
 ]);
+
+/** Fixed typed rotation reason codes (string literals; no error-codes import). */
+const ROTATION_REASON_RECOVERY_REQUIRED =
+  'audit-integrity-rotation-recovery-required';
+const ROTATION_REASON_STATE_INVALID =
+  'audit-integrity-rotation-state-invalid';
+const ROTATION_REASON_IO_ERROR = 'audit-integrity-rotation-io-error';
+const ROTATION_REASON_CONFLICT = 'audit-integrity-rotation-conflict';
+
+/** Legacy dual-write RootFail / Sio reason (string literal; no error-codes import). */
+const DUAL_WRITE_REASON_IO_ERROR = 'audit-integrity-dual-write-io-error';
 
 const REPORT_KEYS = Object.freeze([
   'schemaVersion',
@@ -606,13 +621,126 @@ function mapObservationToReport(obs, checkedAt) {
 }
 
 /**
+ * Fixed rotation-layer io-alert (WAL/root leaf I/O that is not legacy dual RootFail).
+ * @param {string} checkedAt
+ * @returns {Readonly<object>}
+ */
+function freezeRotationIoAlertReport(checkedAt) {
+  return freezeReport({
+    status: 'alert',
+    code: 'io-alert',
+    checkedAt,
+    dualWriteState: 'unknown',
+    relationship: null,
+    recoveryRequired: false,
+    nextAction: 'investigate-integrity',
+    reasonCode: ROTATION_REASON_IO_ERROR,
+  });
+}
+
+/**
+ * Map typed rotation inspector throw → path-free monitor report.
+ * Strict fixed code strings only; never copy message/cause/path.
+ * Unknown exceptions → existing fail-closed malformed alert.
+ *
+ * Rotation I/O special-case: consult dual public inspector once to preserve
+ * historical RootFail reason (`audit-integrity-dual-write-io-error`) when the
+ * data root itself is unusable; otherwise keep rotation I/O reason (e.g. WAL
+ * leaf is a directory while root/dual path still works).
+ *
+ * @param {unknown} error
+ * @param {string} checkedAt
+ * @param {string} dataDir
+ * @returns {Promise<Readonly<object>>}
+ */
+async function mapRotationInspectorErrorToReport(error, checkedAt, dataDir) {
+  let code = null;
+  try {
+    if (
+      error !== null
+      && typeof error === 'object'
+      && typeof /** @type {{ code?: unknown }} */ (error).code === 'string'
+    ) {
+      code = /** @type {{ code: string }} */ (error).code;
+    }
+  } catch {
+    return failClosedMalformedReport(checkedAt);
+  }
+
+  if (code === ROTATION_REASON_IO_ERROR) {
+    try {
+      const dualObs = await inspectAuditIntegrityDualWriteReadOnly(dataDir);
+      const dualReport = mapObservationToReport(dualObs, checkedAt);
+      // Legacy RootFail / dual-root I/O: keep historical dual-write-io-error report.
+      if (
+        dualReport
+        && dualReport.code === 'io-alert'
+        && dualReport.reasonCode === DUAL_WRITE_REASON_IO_ERROR
+      ) {
+        return dualReport;
+      }
+      // Root/dual usable (or non-io dual alert) — rotation WAL I/O must not be
+      // covered by healthy/non-io dual observation.
+      return freezeRotationIoAlertReport(checkedAt);
+    } catch {
+      // Dual inspector throw / unexpected: fail-closed, never leak exception.
+      return failClosedMalformedReport(checkedAt);
+    }
+  }
+  if (
+    code === ROTATION_REASON_STATE_INVALID
+    || code === ROTATION_REASON_CONFLICT
+  ) {
+    return freezeReport({
+      status: 'alert',
+      code: 'integrity-alert',
+      checkedAt,
+      dualWriteState: 'unknown',
+      relationship: null,
+      recoveryRequired: false,
+      nextAction: 'investigate-integrity',
+      reasonCode: code,
+    });
+  }
+  return failClosedMalformedReport(checkedAt);
+}
+
+/**
  * Run-once read-only audit integrity monitor.
+ * Rotation inspector first; dual-write inspector when rotation is absent/completed
+ * (or as RootFail classifier after rotation I/O).
  * @param {string} dataDir
  * @param {object} [options]
  * @returns {Promise<Readonly<object>>}
  */
 export async function runAuditIntegrityMonitor(dataDir, options = {}) {
   const checkedAt = resolveCheckedAt(options);
+
+  let rotationObs;
+  try {
+    rotationObs = await inspectAuditIntegrityRotationReadOnly(dataDir);
+  } catch (error) {
+    return mapRotationInspectorErrorToReport(error, checkedAt, dataDir);
+  }
+
+  if (rotationObs && rotationObs.kind === 'recovery-required') {
+    return freezeReport({
+      status: 'alert',
+      code: 'rotation-recovery-required',
+      checkedAt,
+      dualWriteState:
+        typeof rotationObs.dualWriteState === 'string'
+          ? rotationObs.dualWriteState
+          : 'unknown',
+      relationship: null,
+      recoveryRequired: true,
+      nextAction: 'run-explicit-recovery',
+      reasonCode: ROTATION_REASON_RECOVERY_REQUIRED,
+    });
+  }
+
+  // absent | completed: dual-write path preserves historical mapping.
+  // completed latest-archive deep-check already done inside rotation inspector.
   const observation = await inspectAuditIntegrityDualWriteReadOnly(dataDir);
   return mapObservationToReport(observation, checkedAt);
 }
@@ -648,6 +776,14 @@ function reportHasSemanticConsistency(v) {
         && v.reasonCode === null
         && v.relationship === null
       );
+    case 'rotation-recovery-required':
+      return (
+        v.dualWriteState === 'unknown'
+        && v.recoveryRequired === true
+        && v.nextAction === 'run-explicit-recovery'
+        && v.reasonCode === ROTATION_REASON_RECOVERY_REQUIRED
+        && v.relationship === null
+      );
     case 'uninitialized':
       return (
         v.dualWriteState === 'missing'
@@ -673,7 +809,6 @@ function reportHasSemanticConsistency(v) {
       return false;
   }
 }
-
 /**
  * Validate issued frozen report. Provenance gate runs before any reflection
  * so hostile Proxy / forged frozen objects never fire traps on format/exit.

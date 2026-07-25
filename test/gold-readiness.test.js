@@ -78,9 +78,13 @@ const GOLD_REMAINS_BLOCKED_4419 = 'Gold remains blocked 4/4/1/9';
 const STALE_SLASH_AGGREGATE =
   'no journal rotation / managed scheduler / remote notification delivery';
 
-/** Exact V1.42 signature ceiling. */
+/** Exact historical V1.42 signature — retained G0c base. */
 const V142_SIGNATURE =
   'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+/** Exact V1.43 signature ceiling. */
+const V143_SIGNATURE =
+  'V1.43 explicit crash-recoverable audit integrity rotation foundation';
 
 /** Exact historical V1.41 signature. */
 const V141_SIGNATURE =
@@ -170,7 +174,7 @@ const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
  */
 function productionHardeningCurrentPrefix(text) {
   // Current segment ends before first pre-V1.40 historical base marker.
-  // V1.42 lead-in + V1.41/V1.40 historical bases remain in the current honesty prefix.
+  // V1.43 lead-in + V1.42/V1.41/V1.40 historical bases remain in the current honesty prefix.
   return String(text).split(/V1\.39 historical|V1\.38 historical|V1\.37 historical/)[0];
 }
 
@@ -327,13 +331,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.42', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.42');
+  it('expects LINKE_RELEASE_VERSION to be V1.43', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.43');
   });
 
-  it('expects report.version to be V1.42', () => {
+  it('expects report.version to be V1.43', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.42');
+    assert.strictEqual(report.version, 'V1.43');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -343,7 +347,7 @@ describe('Gold Readiness Report', () => {
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.42 does not change statuses)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.43 does not change statuses)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -849,10 +853,67 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(hardeningEvidence);
     assertGuardedRunnerExecutionGateEvidence(hardeningEvidence);
+    // V1.43 honesty: explicit crash-recoverable audit integrity rotation
+    // foundation; local/manual evidence only; G0c real-LAN evidence absent;
+    // T6d.3 still partial; Gold remains blocked 4/4/1/9.
+    assert.ok(
+      hardeningEvidence.includes(V143_SIGNATURE),
+      'production-hardening evidence must include V1.43 exact signature ceiling',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes(V143_SIGNATURE)
+        && hardeningEvidence.indexOf(V143_SIGNATURE) < hardeningEvidence.indexOf(V142_SIGNATURE),
+      'production-hardening evidence must place V1.43 signature before V1.42 historical base',
+    );
+    // V1.43 rotation foundation modules / tests / CLI as honest local manual evidence
+    assert.ok(
+      hardeningItem.evidence.includes('src/audit-integrity-rotation.js'),
+      'production-hardening evidence must exact-include src/audit-integrity-rotation.js',
+    );
+    assert.ok(
+      hardeningItem.evidence.includes('src/audit-integrity-rotation-state.js'),
+      'production-hardening evidence must exact-include src/audit-integrity-rotation-state.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-rotation.test.js'),
+      'production-hardening evidence must include test/audit-integrity-rotation.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-rotation-state.test.js'),
+      'production-hardening evidence must include test/audit-integrity-rotation-state.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/audit-integrity-rotation-scans.test.js'),
+      'production-hardening evidence must include test/audit-integrity-rotation-scans.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('test/agent-audit-integrity-rotation.test.js'),
+      'production-hardening evidence must include test/agent-audit-integrity-rotation.test.js',
+    );
+    assert.ok(
+      hardeningEvidence.includes('src/agent.js audit-integrity-rotate'),
+      'production-hardening evidence must name Agent CLI audit-integrity-rotate',
+    );
+    assert.ok(
+      hardeningEvidence.includes('src/agent.js audit-integrity-rotation-recover'),
+      'production-hardening evidence must name Agent CLI audit-integrity-rotation-recover',
+    );
+    assert.ok(
+      /explicit manual rotation/i.test(hardeningEvidence),
+      'production-hardening evidence must state explicit manual rotation',
+    );
+    assert.ok(
+      hardeningItem.evidence.some((e) => /not WORM|no WORM/i.test(String(e))),
+      'production-hardening evidence must carry a direct WORM denial element',
+    );
+    assert.ok(
+      evidenceElementsDirectlyNegatePhrase(hardeningItem.evidence, 'worm'),
+      'production-hardening evidence elements: worm must be directly negated',
+    );
     // V1.42 honesty: G0c auto harness delivered; real-LAN evidence absent; T6d.3 still partial
     assert.ok(
       hardeningEvidence.includes(V142_SIGNATURE),
-      'production-hardening evidence must include V1.42 exact signature ceiling',
+      'production-hardening evidence must retain V1.42 exact signature as historical base',
     );
     assert.ok(
       hardeningItem.evidence.includes(V142_SIGNATURE)
@@ -1224,12 +1285,13 @@ describe('Gold Readiness Report', () => {
       /single-process/i.test(hardeningEvidence),
       'production-hardening evidence must retain V1.37 historical single-process queue wording',
     );
-    // V1.40 current-state: local multi-process lock delivered; post-outcome still best-effort;
-    // local run-once monitor/alert delivered (V1.38 base); still no journal rotation;
-    // not managed scheduler; not remote notification delivery; not production monitoring ready
+    // V1.43 current-state: local multi-process lock delivered; post-outcome still best-effort;
+    // local run-once monitor/alert delivered (V1.38 base); explicit manual rotation
+    // delivered (V1.43 base); no automatic rotation; not managed scheduler;
+    // not remote notification delivery; not production monitoring ready
     assert.ok(
-      /no journal rotation|not journal rotation/i.test(hardeningEvidence),
-      'production-hardening evidence must deny journal rotation',
+      /no automatic rotation|not automatic rotation/i.test(hardeningEvidence),
+      'production-hardening evidence must deny automatic rotation',
     );
     assert.ok(
       /local run-once monitor|run-once monitor\/alert|monitor\/alert delivered|local run-once/i.test(hardeningEvidence),
@@ -1248,10 +1310,10 @@ describe('Gold Readiness Report', () => {
       'production-hardening evidence must not keep slash aggregate rotation/scheduler/remote',
     );
     assert.ok(
-      hardeningItem.evidence.some((e) => /no journal rotation/i.test(String(e)))
+      hardeningItem.evidence.some((e) => /no automatic rotation|not automatic rotation/i.test(String(e)))
         && hardeningItem.evidence.some((e) => /not managed scheduler|no managed scheduler/i.test(String(e)))
         && hardeningItem.evidence.some((e) => /not remote notification delivery|no remote notification delivery/i.test(String(e))),
-      'production-hardening evidence must carry direct negatives for rotation / scheduler / remote',
+      'production-hardening evidence must carry direct negatives for automatic rotation / scheduler / remote',
     );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(hardeningEvidence)
@@ -1320,14 +1382,22 @@ describe('Gold Readiness Report', () => {
     assert.ok(hardeningEvidence.includes('realRunnerWiringReady:false'));
     assert.ok(hardeningEvidence.includes('runnerWiringContractReady:false'));
     assert.ok(hardeningEvidence.includes('executionEligible:false'));
-    // V1.42 nextStep leads with G0c honesty + exact signature
+    // V1.43 nextStep leads with rotation-foundation honesty + exact signature
     assert.ok(
-      hardeningItem.nextStep.startsWith('V1.42'),
-      'production-hardening nextStep must lead with V1.42',
+      hardeningItem.nextStep.startsWith('V1.43'),
+      'production-hardening nextStep must lead with V1.43',
+    );
+    assert.ok(
+      hardeningItem.nextStep.includes(V143_SIGNATURE),
+      'production-hardening nextStep must include V1.43 exact signature',
+    );
+    assert.ok(
+      /explicit manual rotation/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must state explicit manual rotation',
     );
     assert.ok(
       hardeningItem.nextStep.includes(V142_SIGNATURE),
-      'production-hardening nextStep must include V1.42 exact signature',
+      'production-hardening nextStep must retain V1.42 exact signature as historical base',
     );
     assert.ok(
       hardeningItem.nextStep.includes(V141_SIGNATURE),
@@ -1398,9 +1468,13 @@ describe('Gold Readiness Report', () => {
       hardeningItem.nextStep.includes('not end-to-end production audit delivery'),
       'production-hardening nextStep must deny end-to-end production audit delivery',
     );
-    // V1.42 current nextStep prefix must not keep stale multi-process denials
+    // V1.43 current nextStep prefix must not keep stale multi-process denials
     {
       const nextCurrent = productionHardeningCurrentPrefix(hardeningItem.nextStep);
+      assert.ok(
+        nextCurrent.includes(V143_SIGNATURE),
+        'production-hardening nextStep current prefix must include V1.43 signature',
+      );
       assert.ok(
         nextCurrent.includes(V142_SIGNATURE),
         'production-hardening nextStep current prefix must include V1.42 signature',
@@ -1528,8 +1602,35 @@ describe('Gold Readiness Report', () => {
       );
     }
     assert.ok(
-      /no journal rotation|not journal rotation/i.test(hardeningItem.nextStep),
-      'production-hardening nextStep must deny journal rotation',
+      /no automatic rotation|not automatic rotation/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny automatic rotation',
+    );
+    // V1.43 rotation foundation boundaries on nextStep: retain blockers and
+    // state this is not automatic scheduling, not remote delivery, not WORM,
+    // not authenticity; archive append-only policy is not WORM/authenticity.
+    assert.ok(
+      /no automatic scheduling|not automatic scheduling/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny automatic scheduling',
+    );
+    assert.ok(
+      /append-only/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must state archive append-only policy',
+    );
+    assert.ok(
+      /not WORM|no WORM/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny WORM directly',
+    );
+    assert.ok(
+      clauseLocalDirectBarePositiveNegated(hardeningItem.nextStep, 'worm'),
+      'production-hardening nextStep: worm must be direct clause-local negated',
+    );
+    assert.ok(
+      /not authenticity|no authenticity|no external authenticity/i.test(hardeningItem.nextStep),
+      'production-hardening nextStep must deny authenticity',
+    );
+    assert.ok(
+      !hardeningItem.nextStep.includes('no journal rotation yet'),
+      'production-hardening nextStep must not keep stale "no journal rotation yet" wording',
     );
     // Ambiguous slash aggregate forbidden on nextStep current-state surface
     assert.ok(
@@ -1887,7 +1988,8 @@ describe('Gold Readiness Report', () => {
       'production-hardening nextStep must briefly point at V1.33 real status / status observational history',
     );
     assert.ok(!/M6d Exit complete|M6d Exit 完成|M6d complete|M6d 完成/i.test(hardeningItem.nextStep));
-    assert.ok(!/\bWORM\b|tamper-proof (?:ready|complete|enabled)|chain integrity (?:ready|complete)|Gold ready|GA ready|cross-lan-connectivity/i.test(`${hardeningItem.nextStep} ${hardeningEvidence}`));
+    // WORM may appear only as a direct denial (asserted above); readiness compounds stay banned
+    assert.ok(!/tamper-proof (?:ready|complete|enabled)|chain integrity (?:ready|complete)|Gold ready|GA ready|cross-lan-connectivity/i.test(`${hardeningItem.nextStep} ${hardeningEvidence}`));
     // Forbidden positive compound: assemble needle at runtime (plan forbids embedding full literal)
     const forbiddenCompound = ['tamper', 'evident'].join('-');
     assert.ok(

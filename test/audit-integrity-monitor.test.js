@@ -72,6 +72,7 @@ const CONDITION_CODES = Object.freeze([
   'uninitialized',
   'state-missing',
   'recovery-required',
+  'rotation-recovery-required',
   'integrity-alert',
   'io-alert',
 ]);
@@ -1036,23 +1037,35 @@ describe('C2 audit integrity run-once monitor', () => {
     });
   });
 
-  it('26. source: only import public inspector from dual-write; no forbidden imports', async () => {
+  it('26. source: only dual-write + rotation public read-only inspectors; no forbidden imports', async () => {
     const src = await readFile(MONITOR_SRC, 'utf8');
     const imports = extractImportBlock(src);
-    assert.ok(/inspectAuditIntegrityDualWriteReadOnly/.test(imports));
-    assert.ok(/audit-integrity-dual-write\.js/.test(imports));
-    // exactly one from dual-write
-    const fromDual = [...imports.matchAll(/from\s+['"][^'"]*audit-integrity-dual-write\.js['"]/g)];
-    assert.equal(fromDual.length, 1);
-    // only that named import
+    const importsFlat = imports.replace(/\s+/g, ' ');
+
+    // Exact named public inspectors only (two modules).
     assert.ok(
-      /import\s*\{\s*inspectAuditIntegrityDualWriteReadOnly\s*\}\s*from\s*['"][^'"]*audit-integrity-dual-write\.js['"]/.test(
-        imports.replace(/\s+/g, ' '),
+      /import\s*\{\s*inspectAuditIntegrityDualWriteReadOnly\s*\}\s*from\s*['"]\.\/audit-integrity-dual-write\.js['"]/.test(
+        importsFlat,
       ),
+      'must import inspectAuditIntegrityDualWriteReadOnly from ./audit-integrity-dual-write.js',
     );
+    assert.ok(
+      /import\s*\{\s*inspectAuditIntegrityRotationReadOnly\s*\}\s*from\s*['"]\.\/audit-integrity-rotation\.js['"]/.test(
+        importsFlat,
+      ),
+      'must import inspectAuditIntegrityRotationReadOnly from ./audit-integrity-rotation.js',
+    );
+
+    // Each inspector module appears exactly once as a from-target.
+    const fromDual = [...imports.matchAll(/from\s+['"][^'"]*audit-integrity-dual-write\.js['"]/g)];
+    assert.equal(fromDual.length, 1, 'exactly one dual-write from import');
+    const fromRotation = [...imports.matchAll(/from\s+['"][^'"]*audit-integrity-rotation\.js['"]/g)];
+    assert.equal(fromRotation.length, 1, 'exactly one rotation from import');
+
     for (const bad of [
       'error-codes',
       'audit-integrity-dual-write-state',
+      'audit-integrity-rotation-state',
       'audit-integrity-journal',
       'audit-integrity-cross-store',
       'audit-integrity-write-queue',
@@ -1063,6 +1076,38 @@ describe('C2 audit integrity run-once monitor', () => {
     ]) {
       assert.equal(imports.includes(bad), false, `forbidden import ${bad}`);
     }
+
+    // Exact allowlist of named imports only (no /write/i — false positive on DualWrite).
+    // Inspect only names inside `{ ... }`, never module path.
+    const allowedNamedImports = new Set([
+      'inspectAuditIntegrityDualWriteReadOnly',
+      'inspectAuditIntegrityRotationReadOnly',
+    ]);
+    /** @type {string[]} */
+    const namedImports = [];
+    for (const m of imports.matchAll(/import\s*\{([^}]+)\}\s*from/g)) {
+      const names = m[1]
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+          // support `foo as bar` / bare `foo`
+          const bits = part.split(/\s+as\s+/i);
+          return bits[0].trim();
+        });
+      for (const name of names) {
+        namedImports.push(name);
+        assert.ok(
+          allowedNamedImports.has(name),
+          `extra or forbidden named import: ${name}`,
+        );
+      }
+    }
+    assert.deepEqual(
+      [...namedImports].sort(),
+      [...allowedNamedImports].sort(),
+      'named imports must be exactly the two public inspectors',
+    );
   });
 
   it('27. source: no setInterval/setTimeout/setImmediate scheduler', async () => {
@@ -1073,10 +1118,10 @@ describe('C2 audit integrity run-once monitor', () => {
     assert.equal(/\bsetImmediate\b/.test(masked), false);
   });
 
-  // V1.42: registry 74→88 (G0c +14 restore = 88); monitor boundary still does not change registry.
-  // Historical: V1.41 was 74 = V1.40 62 + 12 upload.
-  it('28. ERROR_CODES length remains 88 (this boundary does not change registry)', async () => {
-    assert.equal(Object.keys(ERROR_CODES).length, 88);
+  // V1.43 current=94 = V1.42 88 + 6 rotation; monitor boundary still does not change registry.
+  // Historical: V1.42 was 88 = V1.41 74 + 14 restore; V1.41 was 74 = V1.40 62 + 12 upload.
+  it('28. ERROR_CODES length remains 94 (this boundary does not change registry)', async () => {
+    assert.equal(Object.keys(ERROR_CODES).length, 94);
   });
 
   it('29. #11 idle + journal missing/NOT_INITIALIZED → integrity-alert; dual idle; relationship null; not-initialized; exit 2', async () => {

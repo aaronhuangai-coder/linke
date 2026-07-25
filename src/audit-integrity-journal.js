@@ -64,12 +64,22 @@ export const AUDIT_INTEGRITY_JOURNAL_MAX_LINES_AFTER_APPEND = 4097;
 /** Per-line UTF-8 max (checked before JSON.parse); over → bounds-exceeded. */
 export const AUDIT_INTEGRITY_JOURNAL_MAX_RECORD_LINE_BYTES = 374;
 
+/**
+ * Per-line UTF-8 max for a v2 generation-open line (exact 10-key canonical record).
+ * v1 lines and all event-link lines stay bounded by
+ * AUDIT_INTEGRITY_JOURNAL_MAX_RECORD_LINE_BYTES.
+ */
+export const AUDIT_INTEGRITY_JOURNAL_V2_OPEN_MAX_LINE_BYTES = 477;
+
 const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION_V2 = 2;
 const RECORD_KIND_OPEN = 'generation-open';
 const RECORD_KIND_EVENT = 'event-link';
 
 const DOMAIN_GENERATION_OPEN = 'linke.audit-integrity-journal.v1.generation-open\u0000';
 const DOMAIN_EVENT_LINK = 'linke.audit-integrity-journal.v1.event-link\u0000';
+const DOMAIN_V2_GENERATION_OPEN = 'linke.audit-integrity-journal.v2.generation-open\u0000';
+const DOMAIN_V2_EVENT_LINK = 'linke.audit-integrity-journal.v2.event-link\u0000';
 
 const GENERATION_ID_RE = /^[0-9a-f]{32}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
@@ -83,6 +93,26 @@ const RECORD_KEYS = Object.freeze([
   'payloadDigest',
   'linkDigest',
 ]);
+
+/** Exact 10-key canonical order for a v2 generation-open record. */
+const V2_OPEN_RECORD_KEYS = Object.freeze([
+  'schemaVersion',
+  'recordKind',
+  'generationId',
+  'previousGenerationId',
+  'previousHeadDigest',
+  'archiveManifestDigest',
+  'sequence',
+  'previousLinkDigest',
+  'payloadDigest',
+  'linkDigest',
+]);
+
+/**
+ * Byte prefix of every canonical v2 generation-open line. Gates the pre-parse
+ * 477-byte allowance so other 375..477-byte lines still fail bounds before parse.
+ */
+const V2_OPEN_LINE_PREFIX = '{"schemaVersion":2,"recordKind":"generation-open",';
 
 /**
  * Module-private plan brand store (plan object identity → private raw payload).
@@ -146,12 +176,50 @@ function generationOpenLinkDigest(generationId) {
 }
 
 /**
+ * v2 generation-open link digest: v2 open domain over the ten-key preimage
+ * (generationId / previousGenerationId / previousHeadDigest / archiveManifestDigest,
+ * then fixed sequence 0, null previousLinkDigest, null payloadDigest).
+ * @param {{
+ *   generationId: string,
+ *   previousGenerationId: string,
+ *   previousHeadDigest: string,
+ *   archiveManifestDigest: string,
+ * }} parts
+ * @returns {string}
+ */
+function v2GenerationOpenLinkDigest(parts) {
+  // Build the NUL field separator without placing a raw zero byte in source text.
+  const nul = String.fromCharCode(0);
+  return sha256Hex(
+    DOMAIN_V2_GENERATION_OPEN
+      + parts.generationId
+      + nul
+      + parts.previousGenerationId
+      + nul
+      + parts.previousHeadDigest
+      + nul
+      + parts.archiveManifestDigest
+      + nul
+      + '0'
+      + nul
+      + 'null'
+      + nul
+      + 'null',
+  );
+}
+
+/**
+ * Event-link digest under the homogeneous generation domain.
+ * @param {number} schemaVersion 1 → v1 event-link domain; 2 → v2 event-link domain
  * @param {{ generationId: string, sequence: number, previousLinkDigest: string, payloadDigest: string }} parts
  * @returns {string}
  */
-function eventLinkDigest(parts) {
+function eventLinkDigest(schemaVersion, parts) {
+  const domain = schemaVersion === SCHEMA_VERSION
+    ? DOMAIN_EVENT_LINK
+    : DOMAIN_V2_EVENT_LINK;
   return sha256Hex(
-    DOMAIN_EVENT_LINK
+    domain
       + parts.generationId
       + '\u0000'
       + String(parts.sequence)
@@ -180,6 +248,37 @@ function canonicalRecordLine(record) {
     schemaVersion: record.schemaVersion,
     recordKind: record.recordKind,
     generationId: record.generationId,
+    sequence: record.sequence,
+    previousLinkDigest: record.previousLinkDigest,
+    payloadDigest: record.payloadDigest,
+    linkDigest: record.linkDigest,
+  });
+}
+
+/**
+ * Exact 10-key canonical v2 open JSON line (no trailing newline).
+ * @param {{
+ *   schemaVersion: number,
+ *   recordKind: string,
+ *   generationId: string,
+ *   previousGenerationId: string,
+ *   previousHeadDigest: string,
+ *   archiveManifestDigest: string,
+ *   sequence: number,
+ *   previousLinkDigest: string | null,
+ *   payloadDigest: string | null,
+ *   linkDigest: string,
+ * }} record
+ * @returns {string}
+ */
+function canonicalV2OpenLine(record) {
+  return JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    recordKind: record.recordKind,
+    generationId: record.generationId,
+    previousGenerationId: record.previousGenerationId,
+    previousHeadDigest: record.previousHeadDigest,
+    archiveManifestDigest: record.archiveManifestDigest,
     sequence: record.sequence,
     previousLinkDigest: record.previousLinkDigest,
     payloadDigest: record.payloadDigest,
@@ -237,7 +336,9 @@ function isPlainObject(value) {
 
 /**
  * Validate one parsed record plain shape + exact key order + types (format only).
+ * Expected schema version defaults to v1 so all v1 validation stays unchanged.
  * @param {unknown} record
+ * @param {number} [expectedSchemaVersion]
  * @returns {{
  *   schemaVersion: number,
  *   recordKind: string,
@@ -248,7 +349,7 @@ function isPlainObject(value) {
  *   linkDigest: string,
  * }}
  */
-function assertPlainRecordShape(record) {
+function assertPlainRecordShape(record, expectedSchemaVersion = SCHEMA_VERSION) {
   if (!isPlainObject(record)) {
     throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
   }
@@ -270,7 +371,7 @@ function assertPlainRecordShape(record) {
   const payloadDigest = record.payloadDigest;
   const linkDigest = record.linkDigest;
 
-  if (schemaVersion !== SCHEMA_VERSION) {
+  if (schemaVersion !== expectedSchemaVersion) {
     throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
   }
   if (recordKind !== RECORD_KIND_OPEN && recordKind !== RECORD_KIND_EVENT) {
@@ -305,6 +406,95 @@ function assertPlainRecordShape(record) {
     schemaVersion,
     recordKind,
     generationId,
+    sequence,
+    previousLinkDigest,
+    payloadDigest,
+    linkDigest,
+  };
+}
+
+/**
+ * v2 generation-open detection: exact byte prefix gates the 477-byte allowance.
+ * @param {string} line
+ * @returns {boolean}
+ */
+function isV2OpenLine(line) {
+  return line.startsWith(V2_OPEN_LINE_PREFIX);
+}
+
+/**
+ * Validate a parsed v2 generation-open record: exact ten-key order + types (format only).
+ * @param {unknown} record
+ * @returns {{
+ *   schemaVersion: number,
+ *   recordKind: string,
+ *   generationId: string,
+ *   previousGenerationId: string,
+ *   previousHeadDigest: string,
+ *   archiveManifestDigest: string,
+ *   sequence: number,
+ *   previousLinkDigest: string | null,
+ *   payloadDigest: string | null,
+ *   linkDigest: string,
+ * }}
+ */
+function assertV2PlainOpenShape(record) {
+  if (!isPlainObject(record)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  const keys = Object.keys(record);
+  if (keys.length !== V2_OPEN_RECORD_KEYS.length) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  for (let i = 0; i < V2_OPEN_RECORD_KEYS.length; i += 1) {
+    if (keys[i] !== V2_OPEN_RECORD_KEYS[i]) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+  }
+
+  const schemaVersion = record.schemaVersion;
+  const recordKind = record.recordKind;
+  const generationId = record.generationId;
+  const previousGenerationId = record.previousGenerationId;
+  const previousHeadDigest = record.previousHeadDigest;
+  const archiveManifestDigest = record.archiveManifestDigest;
+  const sequence = record.sequence;
+  const previousLinkDigest = record.previousLinkDigest;
+  const payloadDigest = record.payloadDigest;
+  const linkDigest = record.linkDigest;
+
+  if (schemaVersion !== SCHEMA_VERSION_V2) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (recordKind !== RECORD_KIND_OPEN) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (typeof generationId !== 'string' || !GENERATION_ID_RE.test(generationId)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (typeof previousGenerationId !== 'string' || !GENERATION_ID_RE.test(previousGenerationId)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (typeof previousHeadDigest !== 'string' || !HEX64_RE.test(previousHeadDigest)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (typeof archiveManifestDigest !== 'string' || !HEX64_RE.test(archiveManifestDigest)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (sequence !== 0) throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  if (previousLinkDigest !== null) throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  if (payloadDigest !== null) throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  if (typeof linkDigest !== 'string' || !HEX64_RE.test(linkDigest)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+
+  return {
+    schemaVersion,
+    recordKind,
+    generationId,
+    previousGenerationId,
+    previousHeadDigest,
+    archiveManifestDigest,
     sequence,
     previousLinkDigest,
     payloadDigest,
@@ -411,7 +601,7 @@ function verifyRawJournal(raw) {
       throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
     }
     // payloadDigest used as link preimage input only (format already checked).
-    const expectedLink = eventLinkDigest({
+    const expectedLink = eventLinkDigest(SCHEMA_VERSION, {
       generationId: rec.generationId,
       sequence: rec.sequence,
       previousLinkDigest: rec.previousLinkDigest,
@@ -433,6 +623,212 @@ function verifyRawJournal(raw) {
     eventCount: payloadDigests.length,
     payloadDigests,
   };
+}
+
+/**
+ * v2 binding digest input guard: 64 lowercase hex, registered codes only.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function assertV2BindingDigest(value) {
+  if (typeof value !== 'string' || !HEX64_RE.test(value)) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  return value;
+}
+
+/**
+ * Safely read one v2 binding digest option: any property-access throw maps to
+ * chain-broken (never io; never copies cause/message).
+ * @param {unknown} options
+ * @param {string} key
+ * @returns {string}
+ */
+function readV2BindingDigestOption(options, key) {
+  let value;
+  try {
+    value = options == null ? undefined : options[key];
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  return assertV2BindingDigest(value);
+}
+
+/**
+ * Full structure verify of a homogeneous v2 generation on already-read UTF-8 raw.
+ * Ten-key v2 open under the v2 open domain; shared 7-key event records under the
+ * v2 event-link domain. Per-line bound: 477 only for v2-open-prefixed lines, 374 else.
+ * Private headSequence / eventCount / payloadDigests mirror verifyRawJournal so
+ * inspect/file consumers can share one generation-aware path; public text verify
+ * receipts continue to omit those private fields.
+ * @param {string} raw
+ * @returns {{
+ *   generationId: string,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   binding: {
+ *     previousGenerationId: string,
+ *     previousHeadDigest: string,
+ *     archiveManifestDigest: string,
+ *   },
+ *   headSequence: number,
+ *   eventCount: number,
+ *   payloadDigests: string[],
+ * }}
+ */
+function verifyRawV2Journal(raw) {
+  if (raw === '') throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  if (!raw.endsWith('\n')) throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+
+  const body = raw.slice(0, -1);
+  const lines = body === '' ? [] : body.split('\n');
+
+  for (const line of lines) {
+    if (line === '') throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  if (lines.length === 0) throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+
+  // Bounds: line count (API max 4097) — not chain corruption; not size io.
+  if (lines.length > AUDIT_INTEGRITY_JOURNAL_MAX_LINES_AFTER_APPEND) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+  }
+
+  /** @type {Array<ReturnType<typeof assertV2PlainOpenShape> | ReturnType<typeof assertPlainRecordShape>>} */
+  const records = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    // Per-line UTF-8 bound BEFORE JSON.parse; 477 gated on the v2 open prefix.
+    const v2Open = isV2OpenLine(line);
+    const maxLineBytes = v2Open
+      ? AUDIT_INTEGRITY_JOURNAL_V2_OPEN_MAX_LINE_BYTES
+      : AUDIT_INTEGRITY_JOURNAL_MAX_RECORD_LINE_BYTES;
+    if (Buffer.byteLength(line, 'utf8') > maxLineBytes) {
+      throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+
+    if (v2Open) {
+      const record = assertV2PlainOpenShape(parsed);
+      if (canonicalV2OpenLine(record) !== line) {
+        throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+      }
+      records.push(record);
+    } else {
+      const record = assertPlainRecordShape(parsed, SCHEMA_VERSION_V2);
+      if (canonicalRecordLine(record) !== line) {
+        throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+      }
+      records.push(record);
+    }
+  }
+
+  const open = records[0];
+  if (open.recordKind !== RECORD_KIND_OPEN) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+  const binding = {
+    previousGenerationId: open.previousGenerationId,
+    previousHeadDigest: open.previousHeadDigest,
+    archiveManifestDigest: open.archiveManifestDigest,
+  };
+  const expectedOpen = v2GenerationOpenLinkDigest({
+    generationId: open.generationId,
+    previousGenerationId: open.previousGenerationId,
+    previousHeadDigest: open.previousHeadDigest,
+    archiveManifestDigest: open.archiveManifestDigest,
+  });
+  if (open.linkDigest !== expectedOpen) {
+    throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  }
+
+  const generationId = open.generationId;
+  /** @type {string[]} event-link payloadDigest only (never open null) */
+  const payloadDigests = [];
+  for (let i = 1; i < records.length; i += 1) {
+    const rec = records[i];
+    if (rec.recordKind !== RECORD_KIND_EVENT) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    if (rec.sequence !== i) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    if (rec.generationId !== generationId) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    const prev = records[i - 1];
+    if (rec.previousLinkDigest !== prev.linkDigest) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    const expectedLink = eventLinkDigest(SCHEMA_VERSION_V2, {
+      generationId: rec.generationId,
+      sequence: rec.sequence,
+      previousLinkDigest: rec.previousLinkDigest,
+      payloadDigest: rec.payloadDigest,
+    });
+    if (rec.linkDigest !== expectedLink) {
+      throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+    }
+    payloadDigests.push(/** @type {string} */ (rec.payloadDigest));
+  }
+
+  const head = records[records.length - 1];
+  return {
+    generationId,
+    recordCount: records.length,
+    headDigest: head.linkDigest,
+    binding,
+    headSequence: head.sequence,
+    eventCount: payloadDigests.length,
+    payloadDigests,
+  };
+}
+
+/**
+ * Generation-aware full-structure verify of already-read UTF-8 raw.
+ * Homogeneous v2-open raw -> verifyRawV2Journal (477-byte open bound);
+ * otherwise legacy verifyRawJournal (v1 374-byte bound, mixed v1/v2 rejected).
+ * Shared by file verify/inspect, append plan, and append post-write reopen verify.
+ * Schema/domain choice for append is derived only from this result (never caller options).
+ *
+ * @param {string} raw
+ * @returns {{
+ *   generationId: string,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   headSequence: number,
+ *   eventCount: number,
+ *   payloadDigests: string[],
+ *   binding?: {
+ *     previousGenerationId: string,
+ *     previousHeadDigest: string,
+ *     archiveManifestDigest: string,
+ *   },
+ * }}
+ */
+function verifyRawJournalGenerationAware(raw) {
+  if (isV2OpenLine(raw)) {
+    return verifyRawV2Journal(raw);
+  }
+  return verifyRawJournal(raw);
+}
+
+/**
+ * Append event-link schema/domain for a generation-aware verify receipt.
+ * v2 generations carry binding; v1 receipts never do. Caller input must not decide this.
+ *
+ * @param {{ binding?: unknown }} verified
+ * @returns {1|2}
+ */
+function appendSchemaVersionFromVerified(verified) {
+  return Object.prototype.hasOwnProperty.call(verified, 'binding')
+    ? SCHEMA_VERSION_V2
+    : SCHEMA_VERSION;
 }
 
 /**
@@ -585,25 +981,30 @@ export async function planAuditIntegrityEventLinkUnlocked(resolvedRoot, lease, o
     throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_BOUNDS_EXCEEDED);
   }
 
-  const verified = verifyRawJournal(raw);
+  // Generation-aware full verify: homogeneous v1 or v2 only (mixed stays chain-broken).
+  const verified = verifyRawJournalGenerationAware(raw);
 
   if (verified.generationId !== generationId) {
     throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
   }
 
+  // Schema/domain from verified generation only — never from caller options.
+  const schemaVersion = appendSchemaVersionFromVerified(verified);
+
   // Reachable upper bound for sequence is 4096: append preflight allows existing ≤4096
   // and verify forces sequence===line index; existing 4097 is already bounds-rejected.
   const sequence = verified.headSequence + 1;
   const previousLinkDigest = verified.headDigest;
-  const linkDigest = eventLinkDigest({
+  const linkDigest = eventLinkDigest(schemaVersion, {
     generationId,
     sequence,
     previousLinkDigest,
     payloadDigest,
   });
 
+  // Append only a 7-key event-link; v2 open generationBinding bytes stay untouched.
   const record = {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion,
     recordKind: RECORD_KIND_EVENT,
     generationId,
     sequence,
@@ -754,7 +1155,8 @@ export async function publishPlannedAuditIntegrityEventLinkAtomicUnlocked(
     if (postRaw !== privatePayload.rawPostText) {
       throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
     }
-    const postVerified = verifyRawJournal(postRaw);
+    // Generation-aware reopen verify of exact rawPost (not plan hash alone; not v1-only).
+    const postVerified = verifyRawJournalGenerationAware(postRaw);
     if (
       postVerified.recordCount !== plan.post.recordCount
       || postVerified.headDigest !== plan.post.headDigest
@@ -866,8 +1268,9 @@ export async function appendAuditIntegrityEvent(root, options = {}) {
 /**
  * Read-only structural verify of the journal file (may run outside the write queue).
  * Success means internal structure self-consistency only — not authenticity.
- * Receipt allowlist unchanged: state/generationId/recordCount/headDigest only
- * (private payloadDigests from verifyRawJournal never enter this receipt).
+ * Generation-aware: v2 open uses verifyRawV2Journal (477-byte open bound);
+ * v1 remains verifyRawJournal. Receipt allowlist unchanged:
+ * state/generationId/recordCount/headDigest only (private payloadDigests never enter).
  *
  * @param {string} root existing safe data root
  * @returns {Promise<{ state: 'verified', generationId: string, recordCount: number, headDigest: string }>}
@@ -897,7 +1300,7 @@ export async function verifyAuditIntegrityJournalFile(root) {
     mapIoError(error);
   }
 
-  const result = verifyRawJournal(raw);
+  const result = verifyRawJournalGenerationAware(raw);
   return {
     state: 'verified',
     generationId: result.generationId,
@@ -909,7 +1312,9 @@ export async function verifyAuditIntegrityJournalFile(root) {
 /**
  * @internal read-only snapshot after full structure verify (same parser strength as verify).
  * No write queue; no raw records/path/event body/linkDigest list.
- * Snapshot fixed keys/order; payloadDigests deep-copied + frozen (event-link only).
+ * Generation-aware: v2 open uses verifyRawV2Journal so post-rotation v2 journals
+ * inspect cleanly for dual/cross-store cursors. Snapshot fixed keys/order;
+ * payloadDigests deep-copied + frozen (event-link only).
  *
  * @param {string} root existing safe data root
  * @param {object} [options] reserved; current contract does not read option keys
@@ -949,12 +1354,171 @@ export async function inspectAuditIntegrityJournalFile(root, options = {}) {
     mapIoError(error);
   }
 
-  const result = verifyRawJournal(raw);
+  const result = verifyRawJournalGenerationAware(raw);
   return Object.freeze({
     generationId: result.generationId,
     headDigest: result.headDigest,
     recordCount: result.recordCount,
     eventCount: result.eventCount,
     payloadDigests: Object.freeze(result.payloadDigests.slice()),
+  });
+}
+
+/**
+ * Generation-aware read-only structural verify of raw journal text (sync; no I/O).
+ * Homogeneous v1 raw delegates to verifyRawJournal unchanged; homogeneous v2 raw
+ * verifies the ten-key v2 open under the v2 open domain and shared 7-key event
+ * records under the v2 event-link domain. Mixed v1/v2 raw is audit-chain-broken.
+ * v1 receipt has exactly schemaVersion/generationId/recordCount/headDigest and no
+ * generationBinding property; v2 receipt adds a frozen three-key generationBinding.
+ * Success means internal structure self-consistency only — not authenticity.
+ *
+ * @param {string} raw
+ * @returns {{
+ *   schemaVersion: number,
+ *   generationId: string,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   generationBinding?: {
+ *     previousGenerationId: string,
+ *     previousHeadDigest: string,
+ *     archiveManifestDigest: string,
+ *   },
+ * }}
+ */
+export function verifyAuditIntegrityJournalText(raw) {
+  if (typeof raw !== 'string') throwJournalError(ERROR_CODES.AUDIT_CHAIN_BROKEN);
+  // Full-file envelope first: size overlimit is io-error (never bounds-exceeded)
+  // and must gate before v2-open detection, splitting, parsing, or per-line bounds.
+  if (Buffer.byteLength(raw, 'utf8') > AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES) {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR);
+  }
+  if (isV2OpenLine(raw)) {
+    const result = verifyRawV2Journal(raw);
+    return Object.freeze({
+      schemaVersion: SCHEMA_VERSION_V2,
+      generationId: result.generationId,
+      recordCount: result.recordCount,
+      headDigest: result.headDigest,
+      generationBinding: Object.freeze({
+        previousGenerationId: result.binding.previousGenerationId,
+        previousHeadDigest: result.binding.previousHeadDigest,
+        archiveManifestDigest: result.binding.archiveManifestDigest,
+      }),
+    });
+  }
+  const result = verifyRawJournal(raw);
+  return Object.freeze({
+    schemaVersion: SCHEMA_VERSION,
+    generationId: result.generationId,
+    recordCount: result.recordCount,
+    headDigest: result.headDigest,
+  });
+}
+
+/**
+ * Pure/synchronous v2 generation image builder: no filesystem, no queue, no lease.
+ * Emits one v2 open line and one v2 event line (each with trailing newline).
+ * Event payloadDigest uses the shared strict event payload digest SoT.
+ * Returns a frozen exact nine-key receipt with a frozen three-key generationBinding.
+ *
+ * @param {{
+ *   generationId: string,
+ *   previousGenerationId: string,
+ *   previousHeadDigest: string,
+ *   archiveManifestDigest: string,
+ *   rotationEvent: unknown,
+ * }} options
+ * @returns {{
+ *   rawText: string,
+ *   schemaVersion: number,
+ *   generationId: string,
+ *   recordCount: number,
+ *   headDigest: string,
+ *   eventPayloadDigest: string,
+ *   rawByteLength: number,
+ *   rawSha256: string,
+ *   generationBinding: {
+ *     previousGenerationId: string,
+ *     previousHeadDigest: string,
+ *     archiveManifestDigest: string,
+ *   },
+ * }}
+ */
+export function buildAuditIntegrityV2GenerationImage(options = {}) {
+  const generationId = readGenerationIdOption(options);
+  let previousGenerationId;
+  try {
+    previousGenerationId = options == null ? undefined : options.previousGenerationId;
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_GENERATION_ID_INVALID);
+  }
+  previousGenerationId = assertGenerationId(previousGenerationId);
+  const previousHeadDigest = readV2BindingDigestOption(options, 'previousHeadDigest');
+  const archiveManifestDigest = readV2BindingDigestOption(options, 'archiveManifestDigest');
+
+  let rotationEvent;
+  try {
+    rotationEvent = options == null ? undefined : options.rotationEvent;
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+  let payloadDigest;
+  try {
+    payloadDigest = computeEventPayloadDigestSoT(rotationEvent);
+  } catch {
+    throwJournalError(ERROR_CODES.AUDIT_INTEGRITY_EVENT_INVALID);
+  }
+
+  const openLinkDigest = v2GenerationOpenLinkDigest({
+    generationId,
+    previousGenerationId,
+    previousHeadDigest,
+    archiveManifestDigest,
+  });
+  const openLine = canonicalV2OpenLine({
+    schemaVersion: SCHEMA_VERSION_V2,
+    recordKind: RECORD_KIND_OPEN,
+    generationId,
+    previousGenerationId,
+    previousHeadDigest,
+    archiveManifestDigest,
+    sequence: 0,
+    previousLinkDigest: null,
+    payloadDigest: null,
+    linkDigest: openLinkDigest,
+  });
+
+  const eventLink = eventLinkDigest(SCHEMA_VERSION_V2, {
+    generationId,
+    sequence: 1,
+    previousLinkDigest: openLinkDigest,
+    payloadDigest,
+  });
+  const eventLine = canonicalRecordLine({
+    schemaVersion: SCHEMA_VERSION_V2,
+    recordKind: RECORD_KIND_EVENT,
+    generationId,
+    sequence: 1,
+    previousLinkDigest: openLinkDigest,
+    payloadDigest,
+    linkDigest: eventLink,
+  });
+
+  const rawText = `${openLine}\n${eventLine}\n`;
+  return Object.freeze({
+    rawText,
+    schemaVersion: SCHEMA_VERSION_V2,
+    generationId,
+    recordCount: 2,
+    headDigest: eventLink,
+    eventPayloadDigest: payloadDigest,
+    rawByteLength: Buffer.byteLength(rawText, 'utf8'),
+    rawSha256: sha256Hex(rawText),
+    generationBinding: Object.freeze({
+      previousGenerationId,
+      previousHeadDigest,
+      archiveManifestDigest,
+    }),
   });
 }

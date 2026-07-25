@@ -95,6 +95,10 @@ import {
   parseStrictCanonicalAuditEventLinesText,
   StrictCanonicalAuditEventLinesParseError,
 } from './audit-event-schema.js';
+import {
+  AuditIntegrityRotationError,
+  assertAuditIntegrityRotationAllowsAppendUnlocked,
+} from './audit-integrity-rotation-state.js';
 
 const EMPTY_FILE_SHA256 =
   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -1318,6 +1322,25 @@ export async function ensureAuditIntegrityDualWriteIdleUnlocked(resolvedRoot, le
 }
 
 /**
+ * Lease-bound read-only exact-idle validator for rotation and other same-root
+ * callers. Loads existing dual-write state only: never bootstraps, never recovers
+ * prepared, never publishes/writes. Missing or non-idle state is STATE_INVALID.
+ * On exact idle, reuses the existing idle cursor/cross-store validator (no formula copy).
+ *
+ * @param {string} resolvedRoot
+ * @param {object} lease
+ * @returns {Promise<object>} validated idle dual-write state
+ */
+export async function validateAuditIntegrityDualWriteIdleUnlocked(resolvedRoot, lease) {
+  assertAuditIntegrityWriteLease(resolvedRoot, lease);
+  const state = await loadDualWriteStateUnlocked(resolvedRoot, lease);
+  if (state === null || state.status !== 'idle') {
+    throwDualWriteError(ERROR_CODES.AUDIT_INTEGRITY_DUAL_WRITE_STATE_INVALID);
+  }
+  return validateIdleCursorAgainstStoresUnlocked(resolvedRoot, lease, state);
+}
+
+/**
  * Explicit recovery/bootstrap/idle validation; resolve + fresh shared queue lease.
  * @param {string} root
  * @returns {Promise<object>}
@@ -2143,7 +2166,18 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
   }
 
   return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
+    // Rotation gate before any dual-state load/interpret/bootstrap/recover or store mutation.
+    const completedRotation =
+      await assertAuditIntegrityRotationAllowsAppendUnlocked(resolvedRoot, lease);
     const idle = await ensureAuditIntegrityDualWriteIdleUnlocked(resolvedRoot, lease);
+    if (
+      completedRotation !== null
+      && idle.generationId !== completedRotation.nextGenerationId
+    ) {
+      throw new AuditIntegrityRotationError(
+        ERROR_CODES.AUDIT_INTEGRITY_ROTATION_CONFLICT,
+      );
+    }
     return commitDualWriteUnlocked(resolvedRoot, lease, idle, {
       sanitized,
       strictEvent: frozenEvent,

@@ -74,6 +74,13 @@ export const ERROR_CODES = Object.freeze({
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
   // V1.40 local multi-process audit integrity write exclusive lock (+1).
   AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
+  // V1.43 audit integrity rotation state/manifest (+6). String-only kebab; no HTTP metadata.
+  AUDIT_INTEGRITY_ROTATION_STATE_INVALID: 'audit-integrity-rotation-state-invalid',
+  AUDIT_INTEGRITY_ROTATION_IO_ERROR: 'audit-integrity-rotation-io-error',
+  AUDIT_INTEGRITY_ROTATION_PRECONDITION_FAILED: 'audit-integrity-rotation-precondition-failed',
+  AUDIT_INTEGRITY_ROTATION_RECOVERY_REQUIRED: 'audit-integrity-rotation-recovery-required',
+  AUDIT_INTEGRITY_ROTATION_CONFLICT: 'audit-integrity-rotation-conflict',
+  AUDIT_INTEGRITY_ROTATION_BOUNDS_EXCEEDED: 'audit-integrity-rotation-bounds-exceeded',
   // V1.41 G0b resumable snapshot upload (+12). String-only kebab values; no domain metadata.
   UPLOAD_MANIFEST_INVALID: 'upload-manifest-invalid',
   UPLOAD_SESSION_CONFLICT: 'upload-session-conflict',
@@ -89,7 +96,7 @@ export const ERROR_CODES = Object.freeze({
   // Client-local only (HTTP N/A). Distinct from DATA_RESUME_EXHAUSTED.
   UPLOAD_RESUME_EXHAUSTED: 'upload-resume-exhausted',
   // V1.42 G0c endpoint-pull restore (+14). String-only kebab values; no domain metadata.
-  // 74 + 14 restore = 88.
+  // Historical: 74 + 14 restore = 88; +6 rotation (V1.43) = 94.
   RESTORE_TASK_INVALID: 'restore-task-invalid',
   RESTORE_TASK_NOT_FOUND: 'restore-task-not-found',
   RESTORE_TASK_CONFLICT: 'restore-task-conflict',

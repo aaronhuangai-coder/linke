@@ -10,7 +10,7 @@ import {
 
 /**
  * Closed-set pin of the entire public ERROR_CODES registry.
- * Count: 88 = 74 (V1.41 G0b) + 14 new V1.42 G0c restore-* codes.
+ * Count: 94 = 88 (V1.42 G0c) + 6 new V1.43 rotation-* codes.
  *
  * Historical: 74 = existing 62 (V1.40) + 12 new V1.41 G0b upload-* codes.
  *
@@ -28,6 +28,7 @@ import {
  *   (size≠bounds analogy preserved; dual-write has no bounds code).
  * - V1.39: AUDIT_DELIVERY_UNAVAILABLE only (write-admission fail-closed).
  * - V1.40: AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE only (local multi-process write lock).
+ * - V1.43: +6 audit-integrity-rotation-* codes directly after process-lock.
  * - V1.41 G0b: +12 upload-* string-only codes (no domain/object metadata on ERROR_CODES).
  * - UPLOAD_RESUME_EXHAUSTED is client-local only; ≠ DATA_RESUME_EXHAUSTED; HTTP N/A.
  * - V1.42 G0c: +14 restore-* string-only codes + RESTORE_ERROR_HTTP_CONTRACT.
@@ -116,6 +117,13 @@ const EXPECTED_ERROR_CODES = {
   AUDIT_DELIVERY_UNAVAILABLE: 'audit-delivery-unavailable',
   // --- new 1 (V1.40 local multi-process process-lock; only this code is new in this bump) ---
   AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE: 'audit-integrity-process-lock-unavailable',
+  // --- new 6 (V1.43 audit integrity rotation state/manifest; after process-lock) ---
+  AUDIT_INTEGRITY_ROTATION_STATE_INVALID: 'audit-integrity-rotation-state-invalid',
+  AUDIT_INTEGRITY_ROTATION_IO_ERROR: 'audit-integrity-rotation-io-error',
+  AUDIT_INTEGRITY_ROTATION_PRECONDITION_FAILED: 'audit-integrity-rotation-precondition-failed',
+  AUDIT_INTEGRITY_ROTATION_RECOVERY_REQUIRED: 'audit-integrity-rotation-recovery-required',
+  AUDIT_INTEGRITY_ROTATION_CONFLICT: 'audit-integrity-rotation-conflict',
+  AUDIT_INTEGRITY_ROTATION_BOUNDS_EXCEEDED: 'audit-integrity-rotation-bounds-exceeded',
   // --- new 12 (V1.41 G0b resumable snapshot upload; string-only upload-* values) ---
   UPLOAD_MANIFEST_INVALID: 'upload-manifest-invalid',
   UPLOAD_SESSION_CONFLICT: 'upload-session-conflict',
@@ -240,9 +248,9 @@ const EXPECTED_RESTORE_HTTP_CONTRACT = Object.freeze({
 });
 
 describe('Gold error-code registry', () => {
-  it('matches the exact closed-set ERROR_CODES registry (88 entries = 74 + 14 restore)', () => {
-    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 88);
-    assert.strictEqual(Object.keys(ERROR_CODES).length, 88);
+  it('matches the exact closed-set ERROR_CODES registry (94 entries = 88 + 6 rotation)', () => {
+    assert.strictEqual(Object.keys(EXPECTED_ERROR_CODES).length, 94);
+    assert.strictEqual(Object.keys(ERROR_CODES).length, 94);
     assert.deepStrictEqual(ERROR_CODES, EXPECTED_ERROR_CODES);
     // Existing chain-broken remains; bounds is independent of chain and of size io.
     assert.strictEqual(ERROR_CODES.AUDIT_CHAIN_BROKEN, 'audit-chain-broken');
@@ -314,6 +322,31 @@ describe('Gold error-code registry', () => {
       ERROR_CODES.AUDIT_INTEGRITY_PROCESS_LOCK_UNAVAILABLE,
       'audit-integrity-process-lock-unavailable',
     );
+    // V1.43 rotation codes exact values (order after process-lock).
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_STATE_INVALID,
+      'audit-integrity-rotation-state-invalid',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_IO_ERROR,
+      'audit-integrity-rotation-io-error',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_PRECONDITION_FAILED,
+      'audit-integrity-rotation-precondition-failed',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_RECOVERY_REQUIRED,
+      'audit-integrity-rotation-recovery-required',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_CONFLICT,
+      'audit-integrity-rotation-conflict',
+    );
+    assert.strictEqual(
+      ERROR_CODES.AUDIT_INTEGRITY_ROTATION_BOUNDS_EXCEEDED,
+      'audit-integrity-rotation-bounds-exceeded',
+    );
     // V1.41 G0b upload codes exact values + distinct from data-resume-exhausted.
     assert.strictEqual(ERROR_CODES.UPLOAD_MANIFEST_INVALID, 'upload-manifest-invalid');
     assert.strictEqual(ERROR_CODES.UPLOAD_SESSION_CONFLICT, 'upload-session-conflict');
@@ -365,7 +398,7 @@ describe('Gold error-code registry', () => {
     assert.ok(Object.isFrozen(ERROR_CODES));
     const values = Object.values(ERROR_CODES);
     assert.strictEqual(new Set(values).size, values.length);
-    assert.strictEqual(values.length, 88);
+    assert.strictEqual(values.length, 94);
     for (const code of values) {
       assert.match(code, ERROR_CODE_PREFIX_PATTERN);
       assert.strictEqual(assertRegisteredErrorCode(code), code);

@@ -3470,3 +3470,465 @@ describe('V1.37 C2 public journal-only state-absent gate', () => {
     });
   });
 });
+
+// ── V1.43 Task 1: journal v2 homogeneous generation contract (J1–J6) ────
+
+const GENERATION_ID_V2 = '00112233445566778899aabbccddeeff';
+const DOMAIN_V2_GENERATION_OPEN = 'linke.audit-integrity-journal.v2.generation-open\u0000';
+const DOMAIN_V2_EVENT_LINK = 'linke.audit-integrity-journal.v2.event-link\u0000';
+
+/** Fixed strict-canonical rotation event vector (design §9 exact field set). */
+const ROTATION_EVENT_V2 = Object.freeze({
+  id: '55555555-5555-4555-8555-555555555555',
+  createdAt: '2026-07-24T00:00:00.000Z',
+  type: 'audit-integrity-rotation',
+  outcome: 'committed',
+  operation: 'generation-transition',
+  message: 'audit integrity generation rotation committed',
+});
+
+/** Fixed 64-hex stand-ins for the archived v1 head and the archive manifest digest. */
+const ARCHIVED_V1_HEAD_DIGEST = createHash('sha256')
+  .update(`fixture-archived-v1-head:${GENERATION_ID}`)
+  .digest('hex');
+const ARCHIVE_MANIFEST_DIGEST = createHash('sha256')
+  .update(`fixture-archive-manifest:${GENERATION_ID}:${GENERATION_ID_V2}`)
+  .digest('hex');
+
+/** Fixed pure/sync v2 builder options; the builder performs no filesystem I/O. */
+const FIXED_V2_OPTIONS = Object.freeze({
+  generationId: GENERATION_ID_V2,
+  previousGenerationId: GENERATION_ID,
+  previousHeadDigest: ARCHIVED_V1_HEAD_DIGEST,
+  archiveManifestDigest: ARCHIVE_MANIFEST_DIGEST,
+  rotationEvent: ROTATION_EVENT_V2,
+});
+
+const V2_OPEN_RECORD_KEYS = Object.freeze([
+  'schemaVersion',
+  'recordKind',
+  'generationId',
+  'previousGenerationId',
+  'previousHeadDigest',
+  'archiveManifestDigest',
+  'sequence',
+  'previousLinkDigest',
+  'payloadDigest',
+  'linkDigest',
+]);
+
+const V2_GENERATION_BINDING_KEYS = Object.freeze([
+  'previousGenerationId',
+  'previousHeadDigest',
+  'archiveManifestDigest',
+]);
+
+/**
+ * v2 symbols are not exported pre-implementation: reach them only through the
+ * module namespace so RED is a missing-API assertion, never a module-load failure.
+ */
+function assertV2ApiPresent(mod) {
+  assert.equal(typeof mod.buildAuditIntegrityV2GenerationImage, 'function');
+  assert.equal(typeof mod.verifyAuditIntegrityJournalText, 'function');
+}
+
+/** Independent v2 open-link digest (does not import private helpers from the module under test). */
+function independentV2OpenDigest(record) {
+  return createHash('sha256')
+    .update(
+      DOMAIN_V2_GENERATION_OPEN
+        + record.generationId
+        + '\u0000'
+        + record.previousGenerationId
+        + '\u0000'
+        + record.previousHeadDigest
+        + '\u0000'
+        + record.archiveManifestDigest
+        + '\u0000'
+        + '0'
+        + '\u0000'
+        + 'null'
+        + '\u0000'
+        + 'null',
+    )
+    .digest('hex');
+}
+
+/** Independent v2 event-link digest: v2 domain over the shared 7-key preimage order. */
+function independentV2EventLinkDigest({ generationId, sequence, previousLinkDigest, payloadDigest }) {
+  return createHash('sha256')
+    .update(
+      DOMAIN_V2_EVENT_LINK
+        + generationId
+        + '\u0000'
+        + String(sequence)
+        + '\u0000'
+        + previousLinkDigest
+        + '\u0000'
+        + payloadDigest,
+    )
+    .digest('hex');
+}
+
+/** Exact 10-key canonical v2 open JSON line (no trailing newline). */
+function canonicalV2OpenLine(record) {
+  return JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    recordKind: record.recordKind,
+    generationId: record.generationId,
+    previousGenerationId: record.previousGenerationId,
+    previousHeadDigest: record.previousHeadDigest,
+    archiveManifestDigest: record.archiveManifestDigest,
+    sequence: record.sequence,
+    previousLinkDigest: record.previousLinkDigest,
+    payloadDigest: record.payloadDigest,
+    linkDigest: record.linkDigest,
+  });
+}
+
+describe('V1.43 Task 1 journal v2 homogeneous generation contract (J1–J6)', () => {
+  it('J1 v1 canonical vectors and public receipts remain byte-for-byte unchanged', async () => {
+    await withTempRoot('v2-j1-v1-vectors', async (root) => {
+      const mod = await loadJournalModule();
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+      } = mod;
+
+      const init = await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      assert.deepEqual(init, {
+        state: 'initialized',
+        generationId: GENERATION_ID,
+        recordCount: 1,
+        headDigest: independentOpenLinkDigest(GENERATION_ID),
+      });
+      assert.equal(Object.keys(init).join(','), 'state,generationId,recordCount,headDigest');
+
+      const openLine = expectedOpenLine(GENERATION_ID);
+      assert.equal(Buffer.byteLength(openLine, 'utf8'), 240);
+      assert.equal(await readFile(journalAbs(root), 'utf8'), `${openLine}\n`);
+
+      const expectedPayload = independentPayloadDigest(EVENT_A);
+      const expectedLink = independentEventLinkDigest({
+        generationId: GENERATION_ID,
+        sequence: 1,
+        previousLinkDigest: init.headDigest,
+        payloadDigest: expectedPayload,
+      });
+      const appended = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      assert.deepEqual(appended, {
+        state: 'appended',
+        generationId: GENERATION_ID,
+        sequence: 1,
+        recordCount: 2,
+        headDigest: expectedLink,
+        payloadDigest: expectedPayload,
+      });
+      assert.equal(
+        Object.keys(appended).join(','),
+        'state,generationId,sequence,recordCount,headDigest,payloadDigest',
+      );
+
+      const eventLine = canonicalRecordLine({
+        schemaVersion: 1,
+        recordKind: 'event-link',
+        generationId: GENERATION_ID,
+        sequence: 1,
+        previousLinkDigest: init.headDigest,
+        payloadDigest: expectedPayload,
+        linkDigest: expectedLink,
+      });
+      const raw = await readFile(journalAbs(root), 'utf8');
+      assert.equal(raw, `${openLine}\n${eventLine}\n`);
+
+      const verified = await verifyAuditIntegrityJournalFile(root);
+      assert.deepEqual(verified, {
+        state: 'verified',
+        generationId: GENERATION_ID,
+        recordCount: 2,
+        headDigest: expectedLink,
+      });
+      assert.equal(Object.keys(verified).join(','), 'state,generationId,recordCount,headDigest');
+
+      // v1 raw re-verified through the v2-aware text verifier stays result-compatible:
+      // same identity fields, schemaVersion 1, and no generationBinding (v2 open only).
+      assertV2ApiPresent(mod);
+      const text = mod.verifyAuditIntegrityJournalText(raw);
+      assert.equal(text.schemaVersion, 1);
+      assert.equal(text.generationId, verified.generationId);
+      assert.equal(text.recordCount, verified.recordCount);
+      assert.equal(text.headDigest, verified.headDigest);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(text, 'generationBinding'),
+        false,
+      );
+    });
+  });
+
+  it('J2 v2 generation-open has exact ten keys, 477 bytes, and independent digest', async () => {
+    const mod = await loadJournalModule();
+    assertV2ApiPresent(mod);
+    assert.equal(mod.AUDIT_INTEGRITY_JOURNAL_V2_OPEN_MAX_LINE_BYTES, 477);
+
+    const built = mod.buildAuditIntegrityV2GenerationImage(FIXED_V2_OPTIONS);
+    assert.equal(Object.isFrozen(built), true);
+    assert.deepEqual(Object.keys(built), [
+      'rawText',
+      'schemaVersion',
+      'generationId',
+      'recordCount',
+      'headDigest',
+      'eventPayloadDigest',
+      'rawByteLength',
+      'rawSha256',
+      'generationBinding',
+    ]);
+    assert.equal(built.schemaVersion, 2);
+    assert.equal(built.generationId, GENERATION_ID_V2);
+    assert.equal(built.recordCount, 2);
+    assert.equal(built.rawByteLength, Buffer.byteLength(built.rawText, 'utf8'));
+    assert.equal(built.rawSha256, createHash('sha256').update(built.rawText).digest('hex'));
+    assert.deepEqual(built.generationBinding, {
+      previousGenerationId: GENERATION_ID,
+      previousHeadDigest: ARCHIVED_V1_HEAD_DIGEST,
+      archiveManifestDigest: ARCHIVE_MANIFEST_DIGEST,
+    });
+    assert.deepEqual(Object.keys(built.generationBinding), [...V2_GENERATION_BINDING_KEYS]);
+    assert.equal(Object.isFrozen(built.generationBinding), true);
+
+    const [openLine] = built.rawText.trimEnd().split('\n');
+    const open = JSON.parse(openLine);
+    assert.deepEqual(Object.keys(open), [...V2_OPEN_RECORD_KEYS]);
+    assert.equal(open.schemaVersion, 2);
+    assert.equal(open.recordKind, 'generation-open');
+    assert.equal(open.generationId, GENERATION_ID_V2);
+    assert.equal(open.previousGenerationId, GENERATION_ID);
+    assert.equal(open.previousHeadDigest, ARCHIVED_V1_HEAD_DIGEST);
+    assert.equal(open.archiveManifestDigest, ARCHIVE_MANIFEST_DIGEST);
+    assert.equal(open.sequence, 0);
+    assert.equal(open.previousLinkDigest, null);
+    assert.equal(open.payloadDigest, null);
+    assert.equal(open.linkDigest, independentV2OpenDigest(open));
+    assert.equal(openLine, canonicalV2OpenLine(open));
+    assert.equal(Buffer.byteLength(openLine, 'utf8'), 477);
+  });
+
+  it('J3 v2 event-link uses the v2 domain and verifies as a homogeneous generation', async () => {
+    const mod = await loadJournalModule();
+    assertV2ApiPresent(mod);
+
+    const built = mod.buildAuditIntegrityV2GenerationImage(FIXED_V2_OPTIONS);
+    assert.ok(built.rawText.endsWith('\n'));
+    const lines = built.rawText.trimEnd().split('\n');
+    assert.equal(lines.length, 2);
+
+    const open = JSON.parse(lines[0]);
+    const event = JSON.parse(lines[1]);
+    assert.deepEqual(Object.keys(event), [...OPEN_RECORD_KEYS]);
+    assert.equal(event.schemaVersion, 2);
+    assert.equal(event.recordKind, 'event-link');
+    assert.equal(event.generationId, GENERATION_ID_V2);
+    assert.equal(event.sequence, 1);
+    assert.equal(event.previousLinkDigest, open.linkDigest);
+
+    const expectedPayload = independentPayloadDigest(ROTATION_EVENT_V2);
+    assert.equal(event.payloadDigest, expectedPayload);
+    assert.equal(built.eventPayloadDigest, expectedPayload);
+    const expectedLink = independentV2EventLinkDigest({
+      generationId: event.generationId,
+      sequence: event.sequence,
+      previousLinkDigest: event.previousLinkDigest,
+      payloadDigest: event.payloadDigest,
+    });
+    assert.equal(event.linkDigest, expectedLink);
+    // Domain separation is decisive: identical fields under the v1 domain never match.
+    assert.notEqual(
+      event.linkDigest,
+      independentEventLinkDigest({
+        generationId: event.generationId,
+        sequence: event.sequence,
+        previousLinkDigest: event.previousLinkDigest,
+        payloadDigest: event.payloadDigest,
+      }),
+    );
+    assert.equal(lines[1], canonicalRecordLine(event));
+    assert.ok(Buffer.byteLength(lines[1], 'utf8') <= 374);
+    assert.equal(built.headDigest, expectedLink);
+
+    const verified = mod.verifyAuditIntegrityJournalText(built.rawText);
+    assert.equal(verified.schemaVersion, 2);
+    assert.equal(verified.generationId, GENERATION_ID_V2);
+    assert.equal(verified.recordCount, 2);
+    assert.equal(verified.headDigest, built.headDigest);
+    assert.deepEqual(verified.generationBinding, built.generationBinding);
+    assert.equal(Object.isFrozen(verified.generationBinding), true);
+  });
+
+  it('J4 v1 open followed by v2 event-link is audit-chain-broken', async () => {
+    const mod = await loadJournalModule();
+    assertV2ApiPresent(mod);
+
+    const openLine = expectedOpenLine(GENERATION_ID);
+    const openLink = independentOpenLinkDigest(GENERATION_ID);
+    const payloadDigest = 'c'.repeat(64);
+    const v2EventLine = canonicalRecordLine({
+      schemaVersion: 2,
+      recordKind: 'event-link',
+      generationId: GENERATION_ID,
+      sequence: 1,
+      previousLinkDigest: openLink,
+      payloadDigest,
+      linkDigest: independentV2EventLinkDigest({
+        generationId: GENERATION_ID,
+        sequence: 1,
+        previousLinkDigest: openLink,
+        payloadDigest,
+      }),
+    });
+    const mixedRaw = `${openLine}\n${v2EventLine}\n`;
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(mixedRaw),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN),
+    );
+  });
+
+  it('J5 v2 open followed by v1 event-link is audit-chain-broken', async () => {
+    const mod = await loadJournalModule();
+    assertV2ApiPresent(mod);
+
+    const built = mod.buildAuditIntegrityV2GenerationImage(FIXED_V2_OPTIONS);
+    const [openLine] = built.rawText.trimEnd().split('\n');
+    const open = JSON.parse(openLine);
+    const payloadDigest = 'd'.repeat(64);
+    const v1EventLine = canonicalRecordLine({
+      schemaVersion: 1,
+      recordKind: 'event-link',
+      generationId: GENERATION_ID_V2,
+      sequence: 1,
+      previousLinkDigest: open.linkDigest,
+      payloadDigest,
+      linkDigest: independentEventLinkDigest({
+        generationId: GENERATION_ID_V2,
+        sequence: 1,
+        previousLinkDigest: open.linkDigest,
+        payloadDigest,
+      }),
+    });
+    const mixedRaw = `${openLine}\n${v1EventLine}\n`;
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(mixedRaw),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN),
+    );
+  });
+
+  it('J6 v1 archived head binds a separately built v2 live generation image', async () => {
+    await withTempRoot('v2-j6-cross-generation', async (root) => {
+      const mod = await loadJournalModule();
+      const {
+        initializeAuditIntegrityJournal,
+        appendAuditIntegrityEvent,
+        verifyAuditIntegrityJournalFile,
+      } = mod;
+      assertV2ApiPresent(mod);
+
+      await initializeAuditIntegrityJournal(root, { generationId: GENERATION_ID });
+      const appended = await appendAuditIntegrityEvent(root, {
+        generationId: GENERATION_ID,
+        event: { ...EVENT_A },
+      });
+      const archivedRaw = await readFile(journalAbs(root), 'utf8');
+      const archivedVerify = await verifyAuditIntegrityJournalFile(root);
+
+      // v1 archive verified through the v2-aware text verifier stays result-compatible.
+      const archivedText = mod.verifyAuditIntegrityJournalText(archivedRaw);
+      assert.equal(archivedText.schemaVersion, 1);
+      assert.equal(archivedText.generationId, archivedVerify.generationId);
+      assert.equal(archivedText.recordCount, archivedVerify.recordCount);
+      assert.equal(archivedText.headDigest, archivedVerify.headDigest);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(archivedText, 'generationBinding'),
+        false,
+      );
+
+      const built = mod.buildAuditIntegrityV2GenerationImage({
+        generationId: GENERATION_ID_V2,
+        previousGenerationId: GENERATION_ID,
+        previousHeadDigest: archivedVerify.headDigest,
+        archiveManifestDigest: ARCHIVE_MANIFEST_DIGEST,
+        rotationEvent: ROTATION_EVENT_V2,
+      });
+      assert.notEqual(built.rawText, archivedRaw);
+      assert.notEqual(built.headDigest, archivedVerify.headDigest);
+
+      const [openLine] = built.rawText.trimEnd().split('\n');
+      const open = JSON.parse(openLine);
+      assert.equal(open.previousGenerationId, GENERATION_ID);
+      assert.equal(open.previousHeadDigest, archivedVerify.headDigest);
+      assert.equal(open.previousHeadDigest, appended.headDigest);
+      assert.equal(open.linkDigest, independentV2OpenDigest(open));
+
+      const live = mod.verifyAuditIntegrityJournalText(built.rawText);
+      assert.equal(live.schemaVersion, 2);
+      assert.equal(live.generationId, GENERATION_ID_V2);
+      assert.equal(live.recordCount, 2);
+      assert.equal(live.headDigest, built.headDigest);
+      assert.deepEqual(live.generationBinding, {
+        previousGenerationId: GENERATION_ID,
+        previousHeadDigest: archivedVerify.headDigest,
+        archiveManifestDigest: ARCHIVE_MANIFEST_DIGEST,
+      });
+      assert.equal(Object.isFrozen(live.generationBinding), true);
+
+      // Cross-generation binding is by digest only: archived v1 bytes stay untouched.
+      assert.equal(await readFile(journalAbs(root), 'utf8'), archivedRaw);
+    });
+  });
+});
+
+// ── Task 1 review regression: full-file byte envelope in the public text verifier ────
+
+describe('Task 1 review full-file byte envelope', () => {
+  it('Task 1 review full-file byte envelope gates before structural parsing', async () => {
+    const mod = await loadJournalModule();
+    assertV2ApiPresent(mod);
+    const maxBytes = mod.AUDIT_INTEGRITY_JOURNAL_MAX_PRE_READ_BYTES;
+    assert.equal(maxBytes, 1_572_864);
+
+    // Non-string input stays chain-broken: the typeof gate runs first.
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(null),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN),
+    );
+
+    // Exactly MAX+1 ASCII bytes without trailing newline: size overlimit is
+    // io-error (never bounds-exceeded, never chain-broken).
+    const overAscii = 'a'.repeat(maxBytes + 1);
+    assert.equal(Buffer.byteLength(overAscii, 'utf8'), maxBytes + 1);
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(overAscii),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR),
+    );
+
+    // Exactly MAX+1 newline bytes: still io-error — the size gate fires before
+    // any trailing-newline check, slice, split, or per-line bound.
+    const overNewlines = '\n'.repeat(maxBytes + 1);
+    assert.equal(Buffer.byteLength(overNewlines, 'utf8'), maxBytes + 1);
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(overNewlines),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_INTEGRITY_IO_ERROR),
+    );
+
+    // Exactly MAX ASCII bytes without trailing newline: not size-overlimit, so
+    // structural verify owns the failure and it stays chain-broken.
+    const exactAscii = 'a'.repeat(maxBytes);
+    assert.equal(Buffer.byteLength(exactAscii, 'utf8'), maxBytes);
+    assert.throws(
+      () => mod.verifyAuditIntegrityJournalText(exactAscii),
+      (error) => assertIntegrityError(error, ERROR_CODES.AUDIT_CHAIN_BROKEN),
+    );
+  });
+});

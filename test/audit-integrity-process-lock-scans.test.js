@@ -1,5 +1,5 @@
 /**
- * V1.40 C4 — process-lock scans / honesty / closed-set 88 (V1.42 coordinated).
+ * V1.40 C4 — process-lock scans / honesty / closed-set 94 (V1.43 coordinated).
  *
  * Static gates for local multi-process write exclusive lock wiring:
  *   sole production importer = audit-integrity-write-queue.js
@@ -72,22 +72,22 @@ const LOCKF_ABS = '/usr/bin/lockf';
 
 /**
  * Closed-set digit pairs assembled at runtime (no contiguous stale locks).
- * V1.42 semantics: prior = V1.41 (74), current = V1.42 (88 = 74 + 14 restore),
- * next = future (89). Historical V1.40=62 / V1.39=61 remain evidence only.
+ * V1.43 semantics: prior = V1.42 (88), current = V1.43 (94 = 88 + 6 rotation),
+ * next = future (95). Historical V1.41=74 / V1.40=62 / V1.39=61 remain evidence only.
  */
 function currentClosedSetCount() {
-  // Current closed-set (V1.42) = 88 = 74 + 14 restore.
-  return Number(['8', '8'].join(''));
+  // Current closed-set (V1.43) = 94 = 88 + 6 rotation.
+  return Number(['9', '4'].join(''));
 }
 
 function priorClosedSetCount() {
-  // Immediate prior closed-set (V1.41 G0b) = 74.
-  return Number(['7', '4'].join(''));
+  // Immediate prior closed-set (V1.42 G0c) = 88.
+  return Number(['8', '8'].join(''));
 }
 
 function nextClosedSetCount() {
-  // Future closed-set after V1.42 = 89.
-  return Number(['8', '9'].join(''));
+  // Future closed-set after V1.43 = 95.
+  return Number(['9', '5'].join(''));
 }
 
 function orphanGraceNeedle() {
@@ -2671,14 +2671,14 @@ describe('C4 S6: queue executable lifecycle structure', () => {
 });
 
 describe('C4 S7: ERROR_CODES current closed-set; process-lock unique; suite coord', () => {
-  it('S7a. V1.42 helpers prior=74 current=88 next=89; fixtures capture prior/next not current-as-prior', () => {
+  it('S7a. V1.43 helpers prior=88 current=94 next=95; fixtures capture prior/next not current-as-prior', () => {
     const prior = priorClosedSetCount();
     const cur = currentClosedSetCount();
     const next = nextClosedSetCount();
-    // prior=74 (V1.41), current=88 (74+14 restore), next=89. Historical V1.40=62.
-    assert.equal(prior, Number(['7', '4'].join('')));
-    assert.equal(cur, Number(['8', '8'].join('')));
-    assert.equal(next, Number(['8', '9'].join('')));
+    // prior=88 (V1.42), current=94 (88+6 rotation), next=95. Historical V1.41=74 / V1.40=62.
+    assert.equal(prior, Number(['8', '8'].join('')));
+    assert.equal(cur, Number(['9', '4'].join('')));
+    assert.equal(next, Number(['9', '5'].join('')));
 
     assert.ok(
       findStructuralClosedSetLengthLocks(
