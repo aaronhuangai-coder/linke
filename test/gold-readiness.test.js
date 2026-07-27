@@ -331,13 +331,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.43', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.43');
+  it('expects LINKE_RELEASE_VERSION to be V1.44', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.44');
   });
 
-  it('expects report.version to be V1.43', () => {
+  it('expects report.version to be V1.44', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.43');
+    assert.strictEqual(report.version, 'V1.44');
   });
 
   it('expects status blocked and correct summary count', () => {
@@ -347,7 +347,7 @@ describe('Gold Readiness Report', () => {
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.43 does not change statuses)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.44 candidate does not change statuses)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);

@@ -26,12 +26,12 @@ function assertReadmeDoesNotContain(pattern, label) {
 
 /**
  * Extract the unique current-version badge blockquote from README.
- * Start line must match `> **当前版本：V1.43**`; collect consecutive `>` lines only;
+ * Start line must match `> **当前版本：${LINKE_RELEASE_VERSION}**`; collect consecutive `>` lines only;
  * stop at the first non-`>` line. Missing or duplicate starts assert-fail.
  */
 function extractCurrentBadgeBlockquote(markdown) {
   const lines = String(markdown).split('\n');
-  const startMarker = '> **当前版本：V1.43**';
+  const startMarker = `> **当前版本：${LINKE_RELEASE_VERSION}**`;
   const starts = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (lines[i].startsWith(startMarker)) {
@@ -52,7 +52,11 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact current V1.43 signature. */
+/** Exact current V1.44 candidate signature. */
+const V144_CANDIDATE_SIGNATURE =
+  'V1.44 real NAS evidence-validation candidate';
+
+/** Exact historical V1.43 signature — retained rotation foundation. */
 const V143_SIGNATURE =
   'V1.43 explicit crash-recoverable audit integrity rotation foundation';
 
@@ -1952,10 +1956,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.43 audit integrity rotation honesty', () => {
-  it('title and badge claim V1.43 as current', () => {
-    assertReadmeContains(/# Linke V1\.43/, 'README title should mention V1.43');
-    assertReadmeContains(/\*\*当前版本：V1\.43\*\*/, 'README badge should mention V1.43');
+describe('README — V1.44 real NAS evidence candidate honesty', () => {
+  it('title and badge claim V1.44 as current', () => {
+    assertReadmeContains(/# Linke V1\.44/, 'README title should mention V1.44');
+    assertReadmeContains(/\*\*当前版本：V1\.44\*\*/, 'README badge should mention V1.44');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.43\*\*/, 'README badge must not still claim V1.43 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.43$/m, 'README title must not still claim V1.43 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.42\*\*/, 'README badge must not still claim V1.42 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.42$/m, 'README title must not still claim V1.42 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.41\*\*/, 'README badge must not still claim V1.41 as current');
@@ -2028,17 +2034,62 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.43 rotation signature and honest boundaries', () => {
+  it('badge mentions V1.44 candidate signature and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
     assert.ok(
-      !badge.includes('| V1.43 | 当前版本 |'),
-      'extracted badge must not contain version table row "| V1.43 | 当前版本 |" (cross-region bleed guard)',
+      !badge.includes(`| ${LINKE_RELEASE_VERSION} | 当前版本 |`),
+      `extracted badge must not contain version table row "| ${LINKE_RELEASE_VERSION} | 当前版本 |" (cross-region bleed guard)`,
     );
     assert.ok(
-      badge.includes(V143_SIGNATURE),
-      'top badge must include V1.43 exact signature',
+      badge.includes(V144_CANDIDATE_SIGNATURE),
+      'top badge must include V1.44 candidate signature',
+    );
+    assert.ok(
+      badge.includes('exact V1.44 hardware evidence pending'),
+      'top badge must state exact V1.44 hardware evidence pending',
+    );
+    assert.ok(
+      badge.includes('real-nas-remote-backup remains blocked'),
+      'top badge must state real-nas-remote-backup remains blocked',
+    );
+    assert.ok(
+      badge.includes('not Gold'),
+      'top badge must include not Gold',
+    );
+    assert.ok(
+      badge.includes('Gold remains blocked 4/4/1/9'),
+      'top badge must include Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(badge),
+      'top badge must not claim exact V1.44 hardware evidence completed',
+    );
+    assert.ok(
+      !/real NAS PASS|real-nas.*PASS report|真实 NAS.*PASS/i.test(badge),
+      'top badge must not cite a real NAS PASS report',
+    );
+    assert.ok(
+      !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(badge),
+      'top badge must not claim Gold/GA/production-ready',
+    );
+    // V1.43 historical base retained on badge (not current version; foundation facts only)
+    assert.ok(
+      badge.includes('V1.43 historical base'),
+      'top badge must include V1.43 historical base marker',
+    );
+    assert.ok(
+      badge.includes('no automatic rotation'),
+      'top badge V1.43 historical base must include no automatic rotation',
+    );
+    assert.ok(
+      badge.includes('not WORM'),
+      'top badge V1.43 historical base must include not WORM',
+    );
+    assert.ok(
+      badge.includes('no external authenticity'),
+      'top badge V1.43 historical base must include no external authenticity',
     );
     // V1.42 historical G0c base retained with exact signature
     {
@@ -2052,8 +2103,8 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
       );
     }
     assert.ok(
-      badge.includes('G0c real-LAN evidence absent') || badge.includes('real-LAN evidence absent'),
-      'top badge must state real-LAN evidence absent',
+      badge.includes('G0c real-LAN evidence absent'),
+      'top badge must state G0c real-LAN evidence absent',
     );
     assert.ok(
       /auto harness complete|automatic harness/i.test(badge),
@@ -2066,10 +2117,6 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     assert.ok(
       /G0c|endpoint-pull|local multi-process|same-dataDir local multi-process/i.test(badge),
       'top badge must claim G0c delivery or retained multi-process lock base',
-    );
-    assert.ok(
-      badge.includes('not Gold') || badge.includes('Gold remains blocked 4/4/1/9'),
-      'top badge must keep Gold honesty',
     );
     assert.ok(
       !badge.includes(STALE_CURRENT_MULTI_PROCESS_DENY),
@@ -2122,19 +2169,12 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     assert.ok(/T6d\.3 still partial/i.test(badge), 'top badge T6d.3 still partial');
     assert.ok(/not T6d\.3 complete|Not T6d\.3 complete|not.*T6d\.3 complete/i.test(badge), 'top badge not T6d.3 complete');
     assert.ok(/不是 M6d Exit|not M6d Exit|≠ M6d Exit|非 M6d Exit/i.test(badge), 'top badge not M6d Exit');
-    assert.ok(/not Gold|不是 Gold|Gold 依旧 blocked|Gold remains blocked/i.test(badge), 'top badge not Gold');
     assert.ok(/production-hardening 仍 partial|production-hardening remains partial|production-hardening partial/i.test(badge), 'top badge production-hardening partial');
     // Exact independent negative on badge itself (must not rely on version table)
     assert.ok(
       badge.includes('not production-hardening ready'),
       'current badge must include exact "not production-hardening ready"',
     );
-    assert.ok(
-      badge.includes('Gold remains blocked 4/4/1/9')
-        || /4 ready[\s\S]*4 partial[\s\S]*1 blocked|4 ready \/ 4 partial \/ 1 blocked \/ total 9/i.test(badge),
-      'top badge Gold 4/4/1/9',
-    );
-    assert.ok(badge.includes('Gold remains blocked 4/4/1/9'), 'top badge exact Gold remains blocked 4/4/1/9');
     assert.ok(/M1 route open|M1.*open/i.test(badge), 'top badge M1 route open');
     assert.ok(/M2 denied|M2.*denied/i.test(badge), 'top badge M2 denied');
     assert.ok(/realCapabilityImplementationsReady:false/.test(badge), 'top badge global real false');
@@ -2143,35 +2183,6 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     assert.ok(/realRunnerWiringReady:false/.test(badge), 'top badge real wiring false');
     assert.ok(/runnerWiringContractReady:false/.test(badge), 'top badge runnerWiringContract false');
     assert.ok(/executionEligible:false/.test(badge), 'top badge executionEligible false');
-    // V1.43 rotation surface: explicit manual rotation delivered; stale "no journal rotation" must not be required
-    assert.ok(
-      badge.includes('explicit manual rotation delivered'),
-      'top badge explicit manual rotation delivered',
-    );
-    assert.ok(
-      /no automatic rotation/i.test(badge),
-      'top badge direct denial of automatic rotation',
-    );
-    assert.ok(
-      /no automatic scheduling/i.test(badge),
-      'top badge direct denial of automatic scheduling',
-    );
-    assert.ok(
-      /append-only/i.test(badge),
-      'top badge archive policy append-only',
-    );
-    assert.ok(
-      /not WORM/i.test(badge),
-      'top badge direct denial of WORM',
-    );
-    assert.ok(
-      /no external authenticity/i.test(badge),
-      'top badge direct denial of external authenticity',
-    );
-    assert.ok(
-      !/no journal rotation/i.test(badge),
-      'top badge must not keep stale "no journal rotation" on the current surface',
-    );
     assert.ok(
       /not end-to-end production audit delivery|no end-to-end production audit delivery/i.test(badge)
         && badge.includes(POST_OUTCOME_STILL_BEST_EFFORT),
@@ -2203,8 +2214,9 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
       (err) => err instanceof assert.AssertionError,
       'helper canary: missing badge start must fail',
     );
+    const dupMarker = `> **当前版本：${LINKE_RELEASE_VERSION}**`;
     assert.throws(
-      () => extractCurrentBadgeBlockquote('> **当前版本：V1.43** a\n> **当前版本：V1.43** b\n'),
+      () => extractCurrentBadgeBlockquote(`${dupMarker} a\n${dupMarker} b\n`),
       (err) => err instanceof assert.AssertionError,
       'helper canary: duplicate badge start must fail',
     );
@@ -2269,70 +2281,101 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     }
   });
 
-  it('version table marks V1.43 current, V1.42 historical G0c, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
-    // V1.43 current row — independently lock exact signature and rotation-surface honesty
-    const v143RowMatch = readme.match(/\| V1\.43 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v143RowMatch, 'V1.43 current version table row must exist');
+  it('version table marks V1.44 current, V1.43 historical rotation, V1.42 historical G0c, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
+    // V1.44 current row — candidate signature and five fixed honesty phrases
+    const v144RowMatch = readme.match(/\| V1\.44 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v144RowMatch, 'V1.44 current version table row must exist');
+    assert.ok(
+      v144RowMatch[0].includes(V144_CANDIDATE_SIGNATURE),
+      'V1.44 current table row must include exact V1.44 candidate signature',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('exact V1.44 hardware evidence pending'),
+      'V1.44 current table row must state exact V1.44 hardware evidence pending',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('real-nas-remote-backup remains blocked'),
+      'V1.44 current table row must state real-nas-remote-backup remains blocked',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('not Gold'),
+      'V1.44 current table row must include not Gold',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
+      'V1.44 current table row must include exact Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(v144RowMatch[0]),
+      'V1.44 current table row must not claim hardware evidence completed',
+    );
+    assert.ok(
+      !/real NAS PASS|real-nas.*PASS report/i.test(v144RowMatch[0]),
+      'V1.44 current table row must not cite a real NAS PASS report',
+    );
+    assertReadmeContains(
+      /\| V1\.44 \| 当前版本 \|[^|]*(V1\.44 real NAS evidence-validation candidate)[^|]*(exact V1\.44 hardware evidence pending)[^|]*(real-nas-remote-backup remains blocked)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
+      'V1.44 should be current real NAS evidence-validation candidate milestone',
+    );
+    // V1.43 historical row — retain rotation foundation facts; must not remain 当前版本
+    const v143RowMatch = readme.match(/\| V1\.43 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v143RowMatch, 'V1.43 historical version table row must exist');
     assert.ok(
       v143RowMatch[0].includes(V143_SIGNATURE),
-      'V1.43 current table row must include exact V1.43 signature',
+      'V1.43 historical table row must include exact V1.43 signature',
     );
     assert.ok(
       v143RowMatch[0].includes('explicit manual rotation delivered'),
-      'V1.43 current table row must state explicit manual rotation delivered',
+      'V1.43 historical table row must state explicit manual rotation delivered',
     );
     assert.ok(
       /no automatic rotation/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny automatic rotation',
+      'V1.43 historical table row must deny automatic rotation',
     );
     assert.ok(
       /no automatic scheduling/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny automatic scheduling',
+      'V1.43 historical table row must deny automatic scheduling',
     );
     assert.ok(
       /not managed scheduler/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny managed scheduler',
+      'V1.43 historical table row must deny managed scheduler',
     );
     assert.ok(
       /not remote notification delivery/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny remote notification delivery',
+      'V1.43 historical table row must deny remote notification delivery',
     );
     assert.ok(
       /append-only/i.test(v143RowMatch[0]),
-      'V1.43 current table row must state archive policy append-only',
+      'V1.43 historical table row must state archive policy append-only',
     );
     assert.ok(
       /not WORM/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny WORM',
+      'V1.43 historical table row must deny WORM',
     );
     assert.ok(
       /no external authenticity/i.test(v143RowMatch[0]),
-      'V1.43 current table row must deny external authenticity',
+      'V1.43 historical table row must deny external authenticity',
     );
     assert.ok(
       v143RowMatch[0].includes('not production-hardening ready'),
-      'V1.43 current table row must include exact "not production-hardening ready"',
+      'V1.43 historical table row must include not production-hardening ready',
     );
     assert.ok(
       v143RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
-      'V1.43 current table row must include exact Gold remains blocked 4/4/1/9',
+      'V1.43 historical table row must include Gold remains blocked 4/4/1/9',
     );
     assert.ok(
-      v143RowMatch[0].includes('G0c real-LAN evidence absent')
-        || v143RowMatch[0].includes('real-LAN evidence absent'),
-      'V1.43 current table row must state G0c real-LAN evidence absent',
-    );
-    assert.ok(
-      !/G0c real-LAN complete/i.test(v143RowMatch[0]),
-      'V1.43 current table row must not claim G0c real-LAN complete',
+      v143RowMatch[0].includes('G0c real-LAN evidence absent'),
+      'V1.43 historical table row must include G0c real-LAN evidence absent',
     );
     assert.ok(
       !/no journal rotation/i.test(v143RowMatch[0]),
-      'V1.43 current table row must not keep stale "no journal rotation"',
+      'V1.43 historical table row must not keep stale "no journal rotation"',
     );
+    assertReadmeDoesNotContain(/\| V1\.43 \| 当前版本 \|/i, 'V1.43 must not remain marked as current');
     assertReadmeContains(
-      /\| V1\.43 \| 当前版本 \|[^|]*(explicit crash-recoverable audit integrity rotation foundation)[^|]*(explicit manual rotation delivered|no automatic rotation)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
-      'V1.43 should be current audit integrity rotation milestone',
+      /\| V1\.43 \| 历史版本 \|[^|]*(explicit crash-recoverable audit integrity rotation foundation)[^|]*(explicit manual rotation delivered|no automatic rotation)/i,
+      'V1.43 should be historical audit integrity rotation milestone',
     );
     // V1.42 historical row — retain exact G0c signature and auto-harness/real-LAN facts
     const v142HistMatch = readme.match(/\| V1\.42 \| 历史版本 \|[^|\n]*/);
@@ -2505,6 +2548,10 @@ describe('README — V1.43 audit integrity rotation honesty', () => {
     assertReadmeDoesNotContain(/\| V1\.28 \| 当前版本 \|/i, 'V1.28 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.29 \| 当前版本 \|/i, 'V1.29 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.30 \| 当前版本 \|/i, 'V1.30 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.43 \| 当前版本 \|/i, 'V1.43 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.42 \| 当前版本 \|/i, 'V1.42 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.41 \| 当前版本 \|/i, 'V1.41 must not remain marked as current');
+    assertReadmeDoesNotContain(/\| V1\.40 \| 当前版本 \|/i, 'V1.40 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.39 \| 当前版本 \|/i, 'V1.39 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.38 \| 当前版本 \|/i, 'V1.38 must not remain marked as current');
     assertReadmeDoesNotContain(/\| V1\.37 \| 当前版本 \|/i, 'V1.37 must not remain marked as current');

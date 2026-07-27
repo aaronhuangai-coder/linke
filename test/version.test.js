@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact positive signature ceiling for V1.43. */
+/** Exact current V1.44 candidate signature. */
+const V144_CANDIDATE_SIGNATURE =
+  'V1.44 real NAS evidence-validation candidate';
+
+/** Exact historical V1.43 signature — retained rotation foundation; must not be erased. */
 const V143_SIGNATURE =
   'V1.43 explicit crash-recoverable audit integrity rotation foundation';
 
@@ -108,10 +112,11 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.43 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.43');
+  it('LINKE_RELEASE_VERSION is the V1.44 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.44');
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V144_CANDIDATE_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
@@ -142,14 +147,42 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.43 exact signature and honesty boundaries', async () => {
+  it('README current surface carries V1.44 candidate signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.43 signature MUST be on currentSurface (badge + V1.43 row only)
+    // Exact V1.44 candidate signature + five fixed phrases on currentSurface
     assert.ok(
-      currentSurface.includes(V143_SIGNATURE),
-      `README currentSurface must include exact signature: ${V143_SIGNATURE}`,
+      currentSurface.includes(V144_CANDIDATE_SIGNATURE),
+      `README currentSurface must include exact signature: ${V144_CANDIDATE_SIGNATURE}`,
+    );
+    assert.ok(
+      currentSurface.includes('exact V1.44 hardware evidence pending'),
+      'current surface must state exact V1.44 hardware evidence pending',
+    );
+    assert.ok(
+      currentSurface.includes('real-nas-remote-backup remains blocked'),
+      'current surface must state real-nas-remote-backup remains blocked',
+    );
+    assert.ok(
+      currentSurface.includes('not Gold'),
+      'current surface must include not Gold',
+    );
+    assert.ok(
+      currentSurface.includes('Gold remains blocked 4/4/1/9'),
+      'current surface must include Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(currentSurface),
+      'current surface must not claim exact V1.44 hardware evidence completed',
+    );
+    assert.ok(
+      !/real NAS PASS|real-nas.*PASS report|真实 NAS.*PASS/i.test(currentSurface),
+      'current surface must not cite a real NAS PASS report',
+    );
+    assert.ok(
+      !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(currentSurface),
+      'current surface must not claim Gold/GA/production-ready',
     );
     assert.ok(
       currentSurface.includes('G0c real-LAN evidence absent')
@@ -161,43 +194,6 @@ describe('Release Version Consistency', () => {
       'current surface must not claim G0c real-LAN complete',
     );
 
-    // V1.43 precise current boundaries: explicit manual rotation delivered;
-    // no automatic rotation; no scheduler; no remote notification; archive
-    // append-only policy is not WORM/authenticity. Stale "no journal rotation
-    // yet" wording must not remain on the current surface.
-    assert.ok(
-      /explicit (manual )?rotation delivered/i.test(currentSurface),
-      'current surface must state explicit (manual) rotation delivered',
-    );
-    assert.ok(
-      /no automatic rotation|not automatic rotation/i.test(currentSurface),
-      'current surface must deny automatic rotation directly',
-    );
-    assert.ok(
-      barePositiveIsNegatedInSameClause(currentSurface, 'automatic rotation'),
-      'current surface: automatic rotation must be direct clause-local negated',
-    );
-    assert.ok(
-      /append-only/i.test(currentSurface),
-      'current surface must state archive append-only policy',
-    );
-    assert.ok(
-      /not WORM|no WORM/i.test(currentSurface),
-      'current surface must deny WORM directly',
-    );
-    assert.ok(
-      barePositiveIsNegatedInSameClause(currentSurface, 'worm'),
-      'current surface: worm must be direct clause-local negated',
-    );
-    assert.ok(
-      /not authenticity|no authenticity|no external authenticity/i.test(currentSurface),
-      'current surface must deny authenticity',
-    );
-    assert.ok(
-      !currentSurface.includes('no journal rotation yet'),
-      'current surface must not keep stale "no journal rotation yet" wording',
-    );
-
     // Required honesty boundaries MUST each exact-include on currentSurface
     for (const phrase of HONESTY_BOUNDARIES) {
       assert.ok(
@@ -205,6 +201,60 @@ describe('Release Version Consistency', () => {
         `README currentSurface must exact-include honesty boundary: ${phrase}`,
       );
     }
+
+    // V1.43 demoted to historical: retain rotation foundation facts
+    const v143Row = lines.find(
+      (line) => line.includes('| V1.43 |') && line.includes('历史版本'),
+    );
+    assert.ok(v143Row, 'README version table must retain V1.43 as 历史版本');
+    assert.ok(
+      !lines.some((line) => line.includes('| V1.43 |') && line.includes('当前版本')),
+      'V1.43 must not remain marked as 当前版本',
+    );
+    assert.ok(
+      v143Row.includes(V143_SIGNATURE),
+      'V1.43 historical row must retain exact V1.43 rotation signature',
+    );
+    assert.ok(
+      /explicit (manual )?rotation delivered/i.test(v143Row),
+      'V1.43 historical row must state explicit (manual) rotation delivered',
+    );
+    assert.ok(
+      /no automatic rotation|not automatic rotation/i.test(v143Row),
+      'V1.43 historical row must deny automatic rotation',
+    );
+    assert.ok(
+      barePositiveIsNegatedInSameClause(v143Row, 'automatic rotation'),
+      'V1.43 historical row: automatic rotation must be direct clause-local negated',
+    );
+    assert.ok(
+      /append-only/i.test(v143Row),
+      'V1.43 historical row must state archive append-only policy',
+    );
+    assert.ok(
+      /not WORM|no WORM/i.test(v143Row),
+      'V1.43 historical row must deny WORM',
+    );
+    assert.ok(
+      barePositiveIsNegatedInSameClause(v143Row, 'worm'),
+      'V1.43 historical row: worm must be direct clause-local negated',
+    );
+    assert.ok(
+      /not authenticity|no authenticity|no external authenticity/i.test(v143Row),
+      'V1.43 historical row must deny authenticity',
+    );
+    assert.ok(
+      v143Row.includes('not production-hardening ready'),
+      'V1.43 historical row must include not production-hardening ready',
+    );
+    assert.ok(
+      v143Row.includes('Gold remains blocked 4/4/1/9'),
+      'V1.43 historical row must include Gold remains blocked 4/4/1/9',
+    );
+    assert.ok(
+      v143Row.includes('G0c real-LAN evidence absent'),
+      'V1.43 historical row must include G0c real-LAN evidence absent',
+    );
 
     // V1.42 historical G0c base retained on table
     const v142Row = lines.find(
@@ -312,8 +362,6 @@ describe('Release Version Consistency', () => {
       'current surface must not keep ambiguous slash aggregate for rotation/scheduler/remote',
     );
     // Prefer explicit direct negatives on current surface.
-    // V1.43 delivers explicit manual rotation, so journal rotation itself is no
-    // longer denied; automatic rotation is denied in the V1.43 boundary block.
     assert.ok(
       /not managed scheduler|no managed scheduler/i.test(currentSurface),
       'current surface must deny managed scheduler directly',

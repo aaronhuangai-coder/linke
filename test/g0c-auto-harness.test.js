@@ -27,6 +27,8 @@ const REPORT_ABS = join(
 );
 const README_PATH = join(REPO_ROOT, 'README.md');
 
+const V144_CANDIDATE_SIGNATURE =
+  'V1.44 real NAS evidence-validation candidate';
 const V143_SIGNATURE =
   'V1.43 explicit crash-recoverable audit integrity rotation foundation';
 const V142_SIGNATURE =
@@ -700,9 +702,10 @@ describe('G0c real-LAN gate default skip + report absent', () => {
   });
 });
 
-describe('G0c V1.43 version / Gold / README honesty (auto harness ≠ real-LAN)', () => {
-  it('LINKE_RELEASE_VERSION is exactly V1.43 (signature not embedded)', () => {
-    assert.equal(LINKE_RELEASE_VERSION, 'V1.43');
+describe('G0c V1.44 version / Gold / README honesty (auto harness ≠ real-LAN)', () => {
+  it('LINKE_RELEASE_VERSION is exactly V1.44 (signature not embedded)', () => {
+    assert.equal(LINKE_RELEASE_VERSION, 'V1.44');
+    assert.notEqual(LINKE_RELEASE_VERSION, V144_CANDIDATE_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
@@ -710,9 +713,9 @@ describe('G0c V1.43 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(!LINKE_RELEASE_VERSION.includes(V142_SIGNATURE));
   });
 
-  it('Gold remains blocked 4/4/1/9; statuses frozen; V1.43 current + V1.42 evidence honest', () => {
+  it('Gold remains blocked 4/4/1/9; statuses frozen; V1.44 current + V1.43/V1.42 evidence honest', () => {
     const report = buildGoldReadinessReport({ now: new Date('2026-07-23T12:00:00.000Z') });
-    assert.equal(report.version, 'V1.43');
+    assert.equal(report.version, 'V1.44');
     assert.equal(report.status, 'blocked');
     assert.deepEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
 
@@ -732,7 +735,7 @@ describe('G0c V1.43 version / Gold / README honesty (auto harness ≠ real-LAN)'
     const hardening = report.items.find((i) => i.id === 'production-hardening');
     assert.ok(hardening);
     const evidenceText = hardening.evidence.join('\n');
-    assert.ok(evidenceText.includes(V143_SIGNATURE), 'current V1.43 rotation signature evidence');
+    assert.ok(evidenceText.includes(V143_SIGNATURE), 'historical V1.43 rotation signature evidence retained');
     assert.ok(evidenceText.includes('explicit manual rotation delivered'));
     assert.ok(evidenceText.includes('no automatic rotation'));
     assert.ok(evidenceText.includes('no automatic scheduling'));
@@ -762,25 +765,31 @@ describe('G0c V1.43 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(/Gold remains blocked 4\/4\/1\/9/.test(hardening.nextStep));
   });
 
-  it('README current surface is V1.43 honest; V1.42 G0c historical; auto ≠ real-LAN', async () => {
+  it('README current surface is V1.44 honest; V1.43 rotation historical; V1.42 G0c historical; auto ≠ real-LAN', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const firstLine = readme.split('\n')[0].trim();
-    assert.equal(firstLine, '# Linke V1.43');
-    assert.ok(readme.includes('**当前版本：V1.43**'));
+    assert.equal(firstLine, '# Linke V1.44');
+    assert.ok(readme.includes('**当前版本：V1.44**'));
 
     const lines = readme.split('\n');
-    const currentRow = lines.find((l) => l.includes('| V1.43 |') && l.includes('当前版本'));
-    assert.ok(currentRow, 'V1.43 current version table row');
-    assert.ok(currentRow.includes(V143_SIGNATURE));
-    assert.ok(currentRow.includes('explicit manual rotation delivered'));
-    assert.ok(/no automatic rotation/i.test(currentRow));
-    assert.ok(/no automatic scheduling/i.test(currentRow));
-    assert.ok(
-      currentRow.includes('G0c real-LAN evidence absent')
-        || /real-LAN evidence absent/i.test(currentRow),
-    );
+    const currentRow = lines.find((l) => l.includes('| V1.44 |') && l.includes('当前版本'));
+    assert.ok(currentRow, 'V1.44 current version table row');
+    assert.ok(currentRow.includes(V144_CANDIDATE_SIGNATURE));
+    assert.ok(currentRow.includes('exact V1.44 hardware evidence pending'));
+    assert.ok(currentRow.includes('real-nas-remote-backup remains blocked'));
+    assert.ok(currentRow.includes('not Gold'));
     assert.ok(currentRow.includes('Gold remains blocked 4/4/1/9'));
     assert.ok(!/G0c real-LAN complete/i.test(currentRow));
+
+    const v143Row = lines.find((l) => l.includes('| V1.43 |') && l.includes('历史版本'));
+    assert.ok(v143Row, 'V1.43 historical row retained');
+    assert.ok(v143Row.includes(V143_SIGNATURE));
+    assert.ok(v143Row.includes('explicit manual rotation delivered'));
+    assert.ok(/no automatic rotation/i.test(v143Row));
+    assert.ok(/no automatic scheduling/i.test(v143Row));
+    assert.ok(v143Row.includes('not production-hardening ready'));
+    assert.ok(v143Row.includes('Gold remains blocked 4/4/1/9'));
+    assert.ok(v143Row.includes('G0c real-LAN evidence absent'));
 
     const v142Row = lines.find((l) => l.includes('| V1.42 |') && l.includes('历史版本'));
     assert.ok(v142Row, 'V1.42 historical row retained');
