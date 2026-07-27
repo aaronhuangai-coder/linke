@@ -155,7 +155,11 @@ const STALE_CURRENT_MULTI_PROCESS_DENY = 'not multi-process exclusive lock';
 const STALE_SINGLE_PROCESS_QUEUE_ONLY = 'single-process queue only';
 const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
 
-/** Frozen Gold item id/status snapshot (statuses must not change in V1.40). */
+/**
+ * Frozen Gold item id/status snapshot.
+ * V1.44 C1 committed real-NAS acceptance PASS rotates real-nas-remote-backup
+ * blocked → ready; all other item statuses unchanged.
+ */
 const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'release-readiness', status: 'ready' },
   { id: 'local-backup-restore', status: 'ready' },
@@ -164,7 +168,7 @@ const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'nas-dry-run', status: 'partial' },
   { id: 'automation-installation', status: 'partial' },
   { id: 'security-auth', status: 'partial' },
-  { id: 'real-nas-remote-backup', status: 'blocked' },
+  { id: 'real-nas-remote-backup', status: 'ready' },
   { id: 'production-hardening', status: 'partial' },
 ]);
 
@@ -340,14 +344,14 @@ describe('Gold Readiness Report', () => {
     assert.strictEqual(report.version, 'V1.44');
   });
 
-  it('expects status blocked and correct summary count', () => {
+  it('expects status partial and correct summary count', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
-    assert.strictEqual(report.status, 'blocked');
-    assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
+    assert.strictEqual(report.status, 'partial');
+    assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.44 candidate does not change statuses)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.44 real NAS acceptance rotates only real-nas-remote-backup to ready)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -697,7 +701,7 @@ describe('Gold Readiness Report', () => {
     assert.match(automationItem.nextStep, /readiness|gate|dry-run|not_configured|installer|launchd|watchdog|monitoring|managed daemon/i);
   });
 
-  it('verifies security-auth and production-hardening are partial while real-nas-remote-backup remains blocked', () => {
+  it('verifies security-auth and production-hardening are partial while real-nas-remote-backup is ready', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const securityItem = report.items.find(item => item.id === 'security-auth');
     assert.ok(securityItem, 'security-auth should exist');
@@ -2068,7 +2072,48 @@ describe('Gold Readiness Report', () => {
 
     const nasItem = report.items.find(item => item.id === 'real-nas-remote-backup');
     assert.ok(nasItem, 'real-nas-remote-backup should exist');
-    assert.strictEqual(nasItem.status, 'blocked');
+    assert.strictEqual(nasItem.status, 'ready');
+    // V1.44 C1: committed real-NAS acceptance PASS NAS-REAL-V144-20260727-01 evidence.
+    assert.ok(
+      nasItem.evidence.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json'),
+      'real-nas-remote-backup evidence must exact-include committed JSON acceptance report path',
+    );
+    assert.ok(
+      nasItem.evidence.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md'),
+      'real-nas-remote-backup evidence must exact-include committed Markdown acceptance report path',
+    );
+    assert.ok(
+      nasItem.evidence.includes('NAS-REAL-V144-20260727-01'),
+      'real-nas-remote-backup evidence must exact-include acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      nasItem.evidence.includes('903b10abbad5e7ba7d701561150a389c0317d518'),
+      'real-nas-remote-backup evidence must exact-include runtime commit 903b10abbad5e7ba7d701561150a389c0317d518',
+    );
+    assert.ok(
+      nasItem.evidence.includes('runtimeVersion:V1.44'),
+      'real-nas-remote-backup evidence must exact-include runtimeVersion:V1.44',
+    );
+    assert.ok(
+      nasItem.evidence.includes('copy.state:replicated'),
+      'real-nas-remote-backup evidence must exact-include copy.state:replicated',
+    );
+    assert.ok(
+      nasItem.evidence.includes('recovery.state:recovered'),
+      'real-nas-remote-backup evidence must exact-include recovery.state:recovered',
+    );
+    assert.ok(
+      nasItem.evidence.includes('audit.status:healthy'),
+      'real-nas-remote-backup evidence must exact-include audit.status:healthy',
+    );
+    assert.ok(
+      nasItem.evidence.includes('completedMarkerValid:true'),
+      'real-nas-remote-backup evidence must exact-include completedMarkerValid:true',
+    );
+    assert.ok(
+      nasItem.evidence.includes('firstPublishedSnapshotPreserved:true'),
+      'real-nas-remote-backup evidence must exact-include firstPublishedSnapshotPreserved:true',
+    );
   });
 
   it('rejects vague evidence strings like implemented, works, done, available', () => {

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "linke-real-nas-acceptance",
+  "acceptanceId": "NAS-REAL-V144-20260727-01",
+  "runtimeVersion": "V1.44",
+  "runtimeSourceCommit": "903b10abbad5e7ba7d701561150a389c0317d518",
+  "acceptedAt": "2026-07-27T07:55:19.485Z",
+  "environment": "non-production",
+  "provider": "synology",
+  "mountType": "smbfs",
+  "copy": {
+    "state": "replicated",
+    "fileCount": 2,
+    "totalBytes": 9,
+    "verifiedFileCount": 2,
+    "manifestSha256": "a4de7aaff186217d862c6adaec536779c62d77d9163a058ed77245e9771512c6",
+    "completedMarkerValid": true,
+    "lockResidualCount": 0,
+    "stagingResidualCount": 0
+  },
+  "recovery": {
+    "scenario": "staging-ready-process-termination",
+    "terminationSignal": "SIGKILL",
+    "staleLockValidated": true,
+    "stagedFileCount": 2,
+    "stagedVerifiedFileCount": 2,
+    "state": "recovered",
+    "finalPublished": false,
+    "postFinalExists": false,
+    "lockResidualCount": 0,
+    "stagingResidualCount": 0,
+    "residualFileCount": 0,
+    "firstPublishedSnapshotPreserved": true
+  },
+  "audit": {
+    "status": "healthy",
+    "dualWriteState": "idle",
+    "relationship": "equal",
+    "recoveryRequired": false
+  }
+}

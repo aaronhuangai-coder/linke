@@ -382,8 +382,8 @@ describe('G0b real-LAN hardware gate default skip + report absent', () => {
   });
 });
 
-const V144_CANDIDATE_SIGNATURE =
-  'V1.44 real NAS evidence-validation candidate';
+const V144_SIGNATURE =
+  'V1.44 real NAS acceptance PASS';
 const V143_SIGNATURE =
   'V1.43 explicit crash-recoverable audit integrity rotation foundation';
 const V142_SIGNATURE =
@@ -392,7 +392,7 @@ const V142_SIGNATURE =
 describe('G0b V1.44 current surface + V1.43 historical rotation + V1.42/V1.41 historical honesty (G0b real-LAN remains absent)', () => {
   it('LINKE_RELEASE_VERSION is exactly V1.44 (signature not embedded; G0c/G0b signatures historical)', () => {
     assert.equal(LINKE_RELEASE_VERSION, 'V1.44');
-    assert.notEqual(LINKE_RELEASE_VERSION, V144_CANDIDATE_SIGNATURE);
+    assert.notEqual(LINKE_RELEASE_VERSION, V144_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
@@ -405,11 +405,11 @@ describe('G0b V1.44 current surface + V1.43 historical rotation + V1.42/V1.41 hi
     );
   });
 
-  it('Gold remains blocked 4/4/1/9; statuses frozen; V1.44 current + V1.43 rotation/V1.42 G0c/V1.41 G0b historical', () => {
+  it('Gold remains partial 5/4/0/9; statuses frozen; V1.44 current + V1.43 rotation/V1.42 G0c/V1.41 G0b historical', () => {
     const report = buildGoldReadinessReport({ now: new Date('2026-07-22T12:00:00.000Z') });
     assert.equal(report.version, 'V1.44');
-    assert.equal(report.status, 'blocked');
-    assert.deepEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
+    assert.equal(report.status, 'partial');
+    assert.deepEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
 
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepEqual(snapshot, [
@@ -420,7 +420,7 @@ describe('G0b V1.44 current surface + V1.43 historical rotation + V1.42/V1.41 hi
       { id: 'nas-dry-run', status: 'partial' },
       { id: 'automation-installation', status: 'partial' },
       { id: 'security-auth', status: 'partial' },
-      { id: 'real-nas-remote-backup', status: 'blocked' },
+      { id: 'real-nas-remote-backup', status: 'ready' },
       { id: 'production-hardening', status: 'partial' },
     ]);
 
@@ -462,7 +462,7 @@ describe('G0b V1.44 current surface + V1.43 historical rotation + V1.42/V1.41 hi
     assert.ok(/Gold remains blocked 4\/4\/1\/9/.test(hardening.nextStep));
   });
 
-  it('README current surface is V1.44 candidate; V1.43 rotation historical; V1.42 G0c/V1.41 G0b historical; G0b real-LAN absent retained', async () => {
+  it('README current surface is V1.44 real NAS acceptance PASS; V1.43 rotation historical; V1.42 G0c/V1.41 G0b historical; G0b real-LAN absent retained', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const firstLine = readme.split('\n')[0].trim();
     assert.equal(firstLine, '# Linke V1.44');
@@ -471,11 +471,12 @@ describe('G0b V1.44 current surface + V1.43 historical rotation + V1.42/V1.41 hi
     const lines = readme.split('\n');
     const currentRow = lines.find((l) => l.includes('| V1.44 |') && l.includes('当前版本'));
     assert.ok(currentRow, 'V1.44 current version table row');
-    assert.ok(currentRow.includes(V144_CANDIDATE_SIGNATURE));
-    assert.ok(currentRow.includes('exact V1.44 hardware evidence pending'));
-    assert.ok(currentRow.includes('real-nas-remote-backup remains blocked'));
+    assert.ok(currentRow.includes(V144_SIGNATURE));
+    assert.ok(currentRow.includes('exact V1.44 hardware evidence PASS'));
+    assert.ok(currentRow.includes('real-nas-remote-backup ready'));
     assert.ok(currentRow.includes('not Gold'));
-    assert.ok(currentRow.includes('Gold remains blocked 4/4/1/9'));
+    assert.ok(currentRow.includes('Gold remains partial 5/4/0/9'));
+    assert.ok(currentRow.includes('four partial items remain'));
 
     const v143Row = lines.find((l) => l.includes('| V1.43 |') && l.includes('历史版本'));
     assert.ok(v143Row, 'V1.43 historical version table row');

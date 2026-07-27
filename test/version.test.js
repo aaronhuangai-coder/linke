@@ -7,9 +7,9 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact current V1.44 candidate signature. */
-const V144_CANDIDATE_SIGNATURE =
-  'V1.44 real NAS evidence-validation candidate';
+/** Exact current V1.44 real NAS acceptance PASS signature. */
+const V144_SIGNATURE =
+  'V1.44 real NAS acceptance PASS';
 
 /** Exact historical V1.43 signature — retained rotation foundation; must not be erased. */
 const V143_SIGNATURE =
@@ -42,7 +42,8 @@ const HONESTY_BOUNDARIES = Object.freeze([
   'not M6d Exit',
   'not production-hardening ready',
   'not Gold',
-  'Gold remains blocked 4/4/1/9',
+  'Gold remains partial 5/4/0/9',
+  'four partial items remain',
   'not end-to-end production audit delivery',
 ]);
 
@@ -116,7 +117,7 @@ describe('Release Version Consistency', () => {
     assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.44');
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
-    assert.notStrictEqual(LINKE_RELEASE_VERSION, V144_CANDIDATE_SIGNATURE);
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V144_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V141_SIGNATURE);
@@ -147,38 +148,34 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.44 candidate signature and honesty boundaries', async () => {
+  it('README current surface carries V1.44 real NAS acceptance PASS signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.44 candidate signature + five fixed phrases on currentSurface
+    // Exact V1.44 real NAS acceptance PASS signature + fixed phrases on currentSurface
     assert.ok(
-      currentSurface.includes(V144_CANDIDATE_SIGNATURE),
-      `README currentSurface must include exact signature: ${V144_CANDIDATE_SIGNATURE}`,
+      currentSurface.includes(V144_SIGNATURE),
+      `README currentSurface must include exact signature: ${V144_SIGNATURE}`,
     );
     assert.ok(
-      currentSurface.includes('exact V1.44 hardware evidence pending'),
-      'current surface must state exact V1.44 hardware evidence pending',
+      currentSurface.includes('exact V1.44 hardware evidence PASS'),
+      'current surface must state exact V1.44 hardware evidence PASS',
     );
     assert.ok(
-      currentSurface.includes('real-nas-remote-backup remains blocked'),
-      'current surface must state real-nas-remote-backup remains blocked',
+      currentSurface.includes('real-nas-remote-backup ready'),
+      'current surface must state real-nas-remote-backup ready',
     );
     assert.ok(
       currentSurface.includes('not Gold'),
       'current surface must include not Gold',
     );
     assert.ok(
-      currentSurface.includes('Gold remains blocked 4/4/1/9'),
-      'current surface must include Gold remains blocked 4/4/1/9',
+      currentSurface.includes('Gold remains partial 5/4/0/9'),
+      'current surface must include Gold remains partial 5/4/0/9',
     );
     assert.ok(
-      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(currentSurface),
-      'current surface must not claim exact V1.44 hardware evidence completed',
-    );
-    assert.ok(
-      !/real NAS PASS|real-nas.*PASS report|真实 NAS.*PASS/i.test(currentSurface),
-      'current surface must not cite a real NAS PASS report',
+      currentSurface.includes('four partial items remain'),
+      'current surface must state four partial items remain',
     );
     assert.ok(
       !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(currentSurface),

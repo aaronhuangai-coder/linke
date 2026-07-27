@@ -58,9 +58,9 @@ const PATHS = Object.freeze({
   readme: join(REPO_ROOT, 'README.md'),
 });
 
-/** Exact current V1.44 candidate signature. */
-const V144_CANDIDATE_SIGNATURE =
-  'V1.44 real NAS evidence-validation candidate';
+/** Exact current V1.44 real NAS acceptance PASS signature. */
+const V144_SIGNATURE =
+  'V1.44 real NAS acceptance PASS';
 
 /** Exact historical V1.43 signature — retained rotation foundation. */
 const V143_SIGNATURE =
@@ -1254,7 +1254,7 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
     );
   });
 
-  it('Q4 locks the V1.44 candidate surface and V1.43 historical rotation boundaries', async () => {
+  it('Q4 locks the V1.44 real NAS acceptance PASS surface and V1.43 historical rotation boundaries', async () => {
     assert.strictEqual(
       LINKE_RELEASE_VERSION,
       'V1.44',
@@ -1264,26 +1264,30 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
     const sources = await readAllowedSources();
     const { currentSurface, lines } = extractReadmeCurrentSurface(sources.readme);
 
-    // Exact V1.44 candidate signature + fixed pending/blocker phrases on current surface.
+    // Exact V1.44 real NAS acceptance PASS signature + fixed current-state phrases on current surface.
     assert.ok(
-      currentSurface.includes(V144_CANDIDATE_SIGNATURE),
-      `README current surface must include exact signature: ${V144_CANDIDATE_SIGNATURE}`,
+      currentSurface.includes(V144_SIGNATURE),
+      `README current surface must include exact signature: ${V144_SIGNATURE}`,
     );
     assert.ok(
-      currentSurface.includes('exact V1.44 hardware evidence pending'),
-      'current surface must state exact V1.44 hardware evidence pending',
+      currentSurface.includes('exact V1.44 hardware evidence PASS'),
+      'current surface must state exact V1.44 hardware evidence PASS',
     );
     assert.ok(
-      currentSurface.includes('real-nas-remote-backup remains blocked'),
-      'current surface must state real-nas-remote-backup remains blocked',
+      currentSurface.includes('real-nas-remote-backup ready'),
+      'current surface must state real-nas-remote-backup ready',
     );
     assert.ok(
       currentSurface.includes('not Gold'),
       'current surface must exact-include not Gold',
     );
     assert.ok(
-      currentSurface.includes('Gold remains blocked 4/4/1/9'),
-      'current surface must state Gold remains blocked 4/4/1/9',
+      currentSurface.includes('Gold remains partial 5/4/0/9'),
+      'current surface must state Gold remains partial 5/4/0/9',
+    );
+    assert.ok(
+      currentSurface.includes('four partial items remain'),
+      'current surface must state four partial items remain',
     );
 
     // V1.43 demoted to historical row with rotation foundation facts.
@@ -1395,8 +1399,8 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
     assert.strictEqual(report.version, 'V1.44', 'gold-readiness report version must be V1.44');
     assert.deepStrictEqual(
       report.summary,
-      { ready: 4, partial: 4, blocked: 1, total: 9 },
-      'Gold item snapshot counts must remain 4/4/1/9',
+      { ready: 5, partial: 4, blocked: 0, total: 9 },
+      'Gold item snapshot counts must be 5/4/0/9',
     );
     const hardening = report.items.find((item) => item.id === 'production-hardening');
     assert.ok(hardening, 'production-hardening item must exist');

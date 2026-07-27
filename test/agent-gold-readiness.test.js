@@ -59,7 +59,7 @@ function startMockGoldServer(payload) {
 }
 
 describe('Agent gold-readiness CLI', () => {
-  it('prints blocked Gold readiness JSON without mutating dataDir in no-token mode', async () => {
+  it('prints partial Gold readiness JSON without mutating dataDir in no-token mode', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'linke-agent-gold-open-'));
     const server = createServer({ dataDir });
     const port = await listen(server);
@@ -75,8 +75,8 @@ describe('Agent gold-readiness CLI', () => {
 
       assert.strictEqual(stderr, '');
       assert.strictEqual(report.version, LINKE_RELEASE_VERSION);
-      assert.strictEqual(report.status, 'blocked');
-      assert.deepStrictEqual(report.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
+      assert.strictEqual(report.status, 'partial');
+      assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
       assert.strictEqual(Array.isArray(report.items), true);
       assert.strictEqual(report.items.length, 9);
       assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
@@ -107,8 +107,9 @@ describe('Agent gold-readiness CLI', () => {
       const report = JSON.parse(stdout);
 
       assert.strictEqual(stderr, '');
-      assert.strictEqual(report.status, 'blocked');
+      assert.strictEqual(report.status, 'partial');
       assert.strictEqual(report.version, LINKE_RELEASE_VERSION);
+      assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
       assert.ok(!stdout.includes('gold-read-token'), 'stdout must not include token material');
       assert.ok(!stdout.includes('gold-write-token'), 'stdout must not include write token material');
       assert.deepStrictEqual(await readdir(dataDir), []);
@@ -118,25 +119,25 @@ describe('Agent gold-readiness CLI', () => {
     }
   });
 
-  it('exits 2 after printing the report when --fail-on-blocked sees blocked Gold readiness', async () => {
+  it('exits 0 after printing the report when --fail-on-blocked sees no blocked Gold items', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'linke-agent-gold-fail-'));
     const server = createServer({ dataDir });
     const port = await listen(server);
 
     try {
-      const err = await rejectAgent([
+      const { stdout, stderr } = await runAgent([
         'gold-readiness',
         '--server',
         `http://127.0.0.1:${port}`,
         '--fail-on-blocked',
-      ], 2);
-      const report = JSON.parse(err.stdout);
+      ]);
+      const report = JSON.parse(stdout);
 
-      assert.strictEqual(err.stderr, '');
-      assert.strictEqual(report.status, 'blocked');
-      assert.strictEqual(report.summary.blocked, 1);
+      assert.strictEqual(stderr, '');
+      assert.strictEqual(report.status, 'partial');
+      assert.strictEqual(report.summary.blocked, 0);
       assert.ok(report.items.some((item) => item.id === 'real-nas-remote-backup'));
-      assert.ok(!err.stdout.includes(dataDir), 'stdout must not leak dataDir');
+      assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
       assert.deepStrictEqual(await readdir(dataDir), []);
     } finally {
       await close(server);

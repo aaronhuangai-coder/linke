@@ -4,6 +4,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   REAL_NAS_ACCEPTANCE_EVIDENCE_INVALID,
   validateRealNasAcceptanceEvidence,
@@ -11,6 +13,15 @@ import {
 
 const FIXED_CODE = 'real-nas-acceptance-evidence-invalid';
 const FIXED_NAME = 'RealNasAcceptanceEvidenceError';
+const FIXED_RUNTIME_COMMIT = '903b10abbad5e7ba7d701561150a389c0317d518';
+const FIXED_RUNTIME_VERSION = 'V1.44';
+const FIXED_ACCEPTANCE_ID = 'NAS-REAL-V144-20260727-01';
+const JSON_REPORT_PATH = fileURLToPath(
+  new URL('../docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json', import.meta.url),
+);
+const MD_REPORT_PATH = fileURLToPath(
+  new URL('../docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md', import.meta.url),
+);
 const HEX40 = 'a'.repeat(40);
 const HEX64 = 'b'.repeat(64);
 const HEX40_UPPER = 'A'.repeat(40);
@@ -696,6 +707,105 @@ describe('secret / path / process-output minimization', () => {
       assertInvalidEvidenceError(
         () => validateRealNasAcceptanceEvidence(setPath(validEvidence(), c.path, c.value)),
         { leakTokens: c.leak },
+      );
+    }
+  });
+});
+
+/** Collect every JSON leaf string with its dotted path. */
+function collectLeafStrings(node, path, out) {
+  if (typeof node === 'string') {
+    out.push({ path, value: node });
+    return;
+  }
+  if (node !== null && typeof node === 'object') {
+    for (const key of Object.keys(node)) {
+      collectLeafStrings(node[key], path === '' ? key : `${path}.${key}`, out);
+    }
+  }
+}
+
+describe('committed V1.44 real-NAS acceptance JSON artifact', () => {
+  it('exists, passes the closed-schema validator, and pins exact identity and hash leaves', () => {
+    const receipt = JSON.parse(readFileSync(JSON_REPORT_PATH, 'utf8'));
+    assert.equal(validateRealNasAcceptanceEvidence(receipt), true);
+    assert.equal(receipt.runtimeSourceCommit, FIXED_RUNTIME_COMMIT);
+    assert.equal(receipt.runtimeSourceCommit, '903b10abbad5e7ba7d701561150a389c0317d518');
+    assert.equal(receipt.runtimeVersion, 'V1.44');
+    assert.equal(receipt.acceptanceId, 'NAS-REAL-V144-20260727-01');
+
+    const leaves = [];
+    collectLeafStrings(receipt, '', leaves);
+    const hex64Matches = leaves.filter(({ value }) => /^[0-9a-f]{64}$/.test(value));
+    const hex40Matches = leaves.filter(({ value }) => /^[0-9a-f]{40}$/.test(value));
+    assert.deepEqual(hex64Matches, [
+      { path: 'copy.manifestSha256', value: receipt.copy.manifestSha256 },
+    ]);
+    assert.deepEqual(hex40Matches, [
+      { path: 'runtimeSourceCommit', value: '903b10abbad5e7ba7d701561150a389c0317d518' },
+    ]);
+  });
+});
+
+describe('committed V1.44 real-NAS acceptance Markdown artifact', () => {
+  it('contains the exact summary fragments and discloses nothing sensitive', () => {
+    const md = readFileSync(MD_REPORT_PATH, 'utf8');
+
+    const requiredFragments = [
+      'NAS-REAL-V144-20260727-01',
+      'PASS',
+      'overall partial',
+      '5/4/0/9',
+      'four partial items remain',
+      'not Gold',
+    ];
+    for (const fragment of requiredFragments) {
+      assert.ok(
+        md.includes(fragment),
+        `Markdown report must contain exact fragment ${JSON.stringify(fragment)}`,
+      );
+    }
+
+    assert.equal(
+      /[0-9a-fA-F]{64}/.test(md),
+      false,
+      'Markdown report must not contain any 64-hex string',
+    );
+
+    const forbiddenPatterns = [
+      /\bhost(name)?\b/i,
+      /\bip\b/i,
+      /\b\d{1,3}(?:\.\d{1,3}){3}\b/, // IPv4 literal
+      /\burl\b/i,
+      /\b[a-z][a-z0-9+.-]*:\/\//i, // any scheme:// URL
+      /\bendpoint\b/i,
+      /(?:^|[\s"'`(=])\/(?:[\w.-]+\/)+/m, // POSIX absolute path
+      /\b[A-Za-z]:\\/, // Windows absolute path
+      /\\\\/, // UNC path
+      /\bmount\b/i,
+      /\bconfig\b/i,
+      /\bdatadir\b/i,
+      /\bshare\b/i,
+      /\buser\b/i,
+      /\bfile[-_ ]?names?\b/i,
+      /\bfile[-_ ]?contents?\b/i,
+      /\bcredentials?\b/i,
+      /\bpassword\b/i,
+      /\btoken\b/i,
+      /\bownerToken\b/i,
+      /\bauthorization\b/i,
+      /\bpid\b/i,
+      /\battemptId\b/i,
+      /\bstdout\b/i,
+      /\bstderr\b/i,
+      /\berrors?\b/i,
+      /\bstack\b/i,
+    ];
+    for (const pattern of forbiddenPatterns) {
+      assert.equal(
+        pattern.test(md),
+        false,
+        `Markdown report must not match disclosure indicator ${pattern}`,
       );
     }
   });

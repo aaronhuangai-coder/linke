@@ -460,18 +460,18 @@ describe('Linke V2 M1 Exit audit lock', () => {
     );
   });
 
-  it('runtime gold remains blocked without cross-lan-connectivity; M1/M2 not elevated', () => {
+  it('runtime gold remains partial without cross-lan-connectivity; M1/M2 not elevated', () => {
     // Temporal: allow current runtime (V1.33 now; later V1.x after release bump).
     // Do NOT permanently lock LINKE_RELEASE_VERSION / report.version to 'V1.33'.
     assert.match(LINKE_RELEASE_VERSION, /^V1\.\d+$/);
 
     const report = buildGoldReadinessReport();
     assert.equal(report.version, LINKE_RELEASE_VERSION);
-    assert.equal(report.status, 'blocked');
+    assert.equal(report.status, 'partial');
     assert.deepEqual(report.summary, {
-      ready: 4,
+      ready: 5,
       partial: 4,
-      blocked: 1,
+      blocked: 0,
       total: 9,
     });
     assert.equal(report.items.length, 9);

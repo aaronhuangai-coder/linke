@@ -52,9 +52,9 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact current V1.44 candidate signature. */
-const V144_CANDIDATE_SIGNATURE =
-  'V1.44 real NAS evidence-validation candidate';
+/** Exact current V1.44 real NAS acceptance PASS signature. */
+const V144_SIGNATURE =
+  'V1.44 real NAS acceptance PASS';
 
 /** Exact historical V1.43 signature — retained rotation foundation. */
 const V143_SIGNATURE =
@@ -1956,7 +1956,7 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.44 real NAS evidence candidate honesty', () => {
+describe('README — V1.44 real NAS acceptance PASS honesty', () => {
   it('title and badge claim V1.44 as current', () => {
     assertReadmeContains(/# Linke V1\.44/, 'README title should mention V1.44');
     assertReadmeContains(/\*\*当前版本：V1\.44\*\*/, 'README badge should mention V1.44');
@@ -2034,7 +2034,7 @@ describe('README — V1.44 real NAS evidence candidate honesty', () => {
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.44 candidate signature and honest boundaries', () => {
+  it('badge mentions V1.44 real NAS acceptance PASS signature and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
@@ -2043,32 +2043,40 @@ describe('README — V1.44 real NAS evidence candidate honesty', () => {
       `extracted badge must not contain version table row "| ${LINKE_RELEASE_VERSION} | 当前版本 |" (cross-region bleed guard)`,
     );
     assert.ok(
-      badge.includes(V144_CANDIDATE_SIGNATURE),
-      'top badge must include V1.44 candidate signature',
+      badge.includes(V144_SIGNATURE),
+      'top badge must include exact V1.44 real NAS acceptance PASS signature',
     );
     assert.ok(
-      badge.includes('exact V1.44 hardware evidence pending'),
-      'top badge must state exact V1.44 hardware evidence pending',
+      badge.includes('exact V1.44 hardware evidence PASS'),
+      'top badge must state exact V1.44 hardware evidence PASS',
     );
     assert.ok(
-      badge.includes('real-nas-remote-backup remains blocked'),
-      'top badge must state real-nas-remote-backup remains blocked',
+      badge.includes('real-nas-remote-backup ready'),
+      'top badge must state real-nas-remote-backup ready',
     );
     assert.ok(
       badge.includes('not Gold'),
       'top badge must include not Gold',
     );
     assert.ok(
-      badge.includes('Gold remains blocked 4/4/1/9'),
-      'top badge must include Gold remains blocked 4/4/1/9',
+      badge.includes('Gold remains partial 5/4/0/9'),
+      'top badge must include Gold remains partial 5/4/0/9',
     );
     assert.ok(
-      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(badge),
-      'top badge must not claim exact V1.44 hardware evidence completed',
+      badge.includes('four partial items remain'),
+      'top badge must state four partial items remain',
     );
     assert.ok(
-      !/real NAS PASS|real-nas.*PASS report|真实 NAS.*PASS/i.test(badge),
-      'top badge must not cite a real NAS PASS report',
+      badge.includes('NAS-REAL-V144-20260727-01'),
+      'top badge must cite acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      badge.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json'),
+      'top badge must cite committed JSON acceptance report path',
+    );
+    assert.ok(
+      badge.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md'),
+      'top badge must cite committed Markdown acceptance report path',
     );
     assert.ok(
       !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(badge),
@@ -2201,7 +2209,7 @@ describe('README — V1.44 real NAS evidence candidate honesty', () => {
       /not HTTP\/Web monitor|no HTTP\/Web monitor|not HTTP|not Web monitor/i.test(badge),
       'top badge not HTTP/Web monitor',
     );
-    assert.ok(/Gold 依旧 blocked|4 ready[\s\S]*4 partial[\s\S]*1 blocked|Gold remains blocked 4\/4\/1\/9/i.test(badge), 'badge Gold still blocked honesty');
+    assert.ok(/Gold remains partial 5\/4\/0\/9|5 ready[\s\S]*4 partial[\s\S]*0 blocked/i.test(badge), 'badge Gold remains partial 5/4/0/9 honesty');
     assert.doesNotMatch(badge, /(?<!not )\bWORM\b|audit chain integrity complete|Gold ready|M6d Exit complete/i, 'badge must not overclaim M6d/Gold/WORM');
     assert.doesNotMatch(badge, /(?<!not\s)(?<!Not\s)T6d\.3 complete/i, 'badge must not claim T6d.3 complete');
     assert.doesNotMatch(badge, /(?<!not\s)(?<!Not\s)production monitoring ready(?!\s*yet)/i, 'badge must not claim production monitoring ready');
@@ -2282,40 +2290,52 @@ describe('README — V1.44 real NAS evidence candidate honesty', () => {
   });
 
   it('version table marks V1.44 current, V1.43 historical rotation, V1.42 historical G0c, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
-    // V1.44 current row — candidate signature and five fixed honesty phrases
+    // V1.44 current row — real NAS acceptance PASS signature and fixed honesty phrases
     const v144RowMatch = readme.match(/\| V1\.44 \| 当前版本 \|[^|\n]*/);
     assert.ok(v144RowMatch, 'V1.44 current version table row must exist');
     assert.ok(
-      v144RowMatch[0].includes(V144_CANDIDATE_SIGNATURE),
-      'V1.44 current table row must include exact V1.44 candidate signature',
+      v144RowMatch[0].includes(V144_SIGNATURE),
+      'V1.44 current table row must include exact V1.44 real NAS acceptance PASS signature',
     );
     assert.ok(
-      v144RowMatch[0].includes('exact V1.44 hardware evidence pending'),
-      'V1.44 current table row must state exact V1.44 hardware evidence pending',
+      v144RowMatch[0].includes('exact V1.44 hardware evidence PASS'),
+      'V1.44 current table row must state exact V1.44 hardware evidence PASS',
     );
     assert.ok(
-      v144RowMatch[0].includes('real-nas-remote-backup remains blocked'),
-      'V1.44 current table row must state real-nas-remote-backup remains blocked',
+      v144RowMatch[0].includes('real-nas-remote-backup ready'),
+      'V1.44 current table row must state real-nas-remote-backup ready',
     );
     assert.ok(
       v144RowMatch[0].includes('not Gold'),
       'V1.44 current table row must include not Gold',
     );
     assert.ok(
-      v144RowMatch[0].includes('Gold remains blocked 4/4/1/9'),
-      'V1.44 current table row must include exact Gold remains blocked 4/4/1/9',
+      v144RowMatch[0].includes('Gold remains partial 5/4/0/9'),
+      'V1.44 current table row must include exact Gold remains partial 5/4/0/9',
     );
     assert.ok(
-      !/exact V1\.44 hardware evidence (ran|passed|complete|PASS)/i.test(v144RowMatch[0]),
-      'V1.44 current table row must not claim hardware evidence completed',
+      v144RowMatch[0].includes('four partial items remain'),
+      'V1.44 current table row must state four partial items remain',
     );
     assert.ok(
-      !/real NAS PASS|real-nas.*PASS report/i.test(v144RowMatch[0]),
-      'V1.44 current table row must not cite a real NAS PASS report',
+      v144RowMatch[0].includes('NAS-REAL-V144-20260727-01'),
+      'V1.44 current table row must cite acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json'),
+      'V1.44 current table row must cite committed JSON acceptance report path',
+    );
+    assert.ok(
+      v144RowMatch[0].includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md'),
+      'V1.44 current table row must cite committed Markdown acceptance report path',
+    );
+    assert.ok(
+      !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(v144RowMatch[0]),
+      'V1.44 current table row must not claim Gold/GA/production-ready',
     );
     assertReadmeContains(
-      /\| V1\.44 \| 当前版本 \|[^|]*(V1\.44 real NAS evidence-validation candidate)[^|]*(exact V1\.44 hardware evidence pending)[^|]*(real-nas-remote-backup remains blocked)[^|]*(Gold remains blocked 4\/4\/1\/9)/i,
-      'V1.44 should be current real NAS evidence-validation candidate milestone',
+      /\| V1\.44 \| 当前版本 \|[^|]*(V1\.44 real NAS acceptance PASS)[^|]*(exact V1\.44 hardware evidence PASS)[^|]*(real-nas-remote-backup ready)[^|]*(Gold remains partial 5\/4\/0\/9)/i,
+      'V1.44 should be current real NAS acceptance PASS milestone',
     );
     // V1.43 historical row — retain rotation foundation facts; must not remain 当前版本
     const v143RowMatch = readme.match(/\| V1\.43 \| 历史版本 \|[^|\n]*/);

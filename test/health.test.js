@@ -338,8 +338,8 @@ describe('GET /api/gold-readiness', () => {
     assert.match(res.headers.get('content-type') || '', /application\/json/);
     const body = await res.json();
     assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
-    assert.strictEqual(body.status, 'blocked');
-    assert.deepStrictEqual(body.summary, { ready: 4, partial: 4, blocked: 1, total: 9 });
+    assert.strictEqual(body.status, 'partial');
+    assert.deepStrictEqual(body.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
     assert.ok(Number.isFinite(Date.parse(body.generatedAt)));
     assert.strictEqual(Array.isArray(body.items), true);
     assert.strictEqual(body.items.length, 9);
