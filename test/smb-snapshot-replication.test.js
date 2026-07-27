@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
-  mkdir, mkdtemp, rm, writeFile, symlink, readdir, readFile, lstat, open as fsOpen,
+  mkdir, mkdtemp, rm, writeFile, symlink, readdir, readFile, lstat, open as fsOpen, realpath,
 } from 'node:fs/promises';
 import { createReadStream as fsCreateReadStream } from 'node:fs';
 import { join, sep } from 'node:path';
@@ -635,24 +635,74 @@ describe('SMB snapshot replication preflight and publication', () => {
     assert.ok(mountChecks >= 2);
   });
 
-  it('inspectMountedSmb uses fixed /usr/bin/stat args and statfs available bytes', async () => {
+  it('inspectMountedSmb probes via fixed /bin/df smbfs args and statfs available bytes', async () => {
     const calls = [];
     const result = await inspectMountedSmb('/Volumes/TestShare', {
       execFile: async (file, args) => {
         calls.push({ file, args });
-        return { stdout: 'smbfs\n' };
+        return { stdout: 'arbitrary uninspected df output\n', stderr: 'arbitrary stderr\n' };
       },
       statfs: async (path) => {
         calls.push({ path });
         return { bavail: 100n, bsize: 4096n };
       },
     });
-    assert.deepStrictEqual(calls[0], {
-      file: '/usr/bin/stat',
-      args: ['-f', '%T', '/Volumes/TestShare'],
+    assert.deepStrictEqual(calls, [
+      { file: '/bin/df', args: ['-T', 'smbfs', '/Volumes/TestShare'] },
+      { path: '/Volumes/TestShare' },
+    ]);
+    assert.deepStrictEqual(result, { fsType: 'smbfs', availableBytes: 409600 });
+  });
+
+  it('inspectMountedSmb propagates the exact execFile rejection before any statfs call', async () => {
+    const fixedError = new Error('fixed execFile failure');
+    let statfsCalls = 0;
+    await assert.rejects(
+      inspectMountedSmb('/Volumes/TestShare', {
+        execFile: async () => {
+          throw fixedError;
+        },
+        statfs: async () => {
+          statfsCalls += 1;
+          return { bavail: 100n, bsize: 4096n };
+        },
+      }),
+      (error) => error === fixedError,
+    );
+    assert.strictEqual(statfsCalls, 0);
+  });
+
+  it('inspectMountedSmb propagates the exact statfs rejection unchanged', async () => {
+    const fixedError = new Error('fixed statfs failure');
+    await assert.rejects(
+      inspectMountedSmb('/Volumes/TestShare', {
+        execFile: async () => ({ stdout: 'arbitrary output\n', stderr: '' }),
+        statfs: async () => {
+          throw fixedError;
+        },
+      }),
+      (error) => error === fixedError,
+    );
+  });
+
+  it('passes the canonical realpath mount root to every replication mount probe', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const expectedRoot = await realpath(fixture.mountPath);
+    fixture.options.config.nasTargets[0].mountedShare.mountPath = `${fixture.mountPath}/.`;
+
+    const probedPaths = [];
+    const result = await replicateSnapshotToMountedSmb(fixture.options, {
+      inspectMount: async (path) => {
+        probedPaths.push(path);
+        return { fsType: 'smbfs', availableBytes: 1024 * 1024 * 1024 };
+      },
     });
-    assert.strictEqual(result.fsType, 'smbfs');
-    assert.strictEqual(result.availableBytes, 409600);
+
+    assert.strictEqual(result.state, 'replicated');
+    assert.ok(probedPaths.length >= 2, 'expected preflight and pre-publish mount probes');
+    for (const probed of probedPaths) {
+      assert.strictEqual(probed, expectedRoot);
+    }
   });
 
   it('conflict refuses overwrite when final appears before exclusive publication claim', async (t) => {
@@ -1638,6 +1688,31 @@ describe('SMB snapshot explicit stale recovery', () => {
     const serialized = JSON.stringify(recovered);
     for (const forbidden of [fixture.root, fixture.mountPath, 'mounted-share', OWNER_A]) {
       assert.ok(!serialized.includes(forbidden), `must not include ${forbidden}`);
+    }
+  });
+
+  it('passes the canonical realpath mount root to every recovery mount probe', async (t) => {
+    const fixture = await createExecutionFixture(t);
+    const { digest } = await fixtureDigest(fixture.root, fixture.snapshotId);
+    const nowMs = Date.parse('2026-07-10T12:00:00.000Z');
+    await plantLock(fixture, { digest, nowMs });
+    await plantStaging(fixture, { digest });
+    const expectedRoot = await realpath(fixture.mountPath);
+    fixture.options.config.nasTargets[0].mountedShare.mountPath = `${fixture.mountPath}/.`;
+
+    const probedPaths = [];
+    const recovered = await recoverMountedSmbSnapshot({ ...fixture.options, recover: true }, {
+      inspectMount: async (path) => {
+        probedPaths.push(path);
+        return { fsType: 'smbfs', availableBytes: 1024 * 1024 * 1024 };
+      },
+      now: () => new Date(nowMs),
+    });
+
+    assert.strictEqual(recovered.state, 'recovered');
+    assert.ok(probedPaths.length >= 2, 'expected recovery pre- and post-action mount probes');
+    for (const probed of probedPaths) {
+      assert.strictEqual(probed, expectedRoot);
     }
   });
 });

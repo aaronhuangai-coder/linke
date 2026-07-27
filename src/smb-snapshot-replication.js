@@ -283,16 +283,16 @@ export async function buildSmbSnapshotReplicationPlan(options, dependencies = {}
 }
 
 /**
- * 使用固定 `/usr/bin/stat` 参数与 statfs 检查挂载类型和可用空间；禁止 shell。
+ * 使用固定 `/bin/df -T smbfs` 退出状态与 statfs 检查 SMB 和可用空间；
+ * 禁止 shell，并丢弃命令输出。
  */
 export async function inspectMountedSmb(mountPath, deps = {}) {
   const exec = deps.execFile || execFileDefault;
   const getStatfs = deps.statfs || statfs;
-  const { stdout } = await exec('/usr/bin/stat', ['-f', '%T', mountPath]);
-  const fsType = String(stdout).trim();
+  await exec('/bin/df', ['-T', 'smbfs', mountPath]);
   const stats = await getStatfs(mountPath);
   return {
-    fsType,
+    fsType: 'smbfs',
     availableBytes: Number(stats.bavail) * Number(stats.bsize),
   };
 }
@@ -991,7 +991,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
   );
 
   const mountRoot = await resolveMountRoot(mountPath);
-  await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+  await preflightMount(inspectMount, mountRoot, remoteManifest.integrity.totalBytes);
 
   const relativeRootPath = join(mountRoot, ...relativeRoot.split('/'));
   await ensureSafeDirectory(mountRoot, relativeRootPath);
@@ -1116,7 +1116,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
               bytesSinceRecheck += byteCount;
               while (bytesSinceRecheck >= byteRecheckInterval) {
                 bytesSinceRecheck -= byteRecheckInterval;
-                await recheckMount(inspectMount, mountPath);
+                await recheckMount(inspectMount, mountRoot);
               }
             },
           });
@@ -1129,7 +1129,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
 
           filesSinceRecheck += 1;
           if (filesSinceRecheck >= MOUNT_RECHECK_FILE_INTERVAL) {
-            await recheckMount(inspectMount, mountPath);
+            await recheckMount(inspectMount, mountRoot);
             filesSinceRecheck = 0;
           }
         }
@@ -1140,7 +1140,7 @@ export async function replicateSnapshotToMountedSmb(options, deps = {}) {
           serializeCanonicalRemoteManifest(remoteManifest),
           { flag: 'wx' },
         );
-        await recheckMount(inspectMount, mountPath);
+        await recheckMount(inspectMount, mountRoot);
         break;
       } catch (error) {
         if (canRetryBeforePublish(error, retryCount, finalClaimed)) {
@@ -1357,7 +1357,7 @@ export async function recoverMountedSmbSnapshot(options, deps = {}) {
   await verifyLocalSnapshotFiles(options.dataDir, options.deviceId, remoteManifest);
 
   const mountRoot = await resolveMountRoot(mountPath);
-  await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+  await preflightMount(inspectMount, mountRoot, remoteManifest.integrity.totalBytes);
 
   const relativeRootPath = join(mountRoot, ...relativeRoot.split('/'));
   // 恢复只检查既有边界，不主动创建控制树。
@@ -1452,7 +1452,7 @@ export async function recoverMountedSmbSnapshot(options, deps = {}) {
     }
 
     // 恢复后 preflight：确认 mount 仍可用。
-    await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+    await preflightMount(inspectMount, mountRoot, remoteManifest.integrity.totalBytes);
 
     return sanitizedResult({
       state: 'recovered',
@@ -1513,7 +1513,7 @@ export async function recoverMountedSmbSnapshot(options, deps = {}) {
   }
 
   // 恢复后 preflight，确认系统回到可重试态。
-  await preflightMount(inspectMount, mountPath, remoteManifest.integrity.totalBytes);
+  await preflightMount(inspectMount, mountRoot, remoteManifest.integrity.totalBytes);
 
   return sanitizedResult({
     state: 'recovered',
