@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact current V1.44 real NAS acceptance PASS signature. */
+/** Exact current V1.45 NAS dry-run configuration-readiness PASS signature. */
+const V145_SIGNATURE =
+  'V1.45 NAS dry-run configuration-readiness PASS';
+
+/** Exact historical V1.44 signature — retained real NAS acceptance receipt; must not be erased. */
 const V144_SIGNATURE =
   'V1.44 real NAS acceptance PASS';
 
@@ -42,8 +46,8 @@ const HONESTY_BOUNDARIES = Object.freeze([
   'not M6d Exit',
   'not production-hardening ready',
   'not Gold',
-  'Gold remains partial 5/4/0/9',
-  'four partial items remain',
+  'Gold remains partial 6/3/0/9',
+  'three partial items remain',
   'not end-to-end production audit delivery',
 ]);
 
@@ -113,10 +117,11 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.44 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.44');
+  it('LINKE_RELEASE_VERSION is the V1.45 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.45');
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V145_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V144_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V142_SIGNATURE);
@@ -148,34 +153,54 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.44 real NAS acceptance PASS signature and honesty boundaries', async () => {
+  it('README current surface carries V1.45 NAS dry-run configuration-readiness PASS signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.44 real NAS acceptance PASS signature + fixed phrases on currentSurface
+    // Exact V1.45 NAS dry-run configuration-readiness PASS signature + fixed phrases on currentSurface
     assert.ok(
-      currentSurface.includes(V144_SIGNATURE),
-      `README currentSurface must include exact signature: ${V144_SIGNATURE}`,
+      currentSurface.includes(V145_SIGNATURE),
+      `README currentSurface must include exact signature: ${V145_SIGNATURE}`,
     );
     assert.ok(
-      currentSurface.includes('exact V1.44 hardware evidence PASS'),
-      'current surface must state exact V1.44 hardware evidence PASS',
+      currentSurface.includes('nas-dry-run ready'),
+      'current surface must state nas-dry-run ready',
     );
     assert.ok(
       currentSurface.includes('real-nas-remote-backup ready'),
       'current surface must state real-nas-remote-backup ready',
     );
     assert.ok(
+      currentSurface.includes('configuration-only ready'),
+      'current surface must state configuration-only ready',
+    );
+    assert.ok(
+      currentSurface.includes('runtime mount verification pending'),
+      'current surface must state runtime mount verification pending',
+    );
+    assert.ok(
+      currentSurface.includes('executionAuthorized:false'),
+      'current surface must include executionAuthorized:false',
+    );
+    assert.ok(
+      currentSurface.includes('wouldConnect:false'),
+      'current surface must include wouldConnect:false',
+    );
+    assert.ok(
+      currentSurface.includes('wouldWrite:false'),
+      'current surface must include wouldWrite:false',
+    );
+    assert.ok(
       currentSurface.includes('not Gold'),
       'current surface must include not Gold',
     );
     assert.ok(
-      currentSurface.includes('Gold remains partial 5/4/0/9'),
-      'current surface must include Gold remains partial 5/4/0/9',
+      !currentSurface.includes('Gold remains partial 5/4/0/9'),
+      'current surface must not keep stale Gold remains partial 5/4/0/9 (V1.44 historical count)',
     );
     assert.ok(
-      currentSurface.includes('four partial items remain'),
-      'current surface must state four partial items remain',
+      !currentSurface.includes('four partial items remain'),
+      'current surface must not keep stale four partial items remain (V1.44 historical count)',
     );
     assert.ok(
       !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(currentSurface),
@@ -198,6 +223,52 @@ describe('Release Version Consistency', () => {
         `README currentSurface must exact-include honesty boundary: ${phrase}`,
       );
     }
+
+    // V1.44 demoted to historical: retain real NAS acceptance receipt facts.
+    // Scoped to the V1.44 table row only — must not be satisfied by currentSurface
+    // or any other historical text (false-green guard).
+    const v144Row = lines.find(
+      (line) => line.includes('| V1.44 |') && line.includes('历史版本'),
+    );
+    assert.ok(v144Row, 'README version table must retain V1.44 as 历史版本');
+    assert.ok(
+      !lines.some((line) => line.includes('| V1.44 |') && line.includes('当前版本')),
+      'V1.44 must not remain marked as 当前版本',
+    );
+    assert.ok(
+      v144Row.includes(V144_SIGNATURE),
+      'V1.44 historical row must retain exact V1.44 real NAS acceptance PASS signature',
+    );
+    assert.ok(
+      v144Row.includes('NAS-REAL-V144-20260727-01'),
+      'V1.44 historical row must retain acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      v144Row.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json'),
+      'V1.44 historical row must retain committed JSON acceptance report path',
+    );
+    assert.ok(
+      v144Row.includes('docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md'),
+      'V1.44 historical row must retain committed Markdown acceptance report path',
+    );
+    assert.ok(
+      v144Row.includes('Gold remains partial 5/4/0/9'),
+      'V1.44 historical row must retain Gold remains partial 5/4/0/9',
+    );
+    // V1.44 historical row must immediately follow the V1.45 current row in the table.
+    const currentRowIndex = lines.findIndex(
+      (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
+    );
+    assert.ok(currentRowIndex >= 0, 'current version table row index must exist');
+    const nextVersionRow = lines
+      .slice(currentRowIndex + 1)
+      .find((line) => /^\| V\d/.test(line.trimStart()));
+    assert.ok(
+      nextVersionRow !== undefined
+        && nextVersionRow.includes('| V1.44 |')
+        && nextVersionRow.includes('历史版本'),
+      'V1.44 historical row must immediately follow the V1.45 current row',
+    );
 
     // V1.43 demoted to historical: retain rotation foundation facts
     const v143Row = lines.find(

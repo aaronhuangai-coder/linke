@@ -469,8 +469,8 @@ describe('Linke V2 M1 Exit audit lock', () => {
     assert.equal(report.version, LINKE_RELEASE_VERSION);
     assert.equal(report.status, 'partial');
     assert.deepEqual(report.summary, {
-      ready: 5,
-      partial: 4,
+      ready: 6,
+      partial: 3,
       blocked: 0,
       total: 9,
     });

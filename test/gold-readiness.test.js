@@ -157,15 +157,17 @@ const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
 
 /**
  * Frozen Gold item id/status snapshot.
- * V1.44 C1 committed real-NAS acceptance PASS rotates real-nas-remote-backup
- * blocked → ready; all other item statuses unchanged.
+ * V1.45 NAS dry-run configuration-readiness PASS rotates nas-dry-run
+ * partial → ready; all other item statuses unchanged (V1.44 C1 committed
+ * real-NAS acceptance PASS previously rotated real-nas-remote-backup
+ * blocked → ready).
  */
 const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'release-readiness', status: 'ready' },
   { id: 'local-backup-restore', status: 'ready' },
   { id: 'fleet-device-management', status: 'ready' },
   { id: 'version-consistency', status: 'ready' },
-  { id: 'nas-dry-run', status: 'partial' },
+  { id: 'nas-dry-run', status: 'ready' },
   { id: 'automation-installation', status: 'partial' },
   { id: 'security-auth', status: 'partial' },
   { id: 'real-nas-remote-backup', status: 'ready' },
@@ -335,23 +337,28 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.44', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.44');
+  it('expects LINKE_RELEASE_VERSION to be V1.45', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.45');
   });
 
-  it('expects report.version to be V1.44', () => {
+  it('expects report.version to be V1.45', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.44');
+    assert.strictEqual(report.version, 'V1.45');
   });
 
   it('expects status partial and correct summary count', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     assert.strictEqual(report.status, 'partial');
-    assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
+    assert.deepStrictEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
     assert.equal(report.items.some((item) => item.id === 'cross-lan-connectivity'), false);
+    assert.strictEqual(report.items.find((item) => item.id === 'nas-dry-run').status, 'ready');
+    assert.strictEqual(report.items.find((item) => item.id === 'real-nas-remote-backup').status, 'ready');
+    assert.strictEqual(report.items.find((item) => item.id === 'automation-installation').status, 'partial');
+    assert.strictEqual(report.items.find((item) => item.id === 'security-auth').status, 'partial');
+    assert.strictEqual(report.items.find((item) => item.id === 'production-hardening').status, 'partial');
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.44 real NAS acceptance rotates only real-nas-remote-backup to ready)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.45 NAS dry-run configuration-readiness rotates only nas-dry-run to ready)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -455,6 +462,67 @@ describe('Gold Readiness Report', () => {
     assert.ok(nasEvidence.includes('executionReadiness'));
     assert.ok(nasEvidence.includes('rendering'));
     assert.ok(nasEvidence.includes('DOM tests'));
+
+    // V1.45 conjunctive evidence atoms — each must be an exact evidence element.
+    for (const atom of [
+      'schemaVersion:2',
+      'adapterAvailable:true',
+      'executionAuthorized:false',
+      'wouldConnect:false',
+      'wouldWrite:false',
+      'configuredEndpointSentinelConnections:0',
+      'test/nas-dry-run.test.js',
+      'test/agent-nas-dry-run.test.js',
+      'test/web-console.test.js',
+      'docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.json',
+      'docs/superpowers/reports/2026-07-27-v144-real-nas-acceptance.md',
+      'NAS-REAL-V144-20260727-01',
+    ]) {
+      assert.ok(
+        nasItem.evidence.includes(atom),
+        `nas-dry-run evidence must exact-include V1.45 conjunctive atom: ${atom}`,
+      );
+    }
+
+    // V1.45 nextStep: configuration-only ready, runtime mount verification remains
+    // execution-time/pending, three named partial items remain, overall not Gold;
+    // stale V0.69 description must be gone.
+    assert.ok(
+      nasItem.nextStep.includes('configuration-only ready'),
+      'nas-dry-run nextStep must state configuration-only ready',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('runtime mount verification'),
+      'nas-dry-run nextStep must mention runtime mount verification',
+    );
+    assert.ok(
+      /execution-time|pending/.test(nasItem.nextStep),
+      'nas-dry-run nextStep must state runtime mount verification remains execution-time/pending',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('three partial items remain'),
+      'nas-dry-run nextStep must state three partial items remain',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('automation-installation'),
+      'nas-dry-run nextStep must name remaining partial item automation-installation',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('security-auth'),
+      'nas-dry-run nextStep must name remaining partial item security-auth',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('production-hardening'),
+      'nas-dry-run nextStep must name remaining partial item production-hardening',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('not Gold'),
+      'nas-dry-run nextStep must state overall not Gold',
+    );
+    assert.ok(
+      !nasItem.nextStep.includes('V0.69'),
+      'nas-dry-run nextStep must not keep the stale V0.69 description',
+    );
 
     const nasCombined = `${nasItem.label || ''} ${nasItem.nextStep || ''} ${nasEvidence}`;
     assert.ok(nasCombined.toLowerCase().includes('real nas connection'));
@@ -2120,12 +2188,15 @@ describe('Gold Readiness Report', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];
     for (const item of report.items) {
-      // Strip boolean false tokens and registered fail-closed error code
-      // (audit-delivery-unavailable contains substring "available" but is not a readiness claim).
+      // Strip boolean false tokens, the registered fail-closed error code
+      // (audit-delivery-unavailable contains substring "available" but is not a readiness claim),
+      // and the V1.45 adapter-available schema fact atom (adapterAvailable:true lowercases to
+      // contain "available" but is an exact configuration fact, not a readiness claim).
       const evidence = evidenceText(item)
         .toLowerCase()
         .replaceAll('available:false', '')
-        .replaceAll('audit-delivery-unavailable', '');
+        .replaceAll('audit-delivery-unavailable', '')
+        .replaceAll('adapteravailable:true', '');
       for (const word of vagueWords) {
         assert.ok(
           !evidence.includes(word),

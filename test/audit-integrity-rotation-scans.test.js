@@ -31,8 +31,8 @@
  *     test/audit-integrity-rotation-gates.test.js in the full standard suite.
  * Q3: exact six rotation error registry values; exact total registry count 94;
  *     receipt/error output path-free (no cause/stack/raw-event/absolute-path).
- * Q4: exact V1.43 signature and negative boundaries on the current README /
- *     gold-readiness surface.
+ * Q4: exact current V1.45 signature and negative boundaries on the current
+ *     README / gold-readiness surface; V1.44/V1.43 historical rows retained.
  */
 
 import { describe, it } from 'node:test';
@@ -58,7 +58,11 @@ const PATHS = Object.freeze({
   readme: join(REPO_ROOT, 'README.md'),
 });
 
-/** Exact current V1.44 real NAS acceptance PASS signature. */
+/** Exact current V1.45 NAS dry-run configuration-readiness PASS signature. */
+const V145_SIGNATURE =
+  'V1.45 NAS dry-run configuration-readiness PASS';
+
+/** Exact historical V1.44 real NAS acceptance PASS signature — retained hardware evidence. */
 const V144_SIGNATURE =
   'V1.44 real NAS acceptance PASS';
 
@@ -1254,24 +1258,52 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
     );
   });
 
-  it('Q4 locks the V1.44 real NAS acceptance PASS surface and V1.43 historical rotation boundaries', async () => {
+  it('Q4 locks the V1.45 NAS dry-run configuration-readiness PASS surface and V1.44/V1.43 historical boundaries', async () => {
     assert.strictEqual(
       LINKE_RELEASE_VERSION,
-      'V1.44',
-      'LINKE_RELEASE_VERSION must be exactly V1.44',
+      'V1.45',
+      'LINKE_RELEASE_VERSION must be exactly V1.45',
     );
 
     const sources = await readAllowedSources();
     const { currentSurface, lines } = extractReadmeCurrentSurface(sources.readme);
 
-    // Exact V1.44 real NAS acceptance PASS signature + fixed current-state phrases on current surface.
+    // Exact V1.45 NAS dry-run configuration-readiness PASS signature + fixed current-state phrases on current surface.
     assert.ok(
-      currentSurface.includes(V144_SIGNATURE),
-      `README current surface must include exact signature: ${V144_SIGNATURE}`,
+      currentSurface.includes(V145_SIGNATURE),
+      `README current surface must include exact signature: ${V145_SIGNATURE}`,
     );
     assert.ok(
-      currentSurface.includes('exact V1.44 hardware evidence PASS'),
-      'current surface must state exact V1.44 hardware evidence PASS',
+      currentSurface.includes('nas-dry-run ready'),
+      'current surface must state nas-dry-run ready',
+    );
+    assert.ok(
+      currentSurface.includes('configuration-only ready'),
+      'current surface must state configuration-only ready',
+    );
+    assert.ok(
+      currentSurface.includes('executionAuthorized:false'),
+      'current surface must state executionAuthorized:false',
+    );
+    assert.ok(
+      currentSurface.includes('wouldConnect:false'),
+      'current surface must state wouldConnect:false',
+    );
+    assert.ok(
+      currentSurface.includes('wouldWrite:false'),
+      'current surface must state wouldWrite:false',
+    );
+    assert.ok(
+      currentSurface.includes('configuredEndpointSentinelConnections:0'),
+      'current surface must state configuredEndpointSentinelConnections:0',
+    );
+    assert.ok(
+      currentSurface.includes('no real NAS connection is made'),
+      'current surface must state no real NAS connection is made',
+    );
+    assert.ok(
+      currentSurface.includes('runtime mount verification pending'),
+      'current surface must state runtime mount verification pending',
     );
     assert.ok(
       currentSurface.includes('real-nas-remote-backup ready'),
@@ -1282,12 +1314,50 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       'current surface must exact-include not Gold',
     );
     assert.ok(
-      currentSurface.includes('Gold remains partial 5/4/0/9'),
-      'current surface must state Gold remains partial 5/4/0/9',
+      currentSurface.includes('Gold remains partial 6/3/0/9'),
+      'current surface must state Gold remains partial 6/3/0/9',
     );
     assert.ok(
-      currentSurface.includes('four partial items remain'),
-      'current surface must state four partial items remain',
+      currentSurface.includes('three partial items remain'),
+      'current surface must state three partial items remain',
+    );
+
+    // V1.44 demoted to historical row with its exact hardware acceptance facts.
+    const v144Row = lines.find(
+      (line) => line.includes('| V1.44 |') && line.includes('历史版本'),
+    );
+    assert.ok(v144Row, 'README version table must contain V1.44 historical row');
+    assert.ok(
+      v144Row.includes(V144_SIGNATURE),
+      'V1.44 historical row must carry the exact V1.44 signature',
+    );
+    assert.ok(
+      v144Row.includes('exact V1.44 hardware evidence PASS'),
+      'V1.44 historical row must state exact V1.44 hardware evidence PASS',
+    );
+    assert.ok(
+      v144Row.includes('real-nas-remote-backup ready'),
+      'V1.44 historical row must state real-nas-remote-backup ready',
+    );
+    assert.ok(
+      v144Row.includes('NAS-REAL-V144-20260727-01'),
+      'V1.44 historical row must retain acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      v144Row.includes('not Gold'),
+      'V1.44 historical row must include not Gold',
+    );
+    assert.ok(
+      v144Row.includes('Gold remains partial 5/4/0/9'),
+      'V1.44 historical row must include Gold remains partial 5/4/0/9',
+    );
+    assert.ok(
+      v144Row.includes('four partial items remain'),
+      'V1.44 historical row must include four partial items remain',
+    );
+    assert.ok(
+      v144Row.includes('G0c real-LAN evidence absent'),
+      'V1.44 historical row must include G0c real-LAN evidence absent',
     );
 
     // V1.43 demoted to historical row with rotation foundation facts.
@@ -1394,13 +1464,64 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       'current surface must not claim production-hardening ready',
     );
 
-    // Gold-readiness surface: version V1.44; item snapshot and V1.43 evidence foundation unchanged.
+    // Gold-readiness surface: version V1.45; nas-dry-run ready; V1.43 evidence foundation unchanged.
     const report = buildGoldReadinessReport({ now: new Date('2026-07-25T00:00:00.000Z') });
-    assert.strictEqual(report.version, 'V1.44', 'gold-readiness report version must be V1.44');
+    assert.strictEqual(report.version, 'V1.45', 'gold-readiness report version must be V1.45');
+    assert.strictEqual(report.status, 'partial', 'Gold overall status must remain partial');
     assert.deepStrictEqual(
       report.summary,
-      { ready: 5, partial: 4, blocked: 0, total: 9 },
-      'Gold item snapshot counts must be 5/4/0/9',
+      { ready: 6, partial: 3, blocked: 0, total: 9 },
+      'Gold item snapshot counts must be 6/3/0/9',
+    );
+    assert.deepStrictEqual(
+      report.items.map((item) => ({ id: item.id, status: item.status })),
+      [
+        { id: 'release-readiness', status: 'ready' },
+        { id: 'local-backup-restore', status: 'ready' },
+        { id: 'fleet-device-management', status: 'ready' },
+        { id: 'version-consistency', status: 'ready' },
+        { id: 'nas-dry-run', status: 'ready' },
+        { id: 'automation-installation', status: 'partial' },
+        { id: 'security-auth', status: 'partial' },
+        { id: 'real-nas-remote-backup', status: 'ready' },
+        { id: 'production-hardening', status: 'partial' },
+      ],
+      'Gold item snapshot must have nas-dry-run ready and exactly three partial items',
+    );
+    const nasDryRun = report.items.find((item) => item.id === 'nas-dry-run');
+    assert.ok(nasDryRun, 'nas-dry-run item must exist');
+    assert.strictEqual(nasDryRun.status, 'ready', 'nas-dry-run must be ready');
+    const nasEvidenceText = nasDryRun.evidence.join('\n');
+    assert.ok(
+      nasEvidenceText.includes('executionAuthorized:false'),
+      'nas-dry-run evidence must state executionAuthorized:false',
+    );
+    assert.ok(
+      nasEvidenceText.includes('wouldConnect:false'),
+      'nas-dry-run evidence must state wouldConnect:false',
+    );
+    assert.ok(
+      nasEvidenceText.includes('wouldWrite:false'),
+      'nas-dry-run evidence must state wouldWrite:false',
+    );
+    assert.ok(
+      nasEvidenceText.includes('configuredEndpointSentinelConnections:0'),
+      'nas-dry-run evidence must state configuredEndpointSentinelConnections:0',
+    );
+    assert.ok(
+      nasDryRun.nextStep.includes('no real NAS connection is made'),
+      'nas-dry-run nextStep must state no real NAS connection is made',
+    );
+    assert.ok(
+      nasDryRun.nextStep.includes('not Gold'),
+      'nas-dry-run nextStep must retain not Gold',
+    );
+    const realNas = report.items.find((item) => item.id === 'real-nas-remote-backup');
+    assert.ok(realNas, 'real-nas-remote-backup item must exist');
+    assert.strictEqual(realNas.status, 'ready', 'real-nas-remote-backup must remain ready');
+    assert.ok(
+      realNas.evidence.join('\n').includes('NAS-REAL-V144-20260727-01'),
+      'real-nas-remote-backup must retain committed V1.44 acceptance evidence NAS-REAL-V144-20260727-01',
     );
     const hardening = report.items.find((item) => item.id === 'production-hardening');
     assert.ok(hardening, 'production-hardening item must exist');

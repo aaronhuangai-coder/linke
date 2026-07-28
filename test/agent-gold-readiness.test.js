@@ -76,7 +76,7 @@ describe('Agent gold-readiness CLI', () => {
       assert.strictEqual(stderr, '');
       assert.strictEqual(report.version, LINKE_RELEASE_VERSION);
       assert.strictEqual(report.status, 'partial');
-      assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
+      assert.deepStrictEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
       assert.strictEqual(Array.isArray(report.items), true);
       assert.strictEqual(report.items.length, 9);
       assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
@@ -109,7 +109,7 @@ describe('Agent gold-readiness CLI', () => {
       assert.strictEqual(stderr, '');
       assert.strictEqual(report.status, 'partial');
       assert.strictEqual(report.version, LINKE_RELEASE_VERSION);
-      assert.deepStrictEqual(report.summary, { ready: 5, partial: 4, blocked: 0, total: 9 });
+      assert.deepStrictEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
       assert.ok(!stdout.includes('gold-read-token'), 'stdout must not include token material');
       assert.ok(!stdout.includes('gold-write-token'), 'stdout must not include write token material');
       assert.deepStrictEqual(await readdir(dataDir), []);
