@@ -4624,6 +4624,22 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
     if (nasDryRunJobCountEl) nasDryRunJobCountEl.textContent = String(jobs.length);
     clearElement(nasDryRunResultEl);
 
+    const gate = plan.executionGate && typeof plan.executionGate === 'object'
+      ? plan.executionGate
+      : {};
+    const adapterAvailable = gate.adapterAvailable === true;
+    const executionAuthorized = gate.executionAuthorized === true;
+
+    const adapterStatusRow = doc.createElement('div');
+    adapterStatusRow.className = 'nas-dry-run-adapter-status';
+    adapterStatusRow.textContent = 'mounted SMB adapter：' + (adapterAvailable ? '已实现' : '未确认');
+    nasDryRunResultEl.appendChild(adapterStatusRow);
+
+    const authStatusRow = doc.createElement('div');
+    authStatusRow.className = 'nas-dry-run-execution-auth';
+    authStatusRow.textContent = 'dry-run 执行授权：' + (executionAuthorized ? '已授权' : '未授权');
+    nasDryRunResultEl.appendChild(authStatusRow);
+
     if (plan.executionGate) {
       const gateRow = doc.createElement('div');
       gateRow.className = 'nas-dry-run-gate-row';
@@ -4651,7 +4667,7 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       summaryDiv.className = 'nas-readiness-summary';
 
       const title = doc.createElement('h3');
-      title.textContent = 'NAS 执行就绪性摘要';
+      title.textContent = 'NAS 配置就绪性摘要';
       summaryDiv.appendChild(title);
 
       const countsRow = doc.createElement('div');
@@ -4662,6 +4678,10 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
         `已禁用: ${plan.readinessSummary.disabledTargets} | ` +
         `凭证配置: ${plan.readinessSummary.credentialRefConfiguredTargets} | ` +
         `启用缺凭证: ${plan.readinessSummary.enabledCredentialRefMissingTargets} | ` +
+        `挂载共享配置: ${plan.readinessSummary.mountedShareConfiguredTargets} | ` +
+        `挂载共享启用: ${plan.readinessSummary.mountedShareEnabledTargets} | ` +
+        `配置就绪目标: ${plan.readinessSummary.configurationReadyTargets} | ` +
+        `运行时验证待完成: ${plan.readinessSummary.runtimeVerificationPendingTargets} | ` +
         `受阻目标: ${plan.readinessSummary.blockedTargets}`;
       summaryDiv.appendChild(countsRow);
 
@@ -4718,11 +4738,18 @@ export function initConsole(doc, fetchImpl, intervalImpl) {
       if (target.executionReadiness) {
         const readinessRow = doc.createElement('div');
         readinessRow.className = 'nas-dry-run-readiness-row';
-        readinessRow.textContent = `执行就绪状态: ${target.executionReadiness.state}` +
+        readinessRow.textContent = `配置就绪状态: ${target.executionReadiness.state}` +
           (target.executionReadiness.blockers && target.executionReadiness.blockers.length > 0
             ? ` (卡点: ${target.executionReadiness.blockers.join(', ')})`
             : '');
         item.appendChild(readinessRow);
+
+        if (target.executionReadiness.runtimeVerificationRequired === true) {
+          const runtimeRow = doc.createElement('div');
+          runtimeRow.className = 'nas-dry-run-runtime-check';
+          runtimeRow.textContent = '运行时挂载检查：将在真实执行前完成';
+          item.appendChild(runtimeRow);
+        }
       }
 
       const adapter = doc.createElement('div');

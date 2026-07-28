@@ -616,6 +616,11 @@ describe('Web Console / API contract', () => {
             shareName: 'backup',
             remotePath: '/volume1/backup',
             enabled: true,
+            mountedShare: {
+              enabled: true,
+              mountPath: '/v145-must-not-leak/mounted-share',
+              relativeRoot: 'linke/v145-must-not-leak-root',
+            },
           },
           {
             name: 'ugreen-web',
@@ -634,15 +639,18 @@ describe('Web Console / API contract', () => {
     assert.strictEqual(res.status, 200);
     assert.strictEqual(body.mode, 'dry-run');
     assert.strictEqual(body.deviceId, 'web-console-dry-run');
+    assert.strictEqual(body.schemaVersion, 2);
     assert.strictEqual(body.wouldConnect, false);
     assert.strictEqual(body.wouldWrite, false);
+    assert.strictEqual(body.executionGate.adapterAvailable, true);
+    assert.strictEqual(body.executionGate.executionAuthorized, false);
     assert.strictEqual(body.executionGate.remoteExecutionAllowed, false);
     assert.strictEqual(body.targets.length, 2);
     assert.strictEqual(body.jobs.length, 1);
     assert.strictEqual(body.targets[0].provider, 'synology');
     assert.strictEqual(body.targets[1].provider, 'ugreen');
 
-    // Readiness fields
+    // V2 configuration-readiness fields
     assert.ok(body.readinessSummary);
     assert.strictEqual(body.readinessSummary.mode, 'dry-run');
     assert.strictEqual(body.readinessSummary.state, 'blocked');
@@ -651,17 +659,26 @@ describe('Web Console / API contract', () => {
     assert.strictEqual(body.readinessSummary.disabledTargets, 1);
     assert.strictEqual(body.readinessSummary.credentialRefConfiguredTargets, 0);
     assert.strictEqual(body.readinessSummary.enabledCredentialRefMissingTargets, 1);
-    assert.strictEqual(body.readinessSummary.blockedTargets, 2);
+    assert.strictEqual(body.readinessSummary.configurationReadyTargets, 1);
+    assert.strictEqual(body.readinessSummary.runtimeVerificationPendingTargets, 1);
+    assert.strictEqual(body.readinessSummary.blockedTargets, 1);
     assert.strictEqual(body.readinessSummary.remoteExecutionBlocked, true);
-    assert.deepStrictEqual(body.readinessSummary.blockers.sort(), ['credential-ref-missing', 'remote-execution-blocked', 'target-disabled'].sort());
+    assert.deepStrictEqual(body.readinessSummary.blockers, ['target-disabled']);
 
     assert.ok(body.targets[0].executionReadiness);
-    assert.strictEqual(body.targets[0].executionReadiness.state, 'blocked');
-    assert.deepStrictEqual(body.targets[0].executionReadiness.blockers.sort(), ['credential-ref-missing', 'remote-execution-blocked'].sort());
+    assert.strictEqual(body.targets[0].executionReadiness.state, 'ready');
+    assert.deepStrictEqual(body.targets[0].executionReadiness.blockers, []);
 
     assert.ok(body.targets[1].executionReadiness);
     assert.strictEqual(body.targets[1].executionReadiness.state, 'blocked');
-    assert.deepStrictEqual(body.targets[1].executionReadiness.blockers.sort(), ['remote-execution-blocked', 'target-disabled'].sort());
+    assert.deepStrictEqual(body.targets[1].executionReadiness.blockers, ['target-disabled']);
+
+    // Serialized response must not leak mountedShare path keys or input values
+    const serialized = JSON.stringify(body);
+    assert.strictEqual(serialized.includes('mountPath'), false, 'must not leak mountPath key');
+    assert.strictEqual(serialized.includes('relativeRoot'), false, 'must not leak relativeRoot key');
+    assert.strictEqual(serialized.includes('/v145-must-not-leak/mounted-share'), false, 'must not leak mountPath value');
+    assert.strictEqual(serialized.includes('linke/v145-must-not-leak-root'), false, 'must not leak relativeRoot value');
   });
 
   it('POST /api/nas-dry-run rejects invalid JSON body', async () => {
@@ -3497,7 +3514,7 @@ describe('initConsole DOM data-testid hooks', () => {
     assert.match(doc.getElementById('nas-dry-run-result').textContent, /endpoint must be a valid URL/);
   });
 
-  it('DOM test: renders NAS execution readiness summary and target blockers without leaking credentialRef', async () => {
+  it('DOM test: renders NAS dry-run V2 configuration readiness without leaking credentialRef or mountedShare paths', async () => {
     const doc = buildMockDoc();
     const calls = [];
     const mockFetch = async (url, options) => {
@@ -3509,49 +3526,76 @@ describe('initConsole DOM data-testid hooks', () => {
           json: async () => ({
             mode: 'dry-run',
             deviceId: 'web-console-dry-run',
+            schemaVersion: 2,
             wouldConnect: false,
             wouldWrite: false,
             executionGate: {
+              schemaVersion: 2,
+              adapterAvailable: true,
+              executionAuthorized: false,
               remoteExecutionAllowed: false,
-              blockingReason: 'real NAS transport not implemented',
+              blockingReason: 'dry-run does not authorize execution',
+              requiredGates: [
+                { type: 'cli-flag', name: '--execute' },
+                { type: 'env-var', name: 'LINKE_NAS_SMB_EXECUTION' },
+              ],
             },
             readinessSummary: {
+              schemaVersion: 2,
               mode: 'dry-run',
+              scope: 'configuration-only',
               state: 'blocked',
               totalTargets: 3,
               enabledTargets: 2,
               disabledTargets: 1,
               credentialRefConfiguredTargets: 1,
               enabledCredentialRefMissingTargets: 1,
-              blockedTargets: 3,
+              mountedShareConfiguredTargets: 1,
+              mountedShareEnabledTargets: 1,
+              configurationReadyTargets: 1,
+              runtimeVerificationPendingTargets: 1,
+              blockedTargets: 2,
+              executionAuthorized: false,
               remoteExecutionBlocked: true,
-              blockers: ['remote-execution-blocked', 'credential-ref-missing', 'target-disabled'],
+              blockers: ['mounted-share-missing', 'target-disabled'],
             },
             targets: [
               {
-                name: 'synology-configured',
-                provider: 'synology',
-                endpoint: 'http://192.168.1.100:5000',
-                shareName: 'backup',
-                remotePath: '/volume1/backup',
-                enabled: true,
-                credentialRefConfigured: true,
-                executionReadiness: {
-                  state: 'blocked',
-                  blockers: ['remote-execution-blocked'],
-                },
-              },
-              {
-                name: 'synology-missing',
+                name: 'synology-ready',
                 provider: 'synology',
                 endpoint: 'http://192.168.1.100:5000',
                 shareName: 'backup',
                 remotePath: '/volume1/backup',
                 enabled: true,
                 credentialRefConfigured: false,
+                mountedShareConfigured: true,
+                mountedShareEnabled: true,
                 executionReadiness: {
+                  schemaVersion: 2,
+                  state: 'ready',
+                  basis: 'configuration-only',
+                  blockers: [],
+                  runtimeVerificationPerformed: false,
+                  runtimeVerificationRequired: true,
+                },
+              },
+              {
+                name: 'synology-legacy-missing',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: true,
+                mountedShareConfigured: false,
+                mountedShareEnabled: false,
+                executionReadiness: {
+                  schemaVersion: 2,
                   state: 'blocked',
-                  blockers: ['credential-ref-missing', 'remote-execution-blocked'],
+                  basis: 'configuration-only',
+                  blockers: ['mounted-share-missing'],
+                  runtimeVerificationPerformed: false,
+                  runtimeVerificationRequired: false,
                 },
               },
               {
@@ -3562,9 +3606,15 @@ describe('initConsole DOM data-testid hooks', () => {
                 remotePath: '/volume1/backup',
                 enabled: false,
                 credentialRefConfigured: false,
+                mountedShareConfigured: false,
+                mountedShareEnabled: false,
                 executionReadiness: {
+                  schemaVersion: 2,
                   state: 'blocked',
-                  blockers: ['target-disabled', 'remote-execution-blocked'],
+                  basis: 'configuration-only',
+                  blockers: ['target-disabled'],
+                  runtimeVerificationPerformed: false,
+                  runtimeVerificationRequired: false,
                 },
               },
             ],
@@ -3583,13 +3633,18 @@ describe('initConsole DOM data-testid hooks', () => {
       deviceId: 'web-console-dry-run',
       nasTargets: [
         {
-          name: 'synology-configured',
+          name: 'synology-ready',
           provider: 'synology',
           endpoint: 'http://192.168.1.100:5000',
           shareName: 'backup',
           remotePath: '/volume1/backup',
           enabled: true,
           credentialRef: 'home-synology', // should not be leaked in UI text content
+          mountedShare: {
+            enabled: true,
+            mountPath: '/v145-must-not-leak/mounted-share', // should not be leaked in UI text content
+            relativeRoot: 'linke/v145-must-not-leak-root', // should not be leaked in UI text content
+          },
         }
       ],
       backupJobs: [],
@@ -3599,28 +3654,100 @@ describe('initConsole DOM data-testid hooks', () => {
 
     const resultText = doc.getElementById('nas-dry-run-result').textContent;
 
-    // Assert readiness summary text
-    assert.match(resultText, /NAS 执行就绪性摘要/);
+    // V2 gate wording: adapter availability and execution authorization are separate facts
+    assert.match(resultText, /mounted SMB adapter：已实现/);
+    assert.match(resultText, /dry-run 执行授权：未授权/);
+
+    // V2 configuration-readiness summary text
+    assert.match(resultText, /NAS 配置就绪性摘要/);
     assert.match(resultText, /状态:\s*blocked/);
     assert.match(resultText, /总目标:\s*3/);
     assert.match(resultText, /已启用:\s*2/);
     assert.match(resultText, /已禁用:\s*1/);
     assert.match(resultText, /凭证配置:\s*1/);
     assert.match(resultText, /启用缺凭证:\s*1/);
-    assert.match(resultText, /受阻目标:\s*3/);
-    assert.match(resultText, /就绪性卡点:\s*remote-execution-blocked,\s*credential-ref-missing,\s*target-disabled/);
+    assert.match(resultText, /受阻目标:\s*2/);
+    assert.match(resultText, /就绪性卡点:\s*mounted-share-missing,\s*target-disabled/);
 
-    // Assert per-target text
-    assert.match(resultText, /synology-configured/);
-    assert.match(resultText, /synology-missing/);
+    // V2 per-target text: configuration readiness plus pending runtime mount check
+    assert.match(resultText, /synology-ready/);
+    assert.match(resultText, /synology-legacy-missing/);
     assert.match(resultText, /synology-disabled/);
-    assert.match(resultText, /执行就绪状态:\s*blocked/);
-    assert.match(resultText, /卡点:\s*remote-execution-blocked/);
-    assert.match(resultText, /卡点:\s*credential-ref-missing/);
+    assert.match(resultText, /配置就绪状态:\s*ready/);
+    assert.match(resultText, /运行时挂载检查：将在真实执行前完成/);
+    assert.match(resultText, /配置就绪状态:\s*blocked/);
+    assert.match(resultText, /卡点:\s*mounted-share-missing/);
     assert.match(resultText, /卡点:\s*target-disabled/);
 
-    // Verify credentialRef name is not leaked
+    // Verify raw credentialRef, mountedShare paths, and legacy wording are not leaked
     assert.strictEqual(resultText.includes('home-synology'), false, 'must not leak raw credentialRef values');
+    assert.strictEqual(resultText.includes('credentialRef'), false, 'must not leak credentialRef key');
+    assert.strictEqual(resultText.includes('mountPath'), false, 'must not leak mountPath key');
+    assert.strictEqual(resultText.includes('relativeRoot'), false, 'must not leak relativeRoot key');
+    assert.strictEqual(resultText.includes('/v145-must-not-leak/mounted-share'), false, 'must not leak mountPath value');
+    assert.strictEqual(resultText.includes('linke/v145-must-not-leak-root'), false, 'must not leak relativeRoot value');
+    assert.strictEqual(resultText.includes('真实 NAS transport 未实现'), false, 'must not render legacy transport wording');
+    assert.strictEqual(resultText.includes('NAS 执行就绪性摘要'), false, 'must not render legacy summary title');
+    assert.strictEqual(resultText.includes('执行就绪状态'), false, 'must not render legacy target readiness prefix');
+  });
+
+  it('DOM test: NAS dry-run legacy gate schema fails closed on adapter and authorization wording', async () => {
+    const doc = buildMockDoc();
+    const mockFetch = async (url) => {
+      if (String(url).includes('/api/nas-dry-run')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            mode: 'dry-run',
+            deviceId: 'web-console-dry-run',
+            wouldConnect: false,
+            wouldWrite: false,
+            executionGate: {
+              remoteExecutionAllowed: false,
+              blockingReason: 'real NAS transport not implemented',
+            },
+            targets: [
+              {
+                name: 'synology-legacy',
+                provider: 'synology',
+                endpoint: 'http://192.168.1.100:5000',
+                shareName: 'backup',
+                remotePath: '/volume1/backup',
+                enabled: true,
+                credentialRefConfigured: true,
+                executionReadiness: {
+                  state: 'blocked',
+                  blockers: ['remote-execution-blocked'],
+                },
+              },
+            ],
+            jobs: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    const mockInterval = () => 0;
+
+    initConsole(doc, mockFetch, mockInterval);
+    await new Promise((r) => setTimeout(r, 20));
+
+    doc.getElementById('nas-dry-run-config').value = JSON.stringify({
+      deviceId: 'web-console-dry-run',
+      nasTargets: [],
+      backupJobs: [],
+    });
+    doc.getElementById('nas-dry-run-run')._listeners.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const resultText = doc.getElementById('nas-dry-run-result').textContent;
+
+    // Legacy gate without adapterAvailable/executionAuthorized must fail closed
+    assert.match(resultText, /mounted SMB adapter：未确认/);
+    assert.match(resultText, /dry-run 执行授权：未授权/);
+    assert.strictEqual(resultText.includes('mounted SMB adapter：已实现'), false, 'legacy schema must never claim adapter implemented');
+    assert.strictEqual(resultText.includes('dry-run 执行授权：已授权'), false, 'legacy schema must never claim execution authorized');
   });
 
 
