@@ -36,13 +36,28 @@ const FILES_ADAPTER_STEPS = Object.freeze([
   'preview-file-operation',
 ]);
 
+const NAS_DRY_RUN_SCHEMA_VERSION = 2;
+
+const NAS_REQUIRED_EXECUTION_GATES = Object.freeze([
+  Object.freeze({ type: 'cli-flag', name: '--execute' }),
+  Object.freeze({ type: 'env-var', name: 'LINKE_NAS_SMB_EXECUTION' }),
+]);
+
 const NAS_EXECUTION_GATE = Object.freeze({
+  schemaVersion: NAS_DRY_RUN_SCHEMA_VERSION,
+  adapterAvailable: true,
+  executionAuthorized: false,
   remoteExecutionAllowed: false,
-  blockingReason: 'real NAS transport not implemented',
+  blockingReason: 'dry-run does not authorize execution',
+  requiredGates: NAS_REQUIRED_EXECUTION_GATES,
 });
 
 export const NAS_EXECUTION_READINESS_BLOCKERS = Object.freeze({
+  NO_TARGETS_CONFIGURED: 'no-targets-configured',
   TARGET_DISABLED: 'target-disabled',
+  MOUNTED_SHARE_MISSING: 'mounted-share-missing',
+  MOUNTED_SHARE_DISABLED: 'mounted-share-disabled',
+  // Compatibility exports only — never pushed into active V2 blockers.
   CREDENTIAL_REF_MISSING: 'credential-ref-missing',
   REMOTE_EXECUTION_BLOCKED: 'remote-execution-blocked',
 });
@@ -147,42 +162,49 @@ export function validateNasTarget(target) {
 }
 
 /**
- * Derive target execution readiness from enabled state, credential ref configured status,
- * and the global remote execution gate.
+ * Derive target execution readiness from configuration only, using this exact
+ * branch order: disabled target, missing mounted share, disabled mounted share.
  */
-export function getTargetExecutionReadiness(target, remoteExecutionAllowed) {
-  const blockers = [];
+export function getTargetExecutionReadiness(target) {
+  let blocker = null;
   if (!target.enabled) {
-    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.TARGET_DISABLED);
+    blocker = NAS_EXECUTION_READINESS_BLOCKERS.TARGET_DISABLED;
+  } else if (!target.mountedShare) {
+    blocker = NAS_EXECUTION_READINESS_BLOCKERS.MOUNTED_SHARE_MISSING;
+  } else if (!target.mountedShare.enabled) {
+    blocker = NAS_EXECUTION_READINESS_BLOCKERS.MOUNTED_SHARE_DISABLED;
   }
-  const credentialRefConfigured = Boolean(target.credentialRef);
-  if (target.enabled && !credentialRefConfigured) {
-    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.CREDENTIAL_REF_MISSING);
-  }
-  if (!remoteExecutionAllowed) {
-    blockers.push(NAS_EXECUTION_READINESS_BLOCKERS.REMOTE_EXECUTION_BLOCKED);
-  }
-  const state = blockers.length > 0 ? 'blocked' : 'ready';
+
+  const blockers = blocker ? [blocker] : [];
+  const ready = blockers.length === 0;
   return {
-    state,
+    schemaVersion: NAS_DRY_RUN_SCHEMA_VERSION,
+    state: ready ? 'ready' : 'blocked',
+    basis: 'configuration-only',
     blockers,
+    runtimeVerificationPerformed: false,
+    runtimeVerificationRequired: ready,
   };
 }
 
 /**
  * Build readiness summary counts and aggregated blockers from target readiness rows.
  */
-export function buildReadinessSummary(targets, remoteExecutionAllowed) {
+export function buildReadinessSummary(targets) {
   const totalTargets = targets.length;
   let enabledTargets = 0;
   let disabledTargets = 0;
   let credentialRefConfiguredTargets = 0;
   let enabledCredentialRefMissingTargets = 0;
+  let mountedShareConfiguredTargets = 0;
+  let mountedShareEnabledTargets = 0;
+  let configurationReadyTargets = 0;
+  let runtimeVerificationPendingTargets = 0;
   let blockedTargets = 0;
   const uniqueBlockers = new Set();
 
-  if (!remoteExecutionAllowed) {
-    uniqueBlockers.add(NAS_EXECUTION_READINESS_BLOCKERS.REMOTE_EXECUTION_BLOCKED);
+  if (totalTargets === 0) {
+    uniqueBlockers.add(NAS_EXECUTION_READINESS_BLOCKERS.NO_TARGETS_CONFIGURED);
   }
 
   for (const t of targets) {
@@ -200,8 +222,22 @@ export function buildReadinessSummary(targets, remoteExecutionAllowed) {
       enabledCredentialRefMissingTargets++;
     }
 
-    if (t.executionReadiness.state === 'blocked') {
+    if (t.mountedShareConfigured) {
+      mountedShareConfiguredTargets++;
+    }
+
+    if (t.mountedShareEnabled) {
+      mountedShareEnabledTargets++;
+    }
+
+    if (t.executionReadiness.state === 'ready') {
+      configurationReadyTargets++;
+    } else {
       blockedTargets++;
+    }
+
+    if (t.executionReadiness.runtimeVerificationRequired) {
+      runtimeVerificationPendingTargets++;
     }
 
     for (const b of t.executionReadiness.blockers) {
@@ -210,18 +246,25 @@ export function buildReadinessSummary(targets, remoteExecutionAllowed) {
   }
 
   const blockers = Array.from(uniqueBlockers);
-  const state = blockers.length > 0 ? 'blocked' : 'ready';
+  const state = blockedTargets > 0 || totalTargets === 0 ? 'blocked' : 'ready';
 
   return {
+    schemaVersion: NAS_DRY_RUN_SCHEMA_VERSION,
     mode: 'dry-run',
+    scope: 'configuration-only',
     state,
     totalTargets,
     enabledTargets,
     disabledTargets,
     credentialRefConfiguredTargets,
     enabledCredentialRefMissingTargets,
+    mountedShareConfiguredTargets,
+    mountedShareEnabledTargets,
+    configurationReadyTargets,
+    runtimeVerificationPendingTargets,
     blockedTargets,
-    remoteExecutionBlocked: !remoteExecutionAllowed,
+    executionAuthorized: false,
+    remoteExecutionBlocked: true,
     blockers,
   };
 }
@@ -236,7 +279,7 @@ export function buildNasDryRunPlan(config) {
 
   const targets = validatedTargets.map((t) => {
     const credentialRefConfigured = Boolean(t.credentialRef);
-    const executionReadiness = getTargetExecutionReadiness(t, NAS_EXECUTION_GATE.remoteExecutionAllowed);
+    const executionReadiness = getTargetExecutionReadiness(t);
     return {
       provider: t.provider,
       name: t.name,
@@ -253,14 +296,18 @@ export function buildNasDryRunPlan(config) {
     };
   });
 
-  const readinessSummary = buildReadinessSummary(targets, NAS_EXECUTION_GATE.remoteExecutionAllowed);
+  const readinessSummary = buildReadinessSummary(targets);
 
   return {
+    schemaVersion: NAS_DRY_RUN_SCHEMA_VERSION,
     mode: 'dry-run',
     deviceId: config.deviceId,
     wouldConnect: false,
     wouldWrite: false,
-    executionGate: { ...NAS_EXECUTION_GATE },
+    executionGate: {
+      ...NAS_EXECUTION_GATE,
+      requiredGates: NAS_EXECUTION_GATE.requiredGates.map((gate) => ({ ...gate })),
+    },
     readinessSummary,
     targets,
     jobs: (config.backupJobs || []).map((j) => ({

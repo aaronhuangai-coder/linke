@@ -503,6 +503,7 @@ describe('buildNasDryRunPlan', () => {
     const plan = buildNasDryRunPlan(config);
 
     assert.strictEqual(plan.mode, 'dry-run');
+    assert.strictEqual(plan.schemaVersion, 2);
     assert.strictEqual(plan.deviceId, 'test-device');
     assert.strictEqual(plan.wouldConnect, false);
     assert.strictEqual(plan.wouldWrite, false);
@@ -572,6 +573,8 @@ describe('buildNasDryRunPlan', () => {
     assert.strictEqual(plan.mode, 'dry-run');
     assert.strictEqual(plan.wouldConnect, false);
     assert.strictEqual(plan.wouldWrite, false);
+    assert.strictEqual(plan.readinessSummary.state, 'blocked');
+    assert.deepStrictEqual(plan.readinessSummary.blockers, ['no-targets-configured']);
   });
 
   it('handles missing nasTargets as empty array', () => {
@@ -689,7 +692,7 @@ describe('buildNasDryRunPlan', () => {
     assert.strictEqual(jsonPlan.targets[0].credentialRef, undefined);
   });
 
-  it('always returns top-level executionGate with remoteExecutionAllowed false and non-empty blockingReason', () => {
+  it('returns the exact V2 executionGate with adapterAvailable true and executionAuthorized false', () => {
     const config = {
       deviceId: 'test-device',
       nasTargets: [
@@ -706,102 +709,253 @@ describe('buildNasDryRunPlan', () => {
       backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
     };
     const plan = buildNasDryRunPlan(config);
-    assert.ok(plan.executionGate);
-    assert.strictEqual(plan.executionGate.remoteExecutionAllowed, false);
-    assert.ok(typeof plan.executionGate.blockingReason === 'string');
-    assert.ok(plan.executionGate.blockingReason.length > 0);
+    assert.deepStrictEqual(plan.executionGate, {
+      schemaVersion: 2,
+      adapterAvailable: true,
+      executionAuthorized: false,
+      remoteExecutionAllowed: false,
+      blockingReason: 'dry-run does not authorize execution',
+      requiredGates: [
+        { type: 'cli-flag', name: '--execute' },
+        { type: 'env-var', name: 'LINKE_NAS_SMB_EXECUTION' },
+      ],
+    });
   });
 
-  it('cannot override remoteExecutionAllowed with input executionGate: true', () => {
-    const config = {
-      deviceId: 'test-device',
-      executionGate: true,
-      nasTargets: [
-        {
-          name: 'syno',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
+  it('marks an enabled mountedShare target without credentialRef ready even when mountPath does not exist', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-ready',
+      nasTargets: [{
+        name: 'ready-synology',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+        mountedShare: {
           enabled: true,
-          credentialRef: 'home-synology',
+          mountPath: '/path/that/does/not/exist',
+          relativeRoot: 'linke/v145',
         },
-      ],
-      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
-    };
-    const plan = buildNasDryRunPlan(config);
-    assert.ok(plan.executionGate);
-    assert.strictEqual(plan.executionGate.remoteExecutionAllowed, false);
-    assert.ok(typeof plan.executionGate.blockingReason === 'string');
-    assert.ok(plan.executionGate.blockingReason.length > 0);
-  });
+      }],
+      backupJobs: [],
+    });
 
-  it('includes top-level readinessSummary counts and blockers', () => {
-    const config = {
-      deviceId: 'test-device',
-      nasTargets: [
-        {
-          name: 'target1',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
-          enabled: true,
-          credentialRef: 'home-synology',
-        },
-        {
-          name: 'target2',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
-          enabled: true,
-        },
-        {
-          name: 'target3',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
-          enabled: false,
-        },
+    assert.strictEqual(plan.schemaVersion, 2);
+    assert.deepStrictEqual(plan.executionGate, {
+      schemaVersion: 2,
+      adapterAvailable: true,
+      executionAuthorized: false,
+      remoteExecutionAllowed: false,
+      blockingReason: 'dry-run does not authorize execution',
+      requiredGates: [
+        { type: 'cli-flag', name: '--execute' },
+        { type: 'env-var', name: 'LINKE_NAS_SMB_EXECUTION' },
       ],
-      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
-    };
-
-    const plan = buildNasDryRunPlan(config);
-    assert.ok(plan.readinessSummary);
-    assert.strictEqual(plan.readinessSummary.mode, 'dry-run');
-    assert.strictEqual(plan.readinessSummary.state, 'blocked');
-    assert.strictEqual(plan.readinessSummary.totalTargets, 3);
-    assert.strictEqual(plan.readinessSummary.enabledTargets, 2);
-    assert.strictEqual(plan.readinessSummary.disabledTargets, 1);
-    assert.strictEqual(plan.readinessSummary.credentialRefConfiguredTargets, 1);
-    assert.strictEqual(plan.readinessSummary.enabledCredentialRefMissingTargets, 1);
-    assert.strictEqual(plan.readinessSummary.blockedTargets, 3);
+    });
+    assert.strictEqual(plan.wouldConnect, false);
+    assert.strictEqual(plan.wouldWrite, false);
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'ready',
+      basis: 'configuration-only',
+      blockers: [],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: true,
+    });
+    assert.strictEqual(plan.readinessSummary.state, 'ready');
+    assert.deepStrictEqual(plan.readinessSummary.blockers, []);
+    assert.strictEqual(plan.readinessSummary.executionAuthorized, false);
     assert.strictEqual(plan.readinessSummary.remoteExecutionBlocked, true);
-
-    const blockers = plan.readinessSummary.blockers || [];
-    assert.ok(blockers.includes('remote-execution-blocked'));
-    assert.ok(blockers.includes('credential-ref-missing'));
-    assert.ok(blockers.includes('target-disabled'));
-    assert.strictEqual(blockers.length, 3);
+    assert.strictEqual(plan.readinessSummary.enabledCredentialRefMissingTargets, 1);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+    assert.ok(!serialized.includes('/path/that/does/not/exist'));
+    assert.ok(!serialized.includes('linke/v145'));
   });
 
-  it('determines per-target executionReadiness blockers', () => {
-    const config = {
-      deviceId: 'test-device',
+  it('keeps an enabled mountedShare target with credentialRef ready and retains only the configured boolean', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-ready-cred',
+      nasTargets: [{
+        name: 'ready-synology-cred',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+        credentialRef: 'home-synology',
+        mountedShare: {
+          enabled: true,
+          mountPath: '/path/that/does/not/exist',
+          relativeRoot: 'linke/v145',
+        },
+      }],
+      backupJobs: [],
+    });
+
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'ready',
+      basis: 'configuration-only',
+      blockers: [],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: true,
+    });
+    assert.strictEqual(plan.targets[0].credentialRefConfigured, true);
+    assert.strictEqual(plan.targets[0].credentialRef, undefined);
+    assert.strictEqual(plan.readinessSummary.state, 'ready');
+    assert.strictEqual(plan.readinessSummary.credentialRefConfiguredTargets, 1);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('home-synology'));
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+  });
+
+  it('blocks a disabled target with only target-disabled and no mount blocker', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-disabled',
+      nasTargets: [{
+        name: 'disabled-target',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: false,
+      }],
+      backupJobs: [],
+    });
+
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'blocked',
+      basis: 'configuration-only',
+      blockers: ['target-disabled'],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: false,
+    });
+    assert.deepStrictEqual(plan.readinessSummary.blockers, ['target-disabled']);
+    assert.strictEqual(plan.readinessSummary.blockedTargets, 1);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+    assert.ok(!serialized.includes('mounted-share-missing'));
+  });
+
+  it('blocks an enabled target without mountedShare with exactly mounted-share-missing', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-no-mount',
+      nasTargets: [{
+        name: 'no-mount-target',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+      }],
+      backupJobs: [],
+    });
+
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'blocked',
+      basis: 'configuration-only',
+      blockers: ['mounted-share-missing'],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: false,
+    });
+    assert.deepStrictEqual(plan.readinessSummary.blockers, ['mounted-share-missing']);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+  });
+
+  it('blocks an enabled credentialRef-only legacy target with mounted-share-missing and no credential blocker', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-legacy',
+      nasTargets: [{
+        name: 'legacy-credref',
+        provider: 'synology',
+        endpoint: 'http://192.168.1.100:5000',
+        shareName: 'backup',
+        remotePath: '/volume1/backup',
+        enabled: true,
+        credentialRef: 'home-synology',
+      }],
+      backupJobs: [],
+    });
+
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'blocked',
+      basis: 'configuration-only',
+      blockers: ['mounted-share-missing'],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: false,
+    });
+    assert.strictEqual(plan.targets[0].credentialRefConfigured, true);
+    assert.deepStrictEqual(plan.readinessSummary.blockers, ['mounted-share-missing']);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+    assert.ok(!serialized.includes('home-synology'));
+  });
+
+  it('blocks an enabled target with mountedShare.enabled false with exactly mounted-share-disabled', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-mount-disabled',
+      nasTargets: [{
+        name: 'mount-disabled-target',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+        mountedShare: {
+          enabled: false,
+          mountPath: '/path/that/does/not/exist',
+          relativeRoot: 'linke/v145',
+        },
+      }],
+      backupJobs: [],
+    });
+
+    assert.deepStrictEqual(plan.targets[0].executionReadiness, {
+      schemaVersion: 2,
+      state: 'blocked',
+      basis: 'configuration-only',
+      blockers: ['mounted-share-disabled'],
+      runtimeVerificationPerformed: false,
+      runtimeVerificationRequired: false,
+    });
+    assert.strictEqual(plan.targets[0].mountedShareConfigured, true);
+    assert.strictEqual(plan.targets[0].mountedShareEnabled, false);
+    assert.deepStrictEqual(plan.readinessSummary.blockers, ['mounted-share-disabled']);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+  });
+
+  it('aggregates an ordered ready, legacy-missing, disabled fixture into the exact V2 readinessSummary', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-mixed',
       nasTargets: [
         {
-          name: 'enabled-missing-cred',
+          name: 'ready-synology',
           provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
+          endpoint: 'https://nas.example.invalid',
           shareName: 'backup',
-          remotePath: '/volume1/backup',
+          remotePath: '/provider-owned/path',
           enabled: true,
+          mountedShare: {
+            enabled: true,
+            mountPath: '/path/that/does/not/exist',
+            relativeRoot: 'linke/v145',
+          },
         },
         {
-          name: 'enabled-configured-cred',
+          name: 'legacy-credref',
           provider: 'synology',
           endpoint: 'http://192.168.1.100:5000',
           shareName: 'backup',
@@ -811,31 +965,135 @@ describe('buildNasDryRunPlan', () => {
         },
         {
           name: 'disabled-target',
-          provider: 'synology',
-          endpoint: 'http://192.168.1.100:5000',
-          shareName: 'backup',
-          remotePath: '/volume1/backup',
+          provider: 'ugreen',
+          endpoint: 'https://192.168.1.200',
+          shareName: 'data',
+          remotePath: '/shares/data',
           enabled: false,
         },
       ],
-    };
+      backupJobs: [{ name: 'job1', sourcePath: '/tmp/src' }],
+    });
 
-    const plan = buildNasDryRunPlan(config);
-    const target1 = plan.targets.find(t => t.name === 'enabled-missing-cred');
-    const target2 = plan.targets.find(t => t.name === 'enabled-configured-cred');
-    const target3 = plan.targets.find(t => t.name === 'disabled-target');
+    assert.deepStrictEqual(plan.readinessSummary, {
+      schemaVersion: 2,
+      mode: 'dry-run',
+      scope: 'configuration-only',
+      state: 'blocked',
+      totalTargets: 3,
+      enabledTargets: 2,
+      disabledTargets: 1,
+      credentialRefConfiguredTargets: 1,
+      enabledCredentialRefMissingTargets: 1,
+      mountedShareConfiguredTargets: 1,
+      mountedShareEnabledTargets: 1,
+      configurationReadyTargets: 1,
+      runtimeVerificationPendingTargets: 1,
+      blockedTargets: 2,
+      executionAuthorized: false,
+      remoteExecutionBlocked: true,
+      blockers: ['mounted-share-missing', 'target-disabled'],
+    });
+    assert.strictEqual(plan.targets[0].executionReadiness.state, 'ready');
+    assert.deepStrictEqual(plan.targets[0].executionReadiness.blockers, []);
+    assert.strictEqual(plan.targets[1].executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(plan.targets[1].executionReadiness.blockers, ['mounted-share-missing']);
+    assert.strictEqual(plan.targets[2].executionReadiness.state, 'blocked');
+    assert.deepStrictEqual(plan.targets[2].executionReadiness.blockers, ['target-disabled']);
+    assert.strictEqual(plan.targets[0].mountedShareConfigured, true);
+    assert.strictEqual(plan.targets[0].mountedShareEnabled, true);
+    assert.strictEqual(plan.targets[1].credentialRefConfigured, true);
+    assert.strictEqual(plan.targets[1].mountedShareConfigured, false);
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+    assert.ok(!serialized.includes('home-synology'));
+  });
 
-    assert.ok(target1.executionReadiness);
-    assert.strictEqual(target1.executionReadiness.state, 'blocked');
-    assert.deepStrictEqual(target1.executionReadiness.blockers, ['credential-ref-missing', 'remote-execution-blocked']);
+  it('ignores every input executionGate field and leaks no injected gate value', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-gate-injection',
+      executionGate: {
+        schemaVersion: 99,
+        adapterAvailable: false,
+        executionAuthorized: true,
+        remoteExecutionAllowed: true,
+        blockingReason: 'do-not-leak-gate-value',
+        requiredGates: [{ type: 'cli-flag', name: '--do-evil' }],
+      },
+      nasTargets: [{
+        name: 'ready-synology',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+        mountedShare: {
+          enabled: true,
+          mountPath: '/path/that/does/not/exist',
+          relativeRoot: 'linke/v145',
+        },
+      }],
+      backupJobs: [],
+    });
 
-    assert.ok(target2.executionReadiness);
-    assert.strictEqual(target2.executionReadiness.state, 'blocked');
-    assert.deepStrictEqual(target2.executionReadiness.blockers, ['remote-execution-blocked']);
+    assert.deepStrictEqual(plan.executionGate, {
+      schemaVersion: 2,
+      adapterAvailable: true,
+      executionAuthorized: false,
+      remoteExecutionAllowed: false,
+      blockingReason: 'dry-run does not authorize execution',
+      requiredGates: [
+        { type: 'cli-flag', name: '--execute' },
+        { type: 'env-var', name: 'LINKE_NAS_SMB_EXECUTION' },
+      ],
+    });
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('do-not-leak-gate-value'));
+    assert.ok(!serialized.includes('--do-evil'));
+    assert.ok(serialized.includes('--execute'));
+    assert.ok(serialized.includes('LINKE_NAS_SMB_EXECUTION'));
+  });
 
-    assert.ok(target3.executionReadiness);
-    assert.strictEqual(target3.executionReadiness.state, 'blocked');
-    assert.deepStrictEqual(target3.executionReadiness.blockers, ['target-disabled', 'remote-execution-blocked']);
+  it('omits paths, raw credentialRef, agentPath and legacy kebab-case blockers from the serialized plan', () => {
+    const plan = buildNasDryRunPlan({
+      deviceId: 'v145-redaction',
+      agentPath: '/opt/linke/bin/linke-agent',
+      nasTargets: [{
+        name: 'ready-synology',
+        provider: 'synology',
+        endpoint: 'https://nas.example.invalid',
+        shareName: 'backup',
+        remotePath: '/provider-owned/path',
+        enabled: true,
+        credentialRef: 'home-synology',
+        mountedShare: {
+          enabled: true,
+          mountPath: '/path/that/does/not/exist',
+          relativeRoot: 'linke/v145',
+        },
+      }],
+      backupJobs: [],
+    });
+
+    const serialized = JSON.stringify(plan);
+    assert.ok(!serialized.includes('"mountPath"'));
+    assert.ok(!serialized.includes('"relativeRoot"'));
+    assert.ok(!serialized.includes('"credentialRef"'));
+    assert.ok(!serialized.includes('"agentPath"'));
+    assert.ok(!serialized.includes('/path/that/does/not/exist'));
+    assert.ok(!serialized.includes('linke/v145'));
+    assert.ok(!serialized.includes('home-synology'));
+    assert.ok(!serialized.includes('/opt/linke/bin/linke-agent'));
+    assert.ok(!serialized.includes('remote-execution-blocked'));
+    assert.ok(!serialized.includes('credential-ref-missing'));
+    assert.ok(serialized.includes('--execute'));
+    assert.ok(serialized.includes('LINKE_NAS_SMB_EXECUTION'));
+    assert.strictEqual(plan.executionGate.adapterAvailable, true);
+    assert.strictEqual(plan.executionGate.remoteExecutionAllowed, false);
+    assert.strictEqual(plan.targets[0].credentialRefConfigured, true);
+    assert.strictEqual(plan.targets[0].mountedShareConfigured, true);
+    assert.strictEqual(plan.targets[0].mountedShareEnabled, true);
   });
 });
 
