@@ -46,12 +46,23 @@ export const LAUNCHAGENT_LIFECYCLE_CODES = deepFreeze({
   CONFIRMATION_CONSUMED: 'confirmation-consumed',
 });
 
-/** 对外仅暴露固定名称、错误码与消息的生命周期契约错误。 */
+/** 闭合结果码集合：constructor 只接受其中成员，未知/非 string 归一为 INVALID。 */
+const CLOSED_LIFECYCLE_CODES = new Set(Object.values(LAUNCHAGENT_LIFECYCLE_CODES));
+
+/**
+ * 对外仅暴露固定名称、错误码与消息的生命周期契约错误。
+ * 无参或非法 code → launchagent-lifecycle-invalid；合法 code 时 code/message 同值。
+ * 禁止自由消息与额外 data/stack 字段。
+ */
 export class LaunchAgentLifecycleError extends Error {
-  constructor() {
-    super(INVALID_CODE);
+  constructor(code) {
+    const resolved =
+      arguments.length === 0
+        ? INVALID_CODE
+        : (typeof code === 'string' && CLOSED_LIFECYCLE_CODES.has(code) ? code : INVALID_CODE);
+    super(resolved);
     this.name = 'LaunchAgentLifecycleError';
-    this.code = INVALID_CODE;
+    this.code = resolved;
   }
 }
 
@@ -346,9 +357,41 @@ const JOURNAL_STATES = new Set([
   'manual-intervention-required',
 ]);
 
-function validateJournalPayload(value) {
-  const fields = readExactObject(value, ['hostMutationCount']);
-  return { hostMutationCount: requireInteger(fields.hostMutationCount) };
+/** state-specific exact payload projection；不在 validator 内重算 entry hash。 */
+function validateJournalPayload(state, value) {
+  if (
+    state === 'prepared'
+    || state === 'anchored'
+    || state === 'published'
+    || state === 'controller-loaded'
+    || state === 'controller-ready'
+    || state === 'scheduler-loaded'
+    || state === 'compensating'
+    || state === 'manual-intervention-required'
+  ) {
+    const fields = readExactObject(value, ['hostMutationCount']);
+    return { hostMutationCount: requireInteger(fields.hostMutationCount) };
+  }
+  if (state === 'committed' || state === 'recovered' || state === 'no-change') {
+    const fields = readExactObject(value, ['hostMutationCount', 'receiptSha256']);
+    return {
+      hostMutationCount: requireInteger(fields.hostMutationCount),
+      receiptSha256: requireSha256(fields.receiptSha256),
+    };
+  }
+  if (state === 'blocked') {
+    const fields = readExactObject(value, [
+      'hostMutationCount',
+      'receiptSha256',
+      'blockedByEntrySha256',
+    ]);
+    return {
+      hostMutationCount: requireInteger(fields.hostMutationCount),
+      receiptSha256: requireSha256(fields.receiptSha256),
+      blockedByEntrySha256: requireSha256OrNull(fields.blockedByEntrySha256),
+    };
+  }
+  invalid();
 }
 
 function journalProjection(value) {
@@ -368,6 +411,8 @@ function journalProjection(value) {
     ? null
     : requireSha256(fields.previousEntrySha256);
   if ((sequence === 0) !== (previousEntrySha256 === null)) invalid();
+  // 先验证 state，再按 state 投影 payload（existing prepared 行为不回归）。
+  const state = requireEnum(fields.state, JOURNAL_STATES);
   return {
     schemaVersion: requireLiteral(fields.schemaVersion, 1),
     transactionId: requireUuid(fields.transactionId),
@@ -375,9 +420,9 @@ function journalProjection(value) {
     previousEntrySha256,
     entrySha256: requireSha256(fields.entrySha256),
     operation: requireEnum(fields.operation, JOURNAL_OPERATIONS),
-    state: requireEnum(fields.state, JOURNAL_STATES),
+    state,
     at: requireUtc(fields.at),
-    payload: validateJournalPayload(fields.payload),
+    payload: validateJournalPayload(state, fields.payload),
   };
 }
 
