@@ -313,6 +313,7 @@ function anchorProjection(value) {
     purpose: requireEnum(fields.purpose, new Set([
       'first-install',
       'managed-upgrade',
+      'stop',
       'rollback-compensation',
       'uninstall-compensation',
     ])),
@@ -355,10 +356,207 @@ const JOURNAL_STATES = new Set([
   'no-change',
   'blocked',
   'manual-intervention-required',
+  'controller-publish-intent',
+  'controller-published',
+  'scheduler-publish-intent',
+  'scheduler-published',
+  'manifest-publish-intent',
+  'manifest-published',
+  'controller-load-intent',
+  'scheduler-load-intent',
+  'scheduler-stop-intent',
+  'scheduler-stopped',
+  'controller-stop-intent',
+  'controller-stopped',
+  'role-noop',
+  'role-stop-noop',
 ]);
+
+const CHECKPOINT_ROLES = new Map([
+  ['controller-publish-intent', new Set(['controller'])],
+  ['controller-published', new Set(['controller'])],
+  ['scheduler-publish-intent', new Set(['scheduler'])],
+  ['scheduler-published', new Set(['scheduler'])],
+  ['manifest-publish-intent', new Set(['manifest'])],
+  ['manifest-published', new Set(['manifest'])],
+  ['controller-load-intent', new Set(['controller'])],
+  ['scheduler-load-intent', new Set(['scheduler'])],
+  ['scheduler-stop-intent', new Set(['scheduler'])],
+  ['scheduler-stopped', new Set(['scheduler'])],
+  ['controller-stop-intent', new Set(['controller'])],
+  ['controller-stopped', new Set(['controller'])],
+  ['role-noop', new Set(['controller', 'scheduler'])],
+  ['role-stop-noop', new Set(['controller', 'scheduler'])],
+]);
+const COMPENSATION_ACTIONS = new Set([
+  'remove-controller', 'remove-scheduler', 'remove-manifest',
+  'restore-controller', 'restore-scheduler', 'restore-manifest',
+  'stop-controller', 'stop-scheduler', 'load-controller', 'load-scheduler',
+]);
+const COMPENSATION_ACTION_ORDER = new Map([
+  ['stop-scheduler', 0],
+  ['stop-controller', 1],
+  ['remove-manifest', 2],
+  ['restore-manifest', 2],
+  ['remove-scheduler', 3],
+  ['restore-scheduler', 3],
+  ['remove-controller', 4],
+  ['restore-controller', 4],
+  ['load-controller', 5],
+  ['load-scheduler', 6],
+]);
+const COMPENSATION_STATE_ACTION = new Map();
+for (const action of COMPENSATION_ACTIONS) {
+  for (const phase of ['intent', 'completed']) {
+    const state = `compensate-${action}-${phase}`;
+    JOURNAL_STATES.add(state);
+    COMPENSATION_STATE_ACTION.set(state, action);
+  }
+}
+
+function compensationRole(action) {
+  const separator = action.indexOf('-');
+  if (separator === -1) invalid();
+  const role = action.slice(separator + 1);
+  if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') invalid();
+  return role;
+}
+
+function validateReverseFileState(value, role) {
+  const state = readTag(value, 'state');
+  if (state === 'absent') {
+    const fields = readExactObject(value, ['state']);
+    return { state: requireLiteral(fields.state, 'absent') };
+  }
+  if (state !== 'present') invalid();
+  const fields = readExactObject(value, ['state', 'identity', 'sha256']);
+  const identity = validateStoredIdentity(fields.identity, role);
+  const sha256 = requireSha256(fields.sha256);
+  if (identity.sha256 !== sha256) invalid();
+  return { state: 'present', identity, sha256 };
+}
+
+function validateReverseJobState(value) {
+  const state = readTag(value, 'state');
+  const fields = readExactObject(value, ['state', 'identitySha256']);
+  if (state === 'stopped') {
+    if (fields.identitySha256 !== null) invalid();
+    return { state: 'stopped', identitySha256: null };
+  }
+  if (state !== 'loaded') invalid();
+  return {
+    state: 'loaded',
+    identitySha256: requireSha256(fields.identitySha256),
+  };
+}
+
+function validateReverseExpected(value, role) {
+  const fields = readExactObject(value, ['file', 'job']);
+  return {
+    file: validateReverseFileState(fields.file, role),
+    job: validateReverseJobState(fields.job),
+  };
+}
+
+function validateReverseEvidence(value, role) {
+  const kind = readTag(value, 'kind');
+  if (kind === 'candidate') {
+    const fields = readExactObject(value, [
+      'kind', 'transactionId', 'role', 'sha256',
+    ]);
+    return {
+      kind: 'candidate',
+      transactionId: requireUuid(fields.transactionId),
+      role: requireLiteral(fields.role, role),
+      sha256: requireSha256(fields.sha256),
+    };
+  }
+  if (kind !== 'anchor') invalid();
+  const fields = readExactObject(value, [
+    'kind', 'anchorId', 'role', 'sha256', 'loaded',
+  ]);
+  return {
+    kind: 'anchor',
+    anchorId: requireUuid(fields.anchorId),
+    role: requireLiteral(fields.role, role),
+    sha256: requireSha256(fields.sha256),
+    loaded: requireBoolean(fields.loaded),
+  };
+}
+
+function validateReverseStep(value, expectedIndex) {
+  const fields = readExactObject(value, [
+    'index', 'action', 'role', 'expectedPre', 'expectedPost', 'evidence',
+  ]);
+  const index = requireInteger(fields.index);
+  if (index !== expectedIndex) invalid();
+  const action = requireEnum(fields.action, COMPENSATION_ACTIONS);
+  const role = requireLiteral(fields.role, compensationRole(action));
+  const expectedPre = validateReverseExpected(fields.expectedPre, role);
+  const expectedPost = validateReverseExpected(fields.expectedPost, role);
+  const evidence = validateReverseEvidence(fields.evidence, role);
+  const evidenceState = evidence.kind === 'candidate' ? expectedPre.file : expectedPost.file;
+  if (evidenceState.state !== 'present' || evidenceState.sha256 !== evidence.sha256) invalid();
+  return { index, action, role, expectedPre, expectedPost, evidence };
+}
+
+function validateReversePlan(value) {
+  if (!Array.isArray(value) || value.length > 7) invalid();
+  const plan = value.map((step, index) => validateReverseStep(step, index));
+  let priorRank = -1;
+  for (const step of plan) {
+    const rank = COMPENSATION_ACTION_ORDER.get(step.action);
+    if (rank === undefined || rank <= priorRank) invalid();
+    priorRank = rank;
+  }
+  return plan;
+}
 
 /** state-specific exact payload projection；不在 validator 内重算 entry hash。 */
 function validateJournalPayload(state, value) {
+  const allowedRoles = CHECKPOINT_ROLES.get(state);
+  if (allowedRoles !== undefined) {
+    const fields = readExactObject(value, ['hostMutationCount', 'role']);
+    return {
+      hostMutationCount: requireInteger(fields.hostMutationCount),
+      role: requireEnum(fields.role, allowedRoles),
+    };
+  }
+  const compensationAction = COMPENSATION_STATE_ACTION.get(state);
+  if (compensationAction !== undefined) {
+    const phase = state.endsWith('-intent') ? 'intent' : 'completed';
+    const fields = readExactObject(
+      value,
+      phase === 'intent'
+        ? ['hostMutationCount', 'action', 'planIndex', 'reversePlanSha256']
+        : ['hostMutationCount', 'action'],
+    );
+    const payload = {
+      hostMutationCount: requireInteger(fields.hostMutationCount),
+      action: requireLiteral(fields.action, compensationAction),
+    };
+    if (phase === 'intent') {
+      payload.planIndex = requireInteger(fields.planIndex);
+      payload.reversePlanSha256 = requireSha256(fields.reversePlanSha256);
+    }
+    return payload;
+  }
+  if (state === 'compensating') {
+    const fields = readExactObject(value, [
+      'hostMutationCount', 'reversePlan', 'reversePlanSha256',
+    ]);
+    const reversePlan = validateReversePlan(fields.reversePlan);
+    const reversePlanSha256 = requireSha256(fields.reversePlanSha256);
+    const calculated = createHash('sha256')
+      .update(Buffer.from(JSON.stringify(reversePlan), 'utf8'))
+      .digest('hex');
+    if (calculated !== reversePlanSha256) invalid();
+    return {
+      hostMutationCount: requireInteger(fields.hostMutationCount),
+      reversePlan,
+      reversePlanSha256,
+    };
+  }
   if (
     state === 'prepared'
     || state === 'anchored'
@@ -366,7 +564,6 @@ function validateJournalPayload(state, value) {
     || state === 'controller-loaded'
     || state === 'controller-ready'
     || state === 'scheduler-loaded'
-    || state === 'compensating'
     || state === 'manual-intervention-required'
   ) {
     const fields = readExactObject(value, ['hostMutationCount']);
@@ -464,6 +661,41 @@ const RECEIPT_OUTCOMES = new Set([
   'stop-incomplete',
   'uninstall-unload-incomplete',
 ]);
+const RECEIPT_STATE_OUTCOMES = new Map([
+  ['committed', { success: true, outcomes: new Set(['completed']) }],
+  ['no-change', { success: true, outcomes: new Set(['no-change']) }],
+  ['blocked', {
+    success: false,
+    outcomes: new Set([
+      'ownership-mismatch',
+      'label-in-use',
+      'conditional-mutation-unsupported',
+      'conditional-mutation-mismatch',
+      'transaction-in-progress',
+      'recovery-required',
+      'controller-not-ready',
+      'scheduler-load-failed',
+      'rollback-runtime-mismatch',
+    ]),
+  }],
+  ['recovered', {
+    success: false,
+    outcomes: new Set([
+      'conditional-mutation-unsupported',
+      'conditional-mutation-mismatch',
+      'controller-not-ready',
+      'scheduler-load-failed',
+      'rollback-runtime-mismatch',
+      'rollback-unload-incomplete',
+      'stop-incomplete',
+      'uninstall-unload-incomplete',
+    ]),
+  }],
+  ['manual-intervention-required', {
+    success: false,
+    outcomes: new Set(['manual-intervention-required']),
+  }],
+]);
 
 function validateReceiptRole(value, role) {
   const fields = readExactObject(value, ['label', 'outcome', 'changed']);
@@ -489,11 +721,31 @@ function receiptProjection(value) {
     'outcome',
   ]);
   const roles = readExactObject(fields.roles, ['controller', 'scheduler']);
+  const operation = requireEnum(fields.operation, JOURNAL_OPERATIONS);
+  const state = requireEnum(fields.state, RECEIPT_STATES);
+  const success = requireBoolean(fields.success);
+  const hostMutationCount = requireInteger(fields.hostMutationCount);
+  const outcome = requireEnum(fields.outcome, RECEIPT_OUTCOMES);
+  const mapping = RECEIPT_STATE_OUTCOMES.get(state);
+  const recoveredCompletion = operation === 'recover'
+    && state === 'recovered'
+    && success === true
+    && outcome === 'completed';
+  if (
+    mapping === undefined
+    || (
+      !recoveredCompletion
+      && (success !== mapping.success || !mapping.outcomes.has(outcome))
+    )
+    || (state === 'no-change' && hostMutationCount !== 0)
+  ) {
+    invalid();
+  }
   return {
     schemaVersion: requireLiteral(fields.schemaVersion, 1),
-    operation: requireEnum(fields.operation, JOURNAL_OPERATIONS),
-    state: requireEnum(fields.state, RECEIPT_STATES),
-    success: requireBoolean(fields.success),
+    operation,
+    state,
+    success,
     sourceCommit: requireCommit(fields.sourceCommit),
     transactionId: requireUuid(fields.transactionId),
     anchorId: requireUuid(fields.anchorId),
@@ -502,14 +754,263 @@ function receiptProjection(value) {
       controller: validateReceiptRole(roles.controller, 'controller'),
       scheduler: validateReceiptRole(roles.scheduler, 'scheduler'),
     },
-    hostMutationCount: requireInteger(fields.hostMutationCount),
-    outcome: requireEnum(fields.outcome, RECEIPT_OUTCOMES),
+    hostMutationCount,
+    outcome,
   };
 }
 
 /** 校验并投影不含宿主原始输出的闭合操作回执。 */
 export function validateLaunchAgentReceipt(value) {
   return project(receiptProjection, value);
+}
+
+function journalEntrySha256(entry) {
+  return createHash('sha256').update(Buffer.from(JSON.stringify({
+    schemaVersion: entry.schemaVersion,
+    transactionId: entry.transactionId,
+    sequence: entry.sequence,
+    previousEntrySha256: entry.previousEntrySha256,
+    operation: entry.operation,
+    state: entry.state,
+    at: entry.at,
+    payload: entry.payload,
+  }), 'utf8')).digest('hex');
+}
+
+function checkpointRole(entry, role) {
+  return entry.payload.role === role;
+}
+
+function isExactForwardTransition(operation, prior, entry) {
+  const from = prior.state;
+  const to = entry.state;
+  if (operation === 'install') {
+    if (from === 'prepared') return to === 'anchored';
+    if (from === 'anchored') {
+      return (to === 'controller-publish-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'scheduler-stop-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-publish-intent') return to === 'controller-published';
+    if (from === 'controller-published') {
+      return to === 'scheduler-publish-intent' && checkpointRole(entry, 'scheduler');
+    }
+    if (from === 'scheduler-publish-intent') return to === 'scheduler-published';
+    if (from === 'scheduler-published') {
+      return to === 'manifest-publish-intent' && checkpointRole(entry, 'manifest');
+    }
+    if (from === 'manifest-publish-intent') return to === 'manifest-published';
+    if (from === 'manifest-published') {
+      return to === 'controller-load-intent' && checkpointRole(entry, 'controller');
+    }
+    if (from === 'controller-load-intent') return to === 'controller-loaded';
+    if (from === 'controller-loaded') return to === 'controller-ready';
+    if (from === 'controller-ready') {
+      return to === 'scheduler-load-intent' && checkpointRole(entry, 'scheduler');
+    }
+    if (from === 'scheduler-load-intent') return to === 'scheduler-loaded';
+    return isExactForwardTransition('managed-upgrade', prior, entry);
+  }
+
+  if (operation === 'managed-upgrade') {
+    if (from === 'prepared') return to === 'anchored';
+    if (from === 'anchored') {
+      return (to === 'scheduler-stop-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'scheduler-stop-intent') return to === 'scheduler-stopped';
+    if (
+      from === 'scheduler-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return (to === 'controller-stop-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-stop-intent') return to === 'controller-stopped';
+    if (
+      from === 'controller-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return (to === 'controller-publish-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-publish-intent') return to === 'controller-published';
+    if (
+      from === 'controller-published'
+      || (from === 'role-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return (to === 'scheduler-publish-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-publish-intent') return to === 'scheduler-published';
+    if (
+      from === 'scheduler-published'
+      || (from === 'role-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return to === 'manifest-publish-intent' && checkpointRole(entry, 'manifest');
+    }
+    if (from === 'manifest-publish-intent') return to === 'manifest-published';
+    if (from === 'manifest-published') {
+      return to === 'controller-load-intent' && checkpointRole(entry, 'controller');
+    }
+    if (from === 'controller-load-intent') return to === 'controller-loaded';
+    if (from === 'controller-loaded') return to === 'controller-ready';
+    if (from === 'controller-ready') {
+      return to === 'scheduler-load-intent' && checkpointRole(entry, 'scheduler');
+    }
+    if (from === 'scheduler-load-intent') return to === 'scheduler-loaded';
+    return false;
+  }
+
+  if (operation === 'stop') {
+    if (from === 'prepared') return to === 'anchored';
+    if (from === 'anchored') {
+      return (to === 'scheduler-stop-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-stop-intent') return to === 'scheduler-stopped';
+    if (
+      from === 'scheduler-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return (to === 'controller-stop-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-stop-intent') return to === 'controller-stopped';
+    return false;
+  }
+  return false;
+}
+
+function isValidTerminalTransition(operation, prior, entry) {
+  if (entry.state === 'blocked') {
+    return prior.payload.hostMutationCount === 0 && entry.payload.hostMutationCount === 0;
+  }
+  if (entry.state === 'no-change') {
+    return (operation === 'install' || operation === 'managed-upgrade')
+      && prior.state === 'prepared'
+      && prior.payload.hostMutationCount === 0
+      && entry.payload.hostMutationCount === 0;
+  }
+  if (entry.state === 'committed') {
+    if (operation === 'install') {
+      return prior.state === 'scheduler-loaded' || prior.state === 'manifest-published';
+    }
+    if (operation === 'managed-upgrade') {
+      return prior.state === 'scheduler-loaded' || prior.state === 'manifest-published';
+    }
+    if (operation === 'stop') {
+      return prior.state === 'controller-stopped'
+        || (prior.state === 'role-stop-noop' && checkpointRole(prior, 'controller'));
+    }
+  }
+  if (entry.state === 'recovered' && operation === 'stop') {
+    return prior.state === 'scheduler-stop-intent' || prior.state === 'controller-stop-intent';
+  }
+  return false;
+}
+
+function transactionCloseoutProjection(value) {
+  const fields = readExactObject(value, ['entries', 'receipt']);
+  if (!Array.isArray(fields.entries) || fields.entries.length === 0 || fields.entries.length > 4096) {
+    invalid();
+  }
+  const entries = [];
+  let prior = null;
+  let transactionId = null;
+  let operation = null;
+  let compensation = null;
+  for (const rawEntry of fields.entries) {
+    const entry = journalProjection(rawEntry);
+    if (journalEntrySha256(entry) !== entry.entrySha256) invalid();
+    if (prior === null) {
+      if (entry.sequence !== 0 || entry.previousEntrySha256 !== null) invalid();
+      transactionId = entry.transactionId;
+      operation = entry.operation;
+    } else {
+      if (entry.transactionId !== transactionId) invalid();
+      if (entry.operation !== operation) invalid();
+      if (entry.sequence !== prior.sequence + 1) invalid();
+      if (entry.previousEntrySha256 !== prior.entrySha256) invalid();
+      if (entry.payload.hostMutationCount < prior.payload.hostMutationCount) invalid();
+
+      const action = COMPENSATION_STATE_ACTION.get(entry.state);
+      if (prior.state === 'compensating') {
+        compensation = {
+          plan: prior.payload.reversePlan,
+          digest: prior.payload.reversePlanSha256,
+          nextIndex: 0,
+          awaitingCompletion: false,
+        };
+      }
+      if (action !== undefined) {
+        if (compensation === null) invalid();
+        const expectedStep = compensation.plan[compensation.nextIndex];
+        if (entry.state.endsWith('-intent')) {
+          if (compensation.awaitingCompletion || expectedStep === undefined) invalid();
+          if (
+            action !== expectedStep.action
+            || entry.payload.action !== expectedStep.action
+            || entry.payload.planIndex !== expectedStep.index
+            || entry.payload.reversePlanSha256 !== compensation.digest
+          ) {
+            invalid();
+          }
+          compensation.awaitingCompletion = true;
+        } else {
+          if (!compensation.awaitingCompletion || expectedStep === undefined) invalid();
+          if (action !== expectedStep.action || entry.payload.action !== expectedStep.action) invalid();
+          compensation.awaitingCompletion = false;
+          compensation.nextIndex += 1;
+        }
+      } else if (entry.state === 'compensating') {
+        if (compensation !== null || entry.payload.hostMutationCount === 0) invalid();
+      } else if (entry.state === 'recovered' && compensation !== null) {
+        if (
+          compensation.awaitingCompletion
+          || compensation.nextIndex !== compensation.plan.length
+        ) {
+          invalid();
+        }
+      } else if (
+        entry.state === 'manual-intervention-required'
+        && compensation !== null
+      ) {
+        // intent/precheck/action 任一点失败均只能进入 MIR，不能再推进 reverse plan。
+      } else if (isValidTerminalTransition(operation, prior, entry)) {
+        // terminal transition 已按 operation 与精确 prior state 验证。
+      } else if (!isExactForwardTransition(operation, prior, entry)) {
+        invalid();
+      }
+    }
+    if (
+      prior === null
+      && (entry.state !== 'prepared' || entry.payload.hostMutationCount !== 0)
+    ) {
+      invalid();
+    }
+    entries.push(entry);
+    prior = entry;
+  }
+
+  const receipt = receiptProjection(fields.receipt);
+  if (receipt.transactionId !== transactionId) invalid();
+  if (receipt.operation !== operation) invalid();
+  if (receipt.state !== prior.state) invalid();
+  if (receipt.hostMutationCount !== prior.payload.hostMutationCount) invalid();
+  if (!Object.hasOwn(prior.payload, 'receiptSha256')) invalid();
+  const receiptSha256 = createHash('sha256')
+    .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+    .digest('hex');
+  if (prior.payload.receiptSha256 !== receiptSha256) invalid();
+  return { entries, receipt };
+}
+
+/** 校验完整 journal 链与 terminal receipt 的 transaction/operation/hash 对齐。 */
+export function validateLaunchAgentTransactionCloseout(value) {
+  return project(transactionCloseoutProjection, value);
 }
 
 function acceptanceRequestProjection(value) {

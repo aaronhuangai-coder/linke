@@ -877,6 +877,47 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     });
   }
 
+  /**
+   * 只读返回全局 journal heads：精确 bytes hash、每 transaction 最新 entry、
+   * transactionId 词典序稳定排序。同一 transaction 的 operation 漂移时
+   * 整体 fail-closed；不改变既有 readJournal 合同，也不产生耐久化事件。
+   */
+  async function readJournalHeads() {
+    const argumentCount = arguments.length;
+    return withLifecycleErrors(async () => {
+      if (argumentCount !== 0) invalid();
+      await assertBoundRootLayout();
+
+      const snapshot = await loadJournalSnapshot();
+      const operationByTransaction = new Map();
+      const latestByTransaction = new Map();
+
+      for (const entry of snapshot.entries) {
+        const priorOperation = operationByTransaction.get(entry.transactionId);
+        if (priorOperation === undefined) {
+          operationByTransaction.set(entry.transactionId, entry.operation);
+        } else if (priorOperation !== entry.operation) {
+          invalid();
+        }
+        latestByTransaction.set(entry.transactionId, entry);
+      }
+
+      const heads = [...latestByTransaction.entries()]
+        .sort(([left], [right]) => {
+          if (left < right) return -1;
+          if (left > right) return 1;
+          return 0;
+        })
+        .map(([, entry]) => entry);
+
+      return deepFreeze({
+        kind: 'journal-heads',
+        journalSha256: sha256Hex(snapshot.bytes),
+        heads,
+      });
+    });
+  }
+
   async function appendJournal(input) {
     return withLifecycleErrors(async () => {
       await assertBoundRootLayout();
@@ -1397,6 +1438,7 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     releaseManualInterventionLock,
     appendJournal,
     readJournal,
+    readJournalHeads,
     publishReceipt,
     readReceipt,
     consumeConfirmation,

@@ -96,7 +96,7 @@ scheduler profile：
 
 plist 可以包含运行所需本地绝对路径，但 receipt、HTTP、Web 和 CLI 摘要不得回显这些路径。认证材料不得进入 ProgramArguments 或 EnvironmentVariables。
 
-Profile renderer 不自行接受任意绝对脚本路径。`runtimeBinder` 从同一个 canonical immutable installation root 解析固定 pathId：controller 的脚本参数必须字节全等于 `src/controller-runtime.js` 的解析结果，scheduler 的脚本参数必须字节全等于 `src/agent.js` 的解析结果，Node executable 也必须等于 binder 解析的固定 host runtime。renderer 生成 plist 后、manifest 发布前、每次 bootstrap 前和 transaction commit 前，都重新解析 ProgramArguments，并验证实际普通文件的 hash 与 manifest 对应 artifact hash 完全一致；root、pathId、argv 或 hash 任一不一致均零加载并补偿。
+Profile renderer 不自行接受任意绝对脚本路径。`runtimeBinder` 从同一个 canonical immutable installation root 解析固定 pathId：controller 的脚本参数必须字节全等于 `src/controller-runtime.js` 的解析结果，scheduler 的脚本参数必须字节全等于 `src/agent.js` 的解析结果，Node executable 也必须等于 binder 解析的固定 host runtime。纯内存 render/schema 可在 pre-lock 门周围发生，但**不得**因此提前 `writeCandidate` 或 plutil candidate I/O。对 installation-root 实际文件的 live runtime revalidation，以及对 LaunchAgents ownership/label/file 的 inspection，必须落在 `prepared` 之后（并在 manifest 发布前、每次 bootstrap 前和 transaction commit 前再次复核）；root、pathId、argv 或 hash 任一不一致均零加载并补偿。
 
 ### 5.2 Ownership store
 
@@ -155,6 +155,7 @@ manifest 为严格闭合 schema：
 - 旧 manifest 条目也是 `bytes` + 快照/hash，或 `absent`。
 - 两个 label 原加载状态布尔值。
 - anchor ID、parent anchor ID、transaction ID、source commit、purpose、rollback-from manifest hash/absence、restore manifest hash/absence、创建时间。
+- `purpose` 闭合枚举至少包含：`first-install`、`managed-upgrade`、`stop`、`rollback-compensation`、`uninstall-compensation`。`stop` 与其它 purpose 一样必须经 production `validateLaunchAgentAnchor` 闭合验证；非法 schema/字段/枚举在任何 launchctl 或宿主 mutation 前 fail closed。
 
 anchor 只保存 Linke 自己允许写入的非敏感 plist 和 manifest；若现有文件未通过 ownership 校验，不得复制、覆盖或认领。为保证 byte-exact rollback，anchor 允许在 plist bytes 内保留本地绝对运行路径，但必须位于 mode 0700 的 Linke metadata 根、文件 mode 0600，且禁止进入 receipt、日志、HTTP、Web、CLI 摘要或调试附件。
 
@@ -165,12 +166,33 @@ last-green anchor 至少保留到下一次完整事务成功且新锚点验证�
 Host adapter 是真实宿主操作的唯一边界：
 
 - `hostInspector`：只读 lstat、read、hash、canonicalize；不得 open-for-write。
-- `metadataStore`：只允许在 mode 0700 metadata 根的固定 journal/anchor/receipt/candidate 名称上执行 open/write/fsync 与条件发布；不能解析或写 LaunchAgents basename。
-- `atomicPublisher`：`publishAbsent`、`replaceIfMatch`、`removeIfMatch` 三个条件 mutation 原语。
+- `metadataStore`：只允许在 mode 0700 metadata 根的固定 journal/anchor/receipt/candidate 名称上执行 open/write/fsync 与条件发布；不能解析或写 LaunchAgents basename。除既有 per-transaction `readJournal({ transactionId })` 外，必须提供零参数只读全局 journal-head snapshot：`readJournalHeads()`（合同见下）。
+- `atomicPublisher`：`publishAbsent`、`replaceIfMatch`、`removeIfMatch` 三个条件 mutation 原语；`publishAbsent` / `replaceIfMatch` 精确接收 opaque candidate ref `{ kind:'candidate', transactionId, role, sha256 }`（与 metadata-store `writeCandidate` 返回值同形），不得接受 raw bytes、绝对路径或 basename 旁路。
 - `plistValidator`：固定 `/usr/bin/plutil` + 参数数组，不调用 shell。
 - `launchctlRunner`：固定 `/bin/launchctl` + 参数数组，不接受命令字符串。
 - `healthChecker`：只读 loopback controller health，固定 30 秒上限。
 - `clock`、`accountResolver` 和 receipt sink 通过窄接口注入。
+
+#### 5.4.1 `metadataStore.readJournalHeads()`（全局 journal-head snapshot）
+
+只读、零参数接口。不得接受 `transactionId`、路径或任何 caller 过滤参数。不得写、rename、fsync、锁、receipt、durability-event 或其它 I/O mutation。不得改变既有 `readJournal({ transactionId })` 的合同与行为。不得从 safe public `index.js` 导出全局可写或任意索引能力。
+
+实现必须经现有受限 journal 读取/验证路径读取整个 bounded append-only `transaction-journal.json`（沿用 16 MiB 上限）。每一条 entry 都必须完整 schema/chain 验证；同一 `transactionId` 的每条 entry 还必须保持同一个不可变 `operation`。损坏、截断、未知/非法 entry，或 `install -> managed-upgrade` 等 operation 漂移，一律使整个 snapshot fail closed；禁止返回 partial heads、截断修复或跳过坏行。
+
+返回 deeply frozen、detached 的精确闭合对象：
+
+```js
+{
+  kind: 'journal-heads',
+  journalSha256: '64-lowercase-hex',
+  heads: [
+    /* validated latest entry projection per transactionId, lexicographic ascending by transactionId */
+  ],
+}
+```
+
+- `journalSha256`：本次已经完整验证的 journal **精确 bytes** 的 SHA-256。journal 文件不存在时等于空 bytes 的 SHA-256。该值由 store 计算，不得由 caller 提供或覆盖。
+- `heads`：每个 `transactionId` 的最新有效 entry；按 `transactionId` 字节/词典序稳定升序。每个 entry 是 detached、深冻结的 validated projection，不得泄露 raw path、stdout/stderr、argv/env 或 secrets。
 
 本阶段 production/default 组合必须拒绝真实 launchctl；库导出和普通 CLI composition root 只能构造 fake 或 hard-disabled runner。真实 runner 的构造函数需要不可序列化的 acceptance capability；该 capability 只能由独立 acceptance 入口在 `--execute`、非生产确认、当前 uid、canonical 用户 LaunchAgents 根、sourceCommit 与 runtime artifact hashes 对齐全部成立后生成，缺一项均不可构造或注入真实 runner。
 
@@ -254,17 +276,47 @@ any non-terminal operation state
 
 journal 每次状态推进都必须原子落盘并校验前态；不允许跳跃、倒退或 caller 覆盖状态。每个 `*-intent` 固定记录 role、目标 basename、expected identity/absence、candidate hash 或 remove expectation；进程若在 mutation 返回前退出，recover 必须同时检查该 intent 的合法 pre/post 两种实态。
 
-若某个 candidate hash 与 prior hash 相同，该 role 不得执行替换，而是写入显式 `role-noop` checkpoint；所有 profile、manifest 与 runtime artifact hash 均未变化时，upgrade 直接返回 `no-change`，host mutation count=0。真正的 replace post-state 除 candidate hash 外还必须证明 device/inode identity 相对 expected pre-state 已变化，避免相同内容造成 pre/post 歧义。
+若某个 candidate hash 与 prior hash 相同，该 role 不得执行替换，而是写入显式 `role-noop` checkpoint；**全部** profile、manifest 与 runtime artifact hash 均未变化时，upgrade 直接返回 `no-change`，host mutation count=0。若仅 `sourceCommit` 变化而 controller/scheduler profile bytes 与 runtime artifact hash 不变，则 **必须** `committed` 且仅 `publish-manifest`（两 plist 写 `role-noop`），**不得** 收口为 `no-change`。真正的 replace post-state 除 candidate hash 外还必须证明 device/inode identity 相对 expected pre-state 已变化，避免相同内容造成 pre/post 歧义。
 
 状态机中的 stop/load 边同样允许严格的 `role-stop-noop` / `role-load-noop` 替代 checkpoint：只有目标 loaded 布尔已等于 anchor/operation 目标时才能使用，且必须实际探测确认；no-op 不调用 launchctl。
 
 进入 `compensating` 时必须一次性冻结有界 reverse plan，不允许嵌套生成第二个补偿计划。每个补偿动作都有独立 `compensate-<action>-intent/completed`、固定 expected pre/post 与幂等判定；补偿期间再次崩溃时只恢复或完成当前 action。任何实态不匹配、条件 mutation 失败或补偿 action 复核失败都直接进入 `manual-intervention-required`，不得再启动新的自动宿主 mutation 循环。
 
-锁文件不是唯一并发事实。每个普通 install/upgrade/stop/rollback/uninstall 入口在尝试获取锁前必须只读检查 journal，仅允许 `absent` 或已复核 receipt 的可继续终态 `committed` / `recovered` / `no-change` / `blocked`；获得新锁后必须再次比较同一 journal identity，确认未变化才可写 `prepared`。任意业务 intent、compensating 子状态、receipt-pending 或 `manual-intervention-required` 即使锁文件缺失，也一律零宿主 mutation并要求显式 recover，禁止当作 first install 或新事务覆盖。
+#### 5.5.1 全局占用与双快照闭合（`readJournalHeads`）
+
+锁文件不是唯一并发事实。全局 journal-head snapshot 是普通 operation 的权威占用事实源。不得用 per-transaction `readJournal({ transactionId })` 冒充全局 heads；caller 不知道旧 `transactionId` 也不能越过。
+
+对每个普通 install / managed-upgrade / stop / rollback / uninstall：
+
+1. **pre-lock**：在创建新 transaction、追加任何当前 operation journal、acquire lock 或任何 host mutation **之前**，调用 `readJournalHeads()`。
+2. **全局阻断（pre-lock）**：任一 head 为非终态，或 head 为 `manual-intervention-required`（MIR），一律全局阻断——即使没有现存 lock、caller 不知道该旧 transactionId、当前意图是 first-install。pre-lock 阻断不得创建新 transaction、不得追加当前 operation journal、不得 acquire lock、不得 host mutation。
+3. **终态 head 也必须重验** 同 transaction 的 durable receipt；receipt 缺失、损坏，或 transactionId / receipt hash / state 与 head 不闭合，同样阻断。
+4. **pre-lock 通过后**：获取独占锁并验证 lock identity，然后**立即**再读 post-lock `readJournalHeads()`（及对应 receipt 复核）。只有 `journalSha256` 与完整 `heads` identity 都和 pre-lock 精确一致才继续；snapshot 变化或出现 blocker 必须 fail closed。
+5. **post-lock 竞争阻断**：若安全可归属当前 transaction，则以当前 transaction 写 `prepared -> blocked`，blocked entry 引用 blocking entry hash / snapshot identity，写闭合 receipt，再释放锁；不得 host mutation。若无法安全证明归属，保留安全失败，不得猜测恢复或改写 foreign chain。
+6. **正常顺序冻结为**：
+
+```text
+[optional] pure in-memory input/schema/profile render
+     (no transaction, no writeCandidate, no plutil candidate I/O,
+      no ownership/runtime/label/file or LaunchAgents inspection)
+  -> pre-lock readJournalHeads + terminal receipt revalidation
+  -> acquire + verify transaction lock
+  -> post-lock readJournalHeads + receipt revalidation
+     (journalSha256 与 heads identity 必须与 pre-lock 精确一致)
+  -> 当前 transaction prepared journal
+  -> ownership / runtime / label / file inspections
+     (internal mode first-install | managed-upgrade | blocked；
+      journal/receipt operation 全程不可变；同锁同 transaction，禁止 unlock 重入)
+  -> anchor (production validateLaunchAgentAnchor)
+  -> writeCandidate staging + plutil lint on staged plist candidates only
+  -> host mutations (publisher candidate refs / launchctl) …
+```
+
+任意业务 intent、compensating 子状态、receipt-pending 或 `manual-intervention-required` 即使锁文件缺失，也一律零宿主 mutation 并要求显式 recover，禁止当作 first install 或新事务覆盖。用 transactionId-filtered `readJournal` 代替 `readJournalHeads` 视为合同违规。
 
 成功/可恢复收口的持久化顺序固定为：写并 fsync post-state evidence → 写 terminal journal（含 receipt hash）→ 原子写 receipt → 重新验证 terminal journal/receipt → `removeIfMatch` 释放锁。任一步未完成都保留非终态 journal；不得先释放锁再写 terminal。
 
-所有获得锁后才发现且尚未产生宿主 mutation 的 blocker（包括 label-in-use、锁后 ownership/hash/runtime 复核失败）统一写 terminal `blocked` journal 与闭合 blocker receipt 后再释放锁。`no-change` 使用自己的 terminal journal；不得从 `prepared` 直接解锁。
+所有获得锁后才发现且尚未产生宿主 mutation 的 blocker（包括 label-in-use、锁后 ownership/hash/runtime 复核失败、post-lock heads 竞争在可归属当前 transaction 时）统一先写 `prepared`（若尚未写）再写 terminal `blocked` journal 与闭合 blocker receipt 后再释放锁。`no-change` 使用自己的 terminal journal（亦必须先有 `prepared`）；不得从 `prepared` 直接解锁，也不得把 `blocked`/`no-change` 当作事务第一条 journal。
 
 `manual-intervention-required` 是持有 durable `mir-lock` identity 的阻塞态，不允许普通 operation 获取或覆盖。进入 MIR 的顺序固定为：写并 fsync MIR journal → `publishAbsent` durable mir-lock → 复核 mir-lock identity → `removeIfMatch` 原 transaction lock；中途同时存在两个锁时 mir-lock 具有判定优先级。进程退出后也保留 journal/lock 绑定；只有单独的人类授权门 `recover --after-manual-repair` 才可在复核 journal、anchor、MIR lock、实际文件与修复声明 identity 后条件接管。接管后仍按第 6.7 节证明实态；无法证明则继续 MIR，不得静默转成 first install。MIR lock 只有在 recover 写入并验证合法 terminal journal/receipt 后才能条件释放。
 
@@ -272,17 +324,42 @@ journal 每次状态推进都必须原子落盘并校验前态；不允许跳跃
 
 ### 6.1 First install
 
-1. 验证 scope、uid、目标根、metadata 根、source commit 和 allowlisted runtime artifact hashes。
-2. 渲染双 profile，执行 schema + `plutil` 校验。
-3. 确认两个目标均不存在且不存在冲突 ownership。若目标与 manifest 均存在且 ownership、双 hash 完全匹配，路由到 managed upgrade；若目标存在但 manifest 缺失、双文件不完整、hash 漂移或 ownership 不匹配，拒绝 install，并仅在 journal/anchor identity 可证明时引导显式 recover，否则返回固定 ownership blocker。
-4. 获取事务锁并写 `prepared` journal。
-5. 在任何 LaunchAgents 文件发布前，用固定 parser 探测双 label；两者必须可证明 unloaded。任一 loaded 或状态不确定都返回 `label-in-use` blocker，LaunchAgents mutation count=0，并严格按“terminal `blocked` journal（含 receipt hash）→ blocker receipt → 双重复核 → 条件释放锁”收口，不得在 `prepared` 状态释放锁。
-6. 写入双 `priorState=absent` anchor。
-7. 依次用 `publishAbsent` 发布 controller 与 scheduler，每一侧都有独立 intent/completed journal；任一目标不再 absent 都停止，绝不覆盖。
-8. 用同一 no-clobber 条件发布新 manifest，重新验证 manifest 与双 plist hash。
-9. 重新解析两个 plist 的 ProgramArguments，验证 runtimeBinder 路径与 live artifact hashes 后，加载 controller 并等待健康检查通过。
-10. 再次验证 scheduler runtime binding 后加载 scheduler。
-11. 重新验证双 label 状态、plist hash、manifest、runtime binding 和 anchor，写 `committed` receipt。
+**阶段边界（与 §5.5.1 同序，禁止提前 I/O）：**
+
+- **pre-lock 之前/周围**仅允许：caller 输入的纯闭合字段校验，以及**纯内存** profile render / descriptor schema 校验（不创建 transaction、不 `writeCandidate`、不对 candidate 跑 `plutil`、不做 ownership/runtime/label/file 或 LaunchAgents 宿主 inspection）。
+- **锁门**：pre-lock `readJournalHeads` + receipt 重验 → acquire+verify lock → post-lock 同一 snapshot → `prepared`。
+- **`prepared` 之后**才允许 ownership/runtime/label/file inspections，并据此选择**内部** `mode ∈ { first-install, managed-upgrade, blocked }`（见下；**不是** caller 字段，**不得**改写 journal/receipt 的 `operation`）。
+- **anchor 之后**才 `writeCandidate` stage；仅对已 staged 的固定 candidate 调 `plutil -lint`；publisher 只收 opaque candidate ref。
+
+**Journal `operation` 不可变（公共 API 对齐）：**
+
+- 公共入口 `install()` 创建的 transaction：从首条 `prepared` 到任意 terminal 的每一条 journal entry 的 `operation` **始终**为 `install`；对应 `receipt.operation` 也**始终**为 `install`。
+- 公共入口 `managedUpgrade()` 创建的 transaction：全程 `operation` / `receipt.operation` **始终**为 `managed-upgrade`。
+- `operation` 是链级闭合字段，同一 transaction 内禁止漂移、改写或“升级为另一 operation”。chain validation 必须能证明全链 `operation` 恒等。
+- post-prepared 若发现完整且 ownership 匹配的已管理安装，可在**同一把锁、同一 transaction** 下选择内部 `mode='managed-upgrade'`：mode 仅是闭合内部分支/状态机选择（实现细节），**不是** caller 可注入字段，**不是**新的持久化自由字符串字段，**不**改变 journal/receipt 的 `operation`。
+- 该分支的 **anchor `purpose` 仍可为 `managed-upgrade`**（说明 anchor 用途，不是 transaction operation）。
+- 内部 managed-upgrade 分支必须复用 `operation='install'` 下已批准/可验证的显式 states 与 payload 形状推进 stop/publish/load；若现有 closed journal payload/schema 无法安全表达所需 checkpoint，则 **fail closed**（blocked/固定码），**绝不能**中途改 `operation`。
+- **不得** unlock 后重入，**不得**再次绕过 heads gate，**不得**为该路由创建第二 transaction。
+
+**步骤：**
+
+1. 纯输入闭合校验：scope、uid、目标根 ID、metadata 根 ID、source commit、schedule、controllerEnvironment 与 allowlisted runtime artifact **声明**（尚不做宿主文件 inspection）。
+2. （可选，仍属纯内存）按已注入/已校验的 binding 输入做双 profile **内存 render + schema**；**禁止**此时 `writeCandidate`、**禁止** plutil candidate I/O、**禁止** LaunchAgents/label/ownership 探测。
+3. **pre-lock** `readJournalHeads()` + 终态 head 的 durable receipt 重验。任一非终态/MIR head、或终态 head 的 receipt 不闭合：全局阻断——不创建 transaction、不 acquire lock、不 host mutation、不 staging。特别地：即使存在 **caller 未知 transactionId** 的 foreign nonterminal head 且无 lock，first-install 也必须被阻断（不得仅记录泛化 event）。
+4. 获取事务锁并验证 lock identity；**post-lock** 再读 `readJournalHeads()`，要求 `journalSha256` 与完整 `heads` identity 与 pre-lock 精确一致。
+5. 写当前 transaction `prepared` journal：`operation='install'`（由 `install()` 入口创建；此后全链不可变）。
+6. **`prepared` 之后**做 ownership / runtime / label / file inspections（含目标 plist/manifest 是否存在、hash、loaded 探测所需的只读 inspect）。**inspection 不得先于 `prepared`。**
+   - 两目标与 manifest 均不存在且无冲突 → 内部 `mode='first-install'`，继续下方 first-install 路径；journal `operation` 仍为 `install`。
+   - 目标与 manifest 均存在且 ownership、双 hash 完全匹配 → 内部 `mode='managed-upgrade'`，在**同一锁、同一 transaction** 内按 upgrade 状态表推进（stop→publish changed→load 等），journal/receipt `operation` **仍为 `install`**；anchor 可用 `purpose='managed-upgrade'`；**不得**改 operation、**不得** unlock 重入、**不得**再跑 heads gate、**不得**第二 transaction。若 schema 无法安全承载该分支 checkpoint → fail closed。
+   - 目标存在但 manifest 缺失、双文件不完整、hash 漂移或 ownership 不匹配 → 内部 `mode='blocked'`：`prepared → blocked`（或可证明时引导显式 recover），零 host mutation；`operation` 仍为 `install`。
+7. `mode='first-install'`：在任何 LaunchAgents 文件发布前，用固定 parser 探测双 label；两者必须可证明 unloaded。任一 loaded 或状态不确定 → `label-in-use`，count=0，按“`prepared` → terminal `blocked` + receipt → 条件释放锁”收口。
+8. first-install 路径写入双 `priorState=absent` anchor（`purpose=first-install`，经 `validateLaunchAgentAnchor`）。managed-upgrade 内部分支则冻结 pre-state bytes/loaded，`purpose=managed-upgrade`。
+9. **anchor 之后**：`writeCandidate` stage controller/scheduler/manifest；**仅两 plist** 对 staged fixed candidate 调 `plutil -lint`；invalid → blocked，count=0，不得 publish。
+10. first-install：依次用 `publishAbsent(address, candidateRef)` 发布 controller 与 scheduler（只收 opaque candidate ref），每侧独立 intent/completed；任一目标不再 absent 都停止，绝不覆盖。managed-upgrade 内部分支：按 loaded 布尔 stop 后 `replaceIfMatch` 仅发布 changed roles（同 §6.2 突变规则，但 `operation` 保持 `install`）。
+11. 用同一 no-clobber 条件发布新 manifest，重新验证 manifest 与双 plist hash。
+12. 重新解析两个 plist 的 ProgramArguments，验证 runtimeBinder 路径与 live artifact hashes 后，加载 controller 并等待健康检查通过。
+13. 再次验证 scheduler runtime binding 后加载 scheduler。
+14. 重新验证双 label 状态、plist hash、manifest、runtime binding 和 anchor，写 terminal journal + receipt；**`receipt.operation` 必须仍为 `install`**。
 
 controller 必须先 ready，scheduler 才允许加载，避免 scheduler 在 controller 不可用时触发。
 
@@ -290,16 +367,29 @@ controller 必须先 ready，scheduler 才允许加载，避免 scheduler 在 co
 
 ### 6.2 Managed upgrade
 
-1. 校验现有 manifest、label、文件名、两个实际 plist hash、source commit 与 allowlisted runtime artifact hashes，并记录双 label 的实际 loaded 布尔。
-2. 渲染、lint 并校验新双 profile。
-3. 获取锁并一次性冻结旧双 profile、manifest 和加载状态。
-4. 按记录的实际 loaded 布尔处理 scheduler、controller：loaded=true 才写 stop-intent 并 bootout；loaded=false 写 `role-stop-noop` 并复核仍 unloaded。每个实际 bootout 后复查 loaded 状态。任一 bootout 返回失败或状态不确定时，不发布新文件，按下述基于实际状态的补偿规则收口。
-5. 分别用 `replaceIfMatch` 条件发布新 controller 和 scheduler profile，每侧都有独立 intent/completed journal；双 plist 整体非原子，依赖 journal 与双锚点实现可证明收敛。
-6. 在任何新 job 加载前，用 `replaceIfMatch` 条件发布新 manifest并复核其双 hash。
-7. 重新解析新双 plist 的 ProgramArguments，验证它们与同一 manifest/canonical installation root/runtime artifact hashes 绑定。
-8. 加载新 controller 并等待 ready。
-9. 再次验证 scheduler runtime binding 后加载新 scheduler。
-10. 复核完整 post-state、runtime binding 与 sourceCommit，提交 transaction。
+**阶段边界同 §6.1 / §5.5.1：** pre-lock 前后仅纯输入 + 纯内存 render/schema；`writeCandidate` / plutil candidate I/O / ownership/runtime/label/file inspections 均不得早于 `prepared`；staging+plutil 在 anchor 之后。
+
+**步骤：**
+
+1. 纯输入闭合校验（source commit、schedule、controllerEnvironment 等声明字段）。
+2. （可选）纯内存渲染/schema 新双 profile；**禁止** candidate staging 与 plutil candidate I/O。
+3. **pre-lock** `readJournalHeads()` + 终态 receipt 重验（同 5.5.1）。
+4. acquire+verify lock；**post-lock** `readJournalHeads()` 必须与 pre-lock 的 `journalSha256`/heads identity 精确一致。
+5. 写 `prepared` journal。
+6. **`prepared` 之后**校验现有 manifest、label、文件名、两个实际 plist hash、source commit 与 allowlisted runtime artifact hashes，并记录双 label 的实际 loaded 布尔；ownership/runtime/label/file inspections 不得先于 `prepared`。
+7. 一次性冻结旧双 profile、manifest 和加载状态（`purpose=managed-upgrade`，经 `validateLaunchAgentAnchor`）。
+8. **anchor 之后**：`writeCandidate` stage 所需 roles；**仅两 plist** 对 staged candidate `plutil -lint`；invalid → blocked，count=0。仅 changed role 进入后续 replace；publisher 只收 opaque candidate ref。
+9. 按记录的实际 loaded 布尔处理 scheduler、controller：loaded=true 才写 stop-intent 并 bootout；loaded=false 写 `role-stop-noop` 并复核仍 unloaded。每个实际 bootout 后复查 loaded 状态。任一 bootout 返回失败或状态不确定时，不发布新文件，按下述基于实际状态的补偿规则收口。
+10. 分别用 `replaceIfMatch(expected, address, candidateRef)` 条件发布**已改变**的 controller/scheduler profile；相同 bytes 的 role 写显式 `role-noop`。双 plist 整体非原子，依赖 journal 与双锚点实现可证明收敛。
+11. 在任何新 job 加载前，用 `replaceIfMatch` 条件发布新 manifest 并复核其双 hash。**仅 sourceCommit 变化而 profiles/runtime hash 不变时：必须 `committed` 且仅 manifest publish，两 plist `role-noop`；不得 `no-change`。**
+12. 重新解析新双 plist 的 ProgramArguments，验证它们与同一 manifest/canonical installation root/runtime artifact hashes 绑定。
+13. 加载新 controller 并等待 ready。
+14. 再次验证 scheduler runtime binding 后加载新 scheduler。
+15. 复核完整 post-state、runtime binding 与 sourceCommit，提交 transaction。
+
+**全同判定**：controller/scheduler/manifest/runtime artifact 全部 hash 与 pre-state 一致时才 `no-change`（count=0）。sourceCommit-only 变更不满足全同。
+
+若由公共入口 `install()` 在 **同一锁/同一 transaction** 的 post-prepared inspection 选择内部 `mode='managed-upgrade'`：不得 unlock 重入，不得再次绕过 heads gate，不得创建第二 transaction；后续按 upgrade 状态表推进，但全链 journal/receipt `operation` **保持 `install`**（anchor `purpose` 可为 `managed-upgrade`）。直接调用公共入口 `managedUpgrade()` 时，全链 `operation`/`receipt.operation` **始终**为 `managed-upgrade`。
 
 文件发布后的任一步失败都必须停止本轮新状态、恢复双锚点，并精确回放 anchor 的双 loaded 布尔：只有旧 controller recorded loaded=true 时才 bootstrap 并等待 ready；只有旧 scheduler recorded loaded=true 时才在 controller 条件满足后 bootstrap。recorded loaded=false 或 entry=absent 时禁止加载，只复核 unloaded/absent。
 
@@ -312,11 +402,13 @@ bootout 阶段失败时不得盲目 bootstrap 或覆盖 plist：
 
 ### 6.3 Stop
 
-- 先校验 ownership、manifest 与双 hash，获取事务锁，并冻结双 profile、manifest 和原 loaded 状态作为补偿锚点。
-- 按实际 loaded 布尔先处理 scheduler 再处理 controller：loaded=true 才 bootout，loaded=false 走 role-stop-noop；每步推进 operation-specific journal。
+- pre-lock 周围仅纯输入闭合校验（如 sourceCommit 声明）；**禁止**在 `prepared` 前做 ownership/runtime/label/file inspection 或任何 candidate staging/plutil I/O。
+- **pre-lock** `readJournalHeads()` + 终态 receipt 重验（同 5.5.1）→ acquire+verify lock → **post-lock** heads 与 pre-lock 精确一致 → 写 `prepared`。
+- **`prepared` 之后**校验 ownership、manifest 与双 hash，并记录 loaded 布尔；再冻结双 profile、manifest 和原 loaded 状态作为补偿锚点，`purpose=stop`，**必须**通过 production `validateLaunchAgentAnchor`。看似合法但 schema 非法的 stop anchor 必须在任何 launchctl 或 host mutation 前被拒绝。
+- 按实际 loaded 布尔先处理 scheduler 再处理 controller：loaded=true 且 ownership 可证明才 bootout，loaded=false 走 role-stop-noop；每步推进 operation-specific journal。
 - 正常 stop 的终态是两个 label 均未加载。
 - 因为 job 已 bootout，controller 不应被 KeepAlive 重启。
-- bootout 后必须重新探测双 label；任一仍 loaded 时 stop 失败并输出固定 `stop-incomplete` outcome 与非零计数，不继续做自动 mutation。
+- bootout 后必须重新探测双 label；任一仍 loaded 时 stop 失败并输出固定 `stop-incomplete` outcome 与非零 `hostMutationCount`（已发出的 bootout 尝试计入），不继续做自动 mutation。
 - stop 未达双 label unloaded 时，即使补偿后精确回到 pre-state，transaction state 也只能是 `recovered`、operation outcome 必须是 `stop-incomplete`、success=false；不得把 recovered 解释为 stop 成功。
 - stop 不删除 plist、manifest 或 anchor。
 
@@ -328,24 +420,32 @@ bootout 阶段失败时不得盲目 bootstrap 或覆盖 plist：
 
 ### 6.5 Rollback
 
-1. 校验目标 active anchor 与当前 ownership。ownership 缺失、identity 不一致或实际 hash 与 manifest 漂移时拒绝 rollback；只有 journal/anchor identity 可证明时才引导显式 recover，否则返回 `manual-intervention-required`，不得覆盖当前文件。
-2. 获取事务锁，并另建本次 rollback 的 compensation anchor，冻结 rollback 前的当前双 plist、manifest 和加载状态；不得覆盖目标 active anchor。
-3. 按当前 loaded 布尔先处理 scheduler 再处理 controller：仅 loaded=true 的 role 执行 bootout，其余写 role-stop-noop。
-4. 在任何文件 mutation 前重新探测双 label；任一仍 loaded 或状态不确定时，零文件 mutation，按 compensation anchor 恢复原 loaded 布尔并返回固定 `rollback-unload-incomplete` 非成功 outcome。
-5. 对目标 anchor 的每个 tagged entry 执行确定动作：`bytes` 用 `replaceIfMatch` 恢复并校验 hash；`absent` 只用 `removeIfMatch` 删除当前 Linke-managed candidate。manifest 使用相同规则，并在任何 job 重新加载前完成。
-6. 若目标 manifest=`bytes`，在任何 bootstrap 前验证其 sourceCommit/runtime artifact hashes 与恢复后 plist ProgramArguments 实际指向的 live bytes 全等；旧 runtime bundle 必须作为 immutable input 仍存在且 hash 匹配。生命周期模块不修改或伪造 runtime bundle。缺失/漂移时不得加载或宣称 last-green，固定返回 `rollback-runtime-mismatch`、success=false，并按本次 compensation anchor 恢复 rollback 前已验证状态；只有该补偿失败时才进入 MIR/显式重装门。
-7. 逐 role 回放目标 anchor 的 loaded 布尔：仅当 entry=`bytes` 且 recorded loaded=true 时才 bootstrap；controller 需 ready 后方可恢复 recorded loaded=true 的 scheduler。entry=`absent` 或 recorded loaded=false 时禁止 bootstrap，并验证 absent/unloaded。
-8. 校验全部 hash/absence、manifest、runtime binding、anchor lineage 和 loaded 状态后提交 rollback receipt；若恢复出旧 manifest，其快照内 parent activeAnchorId 成为下一 rollback target；若恢复为 absent，终态就是未安装且没有 active target。任一步失败按 compensation anchor 恢复 rollback 前状态；补偿自身失败立即进入 `manual-intervention-required`，禁止继续自动 mutation。
+顺序同 §5.5.1：纯输入校验 → pre-lock heads/receipts → acquire+verify lock → post-lock identical snapshot → `prepared` → ownership/runtime/label/file inspections → compensation anchor → mutations。**禁止**在 `prepared` 前做 ownership/file inspection 或 candidate staging/plutil I/O。
+
+1. 纯输入闭合校验（目标 anchorId 等声明字段）。
+2. **pre-lock** `readJournalHeads()` + 终态 receipt 重验；通过后 acquire+verify lock；**post-lock** heads 与 pre-lock 精确一致；写 `prepared`。
+3. **`prepared` 之后**校验目标 active anchor 与当前 ownership。ownership 缺失、identity 不一致或实际 hash 与 manifest 漂移 → blocked/MIR 引导（可证明 recover 时），不得覆盖当前文件；零 host mutation。
+4. 另建本次 rollback 的 compensation anchor，冻结 rollback 前的当前双 plist、manifest 和加载状态；不得覆盖目标 active anchor。
+5. 按当前 loaded 布尔先处理 scheduler 再处理 controller：仅 loaded=true 的 role 执行 bootout，其余写 role-stop-noop。
+6. 在任何文件 mutation 前重新探测双 label；任一仍 loaded 或状态不确定时，零文件 mutation，按 compensation anchor 恢复原 loaded 布尔并返回固定 `rollback-unload-incomplete` 非成功 outcome。
+7. 对目标 anchor 的每个 tagged entry 执行确定动作：`bytes` 用 `replaceIfMatch` 恢复并校验 hash；`absent` 只用 `removeIfMatch` 删除当前 Linke-managed candidate。manifest 使用相同规则，并在任何 job 重新加载前完成。
+8. 若目标 manifest=`bytes`，在任何 bootstrap 前验证其 sourceCommit/runtime artifact hashes 与恢复后 plist ProgramArguments 实际指向的 live bytes 全等；旧 runtime bundle 必须作为 immutable input 仍存在且 hash 匹配。生命周期模块不修改或伪造 runtime bundle。缺失/漂移时不得加载或宣称 last-green，固定返回 `rollback-runtime-mismatch`、success=false，并按本次 compensation anchor 恢复 rollback 前已验证状态；只有该补偿失败时才进入 MIR/显式重装门。
+9. 逐 role 回放目标 anchor 的 loaded 布尔：仅当 entry=`bytes` 且 recorded loaded=true 时才 bootstrap；controller 需 ready 后方可恢复 recorded loaded=true 的 scheduler。entry=`absent` 或 recorded loaded=false 时禁止 bootstrap，并验证 absent/unloaded。
+10. 校验全部 hash/absence、manifest、runtime binding、anchor lineage 和 loaded 状态后提交 rollback receipt；若恢复出旧 manifest，其快照内 parent activeAnchorId 成为下一 rollback target；若恢复为 absent，终态就是未安装且没有 active target。任一步失败按 compensation anchor 恢复 rollback 前状态；补偿自身失败立即进入 `manual-intervention-required`，禁止继续自动 mutation。
 
 ### 6.6 Uninstall
 
-1. 校验当前双 plist 仍与 Linke manifest hash 一致。
-2. 获取事务锁并冻结当前双 plist、manifest 和加载状态作为 uninstall compensation anchor。
-3. 按当前 loaded 布尔先处理 scheduler 再处理 controller：仅 loaded=true 的 role 执行 bootout，其余写 role-stop-noop。
-4. 在任何文件 mutation 前重新探测双 label；任一仍 loaded 或状态不确定时，零文件 mutation，按 compensation anchor 恢复原 loaded 布尔并返回固定 `uninstall-unload-incomplete` 非成功 outcome。
-5. 仅删除两个已验证的 Linke-managed plist。
-6. 删除 active manifest，但保留脱敏 uninstall receipt。
-7. 验证两个 label 均未加载、两个目标均不存在；任一步失败按 compensation anchor 的双 loaded 布尔恢复精确安装态，无法证明恢复完成则进入 `manual-intervention-required`。
+顺序同 §5.5.1：`prepared` 前禁止 ownership/file inspection 与 candidate staging/plutil I/O。
+
+1. 纯输入闭合校验。
+2. **pre-lock** heads/receipts → acquire+verify lock → **post-lock** identical snapshot → `prepared`。
+3. **`prepared` 之后**校验当前双 plist 仍与 Linke manifest hash 一致；不一致则 blocked，零 host mutation。
+4. 冻结当前双 plist、manifest 和加载状态作为 uninstall compensation anchor。
+5. 按当前 loaded 布尔先处理 scheduler 再处理 controller：仅 loaded=true 的 role 执行 bootout，其余写 role-stop-noop。
+6. 在任何文件 mutation 前重新探测双 label；任一仍 loaded 或状态不确定时，零文件 mutation，按 compensation anchor 恢复原 loaded 布尔并返回固定 `uninstall-unload-incomplete` 非成功 outcome。
+7. 仅删除两个已验证的 Linke-managed plist。
+8. 删除 active manifest，但保留脱敏 uninstall receipt。
+9. 验证两个 label 均未加载、两个目标均不存在；任一步失败按 compensation anchor 的双 loaded 布尔恢复精确安装态，无法证明恢复完成则进入 `manual-intervention-required`。
 
 任何 hash 漂移、ownership 缺失或目标类型异常都必须拒绝删除。若仅一个 plist 缺失或漂移，不得删除剩余文件；receipt 只输出闭合 outcome、存在性布尔值和允许的 hash。只有 journal、anchor、manifest identity 仍能闭合时才引导 6.7 的显式 recover，否则返回 ownership blocker / `manual-intervention-required`，由人工处理，不猜测认领。
 
@@ -494,10 +594,16 @@ new controller ready
 - 两个独立 Node 进程竞争同一 metadata 根，仅一个获得事务锁。
 - 验证锁只能由 no-clobber 原语获取、持有期间 journal 单 writer identity 不变、孤儿接管必须 conditional remove 后重新原子获取。
 - 删除锁但保留每一种非终态 journal，断言所有普通 operation 都是零宿主 mutation；terminal journal/receipt 必须先持久化并复核，之后才允许条件释放锁。
-- 每个 post-lock/zero-host-mutation blocker 必须写 terminal `blocked` journal + receipt 后才释放锁；`prepared` 解锁必须 RED。
+- **真实 seed 未知 transactionId 的 foreign nonterminal head**（无 lock）：first-install / 其它普通 operation 经 `readJournalHeads()` 全局阻断；不得仅记录泛化 event，不得用 filtered `readJournal` 冒充。
+- `readJournalHeads()`：空/不存在 journal 稳定 empty-bytes hash；多 transaction latest-head 稳定排序；append 后 snapshot/hash 改变；损坏/截断/非法 fail closed；同 transaction 的合法 sequence/hash 但 operation 漂移 fixture 也必须整体拒绝且无 partial heads；返回 detached/deep frozen；调用前后无文件/事件/耐久化 mutation；既有 `readJournal` 公开合同回归不变。
+- 每个 post-lock/zero-host-mutation blocker 必须写 `prepared`（若尚未写）→ terminal `blocked` journal + receipt 后才释放锁；`prepared` 解锁必须 RED。
 - MIR 保留 durable mir-lock；普通 operation 与普通 recover 永久拒绝且 mutation count=0，只有显式 `recover --after-manual-repair` + 独立人类 gate 可接管，无法证明修复后实态时继续 MIR。
 - 在“写 MIR journal / 发布 mir-lock / 删除 transaction lock”每个边界注入崩溃，断言 mir-lock 优先且不存在普通 recover 接管窗口。
-- 全相同 candidate 返回 `no-change` 且 mutation count=0；单 role hash 相同走显式 role-noop，改变的 role 必须证明 inode identity 变迁。
+- 全相同 candidate（含 manifest/runtime）返回 `no-change` 且 mutation count=0；单 role hash 相同走显式 role-noop；**sourceCommit-only** 变更必须 `committed` 且仅 manifest publish；改变的 role 必须证明 inode identity 变迁。
+- publisher 调用必须携带 opaque `{ kind:'candidate', transactionId, role, sha256 }`；测试断言非 bytes/路径。
+- stop anchor 必须通过 production `validateLaunchAgentAnchor`（含 `purpose=stop`）；非法 schema 在 launchctl/host mutation 前拒绝。
+- happy path 顺序严格：optional 纯内存 render → pre-lock heads/receipts → lock → post-lock identical heads/receipts → prepared → inspections → anchor → writeCandidate/plutil → mutations；inspection、candidate staging、plutil candidate I/O 不得先于 prepared。
+- **同一 transaction 全链 journal `operation` 不可变**：`install()` 入口始终 `operation='install'`（即便内部 mode 走 managed-upgrade 分支）；`managedUpgrade()` 入口始终 `operation='managed-upgrade'`；receipt.operation 与之对齐；表驱动/链检查必须拒绝中途改 operation。
 - 重复 install/stop/rollback/uninstall 返回固定幂等状态或固定 blocker。
 - 未知锁、错误 journal、错误 anchor、混合 hash 一律停止。
 - acceptance prepare/execute 两阶段必须绑定一次性 nonProductionConfirmationId；消费记录必须在 mint 前 no-clobber+fsync，缺失、重放、uid/root/sourceCommit/runtime hash 不匹配、写入失败或 fake host dependency 均不能铸造真实 capability。
@@ -630,18 +736,39 @@ fresh Kimi 最终设计抗辩返回 0 P0 / 3 P1 / 3 P2。PM 对全部 finding �
 | load intent 后崩溃缺 loaded job identity 证明 | 采纳；raw print 仅在内存计算 jobIdentitySha256，不可证明则 MIR 且不 bootout |
 | confirmation ID 无 durable consumed record | 采纳；mint 前 no-clobber+fsync 消费记录，写失败或重放都拒绝 |
 
+### 13.1 设计 A：全局 journal-head snapshot（Task 2.5）用户批准
+
+Task 4 首版 RED 被 Codex 与独立 GLM 判定 HOLD：缺少可证明的全局 journal 占用 seam，foreign nonterminal 在 caller 不知 transactionId、无 lock 时无法阻断 first-install。用户批准 **设计 A**：
+
+| 项 | 冻结内容 |
+| --- | --- |
+| 新接口 | `metadataStore.readJournalHeads()` 零参数只读全局 heads snapshot（见 5.4.1） |
+| 插入点 | Task 2 与 Task 4 之间新增独立 **Task 2.5**（Task 3 host-adapter 历史可已完成；Task 4 硬依赖 Task 2.5） |
+| Task 2.5 范围 | RED 仅 `test/launchagent-lifecycle-metadata.test.js`；GREEN 仅 `src/launchagent-lifecycle/metadata-store.js` |
+| Task 4 消费 | coordinator 必须调用 `readJournalHeads()`，按 5.5.1 双快照顺序 fail closed；不得用 filtered `readJournal` 冒充 |
+| 六项 RED 整改 | foreign nonterminal 真实 seed；publisher 精确 candidate ref；stop anchor 走 production validator；happy path 新顺序；sourceCommit-only → committed+manifest-only；heads seam 用真实接口 |
+| 角色事实 | implementer = 同一 isolated opencode worker（Grok 4.5 high）；Codex = 主脑/独立验证；GLM = 独立抗辩；Qwen = 仅统计；Kimi = 后续闭环验收。**不宣称任何模型已批准代码** |
+
 ## 14. 角色与后续流程
 
 ```text
-hostController: Codex
-orchestrator: Codex
-pm: Codex
-adversary: fresh Kimi K3 via DashScope helper, read-only, max（Grok 达最大尝试边界后由用户批准最终设计抗辩）
-implementer: Kimi Code CLI, fresh, isolated, max
-statistics: Qwen CLI, effort=N/A:no-supported-control
-reviewer: fresh Kimi K3 via DashScope helper, read-only, max
-closure_reviewer: fresh Kimi K3 via DashScope helper, read-only, max
-verifier: Codex host
+hostController / orchestrator / pm / verifier: Codex（主脑与独立 RED/GREEN 观察；不代替实现）
+implementer: 同一 isolated opencode worker，backed by Grok 4.5 high（文档固化与后续 TDD 实现）
+adversary / independent challenge: GLM（独立抗辩；read-only evidence）
+statistics: Qwen CLI（仅计数与边界统计；不决定正确性）
+closure acceptance: Kimi（后续闭环验收；本阶段不宣称已批准代码）
 ```
 
-实现前必须再生成详细 TDD plan。实现、设计文档 commit、push、真实 launchd 验收和任何部署均是各自独立的授权门。
+独立 TDD 停点（每步需 Codex 观察；同一次 worker 阶段不得先写生产绕过 RED 检查点）：
+
+```text
+docs 固化（本阶段）
+  -> Task 2.5 RED -> Codex RED
+  -> Task 2.5 GREEN -> Codex GREEN
+  -> Task 4 RED rework -> Codex RED
+  -> Task 4 contracts RED -> Codex RED
+  -> Task 4 GREEN -> Codex GREEN
+  -> 后续 Task 5+ …
+```
+
+实现、设计/计划文档 commit、push、真实 launchd 验收和任何部署均是各自独立的用户授权门。本阶段仅文档固化，不执行 commit/push。

@@ -21,13 +21,13 @@
 7. Do not modify `src/supervisor-lifecycle.js`; V1.46 uses new focused modules and must not flip its five global execution facts.
 8. Fixed V1.46 labels are `com.linke.controller` and `com.linke.scheduler`; fixed filenames are the matching labels plus `.plist`. No caller-selected label or filename reaches host adapters.
 9. V1.46 schedule bounds are frozen at integer `60..86400` seconds. This applies only to the new lifecycle renderer; it does not silently change the legacy dry-run validator.
-10. Runtime binding is to one canonical immutable installation root and exactly three artifacts: host Node executable, `src/controller-runtime.js`, and `src/agent.js`. Bind before render; revalidate after render, before manifest publication, before every bootstrap, and before commit.
+10. Runtime binding is to one canonical immutable installation root and exactly three artifacts: host Node executable, `src/controller-runtime.js`, and `src/agent.js`. Pure in-memory render/schema may use an already-closed binding input around the pre-lock gate. Live installation-root revalidation and LaunchAgents ownership/runtime/label/file inspection occur only after `prepared`, and again before manifest publication, every bootstrap, and commit. Candidate staging and plutil candidate I/O occur only after anchor (hence after `prepared`).
 11. LaunchAgents and active-manifest mutation can occur only through `publishAbsent`, `replaceIfMatch`, and `removeIfMatch`. No coordinator or metadata-store method may expose raw `rename`, `unlink`, general write paths, or caller-selected basenames.
 12. Node alone does not satisfy the design's race-safe compare-and-mutate contract for an existing path. Therefore the production real atomic publisher in this candidate must fail closed with `conditional-mutation-unsupported`; test publishers prove coordinator contracts only and are not real-host evidence.
 13. The production/default launchctl surface is hard-disabled. Safe library exports cannot construct a real runner. No Agent/API/Web CLI route is added in this plan.
 13a. Fixed-argv `execFile`-style `/usr/bin/plutil -lint` against a temp-root candidate is allowed and required. Shell execution, command strings, concatenated argv, caller-selected executables/subcommands, and any real `/bin/launchctl` spawn are forbidden; launchctl tests use synthetic fixtures and a subprocess spy.
 14. `launchctl print` raw output is parsed in memory, projected to closed fields, hashed as `jobIdentitySha256`, then discarded. It may not enter a journal, anchor, receipt, log, fixture snapshot, or thrown message.
-15. Any nonterminal journal, MIR journal, or mir-lock is a blocker even when the ordinary lock is absent. Normal operations never overwrite it or reinterpret it as first install.
+15. Any nonterminal journal head, MIR head/journal, or mir-lock is a global blocker even when the ordinary lock is absent and even when the caller does not know the foreign transactionId. Detection is via `readJournalHeads()` (Task 2.5), not filtered `readJournal`. Normal operations never overwrite it or reinterpret it as first install.
 16. Terminal journal and receipt are written and revalidated before conditionally releasing the transaction lock. MIR handoff is journal → durable mir-lock → verify mir-lock → conditionally release transaction lock.
 17. Code-stage release truth remains `automation-installation=partial`, `security-auth=partial`, `production-hardening=partial`, Gold `6 ready / 3 partial / 0 blocked / total 9`, not Gold, not GA.
 18. The following remain literal false invariants: `realCapabilityImplementationsReady`, `realRunnerWiringReady`, `runnerWiringContractReady`, `executeCapabilityAuthorized`, `executionEligible`.
@@ -40,15 +40,23 @@
 25. The canonical immutable runtime root and writable mode-0700 metadata root are always distinct roots with distinct root IDs. “Immutable” applies to Node/controller/agent runtime artifacts, never to journal/lock/receipt storage.
 26. `transaction-journal.json` is append-only JSON Lines, keyed by transaction ID and sequence, not a replaceable single record. Every entry has exact schema, previous-entry hash, entry hash, operation, state, UTC, and closed state payload. The latest entry per transaction defines that transaction state; any latest nonterminal entry, MIR entry, or mir-lock blocks every ordinary operation. A post-lock attempt that discovers a foreign nonterminal appends its own terminal blocked entry/receipt referencing the foreign entry hash and never alters the foreign chain.
 27. Lock owner records PID, random nonce, and explicit availability/value fields for boot-session and process-start identity. Operator-invoked orphan recovery requires both identity values to be available and equal current observations; unavailable values/facts fail closed as still occupied. PID reuse or unavailable liveness facts may cause an availability block but never authorize takeover. MIR/manual-repair remains the only override.
+28. **Global journal-head snapshot (design A / Task 2.5):** `metadataStore.readJournalHeads()` is the authoritative zero-arg read-only global occupancy seam. Ordinary install/upgrade/stop/rollback/uninstall MUST call it pre-lock (and again post-lock) before creating a new transaction or any host mutation. Any nonterminal or MIR head, or terminal head whose durable receipt is missing/corrupt/unclosed, globally blocks—even with no lock and even when the caller does not know the foreign `transactionId`. Filtered `readJournal({ transactionId })` MUST NOT be used to fake global heads. See design §5.4.1 and §5.5.1.
+29. **Dual-snapshot closeout order is frozen:** optional pure in-memory input/schema/profile render (no transaction, no `writeCandidate`, no plutil candidate I/O, no ownership/runtime/label/file inspection) → pre-lock heads+receipts → acquire+verify lock → post-lock identical `journalSha256` and full `heads` identity → current transaction `prepared` → ownership/runtime/label/file inspections (internal mode first-install | managed-upgrade | blocked; same lock/transaction only) → anchor → `writeCandidate` staging + plutil on staged plist candidates → host mutations. Inspections, candidate staging, and plutil candidate I/O MUST NOT precede `prepared` (staging/plutil further require anchor first). Pre-lock blockers create no transaction, append no current-op journal, acquire no lock, and perform no host mutation.
+29a. **Journal/receipt `operation` is immutable per transaction:** public `install()` chains keep `operation='install'` from first `prepared` through every later entry and the terminal receipt—even when post-prepared inspection selects internal `mode='managed-upgrade'` (closed internal branch only; not a caller field; not a free-form persisted string; must not rewrite `operation`). Public `managedUpgrade()` chains keep `operation='managed-upgrade'` throughout. Anchor `purpose` may still be `managed-upgrade` on the install-entry internal branch because purpose describes the anchor, not the transaction operation. No unlock/re-enter, no second heads gate, no second transaction. If closed journal states/payloads cannot safely express the internal upgrade branch under `operation='install'`, fail closed—never mutate `operation` mid-chain.
+30. **Atomic publisher candidate ref contract:** `publishAbsent` / `replaceIfMatch` accept opaque `{ kind:'candidate', transactionId, role, sha256 }` only (same shape as `writeCandidate` return). No raw bytes, absolute paths, or basename bypass.
+31. **sourceCommit-only managed upgrade** (manifest changes; controller/scheduler profile bytes and runtime artifact hashes unchanged) MUST close `committed` with only manifest publish and plist `role-noop`s. It MUST NOT close as `no-change`. Full identity (profiles+manifest+runtime) unchanged remains `no-change` with count=0.
+32. **Independent TDD stop points (no production before Codex-observed RED):** docs → Task 2.5 RED → Codex RED → Task 2.5 GREEN → Codex GREEN → Task 4 RED rework → Codex RED → Task 4 contracts RED → Codex RED → Task 4 GREEN → Codex GREEN. The same worker phase MUST NOT write production to bypass a RED checkpoint. Commit and push remain separate human authorization gates; this docs phase does not commit or push.
+33. No model approval of code is claimed in this plan. Codex observes RED/GREEN; GLM challenges independently; Qwen counts only; Kimi may perform later closure acceptance.
 
 ## PM-DCW Role Map
 
 | Role | Worker | Effort | Boundary |
 | --- | --- | --- | --- |
-| hostController / orchestrator / verifier | Codex | native | Grounds the repo, validates RED/GREEN, reviews every hunk, runs tests, and owns factual verdicts |
-| implementer | fresh isolated Kimi Code CLI | maximum available | Receives exact test/production allowlists; no network, secrets, deployment, real launchctl, or unrelated edits |
+| hostController / orchestrator / pm / verifier | Codex | native | Grounds the repo, independently observes RED/GREEN, reviews every hunk, runs tests, owns factual verdicts; does not implement |
+| implementer | same isolated opencode worker backed by Grok 4.5 high | maximum available | Exact allowlists only; no network, secrets, deployment, real launchctl, or unrelated edits |
 | statistics | Qwen CLI | supported default | Counts files/tests/diff and checks stated invariants; does not decide correctness |
-| adversary / closure reviewer | fresh Kimi DashScope | `reasoning_effort=max` | Read-only adversarial review using supplied diff/test evidence; cannot claim local access |
+| adversary / independent challenge | GLM | independent | Read-only adversarial review from supplied diff/test evidence; cannot claim code approval |
+| closure acceptance | Kimi | later gate | Subsequent end-to-end closure acceptance only; not a code-approval claim in this phase |
 
 If one helper fails, replace only that role and keep the phase HOLD until a usable result exists.
 
@@ -68,18 +76,19 @@ If one helper fails, replace only that role and keep the phase HOLD until a usab
 | --- | --- | --- |
 | Create | `src/launchagent-lifecycle/contracts.js` | Closed constants, local error codes, manifest/anchor/journal/receipt validators, sanitized projections |
 | Create | `src/launchagent-lifecycle/profiles.js` | Runtime binder, strict controller/scheduler descriptors, canonical plist rendering/hash |
-| Create | `src/launchagent-lifecycle/metadata-store.js` | Mode 0700/0600 metadata root, candidates, anchors, journals, locks, receipts, consumed confirmations |
+| Create (Task 2) | `src/launchagent-lifecycle/metadata-store.js` | Mode 0700/0600 metadata root, candidates, anchors, journals, locks, receipts, consumed confirmations |
+| Modify (Task 2.5) | `src/launchagent-lifecycle/metadata-store.js` | Add zero-arg read-only `readJournalHeads()` global journal-head snapshot; no other surface widen |
 | Create | `src/launchagent-lifecycle/host-adapter.js` | Read-only inspection, DS account resolution, fixed plutil/launchctl validation/parser, health checks, disabled real host adapters |
-| Create | `src/launchagent-lifecycle/transaction-coordinator.js` | First install, managed upgrade, stop, rollback, uninstall, recover, compensation, MIR |
+| Create (Task 4 GREEN) | `src/launchagent-lifecycle/transaction-coordinator.js` | First install, managed upgrade, stop, bounded compensation; consumes `readJournalHeads()` dual-snapshot order |
 | Create | `src/launchagent-lifecycle/acceptance-gate.js` | Prepare request, confirmation binding/consumption protocol, module-private capability brand, code-stage deny |
 | Create | `src/launchagent-lifecycle/index.js` | Pure validators/render/prepare plus explicitly disabled production facade; no metadata writer, host inspector, injectable coordinator, runner, publisher, parser, or capability constructor |
-| Create | `test/helpers/launchagent-lifecycle-harness.js` | Deterministic fake inspector/publisher/launchctl/health/clock and trace capture |
+| Create / rework (Task 4 RED) | `test/helpers/launchagent-lifecycle-harness.js` | Deterministic fake inspector/publisher/launchctl/health/clock, `readJournalHeads` seam, candidate-ref publisher, trace capture |
 | Create | `test/helpers/launchagent-lock-contender.js` | Independent child used only for metadata-lock contention |
-| Create | `test/launchagent-lifecycle-contracts.test.js` | Closed schemas and hostile input |
+| Create (Task 1); Modify (Task 4 contracts RED) | `test/launchagent-lifecycle-contracts.test.js` | Closed schemas and hostile input; Task 4 adds operation-specific journal states and `stop` anchor purpose |
 | Create | `test/launchagent-lifecycle-profiles.test.js` | Dual profile, runtime binding, XML/plutil, hash/path constraints |
-| Create | `test/launchagent-lifecycle-metadata.test.js` | Real temp-root modes, durability, no-clobber, fixed layout |
+| Create (Task 2); Modify (Task 2.5 RED only) | `test/launchagent-lifecycle-metadata.test.js` | Real temp-root modes, durability, no-clobber, fixed layout; Task 2.5 proves `readJournalHeads` |
 | Create | `test/launchagent-lifecycle-host-adapter.test.js` | Read-only roots, launchctl parser/argv, hard-disable, CAS sentinel |
-| Create | `test/launchagent-lifecycle-transactions.test.js` | Install/upgrade/stop/no-change/compensation traces |
+| Create / rework (Task 4 RED) | `test/launchagent-lifecycle-transactions.test.js` | Install/upgrade/stop/no-change/compensation; global heads; candidate ref; stop validator; sourceCommit-only |
 | Create | `test/launchagent-lifecycle-recovery.test.js` | Rollback/uninstall/crash recover/MIR truth tables |
 | Create | `test/launchagent-lifecycle-concurrency.test.js` | Two-process lock, nonterminal journal, orphan recovery rules |
 | Create | `test/launchagent-lifecycle-acceptance-gate.test.js` | Prepare/confirmation/replay/private-brand/execute gating |
@@ -182,8 +191,9 @@ Core factory contracts and production boundaries are:
 | `validateLaunchAgentConfirmationRecord` | unknown input | exact acceptance/manual-repair confirmation binding or fixed local error |
 | `validateLaunchAgentConsumedConfirmation` | unknown input | exact durable consumed record or fixed local error |
 | `validateLaunchAgentCapabilityProjection` | unknown input | sanitized exact capability projection; never the private brand |
-| `createLaunchAgentMetadataStore` | one temp/code-owned metadata root | production/internal named metadata methods only; no LaunchAgents writer |
+| `createLaunchAgentMetadataStore` | one temp/code-owned metadata root | production/internal named metadata methods only; no LaunchAgents writer; includes `readJournalHeads()` |
 | `createLaunchAgentMetadataStoreForTest` | metadata root plus explicit fs/durability trace dependencies | internal test-only ordering seam; not re-exported by safe `index.js` |
+| `metadataStore.readJournalHeads` | zero parameters | deeply frozen `{ kind:'journal-heads', journalSha256, heads }`; read-only full-journal validate; absent journal = SHA-256 of empty bytes, while a present zero-byte file is invalid/truncated; heads = latest entry per txId, lexicographic ascending; fail closed on corrupt/truncated/illegal; no write/rename/fsync/lock/receipt/durability mutation; does not change `readJournal({ transactionId })`; absent from safe `index.js` as a global writable/index API |
 | `createDisabledLaunchctlRunner` | no input | runner whose every invocation fails with `launchctl-disabled` |
 | `createUnsupportedProductionAtomicPublisher` | no input | fixed `conditional-mutation-unsupported`; never falls back |
 | `createDarwinAccountResolver` | no caller dependencies | read-only current-uid Directory Service resolution |
@@ -223,31 +233,50 @@ A proven existing target identity extends that exact address with:
 }
 ```
 
-`publishAbsent` takes a fixed absent-target address plus an opaque candidate reference and must return a re-inspected full post identity. `replaceIfMatch` takes the exact expected full identity, target address, and candidate reference, then returns a full post identity whose device/inode transition is checked. `removeIfMatch` takes only the exact expected full identity. The production sentinel rejects all three before mutation.
+`publishAbsent` takes a fixed absent-target address plus an opaque candidate reference exactly `{ kind:'candidate', transactionId, role, sha256 }` (identical to metadata-store `writeCandidate` return) and must return a re-inspected full post identity. `replaceIfMatch` takes the exact expected full identity, target address, and the same opaque candidate reference, then returns a full post identity whose device/inode transition is checked. `removeIfMatch` takes only the exact expected full identity. Callers MUST NOT pass raw bytes, absolute paths, or basename-only bypasses. The production sentinel rejects all three before mutation.
+
+`validateLaunchAgentAnchor` purpose enum includes `stop` (in addition to `first-install`, `managed-upgrade`, `rollback-compensation`, `uninstall-compensation`). Stop anchors MUST pass production validation before any launchctl/host mutation.
 
 ## Dependency Graph
 
 ```text
 Task 1 contracts + runtime binder + profiles
   -> Task 2 metadata store + locks + anchors + receipts
+  -> Task 2.5 readJournalHeads() global journal-head snapshot
+       (RED: test/launchagent-lifecycle-metadata.test.js only;
+        GREEN: src/launchagent-lifecycle/metadata-store.js only)
   -> Task 3 host inspection + launchctl parser + disabled production adapters
+       (historical: may already be complete; remains valid; does not replace Task 2.5)
   -> Task 4 install + managed-upgrade + stop transaction core
+       (hard-depends on Task 2.5; consumes readJournalHeads dual-snapshot order;
+        RED: harness + transactions tests; contracts RED separate; GREEN: contracts.js + transaction-coordinator.js only)
   -> Task 5 rollback + uninstall + recover + compensation + MIR + concurrency
   -> Task 6 prepare/confirmation/capability boundary + safe exports
   -> Task 7 integration + V1.46 version/Gold/README honesty
   -> Task 8 full verification + statistics + fresh closure review
 ```
 
+**Independent stop ladder (docs phase complete before any code):**
+
+```text
+docs (design A freeze; this phase; no commit/push)
+  -> Task 2.5 RED -> Codex observes RED
+  -> Task 2.5 GREEN -> Codex observes GREEN + metadata focused regression
+  -> Task 4 RED rework -> Codex observes RED
+  -> Task 4 contracts RED -> Codex observes RED
+  -> Task 4 GREEN -> Codex observes GREEN + Task 1-3 + 2.5 focused regression
+```
+
 ## Execution Protocol for Every Production-Changing Task
 
 1. Codex records branch, HEAD/upstream, scoped status, and hashes of every task-protected tracked file.
-2. Fresh Kimi Code CLI receives only test files and test helpers for the RED stage.
-3. Codex checks the exact diff and runs the specified RED command. Only a failure caused by missing target behavior is valid.
-4. Fresh isolated Kimi Code CLI receives the verified RED output plus only the minimum production-file allowlist.
+2. Implementer (isolated opencode / Grok 4.5 high) receives only the RED allowlist for that stage.
+3. Codex checks the exact diff and runs the specified RED command. Only a failure caused by missing target behavior is valid. Syntax/import/fixture failures invalidate RED.
+4. After Codex-observed valid RED, implementer receives the verified RED output plus only the minimum production-file allowlist for GREEN. The same worker phase MUST NOT write production before that RED checkpoint.
 5. Codex reviews every hunk, runs GREEN and relevant regressions, validates source scans, and checks protected hashes.
-6. Qwen reports deterministic counts/boundaries. Fresh Kimi DashScope performs read-only adversarial closure from supplied diff/test evidence.
+6. Qwen reports deterministic counts/boundaries. GLM performs read-only adversarial challenge from supplied diff/test evidence. Kimi may run later closure acceptance; none of these roles claim code approval by themselves.
 7. P0/P1, unexplained test failure, or contradictory evidence leaves the task HOLD.
-8. When accepted, Codex may stage only the task's exact paths, runs `git diff --cached --check`, then stops for explicit commit approval. Push is never included in commit approval.
+8. When accepted, Codex may stage only the task's exact paths, runs `git diff --cached --check`, then stops for explicit commit approval. Push is never included in commit approval. Docs-only phases also stop without commit unless the user separately authorizes.
 
 ## Rollback Anchors
 
@@ -259,6 +288,7 @@ Task 1 contracts + runtime binder + profiles
 | Recorded loaded booleans | Restore explicit stopped state without accidentally starting it |
 | Frozen compensation plan | Recover only the current reverse action after a crash; never nest compensation |
 | Durable MIR journal + mir-lock | Prevent ordinary operations from guessing through an unprovable state |
+| `readJournalHeads()` pre/post-lock dual snapshot | Global occupancy without requiring caller-known transactionId; foreign nonterminal/MIR/unclosed terminal always blocks |
 
 ---
 
@@ -464,6 +494,84 @@ Suggested commit: `feat: add V1.46 lifecycle metadata store`. Stop for explicit 
 
 ---
 
+### Task 2.5: Global `readJournalHeads()` Snapshot (Design A)
+
+**Purpose:** Close the global occupancy seam required before Task 4. Ordinary operations must detect foreign nonterminal / MIR / unclosed-terminal heads without knowing prior `transactionId` and without a present lock.
+
+**Files (strict allowlists):**
+
+| Stage | Allowed paths only |
+| --- | --- |
+| RED | `test/launchagent-lifecycle-metadata.test.js` |
+| GREEN | `src/launchagent-lifecycle/metadata-store.js` |
+
+**Explicitly forbidden in Task 2.5:** `src/launchagent-lifecycle/host-adapter.js`, `profiles.js`, `contracts.js` (unless a later separate contracts task is authorized—not this task), `transaction-coordinator.js`, `test/helpers/**`, `test/launchagent-lifecycle-transactions.test.js`, `package.json`, `package-lock.json`, agent/controller/supervisor/server.
+
+**Interface (frozen):**
+
+```js
+async readJournalHeads()
+// zero parameters — rejecting any argument is fail-closed
+// returns deeply frozen detached:
+// {
+//   kind: 'journal-heads',
+//   journalSha256, // SHA-256 of exact validated journal bytes; absent file => SHA-256 of empty bytes
+//   heads,         // latest validated entry per transactionId, lexicographic ascending by transactionId
+// }
+```
+
+- Reads the entire bounded append-only journal through the existing restricted journal read/validate path (16 MiB cap).
+- Every line/entry must full schema+chain validate; corrupt/truncated/unknown/illegal → fail closed (no skip, no repair truncate).
+- Read-only: no write, rename, fsync, lock, receipt, durability-event, or other I/O mutation.
+- Must not change `readJournal({ transactionId })` contract or behavior.
+- Must not export a global writable or arbitrary index capability from safe public `index.js`.
+
+- [ ] **Step 1: Freeze Task 2.5 boundaries**
+
+Record scoped status and hashes for Task 1–2 protected sources/tests plus legacy protected files. Confirm Task 2 metadata store already exists and GREEN baseline is recorded. Expected: no unapproved tracked diff outside this task's later allowlist.
+
+- [ ] **Step 2: Write `readJournalHeads` RED tests (metadata test file only)**
+
+Extend `test/launchagent-lifecycle-metadata.test.js` only. RED must prove the **current missing `readJournalHeads` behavior** (explicit missing-export or missing-behavior assertion after the module exists). Syntax/import/fixture failures are invalid RED.
+
+Coverage required:
+
+1. Absent journal → stable `journalSha256` equal to SHA-256 of empty bytes; `heads` empty array; `kind === 'journal-heads'`. A present zero-byte file is truncated/invalid and must fail closed.
+2. Multiple transactions → each head is the latest valid entry for that `transactionId`; `heads` sorted by `transactionId` lexicographic ascending.
+3. After a valid append, a subsequent `readJournalHeads()` returns a different `journalSha256` and updated head identity.
+4. Corrupt / truncated / illegal journal bytes fail closed (throw fixed lifecycle invalid or equivalent store fail-closed); no partial heads.
+5. A same-transaction fixture whose sequence, previous-entry hash, and entry hashes are otherwise valid but whose `operation` drifts (for example `install` → `managed-upgrade`) makes the entire `readJournalHeads()` snapshot fail closed with no partial heads or mutation.
+6. Returned object and nested entries are detached and deeply frozen (mutating clone must not affect store; `Object.isFrozen` on projection tree).
+7. Call does not create/modify any file under the metadata root, emit durability events, acquire locks, or publish receipts (before/after filesystem + event sink identity equal).
+8. Existing `readJournal({ transactionId })` regression cases remain green and unchanged in public input/return contract.
+
+- [ ] **Step 3: Run Task 2.5 RED**
+
+```bash
+node --test test/launchagent-lifecycle-metadata.test.js
+```
+
+Expected: FAIL only on explicit missing `readJournalHeads` behavior/export assertions among the new cases; pre-existing Task 2 cases remain pass. Codex must independently observe this RED. **Stop. Do not implement GREEN in the same unchecked phase.**
+
+- [ ] **Step 4: Implement `readJournalHeads` (GREEN allowlist only)**
+
+Modify only `src/launchagent-lifecycle/metadata-store.js`. Add the zero-arg method on the store instance surface used by production/internal factories. Reuse existing journal byte read + per-entry validate/chain logic. In the new global projection/chain-closeout pass, also enforce one immutable `operation` per `transactionId`. If sharing that extra check would unintentionally change the existing `readJournal({ transactionId })` behavior, keep the immutable-operation check local to `readJournalHeads()`; do not modify append/write APIs in Task 2.5. Compute `journalSha256` from the exact validated bytes. Build `heads` map then stable-sort. Deep-freeze and detach before return.
+
+- [ ] **Step 5: Run Task 2.5 GREEN + focused regression**
+
+```bash
+node --test test/launchagent-lifecycle-metadata.test.js
+node --test test/launchagent-lifecycle-contracts.test.js test/launchagent-lifecycle-profiles.test.js
+```
+
+Expected: all pass; protected hashes outside allowlist unchanged; no `package-lock.json` touch.
+
+- [ ] **Step 6: Codex GREEN observation + review gate**
+
+Codex re-runs the commands, reviews the exact hunk, confirms read-only semantics and that `readJournal` is unchanged. Qwen counts; GLM may challenge. Suggested commit (separate human gate): `feat: add V1.46 readJournalHeads snapshot`. Stop for explicit commit approval; do not push.
+
+---
+
 ### Task 3: Host Inspection, Account Resolution, and Fail-Closed Runner Boundaries
 
 **Files:**
@@ -552,22 +660,39 @@ Suggested commit: `feat: add fail-closed V1.46 host adapters`. Stop for explicit
 
 ### Task 4: First Install, Managed Upgrade, Stop, and Bounded Compensation
 
-**Files:**
+**Prerequisite:** Task 2.5 GREEN observed by Codex. Task 3 may already be complete historically; Task 4 hard-depends on Task 2.5 `readJournalHeads()`, not on redoing Task 3.
 
-- Create: `test/helpers/launchagent-lifecycle-harness.js`
-- Create: `test/launchagent-lifecycle-transactions.test.js`
-- Create after valid RED: `src/launchagent-lifecycle/transaction-coordinator.js`
-- Modify after valid RED: `src/launchagent-lifecycle/contracts.js`
+**Files by stage (strict):**
 
-**Interface:** `createLaunchAgentLifecycleCoordinator(dependencies)` where every dependency is an already constructed narrow adapter; the factory rejects unknown/missing methods.
+| Stage | Allowed paths only |
+| --- | --- |
+| RED rework | `test/helpers/launchagent-lifecycle-harness.js`, `test/launchagent-lifecycle-transactions.test.js` |
+| Contracts RED | `test/launchagent-lifecycle-contracts.test.js` only |
+| GREEN | `src/launchagent-lifecycle/contracts.js` (modify), `src/launchagent-lifecycle/transaction-coordinator.js` (create) |
+
+**Forbidden in all Task 4 stages:** `host-adapter.js`, `profiles.js`, `metadata-store.js` (already closed by 2.5), `agent.js`, `controller-runtime.js`, `supervisor-lifecycle.js`, `server.js`, `package.json`, `package-lock.json`, real LaunchAgents, real launchctl.
+
+**Interface:** `createLaunchAgentLifecycleCoordinator(dependencies)` — exact narrow adapters; factory rejects unknown/missing keys/methods. Coordinator **must** call `metadataStore.readJournalHeads()` for dual-snapshot occupancy; must not fake heads via filtered `readJournal`.
+
+#### Six mandatory RED rework requirements (design A)
+
+1. **Foreign nonterminal global block:** harness/tests must **really seed** a journal head for an unknown foreign `transactionId` in a nonterminal state, with **no** transaction lock. first-install (caller does not know that id) must be globally blocked with zero host mutation. Recording only a generic event is insufficient.
+2. **Opaque candidate ref publisher:** fake `atomicPublisher.publishAbsent` / `replaceIfMatch` accept exactly `{ kind:'candidate', transactionId, role, sha256 }` (plus address/expected as required). They must validate and record the ref. Tests assert the coordinator passed candidate refs—not bytes, paths, or mere staged-role counts.
+3. **Stop anchor production validator:** stop anchors must go through production `validateLaunchAgentAnchor`. Tests supply a plain-object/anchorId/purpose that looks plausible but is schema-illegal and prove rejection **before** any launchctl/host mutation.
+4. **Happy-path order (strict):**
+   optional pure in-memory input/schema/render → `pre-lock readJournalHeads + terminal receipt revalidation → lock-acquire+verify → post-lock identical journalSha256/heads → prepared → ownership/runtime/label/file inspections → anchor → writeCandidate staging + plutil on staged plists → publish/load…`
+   Pure in-memory validation MAY occur around the pre-lock gate. **All** candidate staging, plutil candidate I/O, and ownership/runtime/label/file inspections MUST occur **after** `prepared` (and staging/plutil after anchor). Inspections MUST NOT precede `prepared`.
+4a. **Immutable journal/receipt `operation`:** `install()` transactions keep `operation='install'` on every journal entry and on `receipt.operation`, including when internal `mode='managed-upgrade'` runs the upgrade state table under the same lock/transaction. `managedUpgrade()` transactions keep `operation='managed-upgrade'` throughout. Never rewrite `operation` mid-chain; never unlock/re-enter or open a second transaction for that route. Anchor `purpose` may be `managed-upgrade` without changing transaction `operation`.
+5. **sourceCommit-only managed upgrade:** when only `sourceCommit` changes (profiles/runtime hashes unchanged), result MUST be `committed` with **only** manifest publish; MUST NOT accept `no-change`.
+6. **Heads seam = real Task 2.5 API:** harness metadata fake implements real `readJournalHeads()` semantics; tests must not substitute transactionId-filtered `readJournal` as the global seam.
 
 - [ ] **Step 1: Freeze Task 4 boundaries**
 
-Record status and protected hashes. Confirm the production publisher and launchctl runner still fail closed.
+Record status/hashes. Confirm Task 2.5 GREEN, production publisher/launchctl still fail closed, and protected legacy files unchanged.
 
-- [ ] **Step 2: Build a deterministic test harness**
+- [ ] **Step 2: Rework deterministic harness (RED allowlist)**
 
-The test helper owns only in-memory/temp-root fakes and records this closed simple-event vocabulary:
+In-memory/temp-root fakes only. Closed simple-event vocabulary remains:
 
 ```js
 [
@@ -585,31 +710,39 @@ The test helper owns only in-memory/temp-root fakes and records this closed simp
 ]
 ```
 
-Compensation checkpoints use one structured trace event with exact keys and closed enums:
+Structured compensation events: exact `{ kind:'compensation', action, phase }` with the frozen action/phase enums; unknown events fail closed. Never import/invoke a production runner.
 
-```js
-{
-  kind: 'compensation',
-  action: 'restore-controller',
-  phase: 'intent',
-}
-```
+Harness must expose:
 
-Allowed actions are `remove-controller`, `remove-scheduler`, `remove-manifest`, `restore-controller`, `restore-scheduler`, `restore-manifest`, `stop-controller`, `stop-scheduler`, `load-controller`, and `load-scheduler`; phase is only `intent` or `completed`. The harness must reject every unrecognized simple or structured event instead of silently succeeding. It never imports or invokes a production runner.
+- real `metadataStore.readJournalHeads()` fake matching Task 2.5 contract;
+- `seedForeignNonterminalHead({ transactionId, state, … })` that appends a durable nonterminal without holding a lock;
+- publisher that accepts only opaque candidate refs and records them for assertion;
+- `writeCandidate`/`readCandidate` + plistValidator kind mapping (`candidate` → `launchagent-candidate` at coordinator boundary);
+- launchctl requests compatible with production `validateLaunchctlRequest` shape;
+- stop-anchor path that can invoke production `validateLaunchAgentAnchor`.
 
 - [ ] **Step 3: Write first-install RED tests**
 
-Assert exact operation order:
+Assert exact order. **Clarification:** pure in-memory input/schema/profile render MAY occur around the pre-lock gate; it MUST NOT create a transaction, call `writeCandidate`, run plutil on candidates, or perform ownership/runtime/label/file inspections. All candidate staging, plutil candidate I/O, and those inspections MUST be after `prepared`; staging/plutil further after anchor.
 
 ```text
-pre-lock journal check
-lock acquire
-post-lock journal/ownership/runtime/label check
+[optional] pure in-memory input/schema/profile render
+pre-lock readJournalHeads + receipt revalidation
+lock acquire + verify
+post-lock readJournalHeads (identical journalSha256 + heads identity)
 prepared journal
-anchor(absent, absent, absent; loaded=false,false)
-controller publish intent -> publish -> completed
-scheduler publish intent -> publish -> completed
-manifest publish intent -> publish -> completed
+ownership/runtime/label/file inspections
+  (internal mode first-install | managed-upgrade | blocked;
+   journal/receipt operation stays 'install' for install() entry;
+   no unlock/re-enter; no second heads bypass; no second transaction)
+anchor(absent, absent, absent; purpose=first-install)
+  OR (internal managed-upgrade mode) pre-state bytes anchor purpose=managed-upgrade
+  // purpose may be managed-upgrade; operation remains install
+writeCandidate stage controller+scheduler+manifest
+plutil lint staged controller + staged scheduler only
+controller publish intent -> publish(candidateRef) -> completed
+scheduler publish intent -> publish(candidateRef) -> completed
+manifest publish intent -> publish(candidateRef) -> completed
 controller load intent -> bootstrap -> identity verify -> completed
 controller health ready
 scheduler load intent -> bootstrap -> identity verify -> scheduled-outcome check -> completed
@@ -619,56 +752,65 @@ receipt publish and verify
 conditional lock release
 ```
 
-If either fixed label is loaded or unknown before first install, assert terminal `blocked`, outcome `label-in-use`, zero LaunchAgents mutation, zero bootout, and receipt-before-unlock.
+Also assert: foreign nonterminal head blocks first-install with no lock and unknown id; label-in-use/unknown → `prepared → blocked`, count=0, receipt-before-unlock; first publish mismatch → blocked count=0; no writeCandidate/plutil/host inspection events before `prepared`.
 
-- [ ] **Step 4: Write managed-upgrade and no-change RED tests**
+- [ ] **Step 4: Write managed-upgrade / no-change / sourceCommit-only RED tests**
 
-Assert a managed upgrade stops scheduler before controller, records exact loaded booleans, publishes only changed roles, then loads controller → health → scheduler. A role with identical bytes writes a role-noop checkpoint. All artifacts identical returns terminal `no-change` with host mutation count zero.
-
-Assert replacement requires the expected pre identity and a changed device/inode identity as well as candidate hash. Mismatch becomes terminal `blocked` before unlock.
+Same dual-snapshot order as install: pure in-memory render optional around pre-lock; existing manifest/files/jobs inspection and candidate staging/plutil only after `prepared` (staging/plutil after anchor). Scheduler bootout before controller; only changed roles publish; identical role → `role-noop`. All profiles+manifest+runtime identical → `prepared → no-change`, count=0. **sourceCommit-only** → `committed`, publish-manifest exactly once, zero plist publish, not `no-change`. Post-lock identity drift → blocked before host mutation. Replacement requires expected pre identity + device/inode change + candidate hash.
 
 - [ ] **Step 5: Write explicit-stop RED tests**
 
-Stop probes both jobs, bootouts only jobs proven owned by current manifest/runtime binding, stops scheduler first, preserves all files/manifest, writes a terminal receipt, and records loaded false/false. Repeated stop uses stop-noop checkpoints and no launchctl mutation.
+Stop: dual-snapshot order; ownership-proven loaded jobs only; scheduler first; preserves bytes; terminal receipt; loaded false/false. Repeated stop → stop-noop, no launchctl. Illegal stop anchor schema rejected before launchctl. Bootout leaves loaded → `recovered` / `stop-incomplete` / `success=false` / `hostMutationCount>0`.
 
 - [ ] **Step 6: Write bounded-compensation RED tests**
 
-Inject failure after each publish/load stage. Assert entering compensation freezes one reverse plan, writes `compensating`, then each reverse action uses `compensate-<action>-intent/completed`. There is no nested compensation plan.
+Inject failure after each publish/load stage. One frozen reverse plan; `compensating`; `compensate-<action>-intent/completed` only; no nested plan. Health/scheduler-load failures restore byte-exact pre-state and recorded loaded booleans. Stopped pre-state must not start either job. Compensation failure → MIR handoff (journal → mir-lock → verify → release tx lock); Task 4 does not require mir-lock-release capability.
 
-For controller health failure and scheduler load failure, restore byte-exact plists/manifest and the original loaded booleans. For a pre-state with both jobs stopped, compensation must not start either job.
-
-- [ ] **Step 7: Run Task 4 RED**
-
-Run:
+- [ ] **Step 7: Run Task 4 behavior RED**
 
 ```bash
 node --test test/launchagent-lifecycle-transactions.test.js
 ```
 
-Expected: FAIL on the explicit coordinator existence assertion, with no dynamic-import or syntax error.
+Expected: FAIL only on explicit coordinator existence (or missing target export after existence) assertions; no syntax/dynamic-import/fixture errors. Codex observes RED. **Stop.**
 
-- [ ] **Step 8: Implement transaction acquisition and journal state machine**
+- [ ] **Step 8: Task 4 contracts RED (separate allowlist + Codex observation)**
 
-Implement the pre-lock and post-lock journal checks, lock identity verification around every metadata/host mutation, explicit intents/completions/noops, and terminal receipt ordering. All post-lock zero-host-mutation blockers write terminal `blocked` plus receipt before unlock.
+Modify only `test/launchagent-lifecycle-contracts.test.js` to require:
 
-- [ ] **Step 9: Implement first-install, managed-upgrade, and stop**
+- operation-specific journal states used by install/upgrade/stop/compensation;
+- anchor `purpose` includes `stop` and rejects illegal stop-shaped input via `validateLaunchAgentAnchor`;
+- **immutable operation chain:** table-driven / chain checks proving that within one transaction every journal entry shares one fixed `operation`, and that a synthetic mid-chain `operation` rewrite (e.g. `install` → `managed-upgrade`) fails closed under validation or coordinator closeout rules; receipt.operation must equal that same immutable chain operation. Internal mode is not a journal `operation` value.
 
-Use fixed per-operation state transition tables. Revalidate runtime binding before manifest publish, each bootstrap, and commit. Use parsed job identity to decide whether compensation may bootout a just-loaded job; uncertain or foreign identity transitions to MIR instead of booting it out.
+```bash
+node --test test/launchagent-lifecycle-contracts.test.js
+```
+
+Expected: valid RED on missing contract behavior. Codex observes RED. **Stop. Do not start GREEN until both behavior RED and contracts RED are observed.**
+
+- [ ] **Step 9: Implement contracts + coordinator (GREEN allowlist only)**
+
+- `contracts.js`: operation-specific journal states; `stop` purpose on anchor validator; no unrelated widen.
+- `transaction-coordinator.js`: dual-snapshot `readJournalHeads` order; candidate-ref publisher calls; production anchor validation including stop; sourceCommit-only committed path; compensation/MIR handoff as designed.
 
 - [ ] **Step 10: Run GREEN and focused regressions**
 
-Run:
-
 ```bash
-node --test test/launchagent-lifecycle-contracts.test.js test/launchagent-lifecycle-profiles.test.js test/launchagent-lifecycle-metadata.test.js test/launchagent-lifecycle-host-adapter.test.js test/launchagent-lifecycle-transactions.test.js
-node --test test/supervisor-lifecycle.test.js test/supervisor-lifecycle-executor.test.js test/agent-supervisor-lifecycle-apply.test.js
+node --test test/launchagent-lifecycle-contracts.test.js \
+  test/launchagent-lifecycle-profiles.test.js \
+  test/launchagent-lifecycle-metadata.test.js \
+  test/launchagent-lifecycle-host-adapter.test.js \
+  test/launchagent-lifecycle-transactions.test.js
+node --test test/supervisor-lifecycle.test.js \
+  test/supervisor-lifecycle-executor.test.js \
+  test/agent-supervisor-lifecycle-apply.test.js
 ```
 
-Expected: all pass; protected legacy files remain unchanged.
+Expected: all pass; protected legacy files and non-allowlist paths unchanged.
 
 - [ ] **Step 11: Review and commit gate**
 
-Suggested commit: `feat: add V1.46 lifecycle transaction coordinator`. Stop for explicit commit approval; do not push.
+Codex GREEN observation + hunk review. Qwen counts; GLM may challenge. Suggested commit: `feat: add V1.46 lifecycle transaction coordinator`. Stop for explicit commit approval; do not push.
 
 ---
 

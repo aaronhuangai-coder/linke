@@ -25,6 +25,7 @@ if (contractsExists) {
     validateLaunchAgentAnchor,
     validateLaunchAgentJournal,
     validateLaunchAgentReceipt,
+    validateLaunchAgentTransactionCloseout,
     validateLaunchAgentAcceptanceRequest,
     validateLaunchAgentConfirmationRecord,
     validateLaunchAgentConsumedConfirmation,
@@ -174,6 +175,237 @@ if (contractsExists) {
     at: AT,
     payload: { hostMutationCount: 0 },
   };
+
+  const OPERATION_CHECKPOINTS = [
+    ['controller-publish-intent', 'controller'],
+    ['controller-published', 'controller'],
+    ['scheduler-publish-intent', 'scheduler'],
+    ['scheduler-published', 'scheduler'],
+    ['manifest-publish-intent', 'manifest'],
+    ['manifest-published', 'manifest'],
+    ['controller-load-intent', 'controller'],
+    ['scheduler-load-intent', 'scheduler'],
+    ['scheduler-stop-intent', 'scheduler'],
+    ['scheduler-stopped', 'scheduler'],
+    ['controller-stop-intent', 'controller'],
+    ['controller-stopped', 'controller'],
+    ['role-noop', 'controller'],
+    ['role-noop', 'scheduler'],
+    ['role-stop-noop', 'controller'],
+    ['role-stop-noop', 'scheduler'],
+  ];
+  const COMPENSATION_ACTIONS = [
+    'remove-controller', 'remove-scheduler', 'remove-manifest',
+    'restore-controller', 'restore-scheduler', 'restore-manifest',
+    'stop-controller', 'stop-scheduler', 'load-controller', 'load-scheduler',
+  ];
+  const CONTROLLER_STORED_IDENTITY = {
+    ...CONTROLLER_IDENTITY,
+    sha256: CONTROLLER_ENTRY.sha256,
+  };
+  const CONTROLLER_FILE_PRESENT = {
+    state: 'present',
+    identity: CONTROLLER_STORED_IDENTITY,
+    sha256: CONTROLLER_ENTRY.sha256,
+  };
+  const CONTROLLER_JOB_LOADED = {
+    state: 'loaded',
+    identitySha256: CONTROLLER_ENTRY.sha256,
+  };
+  const CONTROLLER_JOB_STOPPED = {
+    state: 'stopped',
+    identitySha256: null,
+  };
+  const VALID_REVERSE_PLAN = [
+    {
+      index: 0,
+      action: 'stop-controller',
+      role: 'controller',
+      expectedPre: {
+        file: CONTROLLER_FILE_PRESENT,
+        job: CONTROLLER_JOB_LOADED,
+      },
+      expectedPost: {
+        file: CONTROLLER_FILE_PRESENT,
+        job: CONTROLLER_JOB_STOPPED,
+      },
+      evidence: {
+        kind: 'candidate',
+        transactionId: TRANSACTION_ID,
+        role: 'controller',
+        sha256: CONTROLLER_ENTRY.sha256,
+      },
+    },
+    {
+      index: 1,
+      action: 'restore-controller',
+      role: 'controller',
+      expectedPre: {
+        file: CONTROLLER_FILE_PRESENT,
+        job: CONTROLLER_JOB_STOPPED,
+      },
+      expectedPost: {
+        file: CONTROLLER_FILE_PRESENT,
+        job: CONTROLLER_JOB_STOPPED,
+      },
+      evidence: {
+        kind: 'anchor',
+        anchorId: ANCHOR_ID,
+        role: 'controller',
+        sha256: CONTROLLER_ENTRY.sha256,
+        loaded: true,
+      },
+    },
+  ];
+  const VALID_REVERSE_PLAN_SHA256 = sha256(
+    Buffer.from(JSON.stringify(VALID_REVERSE_PLAN), 'utf8'),
+  );
+
+  function checkpointJournal(state, payload, operation = 'managed-upgrade') {
+    return {
+      ...clone(VALID_JOURNAL),
+      operation,
+      state,
+      payload,
+    };
+  }
+
+  function journalEntryHash(entry) {
+    return createHash('sha256').update(Buffer.from(JSON.stringify({
+      schemaVersion: entry.schemaVersion,
+      transactionId: entry.transactionId,
+      sequence: entry.sequence,
+      previousEntrySha256: entry.previousEntrySha256,
+      operation: entry.operation,
+      state: entry.state,
+      at: entry.at,
+      payload: entry.payload,
+    }), 'utf8')).digest('hex');
+  }
+
+  function linkJournalEntries(entries) {
+    let prior = null;
+    for (const [index, entry] of entries.entries()) {
+      entry.sequence = index;
+      entry.previousEntrySha256 = prior?.entrySha256 ?? null;
+      entry.entrySha256 = journalEntryHash(entry);
+      prior = entry;
+    }
+    return entries;
+  }
+
+  function committedCloseout(checkpoints, terminalMutationCount) {
+    const receipt = {
+      ...clone(VALID_RECEIPT),
+      state: 'committed',
+      success: true,
+      roles: {
+        controller: {
+          label: 'com.linke.controller',
+          outcome: 'created',
+          changed: true,
+        },
+        scheduler: {
+          label: 'com.linke.scheduler',
+          outcome: 'created',
+          changed: true,
+        },
+      },
+      hostMutationCount: terminalMutationCount,
+      outcome: 'completed',
+    };
+    const receiptSha256 = createHash('sha256')
+      .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+      .digest('hex');
+    const committed = checkpointJournal(
+      'committed',
+      { hostMutationCount: terminalMutationCount, receiptSha256 },
+      'install',
+    );
+    return {
+      entries: linkJournalEntries([...checkpoints, committed]),
+      receipt,
+    };
+  }
+
+  function noChangeCloseout(preparedMutationCount, terminalMutationCount) {
+    const receipt = {
+      ...clone(VALID_RECEIPT),
+      operation: 'managed-upgrade',
+      state: 'no-change',
+      success: true,
+      hostMutationCount: terminalMutationCount,
+      outcome: 'no-change',
+    };
+    const receiptSha256 = createHash('sha256')
+      .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+      .digest('hex');
+    return {
+      entries: linkJournalEntries([
+        checkpointJournal(
+          'prepared',
+          { hostMutationCount: preparedMutationCount },
+          'managed-upgrade',
+        ),
+        checkpointJournal(
+          'no-change',
+          { hostMutationCount: terminalMutationCount, receiptSha256 },
+          'managed-upgrade',
+        ),
+      ]),
+      receipt,
+    };
+  }
+
+  function closeoutFixture() {
+    return committedCloseout([
+      checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+      checkpointJournal('anchored', { hostMutationCount: 0 }, 'install'),
+      checkpointJournal(
+        'controller-publish-intent',
+        { hostMutationCount: 0, role: 'controller' },
+        'install',
+      ),
+      checkpointJournal(
+        'controller-published',
+        { hostMutationCount: 1, role: 'controller' },
+        'install',
+      ),
+      checkpointJournal(
+        'scheduler-publish-intent',
+        { hostMutationCount: 1, role: 'scheduler' },
+        'install',
+      ),
+      checkpointJournal(
+        'scheduler-published',
+        { hostMutationCount: 2, role: 'scheduler' },
+        'install',
+      ),
+      checkpointJournal(
+        'manifest-publish-intent',
+        { hostMutationCount: 2, role: 'manifest' },
+        'install',
+      ),
+      checkpointJournal(
+        'manifest-published',
+        { hostMutationCount: 3, role: 'manifest' },
+        'install',
+      ),
+      checkpointJournal(
+        'controller-load-intent',
+        { hostMutationCount: 3, role: 'controller' },
+        'install',
+      ),
+      checkpointJournal('controller-loaded', { hostMutationCount: 4 }, 'install'),
+      checkpointJournal('controller-ready', { hostMutationCount: 4 }, 'install'),
+      checkpointJournal(
+        'scheduler-load-intent',
+        { hostMutationCount: 4, role: 'scheduler' },
+        'install',
+      ),
+      checkpointJournal('scheduler-loaded', { hostMutationCount: 5 }, 'install'),
+    ], 5);
+  }
 
   const VALID_RECEIPT = {
     schemaVersion: 1,
@@ -479,6 +711,15 @@ if (contractsExists) {
     assertProjection(validateLaunchAgentAnchor, withAbsence);
   });
 
+  test('anchor validator accepts stop purpose but still rejects illegal stop schema', () => {
+    const stopAnchor = { ...clone(VALID_ANCHOR), purpose: 'stop' };
+    assertProjection(validateLaunchAgentAnchor, stopAnchor);
+    assertInvalid(
+      validateLaunchAgentAnchor,
+      withOwnData(stopAnchor, 'unexpected', true),
+    );
+  });
+
   test('anchor validator rejects ambiguous entries and unsafe identity data', async (t) => {
     const cases = [
       ...commonClosedSchemaCases(VALID_ANCHOR),
@@ -529,6 +770,260 @@ if (contractsExists) {
     assertProjection(validateLaunchAgentJournal, VALID_JOURNAL);
   });
 
+  test('journal validator accepts exact operation-specific checkpoints', async (t) => {
+    for (const [state, role] of OPERATION_CHECKPOINTS) {
+      await t.test(`${state}:${role}`, () => {
+        const operation = state === 'scheduler-stop-intent' ? 'install' : 'managed-upgrade';
+        assertProjection(
+          validateLaunchAgentJournal,
+          checkpointJournal(state, { hostMutationCount: 0, role }, operation),
+        );
+      });
+    }
+  });
+
+  test('journal validator accepts only closed compensation action checkpoints', async (t) => {
+    for (const action of COMPENSATION_ACTIONS) {
+      for (const phase of ['intent', 'completed']) {
+        await t.test(`${action}:${phase}`, () => {
+          const payload = phase === 'intent'
+            ? {
+                hostMutationCount: 0,
+                action,
+                planIndex: 0,
+                reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+              }
+            : { hostMutationCount: 0, action };
+          assertProjection(
+            validateLaunchAgentJournal,
+            checkpointJournal(
+              `compensate-${action}-${phase}`,
+              payload,
+            ),
+          );
+        });
+      }
+    }
+    await t.test('state/action mismatch', () => {
+      assertInvalid(
+        validateLaunchAgentJournal,
+        checkpointJournal(
+          'compensate-remove-controller-intent',
+          { hostMutationCount: 0, action: 'restore-controller' },
+        ),
+      );
+    });
+    await t.test('unknown compensation action', () => {
+      assertInvalid(
+        validateLaunchAgentJournal,
+        checkpointJournal(
+          'compensate-run-command-intent',
+          { hostMutationCount: 0, action: 'run-command' },
+        ),
+      );
+    });
+    await t.test('known action with unknown phase', () => {
+      assertInvalid(
+        validateLaunchAgentJournal,
+        checkpointJournal(
+          'compensate-remove-controller-started',
+          { hostMutationCount: 0, action: 'remove-controller' },
+        ),
+      );
+    });
+  });
+
+  test('final-review journal requires a durable evidence-bound reverse plan before compensation', () => {
+    assertProjection(
+      validateLaunchAgentJournal,
+      checkpointJournal('compensating', {
+        hostMutationCount: 4,
+        reversePlan: VALID_REVERSE_PLAN,
+        reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+      }),
+    );
+  });
+
+  test('final-review compensation intent is durably bound to its frozen plan action', () => {
+    assertProjection(
+      validateLaunchAgentJournal,
+      checkpointJournal('compensate-stop-controller-intent', {
+        hostMutationCount: 4,
+        action: 'stop-controller',
+        planIndex: 0,
+        reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+      }),
+    );
+  });
+
+  test('final-review durable reverse plan rejects open or recomputed-in-memory shapes', async (t) => {
+    const validCompensating = checkpointJournal('compensating', {
+      hostMutationCount: 4,
+      reversePlan: VALID_REVERSE_PLAN,
+      reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+    });
+    await assertRejectsCases(t, validateLaunchAgentJournal, [
+      ['compensating without durable reverse plan', checkpointJournal(
+        'compensating',
+        { hostMutationCount: 4 },
+      )],
+      ['reverse plan digest mismatch', {
+        ...clone(validCompensating),
+        payload: {
+          ...clone(validCompensating.payload),
+          reversePlanSha256: '9'.repeat(64),
+        },
+      }],
+      ['reverse plan action order mismatch', (() => {
+        const value = clone(validCompensating);
+        value.payload.reversePlan.reverse();
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['reverse plan action without evidence', (() => {
+        const value = clone(validCompensating);
+        delete value.payload.reversePlan[0].evidence;
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['reverse plan action/role mismatch', (() => {
+        const value = clone(validCompensating);
+        value.payload.reversePlan[0].role = 'scheduler';
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['reverse plan expected state is not closed', (() => {
+        const value = clone(validCompensating);
+        value.payload.reversePlan[0].expectedPre.file.path = '/forbidden';
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['candidate evidence role mismatch', (() => {
+        const value = clone(validCompensating);
+        value.payload.reversePlan[0].evidence.role = 'scheduler';
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['anchor evidence loaded state is not boolean', (() => {
+        const value = clone(validCompensating);
+        value.payload.reversePlan[1].evidence.loaded = 'true';
+        value.payload.reversePlanSha256 = sha256(
+          Buffer.from(JSON.stringify(value.payload.reversePlan), 'utf8'),
+        );
+        return value;
+      })()],
+      ['compensation intent without plan binding', checkpointJournal(
+        'compensate-stop-controller-intent',
+        { hostMutationCount: 4, action: 'stop-controller' },
+      )],
+    ]);
+  });
+
+  test('operation-specific checkpoint role is state-bound and exact', () => {
+    assertInvalid(
+      validateLaunchAgentJournal,
+      checkpointJournal(
+        'controller-publish-intent',
+        { hostMutationCount: 0, role: 'scheduler' },
+      ),
+    );
+    assertInvalid(
+      validateLaunchAgentJournal,
+      checkpointJournal(
+        'controller-publish-intent',
+        { hostMutationCount: 0, role: 'controller', candidatePath: '/tmp/forbidden' },
+      ),
+    );
+  });
+
+  test('transaction closeout validator export is required for immutable operation chains', () => {
+    assert.equal(
+      typeof validateLaunchAgentTransactionCloseout,
+      'function',
+      'expected validateLaunchAgentTransactionCloseout to validate full journal/receipt closeout',
+    );
+  });
+
+  if (typeof validateLaunchAgentTransactionCloseout === 'function') {
+    test('transaction closeout accepts one immutable operation chain and aligned receipt', () => {
+      assertProjection(validateLaunchAgentTransactionCloseout, closeoutFixture());
+    });
+
+    test('transaction closeout rejects a hash-valid mid-chain operation rewrite', () => {
+      const fixture = closeoutFixture();
+      fixture.entries[1].operation = 'managed-upgrade';
+      linkJournalEntries(fixture.entries);
+      assertInvalid(validateLaunchAgentTransactionCloseout, fixture);
+    });
+
+    test('transaction closeout rejects a hash-valid receipt operation rewrite', () => {
+      const fixture = closeoutFixture();
+      fixture.receipt.operation = 'managed-upgrade';
+      fixture.entries.at(-1).payload.receiptSha256 = createHash('sha256')
+        .update(Buffer.from(JSON.stringify(fixture.receipt), 'utf8'))
+        .digest('hex');
+      linkJournalEntries(fixture.entries);
+      assertInvalid(validateLaunchAgentTransactionCloseout, fixture);
+    });
+
+    test('final-review transaction closeout validates the exact prior/state transition', () => {
+      const fixture = committedCloseout([
+        checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+        checkpointJournal('controller-loaded', { hostMutationCount: 1 }, 'install'),
+      ], 1);
+      assertInvalid(validateLaunchAgentTransactionCloseout, fixture);
+    });
+
+    test('final-review transaction closeout rejects a decreasing hostMutationCount', () => {
+      const fixture = closeoutFixture();
+      const schedulerIntent = fixture.entries.find(
+        (entry) => entry.state === 'scheduler-publish-intent',
+      );
+      schedulerIntent.payload.hostMutationCount = 0;
+      linkJournalEntries(fixture.entries);
+      assertInvalid(validateLaunchAgentTransactionCloseout, fixture);
+    });
+
+    test('final-review rejects prepared(9) -> controller-loaded(1) -> committed(0)', () => {
+      const fixture = committedCloseout([
+        checkpointJournal('prepared', { hostMutationCount: 9 }, 'install'),
+        checkpointJournal('controller-loaded', { hostMutationCount: 1 }, 'install'),
+      ], 0);
+      assertInvalid(validateLaunchAgentTransactionCloseout, fixture);
+    });
+
+    test('final-review no-change closeout requires zero mutation on both sides', async (t) => {
+      await t.test('prepared(0) -> no-change(0) is valid', () => {
+        assertProjection(
+          validateLaunchAgentTransactionCloseout,
+          noChangeCloseout(0, 0),
+        );
+      });
+      await t.test('prepared(9) -> no-change(9) is rejected', () => {
+        assertInvalid(
+          validateLaunchAgentTransactionCloseout,
+          noChangeCloseout(9, 9),
+        );
+      });
+      await t.test('prepared(0) -> no-change(9) is rejected', () => {
+        assertInvalid(
+          validateLaunchAgentTransactionCloseout,
+          noChangeCloseout(0, 9),
+        );
+      });
+    });
+  }
+
   test('journal validator rejects broken chain and free-form state', async (t) => {
     const cases = [
       ...commonClosedSchemaCases(VALID_JOURNAL),
@@ -552,6 +1047,63 @@ if (contractsExists) {
 
   test('receipt validator accepts only closed operation outcomes', () => {
     assertProjection(validateLaunchAgentReceipt, VALID_RECEIPT);
+  });
+
+  test('final-review committed receipt requires success=true and outcome=completed', async (t) => {
+    const validCommitted = {
+      ...clone(VALID_RECEIPT),
+      state: 'committed',
+      success: true,
+      outcome: 'completed',
+    };
+    await t.test('valid committed mapping', () => {
+      assertProjection(validateLaunchAgentReceipt, validCommitted);
+    });
+    await assertRejectsCases(t, validateLaunchAgentReceipt, [
+      ['committed cannot report success=false', {
+        ...clone(validCommitted),
+        success: false,
+      }],
+      ['committed cannot report ownership-mismatch', {
+        ...clone(validCommitted),
+        outcome: 'ownership-mismatch',
+      }],
+      ['committed false ownership-mismatch contradiction', {
+        ...clone(validCommitted),
+        success: false,
+        outcome: 'ownership-mismatch',
+      }],
+    ]);
+  });
+
+  test('final-review recovered success is exclusive to recover after manual repair', async (t) => {
+    const successfulRecovery = {
+      ...clone(VALID_RECEIPT),
+      operation: 'recover',
+      state: 'recovered',
+      success: true,
+      outcome: 'completed',
+    };
+    await t.test('recover may report recovered success completed', () => {
+      assertProjection(validateLaunchAgentReceipt, successfulRecovery);
+    });
+    for (const operation of ['install', 'managed-upgrade', 'stop']) {
+      await t.test(`${operation} cannot report recovered success completed`, () => {
+        assertInvalid(validateLaunchAgentReceipt, {
+          ...clone(successfulRecovery),
+          operation,
+        });
+      });
+    }
+    await t.test('ordinary stop recovered failure remains valid', () => {
+      assertProjection(validateLaunchAgentReceipt, {
+        ...clone(VALID_RECEIPT),
+        operation: 'stop',
+        state: 'recovered',
+        success: false,
+        outcome: 'stop-incomplete',
+      });
+    });
   });
 
   test('receipt validator rejects unsafe output and false completion shapes', async (t) => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, lstat, readFile, chmod, symlink, rename, rm, mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, lstat, readFile, chmod, symlink, rename, rm, mkdir, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ const EXPECTED_STORE_METHODS = Object.freeze([
   'releaseManualInterventionLock',
   'appendJournal',
   'readJournal',
+  'readJournalHeads',
   'publishReceipt',
   'readReceipt',
   'consumeConfirmation',
@@ -206,6 +207,69 @@ function requireFactory(name) {
   const factory = metadataStoreModule[name];
   assert.equal(typeof factory, 'function', `expected ${name} to be a function export`);
   return factory;
+}
+
+/**
+ * 注册 Task 2.5 行为用例前的无 I/O capability probe。
+ * 当前 RED 只由 frozen store surface 缺少 readJournalHeads 触发；
+ * production method 出现后才注册完整行为矩阵，避免 TypeError 假 RED。
+ */
+function hasReadJournalHeadsMethod() {
+  const factory = metadataStoreModule.createLaunchAgentMetadataStore;
+  if (typeof factory !== 'function') return false;
+  try {
+    const store = factory({
+      metadataRoot: join(tmpdir(), 'linke-la-read-journal-heads-method-probe'),
+    });
+    return typeof store.readJournalHeads === 'function';
+  } catch {
+    return false;
+  }
+}
+
+const HAS_READ_JOURNAL_HEADS = hasReadJournalHeadsMethod();
+
+/**
+ * 为只读接口提供窄 mutation trace；所有 FileHandle 方法都绑定原对象，
+ * 仅记录可能写入、改模式或触发耐久化的调用。
+ */
+function createMutationTracingFs(mutations) {
+  const fsMutators = new Set([
+    'appendFile', 'chmod', 'chown', 'mkdir', 'rename', 'rm', 'rmdir',
+    'truncate', 'unlink', 'writeFile',
+  ]);
+  const handleMutators = new Set([
+    'appendFile', 'chmod', 'chown', 'datasync', 'sync', 'truncate', 'write', 'writeFile',
+  ]);
+
+  return new Proxy(fsPromises, {
+    get(target, property, receiver) {
+      if (property === 'open') {
+        return async (...args) => {
+          const handle = await target.open(...args);
+          return new Proxy(handle, {
+            get(handleTarget, handleProperty) {
+              const value = Reflect.get(handleTarget, handleProperty, handleTarget);
+              if (typeof value !== 'function') return value;
+              return (...methodArgs) => {
+                if (handleMutators.has(handleProperty)) {
+                  mutations.push(`handle.${String(handleProperty)}`);
+                }
+                return value.apply(handleTarget, methodArgs);
+              };
+            },
+          });
+        };
+      }
+
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        if (fsMutators.has(property)) mutations.push(`fs.${String(property)}`);
+        return value.apply(target, args);
+      };
+    },
+  });
 }
 
 function identityUnavailable() {
@@ -523,6 +587,52 @@ async function readJournalLeafBytes(metadataRoot) {
   return readFile(journalLeafPath(metadataRoot));
 }
 
+/**
+ * 只读捕获 metadata 临时根的稳定文件树；忽略 atime，仅比较身份、模式、大小、mtime 与内容 hash。
+ */
+async function snapshotMetadataTree(metadataRoot) {
+  const snapshot = [];
+
+  async function visit(relativePath) {
+    const absolutePath = relativePath === ''
+      ? metadataRoot
+      : join(metadataRoot, relativePath);
+    const names = (await readdir(absolutePath)).sort();
+    for (const name of names) {
+      const childRelative = relativePath === '' ? name : join(relativePath, name);
+      const childAbsolute = join(metadataRoot, childRelative);
+      const st = await lstat(childAbsolute);
+      const common = {
+        relativePath: childRelative,
+        mode: st.mode,
+        uid: st.uid,
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        ctimeMs: st.ctimeMs,
+        device: st.dev,
+        inode: st.ino,
+      };
+      if (st.isDirectory()) {
+        snapshot.push({ ...common, type: 'directory' });
+        await visit(childRelative);
+      } else if (st.isFile()) {
+        snapshot.push({
+          ...common,
+          type: 'file',
+          sha256: sha256Hex(await readFile(childAbsolute)),
+        });
+      } else if (st.isSymbolicLink()) {
+        snapshot.push({ ...common, type: 'symlink' });
+      } else {
+        snapshot.push({ ...common, type: 'other' });
+      }
+    }
+  }
+
+  await visit('');
+  return snapshot;
+}
+
 async function assertJournalLeafMode(metadataRoot) {
   const leafPath = journalLeafPath(metadataRoot);
   const leafStat = await lstat(leafPath);
@@ -670,6 +780,11 @@ test('store own enumerable methods break contract: surface must match frozen met
   assert.equal(store === null || typeof store !== 'object', false, 'factory must return a store object');
 
   const methods = ownEnumerableMethodNames(store);
+  assert.equal(
+    methods.includes('readJournalHeads'),
+    true,
+    'Task 2.5 RED: store.readJournalHeads must exist before behavior tests run',
+  );
   assert.deepEqual(
     methods,
     [...EXPECTED_STORE_METHODS].sort(),
@@ -2259,7 +2374,6 @@ test('M journal payload state-specific validator positive and negative behavior'
     'controller-loaded',
     'controller-ready',
     'scheduler-loaded',
-    'compensating',
   ];
   const terminalWithReceipt = ['committed', 'recovered', 'no-change'];
 
@@ -2272,6 +2386,27 @@ test('M journal payload state-specific validator positive and negative behavior'
     assert.deepEqual(projection, entry, `${state}: exact {hostMutationCount} payload must accept`);
     assert.equal(isDeeplyFrozen(projection), true, `${state}: projection must be deeply frozen`);
   }
+
+  const reversePlan = [];
+  const compensating = buildJournalEntry({
+    state: 'compensating',
+    payload: {
+      hostMutationCount: 0,
+      reversePlan,
+      reversePlanSha256: sha256Hex(Buffer.from(JSON.stringify(reversePlan), 'utf8')),
+    },
+  });
+  const compensatingProjection = validateLaunchAgentJournal(compensating);
+  assert.deepEqual(compensatingProjection, compensating);
+  assert.equal(isDeeplyFrozen(compensatingProjection), true);
+  assert.throws(
+    () => validateLaunchAgentJournal(buildJournalEntry({
+      state: 'compensating',
+      payload: { hostMutationCount: 0 },
+    })),
+    isInvalidLifecycleError,
+    'compensating without a durable reverse plan must reject',
+  );
 
   // Existing prepared contract acceptance must continue.
   const preparedOk = buildJournalEntry({
@@ -3015,6 +3150,7 @@ test('T MIR writer recovered terminal plus receipt then releaseManualInterventio
   );
 
   const recoveredReceipt = buildReceipt({
+    operation: 'recover',
     state: 'recovered',
     success: true,
     outcome: 'completed',
@@ -3025,7 +3161,7 @@ test('T MIR writer recovered terminal plus receipt then releaseManualInterventio
     transactionId: TX_ID,
     sequence: 2,
     previousEntrySha256: mirRequired.entrySha256,
-    operation: 'install',
+    operation: 'recover',
     state: 'recovered',
     at: '2024-01-15T12:00:02.000Z',
     payload: {
@@ -3767,3 +3903,339 @@ test('Y consumeConfirmation durability triple closed frozen ordering and failure
     assertClosedDurabilityEvent(event, 'confirmation');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task 2.5 RED: zero-argument global journal-head snapshot.
+// 完整行为仅在 method surface 出现后注册；当前基线只有 frozen surface 的
+// readJournalHeads 缺失断言失败，不允许 TypeError/import/fixture 假 RED。
+// ---------------------------------------------------------------------------
+
+if (HAS_READ_JOURNAL_HEADS) {
+  test('Z readJournalHeads global snapshot contract', async (t) => {
+    const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+    const createLaunchAgentMetadataStoreForTest = requireFactory(
+      'createLaunchAgentMetadataStoreForTest',
+    );
+
+    await t.test('Z1 absent journal is stable empty hash, deeply frozen, and read-only', async (st) => {
+      const metadataRoot = await makeTempMetadataRoot(st);
+      const events = [];
+      const mutations = [];
+      const store = createLaunchAgentMetadataStoreForTest({
+        metadataRoot,
+        fs: createMutationTracingFs(mutations),
+        onDurabilityEvent: (event) => events.push(event),
+      });
+      await store.initialize();
+      events.length = 0;
+      mutations.length = 0;
+
+      const beforeTree = await snapshotMetadataTree(metadataRoot);
+      const snapshot = await store.readJournalHeads();
+      const afterTree = await snapshotMetadataTree(metadataRoot);
+
+      assert.deepEqual(snapshot, {
+        kind: 'journal-heads',
+        journalSha256: sha256Hex(Buffer.alloc(0)),
+        heads: [],
+      });
+      assert.deepEqual(
+        Reflect.ownKeys(snapshot).filter((key) => typeof key === 'string').sort(),
+        ['heads', 'journalSha256', 'kind'],
+      );
+      assert.equal(isDeeplyFrozen(snapshot), true);
+      assertNoAbsolutePaths(snapshot, 'readJournalHeads absent snapshot');
+      assert.deepEqual(afterTree, beforeTree, 'absent readJournalHeads must not mutate metadata tree');
+      assert.deepEqual(events, [], 'absent readJournalHeads must emit no durability event');
+      assert.deepEqual(mutations, [], 'absent readJournalHeads must perform no fs mutation or fsync');
+      await assertNoJournalLeaf(metadataRoot);
+
+      await assert.rejects(
+        () => store.readJournalHeads({ transactionId: TX_ID }),
+        isInvalidLifecycleError,
+        'readJournalHeads must reject every argument before mutation',
+      );
+      assert.deepEqual(
+        await snapshotMetadataTree(metadataRoot),
+        beforeTree,
+        'invalid argument must not mutate metadata tree',
+      );
+      assert.deepEqual(events, [], 'invalid argument must emit no durability event');
+      assert.deepEqual(mutations, [], 'invalid argument must perform no fs mutation or fsync');
+    });
+
+    await t.test('Z2 latest heads are sorted, exact-byte hashed, detached, and append-sensitive', async (st) => {
+      const metadataRoot = await makeTempMetadataRoot(st);
+      const events = [];
+      const mutations = [];
+      const store = createLaunchAgentMetadataStoreForTest({
+        metadataRoot,
+        fs: createMutationTracingFs(mutations),
+        onDurabilityEvent: (event) => events.push(event),
+      });
+      await store.initialize();
+
+      const firstA = buildJournalEntry({
+        transactionId: TX_ID,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: 'install',
+        state: 'prepared',
+        at: '2024-01-15T12:00:00.000Z',
+        payload: { hostMutationCount: 0 },
+      });
+      const firstB = buildJournalEntry({
+        transactionId: TX_ID_B,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: 'stop',
+        state: 'prepared',
+        at: '2024-01-15T12:00:01.000Z',
+        payload: { hostMutationCount: 0 },
+      });
+      const secondA = buildJournalEntry({
+        transactionId: TX_ID,
+        sequence: 1,
+        previousEntrySha256: firstA.entrySha256,
+        operation: 'install',
+        state: 'anchored',
+        at: '2024-01-15T12:00:02.000Z',
+        payload: { hostMutationCount: 0 },
+      });
+      const secondB = buildJournalEntry({
+        transactionId: TX_ID_B,
+        sequence: 1,
+        previousEntrySha256: firstB.entrySha256,
+        operation: 'stop',
+        state: 'anchored',
+        at: '2024-01-15T12:00:03.000Z',
+        payload: { hostMutationCount: 0 },
+      });
+      const initialBytes = Buffer.concat([
+        journalLineBuffer(firstB),
+        journalLineBuffer(firstA),
+        journalLineBuffer(secondB),
+        journalLineBuffer(secondA),
+      ]);
+      for (const entry of [firstA, firstB, secondA, secondB]) {
+        assert.deepEqual(validateLaunchAgentJournal(entry), entry, 'fixture must validate independently');
+      }
+      await writeFile(journalLeafPath(metadataRoot), initialBytes, { mode: 0o600 });
+      events.length = 0;
+      mutations.length = 0;
+
+      const beforeTree = await snapshotMetadataTree(metadataRoot);
+      const firstSnapshot = await store.readJournalHeads();
+      const afterTree = await snapshotMetadataTree(metadataRoot);
+      assert.equal(firstSnapshot.kind, 'journal-heads');
+      assert.equal(firstSnapshot.journalSha256, sha256Hex(initialBytes));
+      assert.deepEqual(firstSnapshot.heads, [secondA, secondB]);
+      assert.deepEqual(
+        firstSnapshot.heads.map((entry) => entry.transactionId),
+        [TX_ID, TX_ID_B],
+        'heads must be sorted lexicographically by transactionId',
+      );
+      assert.equal(isDeeplyFrozen(firstSnapshot), true);
+      assertNoAbsolutePaths(firstSnapshot, 'readJournalHeads populated snapshot');
+      assert.deepEqual(afterTree, beforeTree, 'populated readJournalHeads must be read-only');
+      assert.deepEqual(events, [], 'populated readJournalHeads must emit no durability event');
+      assert.deepEqual(mutations, [], 'populated readJournalHeads must perform no fs mutation or fsync');
+      assert.throws(
+        () => firstSnapshot.heads.push(firstA),
+        TypeError,
+        'heads array must be frozen',
+      );
+      assert.throws(
+        () => {
+          firstSnapshot.heads[0].payload.hostMutationCount = 99;
+        },
+        TypeError,
+        'nested head payload must be frozen',
+      );
+
+      const sameBytesSnapshot = await store.readJournalHeads();
+      assert.deepEqual(sameBytesSnapshot, firstSnapshot);
+      assert.notStrictEqual(sameBytesSnapshot, firstSnapshot, 'snapshots must be detached objects');
+      assert.notStrictEqual(sameBytesSnapshot.heads, firstSnapshot.heads, 'heads arrays must be detached');
+      assert.notStrictEqual(
+        sameBytesSnapshot.heads[0],
+        firstSnapshot.heads[0],
+        'head entries must be detached projections',
+      );
+      const mutableClone = JSON.parse(JSON.stringify(sameBytesSnapshot));
+      mutableClone.heads[0].payload.hostMutationCount = 77;
+      assert.deepEqual(
+        await store.readJournalHeads(),
+        firstSnapshot,
+        'mutating a detached clone must not affect a reread',
+      );
+
+      const readA = await store.readJournal({ transactionId: TX_ID });
+      const readB = await store.readJournal({ transactionId: TX_ID_B });
+      assert.deepEqual(readA, [firstA, secondA]);
+      assert.deepEqual(readB, [firstB, secondB]);
+
+      const thirdA = buildJournalEntry({
+        transactionId: TX_ID,
+        sequence: 2,
+        previousEntrySha256: secondA.entrySha256,
+        operation: 'install',
+        state: 'published',
+        at: '2024-01-15T12:00:04.000Z',
+        payload: { hostMutationCount: 1 },
+      });
+      const appendedBytes = Buffer.concat([initialBytes, journalLineBuffer(thirdA)]);
+      await writeFile(journalLeafPath(metadataRoot), appendedBytes, { mode: 0o600 });
+      events.length = 0;
+      mutations.length = 0;
+      const beforeSecondRead = await snapshotMetadataTree(metadataRoot);
+      const secondSnapshot = await store.readJournalHeads();
+      assert.equal(secondSnapshot.journalSha256, sha256Hex(appendedBytes));
+      assert.notEqual(secondSnapshot.journalSha256, firstSnapshot.journalSha256);
+      assert.deepEqual(secondSnapshot.heads, [thirdA, secondB]);
+      assert.deepEqual(firstSnapshot.heads, [secondA, secondB], 'first snapshot must stay detached');
+      assert.deepEqual(
+        await snapshotMetadataTree(metadataRoot),
+        beforeSecondRead,
+        'second readJournalHeads call must not mutate metadata tree',
+      );
+      assert.deepEqual(events, [], 'second readJournalHeads call must emit no durability event');
+      assert.deepEqual(mutations, [], 'second readJournalHeads call must perform no fs mutation or fsync');
+
+      assert.deepEqual(
+        await store.readJournal({ transactionId: TX_ID }),
+        [firstA, secondA, thirdA],
+        'existing readJournal return contract must remain unchanged',
+      );
+    });
+
+    await t.test('Z3 corrupt, truncated, illegal, and operation-drift journals fail closed', async (st) => {
+      const valid = buildJournalEntry({
+        transactionId: TX_ID,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: 'install',
+        state: 'prepared',
+        payload: { hostMutationCount: 0 },
+      });
+      const drift = buildJournalEntry({
+        transactionId: TX_ID,
+        sequence: 1,
+        previousEntrySha256: valid.entrySha256,
+        operation: 'managed-upgrade',
+        state: 'anchored',
+        at: '2024-01-15T12:00:01.000Z',
+        payload: { hostMutationCount: 0 },
+      });
+      const illegal = {
+        ...buildJournalEntry({
+          transactionId: TX_ID_B,
+          sequence: 0,
+          previousEntrySha256: null,
+          operation: 'stop',
+          state: 'prepared',
+          payload: { hostMutationCount: 0 },
+        }),
+        unexpected: true,
+      };
+      const validB = buildJournalEntry({
+        transactionId: TX_ID_B,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: 'stop',
+        state: 'prepared',
+        payload: { hostMutationCount: 0 },
+      });
+      assert.deepEqual(validateLaunchAgentJournal(valid), valid);
+      assert.deepEqual(validateLaunchAgentJournal(drift), drift);
+      assert.deepEqual(validateLaunchAgentJournal(validB), validB);
+
+      const cases = [
+        [
+          'corrupt-json-after-valid-prefix',
+          Buffer.concat([journalLineBuffer(valid), Buffer.from('{"broken":\n', 'utf8')]),
+        ],
+        [
+          'truncated-no-lf-after-valid-prefix',
+          Buffer.concat([journalLineBuffer(valid), journalLineBuffer(validB).subarray(0, -1)]),
+        ],
+        [
+          'illegal-entry-shape-after-valid-prefix',
+          Buffer.concat([journalLineBuffer(valid), journalLineBuffer(illegal)]),
+        ],
+        [
+          'same-transaction-operation-drift',
+          Buffer.concat([journalLineBuffer(valid), journalLineBuffer(drift)]),
+        ],
+      ];
+
+      for (const [name, bytes] of cases) {
+        await st.test(name, async (caseTest) => {
+          const metadataRoot = await makeTempMetadataRoot(caseTest);
+          const events = [];
+          const mutations = [];
+          const store = createLaunchAgentMetadataStoreForTest({
+            metadataRoot,
+            fs: createMutationTracingFs(mutations),
+            onDurabilityEvent: (event) => events.push(event),
+          });
+          await store.initialize();
+          await writeFile(journalLeafPath(metadataRoot), bytes, { mode: 0o600 });
+          events.length = 0;
+          mutations.length = 0;
+          const beforeBytes = await readJournalLeafBytes(metadataRoot);
+          const beforeTree = await snapshotMetadataTree(metadataRoot);
+
+          if (name === 'same-transaction-operation-drift') {
+            assert.deepEqual(
+              await store.readJournal({ transactionId: TX_ID }),
+              [valid, drift],
+              'existing readJournal public return contract must remain unchanged for drift fixture',
+            );
+            mutations.length = 0;
+          }
+
+          await assert.rejects(
+            () => store.readJournalHeads(),
+            isInvalidLifecycleError,
+            `${name}: readJournalHeads must reject the entire snapshot`,
+          );
+
+          assert.equal(
+            Buffer.compare(await readJournalLeafBytes(metadataRoot), beforeBytes),
+            0,
+            `${name}: rejected snapshot must preserve exact journal bytes`,
+          );
+          assert.deepEqual(
+            await snapshotMetadataTree(metadataRoot),
+            beforeTree,
+            `${name}: rejected snapshot must not mutate metadata tree`,
+          );
+          assert.deepEqual(events, [], `${name}: rejected snapshot must emit no durability event`);
+          assert.deepEqual(
+            mutations,
+            [],
+            `${name}: rejected snapshot must perform no fs mutation or fsync`,
+          );
+        });
+      }
+    });
+
+    await t.test('Z4 production and test factories expose the same read-only method', async (st) => {
+      const productionRoot = await makeTempMetadataRoot(st);
+      const testRoot = await makeTempMetadataRoot(st);
+      const productionStore = createLaunchAgentMetadataStore({ metadataRoot: productionRoot });
+      const testStore = createLaunchAgentMetadataStoreForTest({
+        metadataRoot: testRoot,
+        fs: fsPromises,
+        onDurabilityEvent: () => {},
+      });
+      assert.equal(typeof productionStore.readJournalHeads, 'function');
+      assert.equal(typeof testStore.readJournalHeads, 'function');
+      assert.deepEqual(
+        ownEnumerableMethodNames(productionStore),
+        ownEnumerableMethodNames(testStore),
+      );
+    });
+  });
+}

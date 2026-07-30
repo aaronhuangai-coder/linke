@@ -1,0 +1,1796 @@
+/**
+ * Linke V1.46 Task 4 测试专用确定性 harness（仅测试代码）。
+ * 只拥有 in-memory/temp-root 合成 fake；不 import/调用 production runner、真实 launchctl、
+ * 真实 ~/Library/LaunchAgents。闭合 simple/structured 事件词汇外一律 fail-closed。
+ */
+
+import { createHash } from 'node:crypto';
+import {
+  LAUNCHAGENT_LIFECYCLE,
+  LAUNCHAGENT_LIFECYCLE_CODES,
+  LaunchAgentLifecycleError,
+  validateLaunchAgentAnchor,
+  validateLaunchAgentJournal,
+  validateLaunchAgentManifest,
+  validateLaunchAgentReceipt,
+} from '../../src/launchagent-lifecycle/contracts.js';
+import { validateLaunchctlRequest } from '../../src/launchagent-lifecycle/host-adapter.js';
+
+const SIMPLE_EVENTS = Object.freeze([
+  'inspect', 'lock-acquire', 'journal', 'anchor',
+  'publish-controller', 'publish-scheduler', 'publish-manifest',
+  'inspect-job-controller', 'inspect-job-scheduler',
+  'verify-job-controller', 'verify-job-scheduler',
+  'bootout-scheduler', 'bootout-controller',
+  'bootstrap-controller', 'health-controller', 'bootstrap-scheduler',
+  'verify-scheduler-outcome',
+  'remove-scheduler', 'remove-controller', 'remove-manifest',
+  'mir-lock-publish', 'mir-lock-verify',
+  'mir-transaction-lock-release', 'mir-lock-release',
+  'receipt', 'lock-release',
+]);
+const SIMPLE_EVENT_SET = new Set(SIMPLE_EVENTS);
+const ADAPTER_CALL_SET = new Set([
+  'read-journal-heads', 'read-journal', 'read-anchor', 'read-receipt',
+  'lock-acquire', 'lock-verify', 'append-journal',
+  'inspect-file', 'inspect-job', 'write-anchor',
+  'write-candidate', 'plist-validate', 'publish', 'host-mutation',
+]);
+const COMPENSATION_ACTION_SET = new Set([
+  'remove-controller', 'remove-scheduler', 'remove-manifest',
+  'restore-controller', 'restore-scheduler', 'restore-manifest',
+  'stop-controller', 'stop-scheduler', 'load-controller', 'load-scheduler',
+]);
+const COMPENSATION_PHASE_SET = new Set(['intent', 'completed']);
+const COMPENSATION_STATE_PATTERN = /^compensate-([a-z-]+)-(intent|completed)$/;
+const FAILABLE_EVENT_SET = new Set([
+  'publish-controller', 'publish-scheduler', 'publish-manifest',
+  'remove-controller', 'remove-scheduler', 'remove-manifest',
+  'bootout-controller', 'bootout-scheduler',
+  'bootstrap-controller', 'bootstrap-scheduler',
+  'health-controller', 'verify-job-controller', 'verify-job-scheduler',
+  'verify-scheduler-outcome',
+]);
+const REVALIDATION_REASONS = new Set([
+  'after-prepared-inspection',
+  'before-manifest-publish',
+  'before-bootstrap-controller',
+  'before-bootstrap-scheduler',
+  'before-commit',
+  'compensate-before-bootstrap-controller',
+  'compensate-before-bootstrap-scheduler',
+  'compensate-before-close',
+]);
+
+const ROOT_LAUNCH_AGENTS = LAUNCHAGENT_LIFECYCLE.rootIds.launchAgents;
+const ROOT_METADATA = LAUNCHAGENT_LIFECYCLE.rootIds.metadata;
+const FILENAMES = LAUNCHAGENT_LIFECYCLE.filenames;
+const LABELS = LAUNCHAGENT_LIFECYCLE.labels;
+const CODE_INVALID = LAUNCHAGENT_LIFECYCLE_CODES.INVALID;
+const CODE_TX = LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS;
+const CODE_MIR = LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED;
+
+/** 纯合成 temp-root 路径，不来自真实 HOME。 */
+const SYNTH_LAUNCH_AGENTS_DIR = '/tmp/linke-v146-harness/LaunchAgents';
+const FIXED_UID = 501;
+const FIXED_DEVICE = 'device-harness-1';
+const CLOCK_BASE_MS = Date.parse('2026-07-30T00:00:00.000Z');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA_RE = /^[0-9a-f]{64}$/;
+const COMMIT_RE = /^[0-9a-f]{40}$/;
+const TERMINAL_JOURNAL_STATES = new Set(['committed', 'recovered', 'no-change', 'blocked']);
+const RUNTIME_ARTIFACTS = Object.freeze({
+  node: { pathId: 'host-node-executable', sha256: 'a1'.repeat(32) },
+  controller: { pathId: 'src/controller-runtime.js', sha256: 'b2'.repeat(32) },
+  agent: { pathId: 'src/agent.js', sha256: 'c3'.repeat(32) },
+});
+const ROLE_BY_ADDRESS = Object.freeze({
+  [`${ROOT_LAUNCH_AGENTS}:${FILENAMES.controller}`]: 'controller',
+  [`${ROOT_LAUNCH_AGENTS}:${FILENAMES.scheduler}`]: 'scheduler',
+  [`${ROOT_METADATA}:${FILENAMES.manifest}`]: 'manifest',
+});
+const LOCK_KEYS = Object.freeze([
+  'schemaVersion', 'transactionId', 'ownerPid', 'ownerNonce',
+  'bootSessionIdentity', 'processStartIdentity',
+]);
+function harnessError(message) {
+  return new Error(`launchagent-harness:${message}`);
+}
+
+function invalid() {
+  throw new LaunchAgentLifecycleError(CODE_INVALID);
+}
+
+function coded(code) {
+  throw new LaunchAgentLifecycleError(code);
+}
+
+function sha256Hex(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value) || Object.isFrozen(value)) {
+    return value;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && Object.hasOwn(descriptor, 'value')) deepFreeze(descriptor.value);
+  }
+  return Object.freeze(value);
+}
+
+function readExactObject(value, expectedKeys) {
+  if (value === null || typeof value !== 'object') invalid();
+  if (Object.getPrototypeOf(value) !== Object.prototype) invalid();
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== expectedKeys.length || ownKeys.some((k) => typeof k !== 'string')) invalid();
+  const expected = new Set(expectedKeys);
+  const fields = Object.create(null);
+  for (const key of ownKeys) {
+    if (!expected.has(key)) invalid();
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalid();
+    fields[key] = descriptor.value;
+  }
+  for (const key of expectedKeys) {
+    if (!Object.hasOwn(fields, key)) invalid();
+  }
+  return fields;
+}
+
+function requireUuid(value) {
+  if (typeof value !== 'string' || !UUID_RE.test(value)) invalid();
+  return value;
+}
+
+function requireSha256(value) {
+  if (typeof value !== 'string' || !SHA_RE.test(value)) invalid();
+  return value;
+}
+
+function computeJournalEntrySha256(entry) {
+  return sha256Hex(Buffer.from(JSON.stringify({
+    schemaVersion: entry.schemaVersion,
+    transactionId: entry.transactionId,
+    sequence: entry.sequence,
+    previousEntrySha256: entry.previousEntrySha256,
+    operation: entry.operation,
+    state: entry.state,
+    at: entry.at,
+    payload: entry.payload,
+  }), 'utf8'));
+}
+
+function resolvedPathFor(role) {
+  return `${SYNTH_LAUNCH_AGENTS_DIR}/${FILENAMES[role]}`;
+}
+
+/**
+ * 镜像 profiles.js 依赖：controllerEnvironment 只进 controller；scheduleSeconds 只进 scheduler；
+ * sourceCommit 只进 publicProjection/manifest，不编码进 plist bytes。
+ */
+function makeProfiles(
+  scheduleSeconds,
+  controllerEnvironment,
+  runtimeArtifacts = RUNTIME_ARTIFACTS,
+) {
+  const controllerBytes = Buffer.from(JSON.stringify({
+    fakePlist: 'controller',
+    label: LABELS.controller,
+    controllerEnvironment,
+  }), 'utf8');
+  const schedulerBytes = Buffer.from(JSON.stringify({
+    fakePlist: 'scheduler',
+    label: LABELS.scheduler,
+    scheduleSeconds,
+  }), 'utf8');
+  return {
+    controller: {
+      label: LABELS.controller,
+      filename: FILENAMES.controller,
+      plistBytes: controllerBytes,
+      plistSha256: sha256Hex(controllerBytes),
+    },
+    scheduler: {
+      label: LABELS.scheduler,
+      filename: FILENAMES.scheduler,
+      plistBytes: schedulerBytes,
+      plistSha256: sha256Hex(schedulerBytes),
+    },
+    manifestRuntimeArtifacts: structuredClone(runtimeArtifacts),
+    publicProjection: {
+      scheduleSeconds,
+      runtimeArtifacts: structuredClone(runtimeArtifacts),
+      controller: {
+        label: LABELS.controller,
+        filename: FILENAMES.controller,
+        plistSha256: sha256Hex(controllerBytes),
+      },
+      scheduler: {
+        label: LABELS.scheduler,
+        filename: FILENAMES.scheduler,
+        plistSha256: sha256Hex(schedulerBytes),
+      },
+    },
+  };
+}
+
+export function createLaunchAgentLifecycleHarness() {
+  const files = new Map();
+  const candidates = new Map();
+  const store = {
+    journal: [],
+    anchors: new Map(),
+    receipts: new Map(),
+    transactionLock: null,
+    manualInterventionLock: null,
+  };
+  const state = {
+    loaded: { controller: false, scheduler: false },
+    jobIdentity: { controller: null, scheduler: null },
+    foreignJob: { controller: false, scheduler: false },
+    probeMode: { controller: 'normal', scheduler: 'normal' },
+    health: { statusCode: 200, ready: true, count: 0 },
+    schedulerOutcome: 'ok',
+    printPhase: { controller: 'inspect', scheduler: 'inspect' },
+    plistLintValid: { controller: true, scheduler: true },
+    runtimeArtifacts: structuredClone(RUNTIME_ARTIFACTS),
+    revalidationFailures: new Set(),
+    strictLaunchctlTransitions: false,
+    forgedReplaceNoMutationRole: null,
+    invalidAtomicExpectations: new Set(),
+    publishedIdentityFaults: new Map(),
+    lastRenderedRuntimeArtifacts: null,
+  };
+  const counters = {
+    inspect: 0,
+    journal: 0,
+    anchor: 0,
+    publish: 0,
+    remove: 0,
+    bootout: 0,
+    bootstrap: 0,
+    print: 0,
+    health: 0,
+    receipt: 0,
+    render: 0,
+    revalidate: 0,
+    plistValidate: 0,
+    writeCandidate: 0,
+    readCandidate: 0,
+    readJournalHeads: 0,
+    readJournal: 0,
+    readAnchor: 0,
+    lockVerify: 0,
+  };
+  const trace = [];
+  const adapterCalls = [];
+  const publishedCandidateRefs = [];
+  const atomicExpectedAttempts = [];
+  const failureOccurrences = new Map();
+  const eventCallCounts = new Map();
+  const hooks = [];
+  const compensationHooks = [];
+  const revalidateMarks = [];
+  let clockIndex = 0;
+  let idIndex = 0;
+  let inodeIndex = 0;
+  let nextAnchorOverride = null;
+  const queuedClockIds = [];
+
+  function nextUuid() {
+    idIndex += 1;
+    return `00000000-0000-4000-8000-${String(idIndex).padStart(12, '0')}`;
+  }
+
+  function nowIso() {
+    const instant = new Date(CLOCK_BASE_MS + clockIndex * 1000);
+    clockIndex += 1;
+    return instant.toISOString();
+  }
+
+  function fileKey(rootId, basename) {
+    return `${rootId}:${basename}`;
+  }
+
+  function roleForAddress(rootId, basename) {
+    const role = ROLE_BY_ADDRESS[fileKey(rootId, basename)];
+    if (!role) invalid();
+    return role;
+  }
+
+  function currentFileIdentity(role) {
+    const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+    const file = files.get(fileKey(rootId, FILENAMES[role]));
+    if (!file) return null;
+    return {
+      device: file.device,
+      inode: file.inode,
+      sha256: sha256Hex(file.bytes),
+    };
+  }
+
+  function completeFileIdentity(role, identity = currentFileIdentity(role)) {
+    if (identity === null) return null;
+    return {
+      rootId: role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS,
+      basename: FILENAMES[role],
+      type: 'regular-file',
+      ownerUid: FIXED_UID,
+      device: identity.device,
+      inode: identity.inode,
+      sha256: identity.sha256,
+    };
+  }
+
+  function publisherIdentity(role, identity = currentFileIdentity(role)) {
+    return completeFileIdentity(role, identity);
+  }
+
+  function takePublishedIdentity(role) {
+    const identity = publisherIdentity(role);
+    const fault = state.publishedIdentityFaults.get(role);
+    if (fault === undefined) return identity;
+    state.publishedIdentityFaults.delete(role);
+    if (fault === 'bad-sha256') {
+      return {
+        ...identity,
+        sha256: identity.sha256 === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64),
+      };
+    }
+    if (fault === 'three-field') {
+      return {
+        device: identity.device,
+        inode: identity.inode,
+        sha256: identity.sha256,
+      };
+    }
+    throw harnessError(`unknown published identity fault: ${String(fault)}`);
+  }
+
+  function placeFile(role, bytes) {
+    const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+    inodeIndex += 1;
+    files.set(fileKey(rootId, FILENAMES[role]), {
+      bytes: Buffer.from(bytes),
+      device: FIXED_DEVICE,
+      inode: `inode-${inodeIndex}`,
+      ownerUid: FIXED_UID,
+    });
+  }
+
+  function removeFile(role) {
+    const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+    files.delete(fileKey(rootId, FILENAMES[role]));
+  }
+
+  function computeJobIdentity(role) {
+    const file = files.get(fileKey(ROOT_LAUNCH_AGENTS, FILENAMES[role]));
+    return file ? sha256Hex(file.bytes) : '0'.repeat(64);
+  }
+
+  function fireHooks(eventName) {
+    for (const hook of hooks) {
+      if (hook.eventName === eventName) hook.fn();
+    }
+  }
+
+  function recordSimpleEvent(eventName) {
+    if (!SIMPLE_EVENT_SET.has(eventName)) {
+      throw harnessError(`unknown simple event: ${String(eventName)}`);
+    }
+    trace.push(eventName);
+    fireHooks(eventName);
+  }
+
+  function recordCompensationEvent(action, phase) {
+    if (!COMPENSATION_ACTION_SET.has(action)) {
+      throw harnessError(`unknown compensation action: ${String(action)}`);
+    }
+    if (!COMPENSATION_PHASE_SET.has(phase)) {
+      throw harnessError(`unknown compensation phase: ${String(phase)}`);
+    }
+    trace.push(deepFreeze({ kind: 'compensation', action, phase }));
+    for (const hook of compensationHooks) {
+      if (hook.action === action && hook.phase === phase) hook.fn();
+    }
+  }
+
+  function recordAdapterCall(name, role = null) {
+    if (!ADAPTER_CALL_SET.has(name)) {
+      throw harnessError(`unknown adapter call: ${String(name)}`);
+    }
+    if (role !== null && role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+      throw harnessError(`unknown adapter role: ${String(role)}`);
+    }
+    adapterCalls.push(deepFreeze({ name, role }));
+  }
+
+  function shouldFail(eventName) {
+    const callIndex = (eventCallCounts.get(eventName) ?? 0) + 1;
+    eventCallCounts.set(eventName, callIndex);
+    const occurrences = failureOccurrences.get(eventName);
+    if (!occurrences || !occurrences.has(callIndex)) return false;
+    occurrences.delete(callIndex);
+    return true;
+  }
+
+  // ---- hostInspector ----
+  const hostInspector = Object.freeze({
+    async inspect(address) {
+      const fields = readExactObject(address, ['rootId', 'basename']);
+      if (typeof fields.rootId !== 'string' || typeof fields.basename !== 'string') invalid();
+      if (fields.basename.includes('/') || fields.basename.includes('\\') || fields.basename.includes('\0')) {
+        invalid();
+      }
+      roleForAddress(fields.rootId, fields.basename);
+      recordAdapterCall('inspect-file', roleForAddress(fields.rootId, fields.basename));
+      counters.inspect += 1;
+      recordSimpleEvent('inspect');
+      const file = files.get(fileKey(fields.rootId, fields.basename));
+      if (!file) {
+        return deepFreeze({
+          rootId: fields.rootId,
+          basename: fields.basename,
+          type: 'regular-file',
+          ownerUid: FIXED_UID,
+        });
+      }
+      return deepFreeze({
+        rootId: fields.rootId,
+        basename: fields.basename,
+        type: 'regular-file',
+        ownerUid: FIXED_UID,
+        device: file.device,
+        inode: file.inode,
+        sha256: sha256Hex(file.bytes),
+      });
+    },
+
+    async read(identity) {
+      const fields = readExactObject(identity, [
+        'rootId', 'basename', 'type', 'ownerUid', 'device', 'inode', 'sha256',
+      ]);
+      if (fields.type !== 'regular-file' || fields.ownerUid !== FIXED_UID) invalid();
+      roleForAddress(fields.rootId, fields.basename);
+      counters.inspect += 1;
+      recordSimpleEvent('inspect');
+      const file = files.get(fileKey(fields.rootId, fields.basename));
+      if (!file) invalid();
+      if (file.device !== fields.device || file.inode !== fields.inode) invalid();
+      if (sha256Hex(file.bytes) !== requireSha256(fields.sha256)) invalid();
+      return Buffer.from(file.bytes);
+    },
+
+    /** 构造 validateLaunchctlRequest 兼容 request 所需的合成宿主事实。 */
+    async launchctlHostFacts() {
+      return deepFreeze({
+        uid: FIXED_UID,
+        rootId: ROOT_LAUNCH_AGENTS,
+        basenames: {
+          controller: FILENAMES.controller,
+          scheduler: FILENAMES.scheduler,
+        },
+        resolvedPaths: {
+          controller: resolvedPathFor('controller'),
+          scheduler: resolvedPathFor('scheduler'),
+        },
+      });
+    },
+  });
+
+  // ---- atomicPublisher：mismatch 在 mutation 前拒绝 → 不计 hostMutation ----
+  function readExpectedIdentity(role, value) {
+    const fields = readExactObject(value, [
+      'rootId', 'basename', 'type', 'ownerUid', 'device', 'inode', 'sha256',
+    ]);
+    const expectedAddress = completeFileIdentity(role, {
+      device: fields.device,
+      inode: fields.inode,
+      sha256: fields.sha256,
+    });
+    for (const key of ['rootId', 'basename', 'type', 'ownerUid']) {
+      if (fields[key] !== expectedAddress[key]) invalid();
+    }
+    if (typeof fields.device !== 'string' || fields.device.length === 0) invalid();
+    if (typeof fields.inode !== 'string' || fields.inode.length === 0) invalid();
+    requireSha256(fields.sha256);
+    return fields;
+  }
+
+  function readPublishInput(input, withExpected) {
+    const keys = withExpected
+      ? ['rootId', 'basename', 'candidateRef', 'expected']
+      : ['rootId', 'basename', 'candidateRef'];
+    const fields = readExactObject(input, keys);
+    const role = roleForAddress(fields.rootId, fields.basename);
+    const ref = readExactObject(fields.candidateRef, [
+      'kind', 'transactionId', 'role', 'sha256',
+    ]);
+    if (ref.kind !== 'candidate') invalid();
+    const transactionId = requireUuid(ref.transactionId);
+    if (ref.role !== role) invalid();
+    const sha256 = requireSha256(ref.sha256);
+    const staged = candidates.get(`${transactionId}:${role}`);
+    if (!staged || staged.sha256 !== sha256) invalid();
+    const candidateRef = deepFreeze({ kind: 'candidate', transactionId, role, sha256 });
+    publishedCandidateRefs.push(candidateRef);
+    recordAdapterCall('publish', role);
+    return {
+      role,
+      bytes: Buffer.from(staged.bytes),
+      expected: withExpected ? fields.expected : null,
+    };
+  }
+
+  function expectedMatchesCurrent(role, expected) {
+    const current = currentFileIdentity(role);
+    if (current === null) return false;
+    if (
+      current.device === expected.device
+      && current.inode === expected.inode
+      && current.sha256 === expected.sha256
+    ) {
+      const complete = completeFileIdentity(role, current);
+      return ['rootId', 'basename', 'type', 'ownerUid']
+        .every((key) => complete[key] === expected[key]);
+    }
+    return false;
+  }
+
+  function recordAtomicExpectedAttempt(operation, role, expected) {
+    if (operation !== 'replace' && operation !== 'remove') {
+      throw harnessError(`unknown atomic expectation operation: ${String(operation)}`);
+    }
+    const keys = expected !== null && typeof expected === 'object'
+      ? Reflect.ownKeys(expected).map(String).sort()
+      : [];
+    atomicExpectedAttempts.push(deepFreeze({ operation, role, keys }));
+    const failureKey = `${operation}:${role}`;
+    if (state.invalidAtomicExpectations.delete(failureKey)) invalid();
+  }
+
+  const atomicPublisher = Object.freeze({
+    async publishAbsent(input) {
+      const { role, bytes } = readPublishInput(input, false);
+      const eventName = `publish-${role}`;
+      if (shouldFail(eventName)) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+      if (files.has(fileKey(rootId, FILENAMES[role]))) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      recordSimpleEvent(eventName);
+      recordAdapterCall('host-mutation', role);
+      placeFile(role, bytes);
+      counters.publish += 1;
+      return deepFreeze({ outcome: 'ok', identity: takePublishedIdentity(role) });
+    },
+
+    async replaceIfMatch(input) {
+      const { role, bytes } = readPublishInput(input, true);
+      recordAtomicExpectedAttempt('replace', role, input.expected);
+      const expected = readExpectedIdentity(role, input.expected);
+      const eventName = `publish-${role}`;
+      if (shouldFail(eventName)) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      if (!expectedMatchesCurrent(role, expected)) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      if (state.forgedReplaceNoMutationRole === role) {
+        state.forgedReplaceNoMutationRole = null;
+        const current = currentFileIdentity(role);
+        return deepFreeze({
+          outcome: 'ok',
+          identity: publisherIdentity(role, {
+            ...current,
+            sha256: sha256Hex(bytes),
+          }),
+        });
+      }
+      recordSimpleEvent(eventName);
+      recordAdapterCall('host-mutation', role);
+      placeFile(role, bytes);
+      counters.publish += 1;
+      return deepFreeze({ outcome: 'ok', identity: takePublishedIdentity(role) });
+    },
+
+    async removeIfMatch(input) {
+      const fields = readExactObject(input, ['rootId', 'basename', 'expected']);
+      const role = roleForAddress(fields.rootId, fields.basename);
+      recordAtomicExpectedAttempt('remove', role, fields.expected);
+      const expected = readExpectedIdentity(role, fields.expected);
+      const eventName = `remove-${role}`;
+      if (shouldFail(eventName)) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      if (!expectedMatchesCurrent(role, expected)) {
+        return deepFreeze({ outcome: 'conditional-mutation-mismatch' });
+      }
+      recordSimpleEvent(eventName);
+      recordAdapterCall('host-mutation', role);
+      removeFile(role);
+      counters.remove += 1;
+      return deepFreeze({ outcome: 'ok' });
+    },
+  });
+
+  // ---- launchctlRunner：仅接受 validateLaunchctlRequest 兼容精确输入 ----
+  function mapPrintEvent(role) {
+    const phase = state.printPhase[role];
+    if (phase === 'inspect') return `inspect-job-${role}`;
+    if (phase === 'verify-then-outcome') {
+      state.printPhase[role] = 'outcome';
+      return `verify-job-${role}`;
+    }
+    if (phase === 'outcome') {
+      state.printPhase[role] = 'verify';
+      return 'verify-scheduler-outcome';
+    }
+    return `verify-job-${role}`;
+  }
+
+  const launchctlRunner = Object.freeze({
+    async run(request) {
+      // production-facing request 不得带 purpose/phase/unknown key
+      const validated = validateLaunchctlRequest(request);
+      const { operation, role } = validated;
+
+      if (operation === 'bootstrap' || operation === 'bootout') {
+        const eventName = `${operation}-${role}`;
+        recordSimpleEvent(eventName);
+        recordAdapterCall('host-mutation', role);
+        // 一旦发出 mutation runner 调用，即使失败也计入 hostMutationCount
+        if (operation === 'bootstrap') counters.bootstrap += 1;
+        else counters.bootout += 1;
+        if (shouldFail(eventName)) {
+          return deepFreeze({ outcome: 'nonzero-exit' });
+        }
+        if (
+          state.strictLaunchctlTransitions
+          && operation === 'bootstrap'
+          && state.loaded[role]
+        ) {
+          return deepFreeze({ outcome: 'nonzero-exit' });
+        }
+        if (operation === 'bootstrap') {
+          state.loaded[role] = true;
+          state.jobIdentity[role] = computeJobIdentity(role);
+          state.foreignJob[role] = false;
+          state.printPhase[role] = role === 'scheduler' ? 'verify-then-outcome' : 'verify';
+        } else {
+          state.loaded[role] = false;
+          state.jobIdentity[role] = null;
+          state.printPhase[role] = 'verify';
+        }
+        return deepFreeze({ outcome: 'ok' });
+      }
+
+      if (operation === 'kickstart') invalid();
+      if (operation !== 'print') invalid();
+
+      const eventName = mapPrintEvent(role);
+      recordAdapterCall('inspect-job', role);
+      counters.print += 1;
+      recordSimpleEvent(eventName);
+      if (shouldFail(eventName) || state.probeMode[role] === 'unknown') {
+        return deepFreeze({ outcome: 'unknown-result' });
+      }
+      const result = {
+        outcome: 'ok',
+        loaded: state.loaded[role],
+        jobIdentitySha256: state.loaded[role] ? state.jobIdentity[role] : null,
+      };
+      if (eventName === 'verify-scheduler-outcome') {
+        result.scheduledOutcome = state.schedulerOutcome;
+      }
+      return deepFreeze(result);
+    },
+  });
+
+  // ---- health / profile / plist / clock ----
+  const healthChecker = Object.freeze({
+    async check(input) {
+      const fields = readExactObject(input, ['port']);
+      if (!Number.isSafeInteger(fields.port) || fields.port < 1 || fields.port > 65535) invalid();
+      counters.health += 1;
+      recordSimpleEvent('health-controller');
+      if (shouldFail('health-controller')) {
+        return deepFreeze({ statusCode: 503, ready: false, count: null });
+      }
+      return deepFreeze({ ...state.health });
+    },
+  });
+
+  const profileRenderer = Object.freeze({
+    async render(input) {
+      const fields = readExactObject(input, [
+        'sourceCommit', 'scheduleSeconds', 'controllerEnvironment',
+      ]);
+      if (typeof fields.sourceCommit !== 'string' || !COMMIT_RE.test(fields.sourceCommit)) invalid();
+      if (
+        !Number.isSafeInteger(fields.scheduleSeconds)
+        || fields.scheduleSeconds < LAUNCHAGENT_LIFECYCLE.scheduleSeconds.min
+        || fields.scheduleSeconds > LAUNCHAGENT_LIFECYCLE.scheduleSeconds.max
+      ) {
+        invalid();
+      }
+      const environment = readExactObject(
+        fields.controllerEnvironment,
+        Object.keys(fields.controllerEnvironment),
+      );
+      for (const key of Object.keys(environment)) {
+        if (typeof environment[key] !== 'string') invalid();
+      }
+      counters.render += 1;
+      const profiles = makeProfiles(
+        fields.scheduleSeconds,
+        fields.controllerEnvironment,
+        state.runtimeArtifacts,
+      );
+      state.lastRenderedRuntimeArtifacts = structuredClone(
+        profiles.manifestRuntimeArtifacts,
+      );
+      return deepFreeze({
+        ...profiles,
+        publicProjection: {
+          sourceCommit: fields.sourceCommit,
+          ...profiles.publicProjection,
+        },
+      });
+    },
+
+    async revalidate(reason) {
+      if (typeof reason !== 'string' || !REVALIDATION_REASONS.has(reason)) invalid();
+      counters.revalidate += 1;
+      revalidateMarks.push(reason);
+      if (state.revalidationFailures.delete(reason)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.ROLLBACK_RUNTIME_MISMATCH);
+      }
+      if (
+        state.lastRenderedRuntimeArtifacts !== null
+        && JSON.stringify(state.runtimeArtifacts)
+          !== JSON.stringify(state.lastRenderedRuntimeArtifacts)
+      ) {
+        return deepFreeze({ ok: false, reason });
+      }
+      return deepFreeze({ ok: true, reason });
+    },
+  });
+
+  const plistValidator = Object.freeze({
+    async validate(candidateRef) {
+      // 协调层显式 kind 映射后的 launchagent-candidate ref
+      const fields = readExactObject(candidateRef, [
+        'kind', 'transactionId', 'role', 'sha256',
+      ]);
+      if (fields.kind !== 'launchagent-candidate') invalid();
+      requireUuid(fields.transactionId);
+      if (fields.role !== 'controller' && fields.role !== 'scheduler') invalid();
+      requireSha256(fields.sha256);
+      const key = `${fields.transactionId}:${fields.role}`;
+      const staged = candidates.get(key);
+      if (!staged || staged.sha256 !== fields.sha256) invalid();
+      recordAdapterCall('plist-validate', fields.role);
+      counters.plistValidate += 1;
+      if (!state.plistLintValid[fields.role]) {
+        return deepFreeze({ valid: false, outcome: 'invalid' });
+      }
+      return deepFreeze({ valid: true, outcome: 'valid' });
+    },
+  });
+
+  const clock = Object.freeze({
+    now() { return nowIso(); },
+    newId() {
+      return queuedClockIds.length > 0 ? queuedClockIds.shift() : nextUuid();
+    },
+  });
+
+  // ---- metadataStore ----
+  function lockSha256(record) {
+    return sha256Hex(Buffer.from(JSON.stringify(record), 'utf8'));
+  }
+
+  function validateLockRecord(record) {
+    const fields = readExactObject(record, [...LOCK_KEYS]);
+    if (fields.schemaVersion !== 1) invalid();
+    requireUuid(fields.transactionId);
+    requireUuid(fields.ownerNonce);
+    if (fields.transactionId === fields.ownerNonce) invalid();
+    if (!Number.isSafeInteger(fields.ownerPid) || fields.ownerPid <= 0) invalid();
+    for (const key of ['bootSessionIdentity', 'processStartIdentity']) {
+      const identity = readExactObject(fields[key], ['available', 'value']);
+      if (identity.available === false) {
+        if (identity.value !== null) invalid();
+      } else if (identity.available === true) {
+        if (typeof identity.value !== 'string' || identity.value.length === 0) invalid();
+      } else {
+        invalid();
+      }
+    }
+    return {
+      schemaVersion: 1,
+      transactionId: fields.transactionId,
+      ownerPid: fields.ownerPid,
+      ownerNonce: fields.ownerNonce,
+      bootSessionIdentity: { ...fields.bootSessionIdentity },
+      processStartIdentity: { ...fields.processStartIdentity },
+    };
+  }
+
+  function lockRefMatches(record, ref, expectedKind) {
+    if (ref === null || typeof ref !== 'object') invalid();
+    const ownKeys = Reflect.ownKeys(ref).filter((k) => typeof k === 'string');
+    if (ownKeys.length !== 4) invalid();
+    for (const key of ['kind', 'transactionId', 'ownerNonce', 'sha256']) {
+      if (!Object.hasOwn(ref, key)) invalid();
+    }
+    if (ref.kind !== expectedKind || record === null) return false;
+    return (
+      ref.transactionId === record.transactionId
+      && ref.ownerNonce === record.ownerNonce
+      && ref.sha256 === lockSha256(record)
+    );
+  }
+
+  function latestJournalEntry(transactionId) {
+    let latest = null;
+    for (const entry of store.journal) {
+      if (entry.transactionId === transactionId) latest = entry;
+    }
+    return latest;
+  }
+
+  function validateJournalEntryShape(entry) {
+    const projection = validateLaunchAgentJournal(entry);
+    if (computeJournalEntrySha256(projection) !== projection.entrySha256) invalid();
+    return projection;
+  }
+
+  function verifyWriterLockRef(writerLockRef, transactionId) {
+    const fields = readExactObject(writerLockRef, [
+      'kind', 'transactionId', 'ownerNonce', 'sha256',
+    ]);
+    if (fields.kind === 'transaction-lock') {
+      if (!lockRefMatches(store.transactionLock, fields, 'transaction-lock')) invalid();
+    } else if (fields.kind === 'manual-intervention-lock') {
+      if (!lockRefMatches(store.manualInterventionLock, fields, 'manual-intervention-lock')) {
+        invalid();
+      }
+    } else {
+      invalid();
+    }
+    if (fields.transactionId !== transactionId) invalid();
+  }
+
+  function assertReceiptAlignedWithTerminal(receiptProjection, receiptSha, terminal) {
+    if (terminal === null || !TERMINAL_JOURNAL_STATES.has(terminal.state)) invalid();
+    if (terminal.state !== receiptProjection.state) invalid();
+    if (terminal.operation !== receiptProjection.operation) invalid();
+    if (terminal.transactionId !== receiptProjection.transactionId) invalid();
+    if (
+      terminal.payload === null
+      || typeof terminal.payload !== 'object'
+      || terminal.payload.hostMutationCount !== receiptProjection.hostMutationCount
+    ) {
+      invalid();
+    }
+    if (terminal.payload.receiptSha256 !== receiptSha) invalid();
+  }
+
+  const metadataStore = Object.freeze({
+    async readJournalHeads() {
+      if (arguments.length !== 0) invalid();
+      const latestByTransaction = new Map();
+      for (const storedEntry of store.journal) {
+        const entry = validateJournalEntryShape(storedEntry);
+        const prior = latestByTransaction.get(entry.transactionId);
+        if (prior === undefined) {
+          if (entry.sequence !== 0 || entry.previousEntrySha256 !== null) invalid();
+        } else {
+          if (entry.sequence !== prior.sequence + 1) invalid();
+          if (entry.previousEntrySha256 !== prior.entrySha256) invalid();
+          if (entry.operation !== prior.operation) invalid();
+        }
+        latestByTransaction.set(entry.transactionId, entry);
+      }
+      const heads = [...latestByTransaction.entries()]
+        .sort(([left], [right]) => {
+          if (left < right) return -1;
+          if (left > right) return 1;
+          return 0;
+        })
+        .map(([, entry]) => structuredClone(entry));
+      const bytes = Buffer.from(
+        store.journal.map((entry) => `${JSON.stringify(entry)}\n`).join(''),
+        'utf8',
+      );
+      counters.readJournalHeads += 1;
+      counters.journal += 1;
+      recordAdapterCall('read-journal-heads');
+      recordSimpleEvent('journal');
+      return deepFreeze({
+        kind: 'journal-heads',
+        journalSha256: sha256Hex(bytes),
+        heads,
+      });
+    },
+
+    async readJournal(input) {
+      const fields = readExactObject(input, ['transactionId']);
+      const transactionId = requireUuid(fields.transactionId);
+      counters.readJournal += 1;
+      counters.journal += 1;
+      recordAdapterCall('read-journal');
+      recordSimpleEvent('journal');
+      return deepFreeze(store.journal.filter((e) => e.transactionId === transactionId));
+    },
+
+    async appendJournal(input) {
+      const fields = readExactObject(input, ['entry', 'expectedPrior', 'writerLockRef']);
+      const entry = validateJournalEntryShape(fields.entry);
+      verifyWriterLockRef(fields.writerLockRef, entry.transactionId);
+      recordAdapterCall('append-journal');
+      const latest = latestJournalEntry(entry.transactionId);
+      if (latest === null) {
+        if (fields.expectedPrior !== null) invalid();
+        if (entry.sequence !== 0 || entry.previousEntrySha256 !== null) invalid();
+      } else {
+        const prior = readExactObject(fields.expectedPrior, [
+          'transactionId', 'sequence', 'entrySha256',
+        ]);
+        if (prior.transactionId !== latest.transactionId) invalid();
+        if (prior.sequence !== latest.sequence) invalid();
+        if (prior.entrySha256 !== latest.entrySha256) invalid();
+        if (entry.sequence !== latest.sequence + 1) invalid();
+        if (entry.previousEntrySha256 !== latest.entrySha256) invalid();
+        if (entry.operation !== latest.operation) invalid();
+      }
+
+      const compensateMatch = entry.state.match(COMPENSATION_STATE_PATTERN);
+      if (compensateMatch) {
+        if (!COMPENSATION_ACTION_SET.has(compensateMatch[1])) {
+          throw harnessError(`unknown compensation action: ${compensateMatch[1]}`);
+        }
+        if (!COMPENSATION_PHASE_SET.has(compensateMatch[2])) {
+          throw harnessError(`unknown compensation phase: ${compensateMatch[2]}`);
+        }
+      }
+
+      store.journal.push(deepFreeze({ ...entry, payload: deepFreeze({ ...entry.payload }) }));
+      counters.journal += 1;
+      if (compensateMatch) {
+        recordCompensationEvent(compensateMatch[1], compensateMatch[2]);
+      } else {
+        recordSimpleEvent('journal');
+      }
+      return deepFreeze({
+        kind: 'journal-entry',
+        transactionId: entry.transactionId,
+        sequence: entry.sequence,
+        entrySha256: entry.entrySha256,
+      });
+    },
+
+    async writeCandidate(input) {
+      const fields = readExactObject(input, ['transactionId', 'role', 'bytes']);
+      const transactionId = requireUuid(fields.transactionId);
+      const role = fields.role;
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') invalid();
+      if (!Buffer.isBuffer(fields.bytes) || fields.bytes.byteLength === 0) invalid();
+      const bytes = Buffer.from(fields.bytes);
+      const digest = sha256Hex(bytes);
+      const key = `${transactionId}:${role}`;
+      if (candidates.has(key)) invalid();
+      candidates.set(key, { bytes, sha256: digest, role, transactionId });
+      recordAdapterCall('write-candidate', role);
+      counters.writeCandidate += 1;
+      // store 契约：kind 为 candidate（非 launchagent-candidate）
+      return deepFreeze({
+        kind: 'candidate',
+        transactionId,
+        role,
+        sha256: digest,
+      });
+    },
+
+    async readCandidate(ref) {
+      const fields = readExactObject(ref, ['kind', 'transactionId', 'role', 'sha256']);
+      if (fields.kind !== 'candidate') invalid();
+      requireUuid(fields.transactionId);
+      if (
+        fields.role !== 'controller'
+        && fields.role !== 'scheduler'
+        && fields.role !== 'manifest'
+      ) {
+        invalid();
+      }
+      requireSha256(fields.sha256);
+      const staged = candidates.get(`${fields.transactionId}:${fields.role}`);
+      if (!staged || staged.sha256 !== fields.sha256) invalid();
+      counters.readCandidate += 1;
+      return Buffer.from(staged.bytes);
+    },
+
+    async writeAnchor(anchor) {
+      const selectedAnchor = nextAnchorOverride === null
+        ? anchor
+        : structuredClone(nextAnchorOverride);
+      nextAnchorOverride = null;
+      if (selectedAnchor === null || typeof selectedAnchor !== 'object') invalid();
+      if (Object.getPrototypeOf(selectedAnchor) !== Object.prototype) invalid();
+      recordAdapterCall('write-anchor');
+      const projection = validateLaunchAgentAnchor(selectedAnchor);
+      const anchorId = requireUuid(projection.anchorId);
+      if (store.anchors.has(anchorId)) invalid();
+      counters.anchor += 1;
+      recordSimpleEvent('anchor');
+      const snapshot = deepFreeze(structuredClone(projection));
+      store.anchors.set(anchorId, snapshot);
+      return deepFreeze({
+        kind: 'anchor',
+        anchorId,
+        sha256: sha256Hex(Buffer.from(JSON.stringify(snapshot), 'utf8')),
+      });
+    },
+
+    async readAnchor(anchorIdInput) {
+      const anchorId = requireUuid(anchorIdInput);
+      counters.readAnchor += 1;
+      recordAdapterCall('read-anchor');
+      const snapshot = store.anchors.get(anchorId);
+      if (!snapshot) invalid();
+      return deepFreeze(structuredClone(snapshot));
+    },
+
+    async acquireTransactionLock(record) {
+      const projection = validateLockRecord(record);
+      recordAdapterCall('lock-acquire');
+      recordSimpleEvent('lock-acquire');
+      if (store.manualInterventionLock !== null) coded(CODE_MIR);
+      if (store.transactionLock !== null) coded(CODE_TX);
+      store.transactionLock = projection;
+      return deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: projection.transactionId,
+        ownerNonce: projection.ownerNonce,
+        sha256: lockSha256(projection),
+      });
+    },
+
+    async verifyTransactionLock(ref) {
+      if (!lockRefMatches(store.transactionLock, ref, 'transaction-lock')) invalid();
+      counters.lockVerify += 1;
+      recordAdapterCall('lock-verify');
+      return true;
+    },
+
+    async releaseTransactionLock(ref, options) {
+      if (arguments.length > 1) {
+        const optFields = readExactObject(options, ['manualInterventionLockRef']);
+        if (!lockRefMatches(store.transactionLock, ref, 'transaction-lock')) invalid();
+        if (
+          !lockRefMatches(
+            store.manualInterventionLock,
+            optFields.manualInterventionLockRef,
+            'manual-intervention-lock',
+          )
+        ) {
+          invalid();
+        }
+        if (store.transactionLock.transactionId !== store.manualInterventionLock.transactionId) {
+          invalid();
+        }
+        const latest = latestJournalEntry(store.transactionLock.transactionId);
+        if (latest === null || latest.state !== 'manual-intervention-required') invalid();
+        recordSimpleEvent('mir-transaction-lock-release');
+        store.transactionLock = null;
+        return true;
+      }
+      if (!lockRefMatches(store.transactionLock, ref, 'transaction-lock')) invalid();
+      const transactionId = store.transactionLock.transactionId;
+      const latest = latestJournalEntry(transactionId);
+      if (latest === null || !TERMINAL_JOURNAL_STATES.has(latest.state)) invalid();
+      const receipt = store.receipts.get(transactionId);
+      if (!receipt) invalid();
+      assertReceiptAlignedWithTerminal(receipt.projection, receipt.sha256, latest);
+      recordSimpleEvent('lock-release');
+      store.transactionLock = null;
+      return true;
+    },
+
+    async acquireManualInterventionLock(record) {
+      const projection = validateLockRecord(record);
+      recordSimpleEvent('mir-lock-publish');
+      if (store.transactionLock === null) invalid();
+      if (store.transactionLock.transactionId !== projection.transactionId) invalid();
+      if (store.transactionLock.ownerNonce === projection.ownerNonce) invalid();
+      if (store.manualInterventionLock !== null) coded(CODE_MIR);
+      store.manualInterventionLock = projection;
+      return deepFreeze({
+        kind: 'manual-intervention-lock',
+        transactionId: projection.transactionId,
+        ownerNonce: projection.ownerNonce,
+        sha256: lockSha256(projection),
+      });
+    },
+
+    async verifyManualInterventionLock(ref) {
+      recordSimpleEvent('mir-lock-verify');
+      if (!lockRefMatches(store.manualInterventionLock, ref, 'manual-intervention-lock')) {
+        invalid();
+      }
+      return true;
+    },
+
+    async publishReceipt(input) {
+      const fields = readExactObject(input, ['receipt', 'lockRef']);
+      const projection = validateLaunchAgentReceipt(fields.receipt);
+      if (!TERMINAL_JOURNAL_STATES.has(projection.state)) invalid();
+      const receiptSha = sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8'));
+      verifyWriterLockRef(fields.lockRef, projection.transactionId);
+      const latest = latestJournalEntry(projection.transactionId);
+      if (latest === null) invalid();
+      assertReceiptAlignedWithTerminal(projection, receiptSha, latest);
+      if (store.receipts.has(projection.transactionId)) invalid();
+      counters.receipt += 1;
+      recordSimpleEvent('receipt');
+      store.receipts.set(projection.transactionId, { projection, sha256: receiptSha });
+      return deepFreeze({
+        kind: 'receipt',
+        transactionId: projection.transactionId,
+        sha256: receiptSha,
+      });
+    },
+
+    async readReceipt(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      recordAdapterCall('read-receipt');
+      const stored = store.receipts.get(transactionId);
+      if (!stored) invalid();
+      counters.receipt += 1;
+      return stored.projection;
+    },
+  });
+
+  const dependencies = Object.freeze({
+    metadataStore,
+    hostInspector,
+    profileRenderer,
+    plistValidator,
+    atomicPublisher,
+    launchctlRunner,
+    healthChecker,
+    clock,
+  });
+
+  function hostMutationCount() {
+    return counters.publish + counters.remove + counters.bootout + counters.bootstrap;
+  }
+
+  function seedJournalAndReceipt({ transactionId, anchorId, sourceCommit }) {
+    const prepared = {
+      schemaVersion: 1,
+      transactionId,
+      sequence: 0,
+      previousEntrySha256: null,
+      operation: 'install',
+      state: 'prepared',
+      at: nowIso(),
+      payload: { hostMutationCount: 0 },
+    };
+    prepared.entrySha256 = computeJournalEntrySha256(prepared);
+    const receipt = validateLaunchAgentReceipt({
+      schemaVersion: 1,
+      operation: 'install',
+      state: 'committed',
+      success: true,
+      sourceCommit,
+      transactionId,
+      anchorId,
+      completedAt: nowIso(),
+      roles: {
+        controller: { label: LABELS.controller, outcome: 'created', changed: true },
+        scheduler: { label: LABELS.scheduler, outcome: 'created', changed: true },
+      },
+      hostMutationCount: 5,
+      outcome: 'completed',
+    });
+    const receiptSha = sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8'));
+    const committed = {
+      schemaVersion: 1,
+      transactionId,
+      sequence: 1,
+      previousEntrySha256: prepared.entrySha256,
+      operation: 'install',
+      state: 'committed',
+      at: nowIso(),
+      payload: { hostMutationCount: 5, receiptSha256: receiptSha },
+    };
+    committed.entrySha256 = computeJournalEntrySha256(committed);
+    store.journal.push(
+      deepFreeze(validateJournalEntryShape(prepared)),
+      deepFreeze(validateJournalEntryShape(committed)),
+    );
+    store.receipts.set(transactionId, { projection: receipt, sha256: receiptSha });
+  }
+
+  function anchorEntryFor(role) {
+    const bytes = harness.fileBytes(role);
+    const identity = currentFileIdentity(role);
+    if (bytes === null || identity === null) {
+      throw harnessError(`cannot build anchor entry for absent role: ${role}`);
+    }
+    return {
+      priorState: 'bytes',
+      bytesBase64: bytes.toString('base64'),
+      sha256: identity.sha256,
+      identity: {
+        rootId: role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS,
+        basename: FILENAMES[role],
+        type: 'regular-file',
+        ownerUid: FIXED_UID,
+        device: identity.device,
+        inode: identity.inode,
+        sha256: identity.sha256,
+      },
+    };
+  }
+
+  const harness = {
+    dependencies() {
+      return dependencies;
+    },
+
+    /** Task 4 工厂契约：精确 key 与精确 method（不含 Task 5 mir-lock-release）。 */
+    factoryContract() {
+      return deepFreeze({
+        keys: [
+          'metadataStore', 'hostInspector', 'profileRenderer', 'plistValidator',
+          'atomicPublisher', 'launchctlRunner', 'healthChecker', 'clock',
+        ],
+        methods: {
+          metadataStore: [
+            'readJournalHeads', 'readJournal', 'appendJournal',
+            'writeCandidate', 'readCandidate',
+            'writeAnchor', 'readAnchor',
+            'acquireTransactionLock', 'verifyTransactionLock', 'releaseTransactionLock',
+            'acquireManualInterventionLock', 'verifyManualInterventionLock',
+            'publishReceipt', 'readReceipt',
+          ],
+          hostInspector: ['inspect', 'read', 'launchctlHostFacts'],
+          profileRenderer: ['render', 'revalidate'],
+          plistValidator: ['validate'],
+          atomicPublisher: ['publishAbsent', 'replaceIfMatch', 'removeIfMatch'],
+          launchctlRunner: ['run'],
+          healthChecker: ['check'],
+          clock: ['now', 'newId'],
+        },
+      });
+    },
+
+    trace() {
+      return deepFreeze([...trace]);
+    },
+
+    adapterCalls() {
+      return deepFreeze(adapterCalls.map((call) => ({ ...call })));
+    },
+
+    compensationEvents() {
+      return deepFreeze(
+        trace.filter((e) => typeof e === 'object' && e.kind === 'compensation'),
+      );
+    },
+
+    journalStates(transactionId) {
+      return deepFreeze(
+        store.journal.filter((e) => e.transactionId === transactionId).map((e) => e.state),
+      );
+    },
+
+    journalEntries(transactionId) {
+      return deepFreeze(
+        store.journal
+          .filter((e) => e.transactionId === transactionId)
+          .map((e) => structuredClone(e)),
+      );
+    },
+
+    journalTransactionIds() {
+      return deepFreeze([...new Set(store.journal.map((entry) => entry.transactionId))].sort());
+    },
+
+    receiptTransactionIds() {
+      return deepFreeze([...store.receipts.keys()].sort());
+    },
+
+    deleteReceiptFor(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      if (!store.receipts.delete(transactionId)) {
+        throw harnessError('cannot delete missing receipt');
+      }
+    },
+
+    deleteAnchorFor(anchorIdInput) {
+      const anchorId = requireUuid(anchorIdInput);
+      if (!store.anchors.delete(anchorId)) {
+        throw harnessError('cannot delete missing anchor');
+      }
+    },
+
+    corruptLatestJournalLink() {
+      if (store.journal.length < 2) {
+        throw harnessError('cannot corrupt journal chain shorter than two entries');
+      }
+      const index = store.journal.length - 1;
+      const latest = structuredClone(store.journal[index]);
+      if (latest.previousEntrySha256 === null) {
+        throw harnessError('latest journal entry has no prior link');
+      }
+      latest.previousEntrySha256 = latest.previousEntrySha256 === 'f'.repeat(64)
+        ? 'e'.repeat(64)
+        : 'f'.repeat(64);
+      store.journal[index] = deepFreeze(latest);
+    },
+
+    misalignReceiptHashFor(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      const stored = store.receipts.get(transactionId);
+      if (!stored) throw harnessError('cannot misalign missing receipt');
+      const sourceCommit = stored.projection.sourceCommit === 'a'.repeat(40)
+        ? 'b'.repeat(40)
+        : 'a'.repeat(40);
+      const projection = validateLaunchAgentReceipt({
+        ...structuredClone(stored.projection),
+        sourceCommit,
+      });
+      const sha256 = sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8'));
+      if (sha256 === stored.sha256) throw harnessError('receipt hash did not change');
+      store.receipts.set(transactionId, { projection, sha256 });
+      return deepFreeze({ transactionId, sha256 });
+    },
+
+    hostSnapshot() {
+      const fileInfo = (role) => {
+        const identity = currentFileIdentity(role);
+        return identity === null ? null : deepFreeze(identity);
+      };
+      return deepFreeze({
+        controller: fileInfo('controller'),
+        scheduler: fileInfo('scheduler'),
+        manifest: fileInfo('manifest'),
+        loaded: { ...state.loaded },
+        jobIdentity: { ...state.jobIdentity },
+        health: { ...state.health },
+      });
+    },
+
+    sentinels() {
+      return deepFreeze({
+        ...counters,
+        hostMutationCount: hostMutationCount(),
+        realLaunchctlCalls: 0,
+        revalidateMarks: [...revalidateMarks],
+      });
+    },
+
+    lockState() {
+      return deepFreeze({
+        transactionLock: store.transactionLock !== null,
+        manualInterventionLock: store.manualInterventionLock !== null,
+      });
+    },
+
+    receiptFor(transactionId) {
+      const stored = store.receipts.get(transactionId);
+      return stored ? stored.projection : null;
+    },
+
+    anchorFor(anchorId) {
+      const snapshot = store.anchors.get(anchorId);
+      return snapshot ? deepFreeze(structuredClone(snapshot)) : null;
+    },
+
+    anchorsWritten() {
+      return deepFreeze([...store.anchors.values()].map((a) => structuredClone(a)));
+    },
+
+    candidatesWritten() {
+      return deepFreeze([...candidates.values()].map((c) => ({
+        kind: 'candidate',
+        transactionId: c.transactionId,
+        role: c.role,
+        sha256: c.sha256,
+      })));
+    },
+
+    publishedCandidateRefs() {
+      return deepFreeze(publishedCandidateRefs.map((ref) => ({ ...ref })));
+    },
+
+    atomicExpectedAttempts() {
+      return deepFreeze(atomicExpectedAttempts.map((attempt) => ({
+        ...attempt,
+        keys: [...attempt.keys],
+      })));
+    },
+
+    fileBytes(role) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown file role: ${String(role)}`);
+      }
+      const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+      const file = files.get(fileKey(rootId, FILENAMES[role]));
+      return file ? Buffer.from(file.bytes) : null;
+    },
+
+    seedInstalled(options = {}) {
+      if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+        throw harnessError('seedInstalled options must be a plain object');
+      }
+      const allowedKeys = new Set([
+        'sourceCommit', 'scheduleSeconds', 'controllerEnvironment', 'loaded', 'foreign',
+      ]);
+      for (const key of Reflect.ownKeys(options)) {
+        if (typeof key !== 'string' || !allowedKeys.has(key)) {
+          throw harnessError(`seedInstalled unknown key: ${String(key)}`);
+        }
+      }
+      const sourceCommit = options.sourceCommit ?? '0'.repeat(40);
+      const scheduleSeconds = options.scheduleSeconds ?? 300;
+      const controllerEnvironment = options.controllerEnvironment ?? {};
+      const loaded = options.loaded ?? { controller: true, scheduler: true };
+      const foreign = options.foreign ?? { controller: false, scheduler: false };
+      if (typeof sourceCommit !== 'string' || !COMMIT_RE.test(sourceCommit)) {
+        throw harnessError('seedInstalled sourceCommit must be 40 lowercase hex');
+      }
+      if (!Number.isSafeInteger(scheduleSeconds)) {
+        throw harnessError('seedInstalled scheduleSeconds must be an integer');
+      }
+      for (const [name, pair] of [['loaded', loaded], ['foreign', foreign]]) {
+        const pairFields = readExactObject(pair, ['controller', 'scheduler']);
+        if (typeof pairFields.controller !== 'boolean' || typeof pairFields.scheduler !== 'boolean') {
+          throw harnessError(`seedInstalled ${name} must be exact booleans`);
+        }
+      }
+
+      const profiles = makeProfiles(
+        scheduleSeconds,
+        controllerEnvironment,
+        state.runtimeArtifacts,
+      );
+      placeFile('controller', profiles.controller.plistBytes);
+      placeFile('scheduler', profiles.scheduler.plistBytes);
+
+      const seedTransactionId = nextUuid();
+      const seedAnchorId = nextUuid();
+      const installationId = nextUuid();
+      const manifest = validateLaunchAgentManifest({
+        schemaVersion: 1,
+        installationId,
+        scope: LAUNCHAGENT_LIFECYCLE.scope,
+        sourceCommit,
+        runtimeArtifacts: profiles.manifestRuntimeArtifacts,
+        transactionId: seedTransactionId,
+        controller: {
+          label: LABELS.controller,
+          filename: FILENAMES.controller,
+          plistSha256: profiles.controller.plistSha256,
+        },
+        scheduler: {
+          label: LABELS.scheduler,
+          filename: FILENAMES.scheduler,
+          plistSha256: profiles.scheduler.plistSha256,
+        },
+        activeAnchorId: seedAnchorId,
+        installedAt: nowIso(),
+      });
+      const manifestBytes = Buffer.from(JSON.stringify(manifest), 'utf8');
+      placeFile('manifest', manifestBytes);
+
+      const seedAnchor = validateLaunchAgentAnchor({
+        schemaVersion: 1,
+        anchorId: seedAnchorId,
+        parentAnchorId: null,
+        transactionId: seedTransactionId,
+        sourceCommit,
+        purpose: 'first-install',
+        rollbackFromManifestSha256: null,
+        restoreManifestSha256: null,
+        controller: { priorState: 'absent' },
+        scheduler: { priorState: 'absent' },
+        manifest: { priorState: 'absent' },
+        loaded: { controller: false, scheduler: false },
+        createdAt: nowIso(),
+      });
+      store.anchors.set(seedAnchorId, deepFreeze(structuredClone(seedAnchor)));
+      seedJournalAndReceipt({
+        transactionId: seedTransactionId,
+        anchorId: seedAnchorId,
+        sourceCommit,
+      });
+
+      for (const role of ['controller', 'scheduler']) {
+        state.loaded[role] = loaded[role];
+        state.foreignJob[role] = foreign[role];
+        state.jobIdentity[role] = loaded[role]
+          ? (foreign[role] ? 'f'.repeat(64) : computeJobIdentity(role))
+          : null;
+      }
+      state.health = { statusCode: 200, ready: true, count: 0 };
+      state.schedulerOutcome = 'ok';
+      state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
+
+      return deepFreeze({
+        sourceCommit,
+        scheduleSeconds,
+        controllerEnvironment: { ...controllerEnvironment },
+        controllerBytes: Buffer.from(profiles.controller.plistBytes),
+        schedulerBytes: Buffer.from(profiles.scheduler.plistBytes),
+        manifestBytes: Buffer.from(manifestBytes),
+        controllerSha256: profiles.controller.plistSha256,
+        schedulerSha256: profiles.scheduler.plistSha256,
+        manifestSha256: sha256Hex(manifestBytes),
+        installationId,
+        anchorId: seedAnchorId,
+        transactionId: seedTransactionId,
+      });
+    },
+
+    seedForeignNonterminalHead(input) {
+      const fields = readExactObject(input, ['transactionId', 'operation', 'state']);
+      const transactionId = requireUuid(fields.transactionId);
+      if (store.journal.some((entry) => entry.transactionId === transactionId)) {
+        throw harnessError('foreign transactionId already exists');
+      }
+      if (typeof fields.operation !== 'string' || fields.operation.length === 0) invalid();
+      if (
+        typeof fields.state !== 'string'
+        || fields.state.length === 0
+        || TERMINAL_JOURNAL_STATES.has(fields.state)
+      ) {
+        invalid();
+      }
+      const entry = {
+        schemaVersion: 1,
+        transactionId,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: fields.operation,
+        state: fields.state,
+        at: nowIso(),
+        payload: { hostMutationCount: 0 },
+      };
+      entry.entrySha256 = computeJournalEntrySha256(entry);
+      const projection = validateJournalEntryShape(entry);
+      store.journal.push(deepFreeze({ ...projection, payload: deepFreeze({ ...projection.payload }) }));
+      return deepFreeze(structuredClone(projection));
+    },
+
+    plausibleInvalidStopAnchor(sourceCommit) {
+      if (typeof sourceCommit !== 'string' || !COMMIT_RE.test(sourceCommit)) {
+        throw harnessError('stop anchor sourceCommit must be 40 lowercase hex');
+      }
+      return deepFreeze({
+        schemaVersion: 1,
+        anchorId: nextUuid(),
+        parentAnchorId: null,
+        transactionId: nextUuid(),
+        sourceCommit,
+        purpose: 'stop',
+        rollbackFromManifestSha256: null,
+        restoreManifestSha256: null,
+        controller: anchorEntryFor('controller'),
+        scheduler: anchorEntryFor('scheduler'),
+        manifest: anchorEntryFor('manifest'),
+        loaded: { ...state.loaded },
+        createdAt: nowIso(),
+        unexpected: true,
+      });
+    },
+
+    overrideNextAnchor(anchor) {
+      if (anchor === null || typeof anchor !== 'object' || Object.getPrototypeOf(anchor) !== Object.prototype) {
+        throw harnessError('anchor override must be a plain object');
+      }
+      if (nextAnchorOverride !== null) throw harnessError('anchor override already pending');
+      nextAnchorOverride = structuredClone(anchor);
+    },
+
+    resetObservations() {
+      trace.length = 0;
+      adapterCalls.length = 0;
+      publishedCandidateRefs.length = 0;
+      atomicExpectedAttempts.length = 0;
+      failureOccurrences.clear();
+      eventCallCounts.clear();
+      state.invalidAtomicExpectations.clear();
+      state.publishedIdentityFaults.clear();
+      hooks.length = 0;
+      compensationHooks.length = 0;
+      revalidateMarks.length = 0;
+      for (const key of Object.keys(counters)) counters[key] = 0;
+      state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
+      state.lastRenderedRuntimeArtifacts = null;
+    },
+
+    failNext(eventName) {
+      if (!FAILABLE_EVENT_SET.has(eventName)) {
+        throw harnessError(`event is not failure-injectable: ${String(eventName)}`);
+      }
+      const nextCall = (eventCallCounts.get(eventName) ?? 0) + 1;
+      if (!failureOccurrences.has(eventName)) failureOccurrences.set(eventName, new Set());
+      failureOccurrences.get(eventName).add(nextCall);
+    },
+
+    failAt(eventName, occurrence) {
+      if (!FAILABLE_EVENT_SET.has(eventName)) {
+        throw harnessError(`event is not failure-injectable: ${String(eventName)}`);
+      }
+      if (!Number.isSafeInteger(occurrence) || occurrence <= 0) {
+        throw harnessError('failAt occurrence must be a positive integer');
+      }
+      if (!failureOccurrences.has(eventName)) failureOccurrences.set(eventName, new Set());
+      failureOccurrences.get(eventName).add(occurrence);
+    },
+
+    failNextRevalidation(reason) {
+      if (!REVALIDATION_REASONS.has(reason)) {
+        throw harnessError(`unknown revalidation reason: ${String(reason)}`);
+      }
+      if (state.revalidationFailures.has(reason)) {
+        throw harnessError(`revalidation failure already pending: ${reason}`);
+      }
+      state.revalidationFailures.add(reason);
+    },
+
+    queueClockIds(ids) {
+      if (!Array.isArray(ids) || ids.length === 0) {
+        throw harnessError('clock id queue must be a non-empty array');
+      }
+      if (queuedClockIds.length !== 0) {
+        throw harnessError('clock id queue already populated');
+      }
+      for (const id of ids) {
+        if (typeof id !== 'string' || !UUID_RE.test(id)) {
+          throw harnessError('clock id queue contains invalid uuid');
+        }
+      }
+      queuedClockIds.push(...ids);
+    },
+
+    enableStrictLaunchctlTransitions() {
+      state.strictLaunchctlTransitions = true;
+    },
+
+    failNextAtomicExpectedValidation(operation, role) {
+      if (operation !== 'replace' && operation !== 'remove') {
+        throw harnessError(`unknown atomic expectation operation: ${String(operation)}`);
+      }
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown atomic expectation role: ${String(role)}`);
+      }
+      const key = `${operation}:${role}`;
+      if (state.invalidAtomicExpectations.has(key)) {
+        throw harnessError(`atomic expectation failure already pending: ${key}`);
+      }
+      state.invalidAtomicExpectations.add(key);
+    },
+
+    corruptNextPublishedIdentityAfterMutation(role, fault) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown published identity role: ${String(role)}`);
+      }
+      if (fault !== 'bad-sha256' && fault !== 'three-field') {
+        throw harnessError(`unknown published identity fault: ${String(fault)}`);
+      }
+      if (state.publishedIdentityFaults.has(role)) {
+        throw harnessError(`published identity fault already pending: ${role}`);
+      }
+      state.publishedIdentityFaults.set(role, fault);
+    },
+
+    forgeNextReplaceSuccessWithoutMutation(role) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown forged replace role: ${String(role)}`);
+      }
+      if (state.forgedReplaceNoMutationRole !== null) {
+        throw harnessError('forged replace already pending');
+      }
+      state.forgedReplaceNoMutationRole = role;
+    },
+
+    setRuntimeArtifactSha256(role, sha256) {
+      if (role !== 'node' && role !== 'controller' && role !== 'agent') {
+        throw harnessError(`unknown runtime artifact role: ${String(role)}`);
+      }
+      if (typeof sha256 !== 'string' || !SHA_RE.test(sha256)) {
+        throw harnessError('runtime artifact sha256 must be 64 lowercase hex');
+      }
+      state.runtimeArtifacts[role] = {
+        ...state.runtimeArtifacts[role],
+        sha256,
+      };
+    },
+
+    seedLoadedJob(role, options = {}) {
+      if (role !== 'controller' && role !== 'scheduler') {
+        throw harnessError(`unknown loaded-job role: ${String(role)}`);
+      }
+      const foreign = options.foreign ?? false;
+      if (typeof foreign !== 'boolean') throw harnessError('seedLoadedJob foreign must be boolean');
+      state.loaded[role] = true;
+      state.foreignJob[role] = foreign;
+      state.jobIdentity[role] = foreign ? 'f'.repeat(64) : computeJobIdentity(role);
+    },
+
+    setProbeMode(role, mode) {
+      if (role !== 'controller' && role !== 'scheduler') {
+        throw harnessError(`unknown probe role: ${String(role)}`);
+      }
+      if (mode !== 'normal' && mode !== 'unknown') {
+        throw harnessError(`unknown probe mode: ${String(mode)}`);
+      }
+      state.probeMode[role] = mode;
+    },
+
+    setPlistLintValid(role, valid) {
+      if (role !== 'controller' && role !== 'scheduler') {
+        throw harnessError(`unknown plist role: ${String(role)}`);
+      }
+      if (typeof valid !== 'boolean') throw harnessError('plist lint valid must be boolean');
+      state.plistLintValid[role] = valid;
+    },
+
+    afterEvent(eventName, fn) {
+      if (!SIMPLE_EVENT_SET.has(eventName)) {
+        throw harnessError(`cannot hook unknown event: ${String(eventName)}`);
+      }
+      if (typeof fn !== 'function') throw harnessError('hook must be a function');
+      hooks.push({ eventName, fn });
+    },
+
+    afterCompensationEvent(action, phase, fn) {
+      if (!COMPENSATION_ACTION_SET.has(action)) {
+        throw harnessError(`unknown compensation action: ${String(action)}`);
+      }
+      if (!COMPENSATION_PHASE_SET.has(phase)) {
+        throw harnessError(`unknown compensation phase: ${String(phase)}`);
+      }
+      if (typeof fn !== 'function') throw harnessError('hook must be a function');
+      compensationHooks.push({ action, phase, fn });
+    },
+
+    driftHostFile(role) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown drift role: ${String(role)}`);
+      }
+      const existing = harness.fileBytes(role);
+      if (existing === null) throw harnessError(`cannot drift absent file: ${role}`);
+      placeFile(role, Buffer.concat([existing, Buffer.from('\n# harness-drift', 'utf8')]));
+    },
+
+    sha256(bytes) {
+      return sha256Hex(Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8'));
+    },
+
+    /** 供测试构造 launchctl request 的合成路径（不进入 receipt）。 */
+    syntheticResolvedPath(role) {
+      if (role !== 'controller' && role !== 'scheduler') {
+        throw harnessError(`unknown role: ${String(role)}`);
+      }
+      return resolvedPathFor(role);
+    },
+
+    fixedUid() {
+      return FIXED_UID;
+    },
+  };
+
+  return Object.freeze(harness);
+}
