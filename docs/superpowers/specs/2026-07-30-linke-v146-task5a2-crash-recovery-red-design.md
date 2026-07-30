@@ -222,12 +222,12 @@ revived.preProveRecoveryLockRelease({ transactionId });
 
 它只能：
 
-1. 验证 revived stale transaction lock、latest nonterminal journal 与 `transactionId` 精确一致。
-2. 验证 MIR journal/mir-lock 不存在。
+1. 验证 revived stale transaction lock、latest recoverable journal 与 `transactionId` 精确一致。latest 可以是普通 nonterminal，也可以是 terminal journal 已落盘但 receipt 缺失/冲突，或精确 receipt 已发布但 stale lock 尚未释放的 terminal-publication 窗口。
+2. 验证 latest 不是 `manual-intervention-required`，且 MIR journal/mir-lock 不存在。
 3. 以 module-private test capability 将 fake stale lock 标为“已由未来 Step 7 证明并条件释放”。
 4. 写入固定 trace `recovery-lock-seam`，host mutation count 保持 0。
 
-它不得修改 journal、anchor、candidate、receipt、host file 或 loaded/job state。接缝后，生产 `recover()` 仍必须通过现有 `acquireTransactionLock` / `verifyTransactionLock` 获取新的 recovery transaction lock。Step 4 不得因此声称真实孤儿 takeover 已验证。
+它不得把“任意已完成事务”变成可恢复状态：只有匹配 stale lock 的 transaction 才可进入接缝；没有 stale lock 的普通 closed transaction 保持只读幂等返回。它也不得修改 journal、anchor、candidate、receipt、host file 或 loaded/job state。接缝后，生产 `recover()` 仍必须通过现有 `acquireTransactionLock` / `verifyTransactionLock` 获取新的 recovery transaction lock。Step 4 不得因此声称真实孤儿 takeover 已验证。
 
 ## 6. 恢复数据流
 
