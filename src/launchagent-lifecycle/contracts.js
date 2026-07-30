@@ -368,8 +368,15 @@ const JOURNAL_STATES = new Set([
   'scheduler-stopped',
   'controller-stop-intent',
   'controller-stopped',
+  'controller-remove-intent',
+  'controller-removed',
+  'scheduler-remove-intent',
+  'scheduler-removed',
+  'manifest-remove-intent',
+  'manifest-removed',
   'role-noop',
   'role-stop-noop',
+  'role-load-noop',
 ]);
 
 const CHECKPOINT_ROLES = new Map([
@@ -385,8 +392,15 @@ const CHECKPOINT_ROLES = new Map([
   ['scheduler-stopped', new Set(['scheduler'])],
   ['controller-stop-intent', new Set(['controller'])],
   ['controller-stopped', new Set(['controller'])],
+  ['controller-remove-intent', new Set(['controller'])],
+  ['controller-removed', new Set(['controller'])],
+  ['scheduler-remove-intent', new Set(['scheduler'])],
+  ['scheduler-removed', new Set(['scheduler'])],
+  ['manifest-remove-intent', new Set(['manifest'])],
+  ['manifest-removed', new Set(['manifest'])],
   ['role-noop', new Set(['controller', 'scheduler'])],
   ['role-stop-noop', new Set(['controller', 'scheduler'])],
+  ['role-load-noop', new Set(['controller', 'scheduler'])],
 ]);
 const COMPENSATION_ACTIONS = new Set([
   'remove-controller', 'remove-scheduler', 'remove-manifest',
@@ -881,6 +895,100 @@ function isExactForwardTransition(operation, prior, entry) {
     if (from === 'controller-stop-intent') return to === 'controller-stopped';
     return false;
   }
+  if (operation === 'rollback') {
+    if (from === 'prepared') return to === 'anchored';
+    if (from === 'anchored') {
+      return (to === 'scheduler-stop-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-stop-intent') return to === 'scheduler-stopped';
+    if (
+      from === 'scheduler-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return (to === 'controller-stop-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-stop-intent') return to === 'controller-stopped';
+    if (
+      from === 'controller-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return (to === 'controller-publish-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'controller-remove-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-publish-intent') return to === 'controller-published';
+    if (from === 'controller-remove-intent') return to === 'controller-removed';
+    if (
+      from === 'controller-published'
+      || from === 'controller-removed'
+      || (from === 'role-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return (to === 'scheduler-publish-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'scheduler-remove-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-publish-intent') return to === 'scheduler-published';
+    if (from === 'scheduler-remove-intent') return to === 'scheduler-removed';
+    if (
+      from === 'scheduler-published'
+      || from === 'scheduler-removed'
+      || (from === 'role-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return (to === 'manifest-publish-intent' && checkpointRole(entry, 'manifest'))
+        || (to === 'manifest-remove-intent' && checkpointRole(entry, 'manifest'));
+    }
+    if (from === 'manifest-publish-intent') return to === 'manifest-published';
+    if (from === 'manifest-remove-intent') return to === 'manifest-removed';
+    if (from === 'manifest-published') {
+      return (to === 'controller-load-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-load-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-load-intent') return to === 'controller-loaded';
+    if (from === 'controller-loaded') return to === 'controller-ready';
+    if (
+      from === 'controller-ready'
+      || (from === 'role-load-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return (to === 'scheduler-load-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-load-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-load-intent') return to === 'scheduler-loaded';
+    return false;
+  }
+  if (operation === 'uninstall') {
+    if (from === 'prepared') return to === 'anchored';
+    if (from === 'anchored') {
+      return (to === 'scheduler-stop-intent' && checkpointRole(entry, 'scheduler'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'scheduler'));
+    }
+    if (from === 'scheduler-stop-intent') return to === 'scheduler-stopped';
+    if (
+      from === 'scheduler-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'scheduler'))
+    ) {
+      return (to === 'controller-stop-intent' && checkpointRole(entry, 'controller'))
+        || (to === 'role-stop-noop' && checkpointRole(entry, 'controller'));
+    }
+    if (from === 'controller-stop-intent') return to === 'controller-stopped';
+    if (
+      from === 'controller-stopped'
+      || (from === 'role-stop-noop' && checkpointRole(prior, 'controller'))
+    ) {
+      return to === 'scheduler-remove-intent' && checkpointRole(entry, 'scheduler');
+    }
+    if (from === 'scheduler-remove-intent') return to === 'scheduler-removed';
+    if (from === 'scheduler-removed') {
+      return to === 'controller-remove-intent' && checkpointRole(entry, 'controller');
+    }
+    if (from === 'controller-remove-intent') return to === 'controller-removed';
+    if (from === 'controller-removed') {
+      return to === 'manifest-remove-intent' && checkpointRole(entry, 'manifest');
+    }
+    if (from === 'manifest-remove-intent') return to === 'manifest-removed';
+    return false;
+  }
   return false;
 }
 
@@ -905,9 +1013,20 @@ function isValidTerminalTransition(operation, prior, entry) {
       return prior.state === 'controller-stopped'
         || (prior.state === 'role-stop-noop' && checkpointRole(prior, 'controller'));
     }
+    if (operation === 'rollback') {
+      return prior.state === 'scheduler-loaded'
+        || (prior.state === 'role-load-noop' && checkpointRole(prior, 'scheduler'))
+        || prior.state === 'manifest-removed';
+    }
+    if (operation === 'uninstall') return prior.state === 'manifest-removed';
   }
   if (entry.state === 'recovered' && operation === 'stop') {
     return prior.state === 'scheduler-stop-intent' || prior.state === 'controller-stop-intent';
+  }
+  if (entry.state === 'recovered' && (operation === 'rollback' || operation === 'uninstall')) {
+    return prior.state === 'anchored'
+      || prior.state === 'scheduler-stop-intent'
+      || prior.state === 'controller-stop-intent';
   }
   return false;
 }

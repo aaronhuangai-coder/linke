@@ -185,6 +185,14 @@ function validateStopInput(value) {
   return deepFreeze({ sourceCommit: requireCommit(fields.sourceCommit) });
 }
 
+function validateRollbackInput(value) {
+  const fields = readExactObject(value, ['sourceCommit', 'targetAnchorId']);
+  return deepFreeze({
+    sourceCommit: requireCommit(fields.sourceCommit),
+    targetAnchorId: requireUuid(fields.targetAnchorId),
+  });
+}
+
 function journalEntrySha256(entry) {
   return sha256Hex(Buffer.from(JSON.stringify({
     schemaVersion: entry.schemaVersion,
@@ -633,6 +641,59 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
   }
 
+  function anchorBytes(anchor, role) {
+    const entry = anchor[role];
+    if (entry.priorState !== 'bytes') return null;
+    const bytes = Buffer.from(entry.bytesBase64, 'base64');
+    if (sha256Hex(bytes) !== entry.sha256) invalid();
+    return bytes;
+  }
+
+  function validateRollbackTarget(target, snapshot, manifest, targetAnchorId) {
+    if (
+      target.anchorId !== targetAnchorId
+      || manifest.activeAnchorId !== targetAnchorId
+      || target.rollbackFromManifestSha256 !== snapshot.identities.manifest.sha256
+    ) {
+      return null;
+    }
+    if (target.manifest.priorState === 'absent') {
+      if (
+        target.restoreManifestSha256 !== null
+        || target.parentAnchorId !== null
+        || target.controller.priorState !== 'absent'
+        || target.scheduler.priorState !== 'absent'
+        || target.loaded.controller
+        || target.loaded.scheduler
+      ) {
+        return null;
+      }
+      return { manifest: null, bytes: null };
+    }
+    if (
+      target.controller.priorState !== 'bytes'
+      || target.scheduler.priorState !== 'bytes'
+      || target.restoreManifestSha256 !== target.manifest.sha256
+      || target.parentAnchorId === null
+    ) {
+      return null;
+    }
+    try {
+      const bytes = anchorBytes(target, 'manifest');
+      const restored = validateLaunchAgentManifest(JSON.parse(bytes.toString('utf8')));
+      if (
+        restored.activeAnchorId !== target.parentAnchorId
+        || restored.controller.plistSha256 !== target.controller.sha256
+        || restored.scheduler.plistSha256 !== target.scheduler.sha256
+      ) {
+        return null;
+      }
+      return { manifest: restored, bytes };
+    } catch {
+      return null;
+    }
+  }
+
   function anchorEntry(snapshot, role) {
     return {
       priorState: 'bytes',
@@ -642,9 +703,20 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     };
   }
 
-  async function writeAnchor(context, snapshot, purpose, sourceCommit, parentAnchorId) {
+  async function writeAnchor(
+    context,
+    snapshot,
+    purpose,
+    sourceCommit,
+    parentAnchorId,
+    rollbackFromManifestSha256 = undefined,
+  ) {
     const present = purpose !== 'first-install';
-    context.anchorId = requireUuid(deps.clock.newId());
+    if (context.anchor !== null) invalid();
+    if (context.anchorId === null) context.anchorId = requireUuid(deps.clock.newId());
+    const rollbackFrom = rollbackFromManifestSha256 === undefined
+      ? (present ? snapshot.identities.manifest.sha256 : null)
+      : rollbackFromManifestSha256;
     const anchor = validateLaunchAgentAnchor({
       schemaVersion: 1,
       anchorId: context.anchorId,
@@ -652,7 +724,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       transactionId: context.transactionId,
       sourceCommit,
       purpose,
-      rollbackFromManifestSha256: present ? snapshot.identities.manifest.sha256 : null,
+      rollbackFromManifestSha256: rollbackFrom,
       restoreManifestSha256: present ? snapshot.identities.manifest.sha256 : null,
       controller: present ? anchorEntry(snapshot, 'controller') : { priorState: 'absent' },
       scheduler: present ? anchorEntry(snapshot, 'scheduler') : { priorState: 'absent' },
@@ -752,6 +824,34 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
   }
 
+  async function stageRollbackCandidates(context, target) {
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      const entry = target[role];
+      if (entry.priorState !== 'bytes') continue;
+      if (context.identities[role]?.sha256 === entry.sha256) continue;
+      const bytes = anchorBytes(target, role);
+      const candidateRef = await deps.metadataStore.writeCandidate({
+        transactionId: context.transactionId,
+        role,
+        bytes,
+      });
+      context.candidateRefs[role] = projectCandidateRef(
+        candidateRef,
+        context.transactionId,
+        role,
+        entry.sha256,
+      );
+      const persisted = await deps.metadataStore.readCandidate(context.candidateRefs[role]);
+      if (!Buffer.isBuffer(persisted) || Buffer.compare(persisted, bytes) !== 0) invalid();
+      if (role !== 'manifest') {
+        const lint = await deps.plistValidator.validate(
+          candidateForPlist(context.candidateRefs[role]),
+        );
+        if (lint?.valid !== true) throw new FlowFailure('conditional-mutation-mismatch');
+      }
+    }
+  }
+
   async function replaceCandidate(input, expected) {
     return deps.atomicPublisher.replaceIfMatch({ ...input, expected });
   }
@@ -816,6 +916,36 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     await appendJournal(context, `${role}-published`, { role });
   }
 
+  async function removeManagedIdentity(context, role) {
+    const expected = context.identities[role];
+    if (expected === null) invalid();
+    await appendJournal(context, `${role}-remove-intent`, { role });
+    const result = await deps.atomicPublisher.removeIfMatch({
+      ...addressFor(role),
+      expected,
+    });
+    if (result?.outcome !== 'ok') {
+      throw new FlowFailure('conditional-mutation-mismatch');
+    }
+    context.mutationCount += 1;
+    context.possiblePublisherMutations.add(role);
+    try {
+      projectAbsentIdentity(
+        await deps.hostInspector.inspect(addressFor(role)),
+        role,
+        context.facts.uid,
+      );
+    } catch {
+      throw new FlowFailure('conditional-mutation-mismatch', {
+        forceManualIntervention: true,
+      });
+    }
+    context.possiblePublisherMutations.delete(role);
+    context.identities[role] = null;
+    context.published.add(role);
+    await appendJournal(context, `${role}-removed`, { role });
+  }
+
   async function bootout(context, facts, role) {
     await appendJournal(context, `${role}-stop-intent`, { role });
     const result = await deps.launchctlRunner.run(launchctlRequest(facts, 'bootout', role));
@@ -851,6 +981,83 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     await appendJournal(context, `${role}-stopped`, { role });
   }
 
+  async function recoverIncompleteUnload(context, snapshot, outcome) {
+    for (const role of ['controller', 'scheduler']) {
+      const observed = await probeJob(snapshot.facts, role);
+      if (observed.outcome !== 'ok') {
+        return enterManualIntervention(
+          context,
+          receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        );
+      }
+      if (observed.loaded === false && observed.jobIdentitySha256 === null) {
+        if (snapshot.jobs[role].loaded) context.stopped.add(role);
+        continue;
+      }
+      if (
+        observed.loaded !== true
+        || !snapshot.jobs[role].loaded
+        || observed.jobIdentitySha256 !== snapshot.identities[role].sha256
+      ) {
+        return enterManualIntervention(
+          context,
+          receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        );
+      }
+      context.stopped.delete(role);
+    }
+    return compensate(context, snapshot, outcome, 'upgrade');
+  }
+
+  async function unloadOwnedJobs(context, snapshot, incompleteOutcome) {
+    for (const role of ['scheduler', 'controller']) {
+      const fresh = await probeJob(snapshot.facts, role);
+      const expectedLoaded = snapshot.jobs[role].loaded;
+      if (
+        fresh.outcome !== 'ok'
+        || fresh.loaded !== expectedLoaded
+        || (expectedLoaded && fresh.jobIdentitySha256 !== snapshot.identities[role].sha256)
+        || (!expectedLoaded && fresh.jobIdentitySha256 !== null)
+      ) {
+        return closeWithReceipt(context, {
+          state: 'blocked', outcome: 'ownership-mismatch', success: false,
+          blockedByEntrySha256: null,
+          roles: receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        });
+      }
+      if (!expectedLoaded) {
+        await appendJournal(context, 'role-stop-noop', { role });
+        continue;
+      }
+      try {
+        await bootout(context, snapshot.facts, role);
+      } catch (error) {
+        if (!(error instanceof FlowFailure)) throw error;
+        return recoverIncompleteUnload(context, snapshot, incompleteOutcome);
+      }
+    }
+    for (const role of ['scheduler', 'controller']) {
+      const observed = await probeJob(snapshot.facts, role);
+      if (
+        observed.outcome !== 'ok'
+        || observed.loaded !== false
+        || observed.jobIdentitySha256 !== null
+      ) {
+        return recoverIncompleteUnload(context, snapshot, incompleteOutcome);
+      }
+    }
+    return null;
+  }
+
   function controllerPort(input) {
     const raw = input.controllerEnvironment.PORT;
     if (typeof raw === 'string' && /^\d+$/.test(raw)) {
@@ -858,6 +1065,51 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       if (Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 65535) return parsed;
     }
     return 8899;
+  }
+
+  function controllerPortFromPlistBytes(value) {
+    if (!Buffer.isBuffer(value)) invalid();
+    const text = value.toString('utf8');
+    let rawPort;
+    try {
+      const descriptor = JSON.parse(text);
+      if (
+        descriptor === null
+        || typeof descriptor !== 'object'
+        || Array.isArray(descriptor)
+        || Object.getPrototypeOf(descriptor) !== Object.prototype
+      ) {
+        invalid();
+      }
+      const label = descriptor.Label ?? descriptor.label;
+      if (label !== LABELS.controller) invalid();
+      const environment = descriptor.EnvironmentVariables ?? descriptor.controllerEnvironment;
+      if (
+        environment === null
+        || typeof environment !== 'object'
+        || Array.isArray(environment)
+        || Object.getPrototypeOf(environment) !== Object.prototype
+      ) {
+        invalid();
+      }
+      rawPort = environment.PORT;
+    } catch (error) {
+      if (error instanceof LaunchAgentLifecycleError) throw error;
+      const labelMatches = [...text.matchAll(
+        /<key>Label<\/key>\s*<string>([^<]*)<\/string>/g,
+      )];
+      if (labelMatches.length !== 1 || labelMatches[0][1] !== LABELS.controller) invalid();
+      const portMatches = [...text.matchAll(
+        /<key>PORT<\/key>\s*<string>([^<]*)<\/string>/g,
+      )];
+      if (portMatches.length > 1) invalid();
+      rawPort = portMatches[0]?.[1];
+    }
+    if (rawPort === undefined) return 8899;
+    if (typeof rawPort !== 'string' || !/^\d+$/.test(rawPort)) invalid();
+    const parsed = Number(rawPort);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65535) invalid();
+    return parsed;
   }
 
   async function revalidateRuntime(reason) {
@@ -1011,19 +1263,158 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
   }
 
+  async function applyRollbackFiles(context, target) {
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      const entry = target[role];
+      if (entry.priorState === 'absent') {
+        await removeManagedIdentity(context, role);
+        continue;
+      }
+      if (context.identities[role]?.sha256 === entry.sha256) {
+        if (role === 'manifest') invalid();
+        const currentBytes = await deps.hostInspector.read(context.identities[role]);
+        if (Buffer.compare(Buffer.from(currentBytes), anchorBytes(target, role)) !== 0) invalid();
+        await appendJournal(context, 'role-noop', { role });
+        continue;
+      }
+      await publishCandidate(context, role, context.identities[role]);
+    }
+  }
+
+  async function replayRollbackLoadedState(context, target, targetControllerPort) {
+    for (const role of ['controller', 'scheduler']) {
+      if (!target.loaded[role]) {
+        const observed = await probeJob(context.facts, role);
+        if (
+          observed.outcome !== 'ok'
+          || observed.loaded !== false
+          || observed.jobIdentitySha256 !== null
+        ) {
+          throw new FlowFailure('conditional-mutation-mismatch');
+        }
+        await appendJournal(context, 'role-load-noop', { role });
+        continue;
+      }
+      if (role === 'controller') {
+        await bootstrapController(
+          context,
+          context.facts,
+          { controllerEnvironment: { PORT: String(targetControllerPort) } },
+          context.identities.controller.sha256,
+        );
+      } else {
+        await bootstrapScheduler(
+          context,
+          context.facts,
+          context.identities.scheduler.sha256,
+        );
+      }
+    }
+  }
+
+  async function verifyRollbackTarget(
+    context,
+    target,
+    targetProjection,
+    targetControllerPort,
+  ) {
+    await revalidateRuntime('before-commit');
+    const persistedTarget = validateLaunchAgentAnchor(
+      await deps.metadataStore.readAnchor(target.anchorId),
+    );
+    if (!sameValue(persistedTarget, target)) invalid();
+
+    const currentBytes = { controller: null, scheduler: null, manifest: null };
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      const inspected = await deps.hostInspector.inspect(addressFor(role));
+      if (target[role].priorState === 'absent') {
+        projectAbsentIdentity(inspected, role, context.facts.uid);
+        if (context.identities[role] !== null) invalid();
+        continue;
+      }
+      const identity = projectFullIdentity(inspected, role, context.facts.uid);
+      const bytes = Buffer.from(await deps.hostInspector.read(identity));
+      if (
+        identity.sha256 !== target[role].sha256
+        || Buffer.compare(bytes, anchorBytes(target, role)) !== 0
+        || !sameValue(identity, context.identities[role])
+      ) {
+        throw new FlowFailure('conditional-mutation-mismatch');
+      }
+      currentBytes[role] = bytes;
+    }
+
+    if (targetProjection.manifest !== null) {
+      const restored = validateLaunchAgentManifest(
+        JSON.parse(currentBytes.manifest.toString('utf8')),
+      );
+      if (!sameValue(restored, targetProjection.manifest)) invalid();
+      const parent = await validateActiveAnchor(restored);
+      if (parent === null || parent.anchorId !== target.parentAnchorId) {
+        throw new FlowFailure('ownership-mismatch');
+      }
+    }
+
+    for (const role of ['controller', 'scheduler']) {
+      const observed = await probeJob(context.facts, role);
+      const expectedLoaded = target.loaded[role];
+      if (
+        observed.outcome !== 'ok'
+        || observed.loaded !== expectedLoaded
+        || (
+          expectedLoaded
+            ? observed.jobIdentitySha256 !== context.identities[role]?.sha256
+            : observed.jobIdentitySha256 !== null
+        )
+      ) {
+        throw new FlowFailure('conditional-mutation-mismatch');
+      }
+    }
+    if (target.loaded.controller) {
+      const health = await deps.healthChecker.check({ port: targetControllerPort });
+      if (health?.statusCode !== 200 || health?.ready !== true) {
+        throw new FlowFailure('controller-not-ready');
+      }
+    }
+  }
+
+  async function verifyUninstalled(context) {
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      projectAbsentIdentity(
+        await deps.hostInspector.inspect(addressFor(role)),
+        role,
+        context.facts.uid,
+      );
+      if (context.identities[role] !== null) invalid();
+    }
+    for (const role of ['controller', 'scheduler']) {
+      const observed = await probeJob(context.facts, role);
+      if (
+        observed.outcome !== 'ok'
+        || observed.loaded !== false
+        || observed.jobIdentitySha256 !== null
+      ) {
+        throw new FlowFailure('conditional-mutation-mismatch');
+      }
+    }
+  }
+
   async function completeInstall(context, input, snapshot) {
-    const anchor = await writeAnchor(
+    context.anchorId = requireUuid(deps.clock.newId());
+    const manifest = makeManifest(context, context.rendered, context.anchorId);
+    const manifestBytes = Buffer.from(JSON.stringify(manifest), 'utf8');
+    await writeAnchor(
       context,
       snapshot,
       'first-install',
       context.sourceCommit,
       null,
+      sha256Hex(manifestBytes),
     );
-    const manifest = makeManifest(context, context.rendered, anchor.anchorId);
     const candidateBytes = {
       controller: Buffer.from(context.rendered.controller.plistBytes),
       scheduler: Buffer.from(context.rendered.scheduler.plistBytes),
-      manifest: Buffer.from(JSON.stringify(manifest), 'utf8'),
+      manifest: manifestBytes,
     };
     try {
       await stageCandidates(context, candidateBytes);
@@ -1157,7 +1548,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   async function publishRestorationCandidate(context, role, candidateRef) {
     const expected = context.identities[role];
     const input = { ...addressFor(role), candidateRef };
-    const result = await replaceCandidate(input, expected);
+    const result = expected === null
+      ? await deps.atomicPublisher.publishAbsent(input)
+      : await replaceCandidate(input, expected);
     if (result === null || typeof result !== 'object' || result.outcome !== 'ok') {
       throw new FlowFailure('manual-intervention-required', {
         forceManualIntervention: true,
@@ -1177,7 +1570,11 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
         claimed.sha256 !== candidateRef.sha256
         || inspected.sha256 !== candidateRef.sha256
         || !sameValue(claimed, inspected)
-        || (inspected.device === expected.device && inspected.inode === expected.inode)
+        || (
+          expected !== null
+          && inspected.device === expected.device
+          && inspected.inode === expected.inode
+        )
       ) {
         throw new FlowFailure('manual-intervention-required', {
           forceManualIntervention: true,
@@ -1277,7 +1674,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       };
     }
     if (action.startsWith('restore-')) {
-      if (currentIdentity === null || priorIdentity === null) invalid();
+      if (priorIdentity === null) invalid();
       return {
         index,
         action,
@@ -1401,7 +1798,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       }
     }
     if (snapshot.jobs.controller.loaded) {
-      const health = await deps.healthChecker.check({ port: 8899 });
+      const health = await deps.healthChecker.check({
+        port: controllerPortFromPlistBytes(snapshot.bytes.controller),
+      });
       if (health?.statusCode !== 200 || health?.ready !== true) {
         throw new FlowFailure('manual-intervention-required', {
           forceManualIntervention: true,
@@ -1596,10 +1995,15 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     await appendJournal(context, `compensate-${action}-completed`, { action });
   }
 
-  async function compensate(context, snapshot, outcome, mode, input = null) {
+  async function compensate(context, snapshot, outcome, mode) {
     try {
       const reversePlan = buildReversePlan(context, snapshot, mode);
       const reversePlanSha256 = sha256Hex(Buffer.from(JSON.stringify(reversePlan), 'utf8'));
+      const recoveryInput = {
+        controllerEnvironment: snapshot.present.controller
+          ? { PORT: String(controllerPortFromPlistBytes(snapshot.bytes.controller)) }
+          : {},
+      };
       const compensating = await appendJournal(context, 'compensating', {
         reversePlan,
         reversePlanSha256,
@@ -1612,9 +2016,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
           step,
           compensating.payload.reversePlanSha256,
           compensating.payload.reversePlan,
-          input ?? {
-            controllerEnvironment: {},
-          },
+          recoveryInput,
         );
       }
       await verifyRecoveryTarget(context, snapshot);
@@ -1669,18 +2071,21 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       });
     }
 
+    context.anchorId = requireUuid(deps.clock.newId());
+    const nextManifest = makeManifest(context, context.rendered, context.anchorId, manifest);
+    const nextManifestBytes = Buffer.from(JSON.stringify(nextManifest), 'utf8');
     await writeAnchor(
       context,
       snapshot,
       'managed-upgrade',
       context.sourceCommit,
       manifest.activeAnchorId,
+      sha256Hex(nextManifestBytes),
     );
-    const nextManifest = makeManifest(context, context.rendered, context.anchorId, manifest);
     const candidateBytes = {
       controller: Buffer.from(context.rendered.controller.plistBytes),
       scheduler: Buffer.from(context.rendered.scheduler.plistBytes),
-      manifest: Buffer.from(JSON.stringify(nextManifest), 'utf8'),
+      manifest: nextManifestBytes,
     };
     try {
       await stageCandidates(context, candidateBytes);
@@ -1778,7 +2183,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
           ),
         });
       }
-      return compensate(context, snapshot, error.outcome, 'upgrade', input);
+      return compensate(context, snapshot, error.outcome, 'upgrade');
     }
   }
 
@@ -1955,6 +2360,195 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     });
   }
 
+  async function runRollback(input) {
+    const normalized = validateRollbackInput(input);
+    const begun = await beginTransaction('rollback', normalized.sourceCommit, null);
+    if (begun.terminal !== null) return begun.terminal;
+    const { context } = begun;
+    const snapshot = await inspectCurrentState();
+    context.facts = snapshot.facts;
+    context.identities = { ...snapshot.identities };
+    const manifest = parseManagedInstallation(snapshot, normalized.sourceCommit);
+    const target = manifest === null ? null : await validateActiveAnchor(manifest);
+    const targetProjection = target === null
+      ? null
+      : validateRollbackTarget(
+          target,
+          snapshot,
+          manifest,
+          normalized.targetAnchorId,
+        );
+    if (manifest === null || target === null || targetProjection === null) {
+      context.anchorId = requireUuid(deps.clock.newId());
+      return closeWithReceipt(context, {
+        state: 'blocked', outcome: 'ownership-mismatch', success: false,
+        blockedByEntrySha256: null,
+        roles: receiptRoles(
+          { outcome: 'unchanged', changed: false },
+          { outcome: 'unchanged', changed: false },
+        ),
+      });
+    }
+    const targetControllerPort = target.controller.priorState === 'bytes'
+      ? controllerPortFromPlistBytes(anchorBytes(target, 'controller'))
+      : null;
+    try {
+      await revalidateRuntime('after-prepared-inspection');
+    } catch (error) {
+      if (!(error instanceof FlowFailure)) throw error;
+      context.anchorId = requireUuid(deps.clock.newId());
+      return closeWithReceipt(context, {
+        state: 'blocked', outcome: error.outcome, success: false,
+        blockedByEntrySha256: null,
+        roles: receiptRoles(
+          { outcome: 'unchanged', changed: false },
+          { outcome: 'unchanged', changed: false },
+        ),
+      });
+    }
+
+    await writeAnchor(
+      context,
+      snapshot,
+      'rollback-compensation',
+      normalized.sourceCommit,
+      target.anchorId,
+    );
+    if (
+      targetProjection.manifest !== null
+      && !sameValue(targetProjection.manifest.runtimeArtifacts, manifest.runtimeArtifacts)
+    ) {
+      try {
+        await verifyRecoveryTarget(context, snapshot);
+      } catch {
+        return enterManualIntervention(
+          context,
+          receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        );
+      }
+      return closeWithReceipt(context, {
+        state: 'recovered', outcome: 'rollback-runtime-mismatch', success: false,
+        roles: receiptRoles(
+          { outcome: 'unchanged', changed: false },
+          { outcome: 'unchanged', changed: false },
+        ),
+      });
+    }
+
+    try {
+      await stageRollbackCandidates(context, target);
+      const unloadResult = await unloadOwnedJobs(
+        context,
+        snapshot,
+        'rollback-unload-incomplete',
+      );
+      if (unloadResult !== null) return unloadResult;
+      await applyRollbackFiles(context, target);
+      if (targetProjection.manifest !== null) {
+        await revalidateRuntime('before-bootstrap-controller');
+        await replayRollbackLoadedState(context, target, targetControllerPort);
+      }
+      await verifyRollbackTarget(
+        context,
+        target,
+        targetProjection,
+        targetControllerPort,
+      );
+      return await closeWithReceipt(context, {
+        state: 'committed', outcome: 'completed', success: true,
+        roles: receiptRoles(
+          {
+            outcome: target.controller.priorState === 'absent' ? 'removed' : 'restored',
+            changed: true,
+          },
+          {
+            outcome: target.scheduler.priorState === 'absent' ? 'removed' : 'restored',
+            changed: true,
+          },
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof FlowFailure)) throw error;
+      if (context.mutationCount === 0) {
+        return closeWithReceipt(context, {
+          state: 'blocked', outcome: error.outcome, success: false,
+          blockedByEntrySha256: null,
+          roles: receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        });
+      }
+      return compensate(context, snapshot, error.outcome, 'upgrade');
+    }
+  }
+
+  async function runUninstall(input) {
+    const normalized = validateStopInput(input);
+    const begun = await beginTransaction('uninstall', normalized.sourceCommit, null);
+    if (begun.terminal !== null) return begun.terminal;
+    const { context } = begun;
+    const snapshot = await inspectCurrentState();
+    context.facts = snapshot.facts;
+    context.identities = { ...snapshot.identities };
+    const manifest = parseManagedInstallation(snapshot, normalized.sourceCommit);
+    const activeAnchor = manifest === null ? null : await validateActiveAnchor(manifest);
+    if (manifest === null || activeAnchor === null) {
+      context.anchorId = requireUuid(deps.clock.newId());
+      return closeWithReceipt(context, {
+        state: 'blocked', outcome: 'ownership-mismatch', success: false,
+        blockedByEntrySha256: null,
+        roles: receiptRoles(
+          { outcome: 'unchanged', changed: false },
+          { outcome: 'unchanged', changed: false },
+        ),
+      });
+    }
+    await writeAnchor(
+      context,
+      snapshot,
+      'uninstall-compensation',
+      normalized.sourceCommit,
+      manifest.activeAnchorId,
+    );
+
+    try {
+      const unloadResult = await unloadOwnedJobs(
+        context,
+        snapshot,
+        'uninstall-unload-incomplete',
+      );
+      if (unloadResult !== null) return unloadResult;
+      await removeManagedIdentity(context, 'scheduler');
+      await removeManagedIdentity(context, 'controller');
+      await removeManagedIdentity(context, 'manifest');
+      await verifyUninstalled(context);
+      return await closeWithReceipt(context, {
+        state: 'committed', outcome: 'completed', success: true,
+        roles: receiptRoles(
+          { outcome: 'removed', changed: true },
+          { outcome: 'removed', changed: true },
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof FlowFailure)) throw error;
+      if (context.mutationCount === 0) {
+        return closeWithReceipt(context, {
+          state: 'blocked', outcome: error.outcome, success: false,
+          blockedByEntrySha256: null,
+          roles: receiptRoles(
+            { outcome: 'unchanged', changed: false },
+            { outcome: 'unchanged', changed: false },
+          ),
+        });
+      }
+      return compensate(context, snapshot, error.outcome, 'upgrade');
+    }
+  }
+
   return Object.freeze({
     async install(input) {
       return runInstallOrUpgrade('install', input);
@@ -1966,6 +2560,14 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
 
     async stop(input) {
       return runStop(input);
+    },
+
+    async rollback(input) {
+      return runRollback(input);
+    },
+
+    async uninstall(input) {
+      return runUninstall(input);
     },
   });
 }
