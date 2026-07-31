@@ -28,6 +28,7 @@ const SIMPLE_EVENTS = Object.freeze([
   'mir-lock-publish', 'mir-lock-verify',
   'mir-transaction-lock-release', 'mir-lock-release',
   'receipt', 'lock-release',
+  'recovery-lock-seam',
 ]);
 const SIMPLE_EVENT_SET = new Set(SIMPLE_EVENTS);
 const ADAPTER_CALL_SET = new Set([
@@ -216,7 +217,56 @@ function makeProfiles(
   };
 }
 
-export function createLaunchAgentLifecycleHarness() {
+// ---- Task 5A.2 crash image：module-private brand、闭合 selector 词汇与字节编解码 ----
+const CRASH_IMAGE_BRAND = new WeakSet();
+const CRASH_SELECTOR_KINDS = new Set(['journal-state', 'host-mutation']);
+const CRASH_HOST_ACTIONS = new Set([
+  'publish-controller', 'publish-scheduler', 'publish-manifest',
+  'bootout-controller', 'bootout-scheduler',
+  'bootstrap-controller', 'bootstrap-scheduler',
+  'remove-controller', 'remove-scheduler', 'remove-manifest',
+  'restore-controller', 'restore-scheduler', 'restore-manifest',
+  'load-controller', 'load-scheduler', 'stop-controller', 'stop-scheduler',
+]);
+
+function validatePositiveOccurrence(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw harnessError('crash capture occurrence must be a positive integer');
+  }
+  return value;
+}
+
+function encodeBytes(value) {
+  if (!Buffer.isBuffer(value)) throw harnessError('crash image bytes must be Buffer');
+  return value.toString('base64');
+}
+
+function decodeBytes(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw harnessError('crash image base64 must be non-empty');
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.toString('base64') !== value) throw harnessError('invalid crash image base64');
+  return bytes;
+}
+
+export function createLaunchAgentLifecycleHarness(options = {}) {
+  if (options === null || typeof options !== 'object'
+      || Object.getPrototypeOf(options) !== Object.prototype) {
+    throw harnessError('harness options must be a plain object');
+  }
+  const optionFields = readExactObject(
+    options,
+    Reflect.ownKeys(options).length === 0 ? [] : ['crashImage'],
+  );
+  const revivedImage = Object.hasOwn(optionFields, 'crashImage')
+    ? optionFields.crashImage
+    : null;
+  if (revivedImage !== null && !CRASH_IMAGE_BRAND.has(revivedImage)) {
+    throw harnessError('untrusted crash image');
+  }
+  // Step 4 锁接缝只允许作用于 branded revived harness。
+  const revivedFromCrashImage = revivedImage !== null;
   const files = new Map();
   const candidates = new Map();
   const store = {
@@ -277,7 +327,19 @@ export function createLaunchAgentLifecycleHarness() {
   let idIndex = 0;
   let inodeIndex = 0;
   let nextAnchorOverride = null;
+  // Task 5 Step 2：唯一 pending exact receipt race id；不写入 crash image，
+  // revived harness 自然从 null 开始；resetObservations 复位。
+  let exactReceiptRaceTransactionId = null;
   const queuedClockIds = [];
+  let crashSelector = null;
+  let crashImage = null;
+  let crashImageTaken = false;
+  const crashOccurrences = new Map();
+
+  // crash image 只恢复 durable allowlist；hooks/失败注入/trace/计数保持新 harness 默认。
+  if (revivedImage !== null) {
+    restoreDurableState(revivedImage);
+  }
 
   function nextUuid() {
     idIndex += 1;
@@ -566,6 +628,7 @@ export function createLaunchAgentLifecycleHarness() {
       recordAdapterCall('host-mutation', role);
       placeFile(role, bytes);
       counters.publish += 1;
+      recordSuccessfulHostMutation(eventName);
       return deepFreeze({ outcome: 'ok', identity: takePublishedIdentity(role) });
     },
 
@@ -595,6 +658,7 @@ export function createLaunchAgentLifecycleHarness() {
       recordAdapterCall('host-mutation', role);
       placeFile(role, bytes);
       counters.publish += 1;
+      recordSuccessfulHostMutation(eventName);
       return deepFreeze({ outcome: 'ok', identity: takePublishedIdentity(role) });
     },
 
@@ -614,6 +678,7 @@ export function createLaunchAgentLifecycleHarness() {
       recordAdapterCall('host-mutation', role);
       removeFile(role);
       counters.remove += 1;
+      recordSuccessfulHostMutation(eventName);
       return deepFreeze({ outcome: 'ok' });
     },
   });
@@ -666,6 +731,7 @@ export function createLaunchAgentLifecycleHarness() {
           state.jobIdentity[role] = null;
           state.printPhase[role] = 'verify';
         }
+        recordSuccessfulHostMutation(`${operation}-${role}`);
         return deepFreeze({ outcome: 'ok' });
       }
 
@@ -962,6 +1028,9 @@ export function createLaunchAgentLifecycleHarness() {
       }
 
       store.journal.push(deepFreeze({ ...entry, payload: deepFreeze({ ...entry.payload }) }));
+      // journal entry 已持久化且 writer lock/chain 校验通过后才允许 crash capture；
+      // capture 必须早于 observation hooks，保证 image 不含观察态。
+      maybeCaptureCrash('journal-state', entry.state);
       counters.journal += 1;
       if (compensateMatch) {
         recordCompensationEvent(compensateMatch[1], compensateMatch[2]);
@@ -1136,6 +1205,19 @@ export function createLaunchAgentLifecycleHarness() {
       const latest = latestJournalEntry(projection.transactionId);
       if (latest === null) invalid();
       assertReceiptAlignedWithTerminal(projection, receiptSha, latest);
+      // Task 5 Step 2 race 注入：只在 pending id 匹配时消费；从当时 validated
+      // terminal payload 派生 exact embedded projection，hash 必须闭合；随后仍走
+      // 既有 receipt-exists failure，publishReceipt 绝不静默成功。
+      if (exactReceiptRaceTransactionId === projection.transactionId) {
+        exactReceiptRaceTransactionId = null;
+        const embedded = validateLaunchAgentReceipt(latest.payload.receipt);
+        const embeddedSha256 = sha256Hex(Buffer.from(JSON.stringify(embedded), 'utf8'));
+        if (embeddedSha256 !== latest.payload.receiptSha256) invalid();
+        store.receipts.set(projection.transactionId, {
+          projection: embedded,
+          sha256: embeddedSha256,
+        });
+      }
       if (store.receipts.has(projection.transactionId)) invalid();
       counters.receipt += 1;
       recordSimpleEvent('receipt');
@@ -1241,6 +1323,123 @@ export function createLaunchAgentLifecycleHarness() {
     };
   }
 
+  // ---- Task 5A.2 crash image：只序列化 durable allowlist，禁止 hooks/函数/Buffer 泄露 ----
+  function captureDurableState() {
+    const image = deepFreeze({
+      schemaVersion: 1,
+      files: [...files.entries()].map(([key, file]) => ({
+        key,
+        bytesBase64: encodeBytes(file.bytes),
+        device: file.device,
+        inode: file.inode,
+        ownerUid: file.ownerUid,
+      })),
+      candidates: [...candidates.entries()].map(([key, candidate]) => ({
+        key,
+        bytesBase64: encodeBytes(candidate.bytes),
+        sha256: candidate.sha256,
+        role: candidate.role,
+        transactionId: candidate.transactionId,
+      })),
+      journal: structuredClone(store.journal),
+      anchors: [...store.anchors.entries()].map(([key, value]) => [key, structuredClone(value)]),
+      receipts: [...store.receipts.entries()].map(([key, value]) => [key, structuredClone(value)]),
+      transactionLock: structuredClone(store.transactionLock),
+      manualInterventionLock: structuredClone(store.manualInterventionLock),
+      host: {
+        loaded: structuredClone(state.loaded),
+        jobIdentity: structuredClone(state.jobIdentity),
+        foreignJob: structuredClone(state.foreignJob),
+        probeMode: structuredClone(state.probeMode),
+        health: structuredClone(state.health),
+        schedulerOutcome: state.schedulerOutcome,
+        runtimeArtifacts: structuredClone(state.runtimeArtifacts),
+      },
+      sequence: { clockIndex, idIndex, inodeIndex },
+    });
+    CRASH_IMAGE_BRAND.add(image);
+    return image;
+  }
+
+  function restoreDurableState(image) {
+    if (image.schemaVersion !== 1) throw harnessError('unsupported crash image schema');
+    for (const item of image.files) {
+      files.set(item.key, {
+        bytes: decodeBytes(item.bytesBase64),
+        device: item.device,
+        inode: item.inode,
+        ownerUid: item.ownerUid,
+      });
+    }
+    for (const item of image.candidates) {
+      const bytes = decodeBytes(item.bytesBase64);
+      if (sha256Hex(bytes) !== item.sha256) {
+        throw harnessError('crash image candidate hash mismatch');
+      }
+      candidates.set(item.key, {
+        bytes,
+        sha256: item.sha256,
+        role: item.role,
+        transactionId: item.transactionId,
+      });
+    }
+    for (const entry of image.journal) {
+      store.journal.push(deepFreeze(validateJournalEntryShape(structuredClone(entry))));
+    }
+    for (const [key, value] of image.anchors) {
+      store.anchors.set(key, deepFreeze(validateLaunchAgentAnchor(structuredClone(value))));
+    }
+    for (const [key, value] of image.receipts) {
+      const projection = validateLaunchAgentReceipt(structuredClone(value.projection));
+      const receiptSha = sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8'));
+      if (receiptSha !== value.sha256) {
+        throw harnessError('crash image receipt hash mismatch');
+      }
+      store.receipts.set(key, deepFreeze({ projection, sha256: receiptSha }));
+    }
+    store.transactionLock = image.transactionLock === null
+      ? null
+      : validateLockRecord(structuredClone(image.transactionLock));
+    store.manualInterventionLock = image.manualInterventionLock === null
+      ? null
+      : validateLockRecord(structuredClone(image.manualInterventionLock));
+    Object.assign(state.loaded, image.host.loaded);
+    Object.assign(state.jobIdentity, image.host.jobIdentity);
+    Object.assign(state.foreignJob, image.host.foreignJob);
+    Object.assign(state.probeMode, image.host.probeMode);
+    state.health = structuredClone(image.host.health);
+    state.schedulerOutcome = image.host.schedulerOutcome;
+    state.runtimeArtifacts = structuredClone(image.host.runtimeArtifacts);
+    clockIndex = image.sequence.clockIndex;
+    idIndex = image.sequence.idIndex;
+    inodeIndex = image.sequence.inodeIndex;
+  }
+
+  function maybeCaptureCrash(kind, value) {
+    if (crashSelector === null || crashImage !== null || crashSelector.kind !== kind) return;
+    const selected = kind === 'journal-state' ? crashSelector.state : crashSelector.action;
+    if (selected !== value) return;
+    const key = `${kind}:${value}`;
+    const occurrence = (crashOccurrences.get(key) ?? 0) + 1;
+    crashOccurrences.set(key, occurrence);
+    if (occurrence === crashSelector.occurrence) crashImage = captureDurableState();
+  }
+
+  // 补偿窗口内最新 journal 为 compensate-<action>-intent 时，post-mutation image 以补偿
+  // action 命名；否则使用宿主 fallback action。
+  function semanticMutationAction(fallbackAction) {
+    const transactionId = store.transactionLock?.transactionId ?? null;
+    const latest = transactionId === null ? null : latestJournalEntry(transactionId);
+    const match = latest?.state.match(/^compensate-([a-z-]+)-intent$/);
+    return match ? match[1] : fallbackAction;
+  }
+
+  // 只在真实 fake 状态变更成功且计数增加之后调用；失败/非零退出/CAS mismatch/未知状态
+  // 绝不生成 post-mutation image。
+  function recordSuccessfulHostMutation(fallbackAction) {
+    maybeCaptureCrash('host-mutation', semanticMutationAction(fallbackAction));
+  }
+
   const harness = {
     dependencies() {
       return dependencies;
@@ -1321,6 +1520,94 @@ export function createLaunchAgentLifecycleHarness() {
       if (!store.anchors.delete(anchorId)) {
         throw harnessError('cannot delete missing anchor');
       }
+    },
+
+    armCrashCapture(selector) {
+      if (crashSelector !== null || crashImage !== null || crashImageTaken) {
+        throw harnessError('crash capture already configured');
+      }
+      if (selector === null || typeof selector !== 'object'
+          || Object.getPrototypeOf(selector) !== Object.prototype) {
+        throw harnessError('crash selector must be a plain object');
+      }
+      const kindDescriptor = Object.getOwnPropertyDescriptor(selector, 'kind');
+      if (!kindDescriptor || !Object.hasOwn(kindDescriptor, 'value')
+          || !CRASH_SELECTOR_KINDS.has(kindDescriptor.value)) {
+        throw harnessError('unknown crash selector kind');
+      }
+      const kind = kindDescriptor.value;
+      const fields = readExactObject(
+        selector,
+        kind === 'journal-state'
+          ? ['kind', 'state', 'occurrence']
+          : ['kind', 'action', 'occurrence'],
+      );
+      validatePositiveOccurrence(fields.occurrence);
+      if (kind === 'journal-state') {
+        if (typeof fields.state !== 'string' || fields.state.length === 0) {
+          throw harnessError('journal crash state must be non-empty');
+        }
+        crashSelector = deepFreeze({
+          kind,
+          state: fields.state,
+          occurrence: fields.occurrence,
+        });
+      } else {
+        if (!CRASH_HOST_ACTIONS.has(fields.action)) {
+          throw harnessError('unknown crash host action');
+        }
+        crashSelector = deepFreeze({
+          kind,
+          action: fields.action,
+          occurrence: fields.occurrence,
+        });
+      }
+      return true;
+    },
+
+    takeCrashImage() {
+      if (crashImage === null || crashImageTaken) {
+        throw harnessError('crash image unavailable');
+      }
+      crashImageTaken = true;
+      return crashImage;
+    },
+
+    /**
+     * Step 4 预证明锁接缝：只作用于 branded revived harness；仅清除 transactionId 匹配、
+     * 无 MIR lock、latest 非 MIR 的 fake stale transaction lock。不预判 receipt 闭合。
+     */
+    preProveRecoveryLockRelease(input) {
+      if (!revivedFromCrashImage) throw harnessError('lock seam requires revived crash image');
+      const fields = readExactObject(input, ['transactionId']);
+      const transactionId = requireUuid(fields.transactionId);
+      if (store.transactionLock?.transactionId !== transactionId) {
+        throw harnessError('stale transaction lock mismatch');
+      }
+      if (store.manualInterventionLock !== null) {
+        throw harnessError('manual intervention lock blocks ordinary recovery');
+      }
+      const latest = latestJournalEntry(transactionId);
+      if (latest === null || latest.state === 'manual-intervention-required') {
+        throw harnessError('lock seam requires a recoverable non-MIR journal');
+      }
+      store.transactionLock = null;
+      recordSimpleEvent('recovery-lock-seam');
+      return true;
+    },
+
+    /**
+     * Task 5 Step 2 exact terminal receipt publish race：只 arm 一次，重复 arm 抛
+     * 稳定 harness error。injection 而非 seed path；不进 crash image；实际抢先
+     * 落盘发生在 metadataStore.publishReceipt 的 receipt-exists 检查之前。
+     */
+    raceExactTerminalReceiptOnNextPublish(input) {
+      const fields = readExactObject(input, ['transactionId']);
+      const transactionId = requireUuid(fields.transactionId);
+      if (exactReceiptRaceTransactionId !== null) {
+        throw harnessError('terminal receipt race already armed');
+      }
+      exactReceiptRaceTransactionId = transactionId;
     },
 
     corruptLatestJournalLink() {
@@ -1614,6 +1901,7 @@ export function createLaunchAgentLifecycleHarness() {
       hooks.length = 0;
       compensationHooks.length = 0;
       revalidateMarks.length = 0;
+      exactReceiptRaceTransactionId = null;
       for (const key of Object.keys(counters)) counters[key] = 0;
       state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
       state.lastRenderedRuntimeArtifacts = null;
