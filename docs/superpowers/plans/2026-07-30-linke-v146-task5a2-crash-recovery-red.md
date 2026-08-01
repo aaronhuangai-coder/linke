@@ -554,8 +554,13 @@ const CRASH_PHASES = Object.freeze([
 Implement exact `runBusinessFixture(row, selector)`:
 
 - install: fresh harness and `coordinator.install({ sourceCommit:COMMIT_A, scheduleSeconds:300, controllerEnvironment:{} })`;
-- stop: `seedInstalled({sourceCommit:COMMIT_A, loaded:{controller:true,scheduler:true}})`, reset, then `coordinator.stop({sourceCommit:COMMIT_B})`;
-- uninstall: same managed seed/reset, then `coordinator.uninstall({sourceCommit:COMMIT_B})`.
+- stop: `seedInstalled({sourceCommit:COMMIT_A, loaded:{controller:true,scheduler:true}})`, reset, then `coordinator.stop({sourceCommit:COMMIT_A})`;
+- uninstall: same managed seed/reset, then `coordinator.uninstall({sourceCommit:COMMIT_A})`.
+
+`stop`/`uninstall` 的 `sourceCommit` 必须与 seeded manifest 的 `sourceCommit` 一致。生产
+`parseManagedInstallation(snapshot, sourceCommit)` 将该字段作为 ownership 证明；在上述
+`COMMIT_A` seed 上传入 `COMMIT_B` 会稳定关闭为 `blocked/ownership-mismatch`、零宿主变更，
+因此无法到达本任务要求的 intent/mutation crash window。
 
 Return `{ image, revived, transactionId, originalOperation, preOperationSnapshot, completedResult }`. Never hand-seed a nonterminal journal.
 
@@ -590,9 +595,9 @@ async function runBusinessFixture(row, selector) {
       controllerEnvironment: {},
     });
   } else if (row.operation === 'stop') {
-    completedResult = await coordinator.stop({ sourceCommit: COMMIT_B });
+    completedResult = await coordinator.stop({ sourceCommit: COMMIT_A });
   } else {
-    completedResult = await coordinator.uninstall({ sourceCommit: COMMIT_B });
+    completedResult = await coordinator.uninstall({ sourceCommit: COMMIT_A });
   }
   const completedReceipt = validateLaunchAgentReceipt(completedResult);
   const image = harness.takeCrashImage();
@@ -875,19 +880,42 @@ assert.equal(latest.payload.reversePlanSha256, compensating.payload.reversePlanS
 assert.deepEqual(compensating.payload.reversePlan[expectedStep.index], expectedStep);
 ```
 
-The pre-mutation image must equal `expectedPre`; the post-mutation image must equal `expectedPost`, using exact file bytes/hash/job identity rather than trace text.
+The pre-mutation image must equal `expectedPre`; the post-mutation image must equal
+`expectedPost`, using exact file bytes/hash/job identity rather than trace text. The
+frozen identity remains the exact live identity for `stop-*`, `remove-*` before
+removal, and `restore-*` before restoration. After an atomic restoration, however,
+`restore-*` post-mutation and both `load-*` phases carry the prior content/job target
+in the frozen plan while the live file has the fresh inode assigned by the
+deterministic harness. For those seven rows, assert exact device/content/job state
+and the harness-only fresh-inode relation instead of falsely equating the live inode
+with the frozen prior inode. This relation is test-harness evidence, not a general
+production guarantee that a real filesystem can never reuse an older inode.
 
 Use this exact state assertion for the current step role:
 
 ```js
-function assertReverseExpected(harness, step, expected) {
+function assertReverseExpected(harness, step, expected, phase) {
   const host = harness.hostSnapshot();
   const file = host[step.role];
   if (expected.file.state === 'absent') {
     assert.equal(file, null, `${step.action}: file absent`);
   } else {
+    const restoredWithFreshHarnessInode = step.action.startsWith('load-')
+      || (
+        step.action.startsWith('restore-')
+        && phase === 'mutation-before-completed'
+      );
     assert.equal(file?.device, expected.file.identity.device);
-    assert.equal(file?.inode, expected.file.identity.inode);
+    assert.equal(typeof file?.inode, 'string', `${step.action}: inode present`);
+    if (restoredWithFreshHarnessInode) {
+      assert.notEqual(
+        file.inode,
+        expected.file.identity.inode,
+        `${step.action}: deterministic harness allocates a fresh restore inode`,
+      );
+    } else {
+      assert.equal(file.inode, expected.file.identity.inode);
+    }
     assert.equal(file?.sha256, expected.file.sha256);
     assert.equal(harness.sha256(harness.fileBytes(step.role)), expected.file.sha256);
   }
@@ -902,6 +930,7 @@ assertReverseExpected(
   revived,
   expectedStep,
   phase === 'intent-before-mutation' ? expectedStep.expectedPre : expectedStep.expectedPost,
+  phase,
 );
 ```
 

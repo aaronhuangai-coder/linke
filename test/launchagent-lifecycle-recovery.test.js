@@ -1703,24 +1703,28 @@ if (recoverImplemented) {
 // ---------------------------------------------------------------------------
 // Task 5 Step 1：真实 terminal committed journal/receipt gap 的 active 观察，
 // 以及同一 missing-receipt 场景的 capability-gated embedded receipt/hash 闭合。
-// active 测试只记录当前生产事实：committed 终端 journal 仅持 receiptSha256
-// 指针、receipt 本体缺失、revived 后零 host mutation；不构成第二 active RED。
+// active 观察只在 recover 公开面缺失时注册（!recoverImplemented）：它记录的
+// 当前生产事实是 committed 终端 journal 仅持 receiptSha256 指针、receipt 本体
+// 缺失、revived 后零 host mutation；GREEN 后 closeout 必须内嵌 receipt，
+// 该观察随之过期，不构成第二 active RED。
 // gated 测试在 recover 公开面出现后才注册：要求终端 payload 内嵌 exact
 // receipt projection 并与 receiptSha256 哈希闭合，recover 幂等重发同一
 // projection，零 host mutation、双锁均释放、不覆盖其它 receipt。
 // ---------------------------------------------------------------------------
 
-test('Task 5A.2 terminal committed crash image exposes the missing-receipt gap', async () => {
-  const fixture = await captureInstallImage({
-    kind: 'journal-state', state: 'committed', occurrence: 1,
+if (!recoverImplemented) {
+  test('Task 5A.2 terminal committed crash image exposes the missing-receipt gap', async () => {
+    const fixture = await captureInstallImage({
+      kind: 'journal-state', state: 'committed', occurrence: 1,
+    });
+    const latest = fixture.revived.journalEntries(fixture.transactionId).at(-1);
+    assert.equal(latest.state, 'committed');
+    assert.equal(fixture.revived.receiptFor(fixture.transactionId), null);
+    assert.equal(typeof latest.payload.receiptSha256, 'string');
+    assert.equal(Object.hasOwn(latest.payload, 'receipt'), false);
+    assert.equal(fixture.revived.sentinels().hostMutationCount, 0);
   });
-  const latest = fixture.revived.journalEntries(fixture.transactionId).at(-1);
-  assert.equal(latest.state, 'committed');
-  assert.equal(fixture.revived.receiptFor(fixture.transactionId), null);
-  assert.equal(typeof latest.payload.receiptSha256, 'string');
-  assert.equal(Object.hasOwn(latest.payload, 'receipt'), false);
-  assert.equal(fixture.revived.sentinels().hostMutationCount, 0);
-});
+}
 
 if (recoverImplemented) {
   test('Task 5A.2 recover republishes the exact embedded terminal receipt projection', async () => {
@@ -1885,9 +1889,15 @@ if (recoverImplemented) {
     assert.equal(conflicting.sourceCommit, COMMIT_B);
     const idsBefore = revived.receiptTransactionIds();
     const hostBefore = revived.hostSnapshot();
+    const journalBefore = revived.journalEntries(transactionId);
     revived.resetObservations();
 
-    // 禁止 preProve ordinary release：conflicting receipt 必须走 MIR takeover。
+    // fail-closed 只读分类契约：本用例故意不调用 preProveRecoveryLockRelease，
+    // 即没有 owner-death 证明，现有依赖也没有安全读取旧 transaction-lock ref
+    // 的 seam；此时 recover 只能返回只读 MIR 分类（闭合 receipt 标记
+    // manual-intervention-required），不得追加 MIR journal、不得发布/验证
+    // MIR lock、不得释放旧 transaction lock——那些动作会授权不安全的 orphan
+    // takeover。真实 MIR handoff/orphan takeover 延后到单独授权任务。
     const receipt = validateLaunchAgentReceipt(
       await createLaunchAgentLifecycleCoordinator(revived.dependencies())
         .recover({ transactionId }),
@@ -1903,15 +1913,18 @@ if (recoverImplemented) {
     assert.deepEqual(revived.receiptTransactionIds(), idsBefore);
     assert.deepEqual(revived.hostSnapshot(), hostBefore);
     assert.equal(revived.sentinels().hostMutationCount, 0);
-    assert.equal(revived.journalStates(transactionId).at(-1), 'manual-intervention-required');
+    // durable journal 冻结在原 terminal state（committed），不得追加 MIR journal。
+    assert.deepEqual(revived.journalEntries(transactionId), journalBefore);
+    assert.equal(revived.journalStates(transactionId).at(-1), 'committed');
+    // 锁状态保持 crash image 原样：旧 transaction lock 仍在，无 MIR lock。
     assert.deepEqual(revived.lockState(), {
-      transactionLock: false,
-      manualInterventionLock: true,
+      transactionLock: true,
+      manualInterventionLock: false,
     });
     const trace = revived.trace();
-    assert.equal(countEvent(trace, 'mir-lock-publish'), 1);
-    assert.equal(countEvent(trace, 'mir-lock-verify'), 1);
-    assert.equal(countEvent(trace, 'mir-transaction-lock-release'), 1);
+    assert.equal(countEvent(trace, 'mir-lock-publish'), 0);
+    assert.equal(countEvent(trace, 'mir-lock-verify'), 0);
+    assert.equal(countEvent(trace, 'mir-transaction-lock-release'), 0);
     assert.equal(countEvent(trace, 'recovery-lock-seam'), 0);
     assert.equal(countEvent(trace, 'lock-release'), 0);
     assert.equal(countEvent(trace, 'receipt'), 0);
@@ -2156,6 +2169,310 @@ if (recoverImplemented) {
         `最终失败 revalidation/MIR journal 之后不得出现 host event: ${label}`,
       );
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 5A.3 返修 RED（PM 裁决 findings F1/F2/F3）：只证明当前生产 recover 的
+// 三个安全缺口；GREEN 前本组不得通过。F1 用 controller-stop-intent 而非
+// scheduler-stop-intent：contracts isExactForwardTransition 对 install 的
+// anchored→scheduler-stop-intent(role=scheduler) 显式合法，只有
+// anchored→controller-stop-intent 才是 transition-invalid 且单条全合法。
+// ---------------------------------------------------------------------------
+
+if (recoverImplemented) {
+  test('Task 5A.3 F1 recover rejects a transition-invalid chain before any lock or mutation', async () => {
+    const fixture = await captureInstallImage({
+      kind: 'journal-state', state: 'controller-publish-intent', occurrence: 1,
+    });
+    const { revived, transactionId } = fixture;
+    // schema/canonical hash/sequence/prevHash/operation/head 全保持合法，
+    // 仅 transition 非法（install 的 anchored→controller-stop-intent）。
+    revived.rewriteLatestJournalCheckpointForTest({
+      transactionId,
+      state: 'controller-stop-intent',
+      role: 'controller',
+    });
+    const journalBefore = revived.journalEntries(transactionId);
+    assert.equal(journalBefore.at(-1).state, 'controller-stop-intent');
+    assert.equal(journalBefore.at(-1).operation, 'install');
+    const hostBefore = revived.hostSnapshot();
+    revived.preProveRecoveryLockRelease({ transactionId });
+    revived.resetObservations();
+
+    const coordinator = createLaunchAgentLifecycleCoordinator(revived.dependencies());
+    await assert.rejects(
+      coordinator.recover({ transactionId }),
+      (error) => {
+        assert.equal(error?.code, 'launchagent-lifecycle-invalid', 'transition-invalid 必须以闭合 invalid 拒绝');
+        assert.equal(error?.message, 'launchagent-lifecycle-invalid');
+        return true;
+      },
+      'transition-invalid chain 不得进入任何恢复分支',
+    );
+    assert.deepEqual(revived.journalEntries(transactionId), journalBefore, 'journal 逐字节冻结');
+    assert.deepEqual(revived.hostSnapshot(), hostBefore, 'host 逐字段冻结');
+    assert.equal(revived.sentinels().hostMutationCount, 0);
+    assert.deepEqual(revived.lockState(), {
+      transactionLock: false,
+      manualInterventionLock: false,
+    });
+    assert.equal(
+      revived.adapterCalls().filter((call) => call.name === 'lock-acquire').length,
+      0,
+      'transition 验证必须先于任何 fresh lock acquire',
+    );
+    assert.equal(countEvent(revived.trace(), 'lock-acquire'), 0);
+    assert.equal(revived.receiptFor(transactionId), null);
+  });
+
+  test('Task 5A.3 F2 recover fail-closed MIR: external manifest loss before remove phase', async () => {
+    // uninstall 在 scheduler-stop-intent 窗口：remove 阶段尚未开始，manifest 外部
+    // 缺失不得被当作事务进度（restore 回 anchor），必须 durable MIR + frozen host。
+    const row = { intent: 'scheduler-stop-intent', action: 'bootout-scheduler', operation: 'uninstall' };
+    const fixture = await runBusinessFixture(row, selectorFor(row, CRASH_PHASES[0]));
+    const { revived, transactionId } = fixture;
+    assert.equal(revived.journalEntries(transactionId).at(-1).state, row.intent);
+    assert.equal(revived.journalEntries(transactionId).at(-1).operation, 'uninstall');
+    assert.ok(revived.hostSnapshot().manifest !== null, 'manifest 缺失前真实存在');
+
+    revived.removeHostFileForTest('manifest');
+    assert.equal(revived.hostSnapshot().manifest, null, '外部缺失必须真实生效');
+
+    const receiptBefore = revived.receiptFor(transactionId);
+    assert.equal(receiptBefore, null, '非终端窗口不存在既有 receipt');
+    const hostBefore = revived.hostSnapshot();
+    revived.preProveRecoveryLockRelease({ transactionId });
+    const result = validateLaunchAgentReceipt(
+      await createLaunchAgentLifecycleCoordinator(revived.dependencies())
+        .recover({ transactionId }),
+    );
+
+    assertFailClosedMirContract(fixture, receiptBefore, result);
+    assertZeroMutationFrozenHost(fixture, hostBefore);
+    assert.equal(
+      revived.hostSnapshot().manifest,
+      null,
+      'recover 不得把外部缺失当作事务进度并从 anchor 恢复 manifest',
+    );
+    assert.equal(countEvent(revived.trace(), 'publish-manifest'), 0);
+  });
+
+  test('Task 5A.3 F3 recover classifies an invalid persisted receipt read-only as manual-intervention-required', async () => {
+    const fixture = await captureInstallImage({
+      kind: 'journal-state', state: 'committed', occurrence: 1,
+    });
+    const {
+      revived, image, transactionId, completed,
+    } = fixture;
+    await revived.dependencies().metadataStore.publishReceipt({
+      receipt: completed,
+      lockRef: lockRefFromImage(image),
+    });
+    const terminal = revived.journalEntries(transactionId).at(-1);
+    assert.equal(terminal.state, 'committed');
+    const embedded = validateLaunchAgentReceipt(terminal.payload.receipt);
+    const corrupted = revived.corruptReceiptForTest(transactionId);
+    assert.throws(
+      () => validateLaunchAgentReceipt(corrupted.projection),
+      /launchagent-lifecycle-invalid/,
+      'corrupt receipt 必须真实打破 validateLaunchAgentReceipt',
+    );
+    const idsBefore = revived.receiptTransactionIds();
+    const hostBefore = revived.hostSnapshot();
+    const journalBefore = revived.journalEntries(transactionId);
+    revived.resetObservations();
+
+    // 无 owner-death 证明、故意不调用 preProveRecoveryLockRelease：invalid receipt
+    // 只能只读分流 MIR classification（字段来自 embedded terminal receipt，不猜测），
+    // 旧 transaction lock 保持，不写 journal/lock/host，不覆盖 corrupt receipt。
+    const receipt = validateLaunchAgentReceipt(
+      await createLaunchAgentLifecycleCoordinator(revived.dependencies())
+        .recover({ transactionId }),
+    );
+    assert.equal(receipt.state, 'manual-intervention-required');
+    assert.equal(receipt.success, false);
+    assert.equal(receipt.operation, 'install');
+    assert.equal(receipt.transactionId, transactionId);
+    assert.equal(receipt.sourceCommit, embedded.sourceCommit);
+    assert.equal(receipt.anchorId, embedded.anchorId);
+    assert.equal(receipt.hostMutationCount, terminal.payload.hostMutationCount);
+    assert.deepEqual(
+      revived.receiptFor(transactionId),
+      corrupted.projection,
+      'corrupt receipt 不得被覆盖、修复或删除',
+    );
+    assert.deepEqual(revived.receiptTransactionIds(), idsBefore);
+    assert.deepEqual(revived.journalEntries(transactionId), journalBefore, 'journal 逐字节冻结');
+    assert.deepEqual(revived.hostSnapshot(), hostBefore, 'host 逐字段冻结');
+    assert.equal(revived.sentinels().hostMutationCount, 0);
+    assert.deepEqual(revived.lockState(), {
+      transactionLock: true,
+      manualInterventionLock: false,
+    });
+    const trace = revived.trace();
+    for (const event of [
+      'mir-lock-publish',
+      'mir-lock-verify',
+      'mir-transaction-lock-release',
+      'recovery-lock-seam',
+      'lock-acquire',
+      'lock-release',
+      'receipt',
+    ]) {
+      assert.equal(countEvent(trace, event), 0, `${event} 不得发生`);
+    }
+  });
+
+  test('Task 5A.3 H2 recover normalizes hostile classifyReceipt shapes to closed INVALID read-only', async (t) => {
+    // dependency boundary hardening：factory 只验证方法 surface，第三方/测试
+    // dependency 的 classifyReceipt 返回值可以是 accessor-backed plain object
+    // 或 hostile Proxy。recover 必须 descriptor-first：不执行 status accessor、
+    // 不通过 ordinary property get 读取 status；Proxy descriptor/prototype/
+    // thenable trap 可能被执行，但其 raw error 必须归一为闭合 INVALID，
+    // 且全程只读（零 fresh lock、零 host mutation、零 receipt write、
+    // journal/host/lock/receipt 逐字节冻结）。
+    const buildFixture = async () => {
+      const fixture = await captureInstallImage({
+        kind: 'journal-state', state: 'committed', occurrence: 1,
+      });
+      const { revived, transactionId } = fixture;
+      revived.resetObservations();
+      return { revived, transactionId };
+    };
+    const recoverWith = (revived, transactionId, hostileResult) => {
+      const base = revived.dependencies();
+      const metadataStore = {
+        ...base.metadataStore,
+        classifyReceipt: async () => hostileResult,
+      };
+      return createLaunchAgentLifecycleCoordinator({ ...base, metadataStore })
+        .recover({ transactionId });
+    };
+    const assertFrozenReadOnly = (revived, transactionId, journalBefore, hostBefore) => {
+      assert.deepEqual(revived.journalEntries(transactionId), journalBefore, 'journal 逐字节冻结');
+      assert.deepEqual(revived.hostSnapshot(), hostBefore, 'host 逐字段冻结');
+      assert.equal(revived.receiptFor(transactionId), null, '不得写入任何 receipt');
+      assert.deepEqual(revived.lockState(), {
+        transactionLock: true,
+        manualInterventionLock: false,
+      });
+      assert.equal(revived.sentinels().hostMutationCount, 0, '零 host mutation');
+      assert.equal(
+        revived.adapterCalls().filter((call) => call.name === 'lock-acquire').length,
+        0,
+        '不得 acquire fresh lock',
+      );
+      const trace = revived.trace();
+      for (const event of ['receipt', 'recovery-lock-seam', 'mir-lock-publish']) {
+        assert.equal(countEvent(trace, event), 0, `${event} 不得发生`);
+      }
+    };
+
+    await t.test('accessor-backed status getter is never invoked and canary never leaks', async () => {
+      const { revived, transactionId } = await buildFixture();
+      const canary = 'h2-getter-canary-must-not-leak';
+      let getterCalls = 0;
+      const hostileResult = Object.defineProperty({}, 'status', {
+        enumerable: true,
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(canary);
+        },
+      });
+      const journalBefore = revived.journalEntries(transactionId);
+      const hostBefore = revived.hostSnapshot();
+      await assert.rejects(
+        () => recoverWith(revived, transactionId, hostileResult),
+        (error) => {
+          assert.equal(error?.code, 'launchagent-lifecycle-invalid', 'code 必须闭合');
+          assert.equal(error?.message, 'launchagent-lifecycle-invalid', 'message 必须闭合');
+          assert.equal(
+            String(error?.stack ?? '').includes(canary),
+            false,
+            'raw canary 不得出现在公开错误',
+          );
+          return true;
+        },
+        'hostile getter shape 必须以闭合 INVALID 拒绝',
+      );
+      assert.equal(getterCalls, 0, 'status getter 必须从未被调用');
+      assertFrozenReadOnly(revived, transactionId, journalBefore, hostBefore);
+    });
+
+    await t.test('thenable probe get-trap canary normalizes at the await boundary', async () => {
+      // await 依赖返回值时 runtime 必然执行 get('then') 探测；本用例的 get
+      // trap 对任何 property 都抛 raw canary，证明该泄漏同样被 await 边界归一
+      // 为闭合 INVALID，而不是穿透到公开错误。
+      const { revived, transactionId } = await buildFixture();
+      const canary = 'h2-proxy-canary-must-not-leak';
+      const hostileResult = new Proxy({ status: 'missing' }, {
+        get() {
+          throw new Error(canary);
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error(canary);
+        },
+        ownKeys() {
+          throw new Error(canary);
+        },
+      });
+      const journalBefore = revived.journalEntries(transactionId);
+      const hostBefore = revived.hostSnapshot();
+      await assert.rejects(
+        () => recoverWith(revived, transactionId, hostileResult),
+        (error) => {
+          assert.equal(error?.code, 'launchagent-lifecycle-invalid', 'code 必须闭合');
+          assert.equal(error?.message, 'launchagent-lifecycle-invalid', 'message 必须闭合');
+          assert.equal(
+            String(error?.stack ?? '').includes(canary),
+            false,
+            'raw canary 不得出现在公开错误',
+          );
+          return true;
+        },
+        'thenable probe canary 必须以闭合 INVALID 拒绝',
+      );
+      assertFrozenReadOnly(revived, transactionId, journalBefore, hostBefore);
+    });
+
+    await t.test('descriptor trap canary normalizes inside shape validation', async () => {
+      // get('then') 放行让 Promise resolution 完成，保证 recover 真实抵达
+      // readReceiptClassification；getOwnPropertyDescriptor trap 抛 raw canary，
+      // 必须被其 try/catch 归一为闭合 INVALID。
+      const { revived, transactionId } = await buildFixture();
+      const canary = 'h2-descriptor-canary-must-not-leak';
+      let descriptorTrapCalls = 0;
+      const hostileResult = new Proxy({ status: 'missing' }, {
+        get(target, property, receiver) {
+          if (property === 'then') return undefined;
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor() {
+          descriptorTrapCalls += 1;
+          throw new Error(canary);
+        },
+      });
+      const journalBefore = revived.journalEntries(transactionId);
+      const hostBefore = revived.hostSnapshot();
+      await assert.rejects(
+        () => recoverWith(revived, transactionId, hostileResult),
+        (error) => {
+          assert.equal(error?.code, 'launchagent-lifecycle-invalid', 'code 必须闭合');
+          assert.equal(error?.message, 'launchagent-lifecycle-invalid', 'message 必须闭合');
+          assert.equal(
+            String(error?.stack ?? '').includes(canary),
+            false,
+            'raw canary 不得出现在公开错误',
+          );
+          return true;
+        },
+        'descriptor trap canary 必须以闭合 INVALID 拒绝',
+      );
+      assert.ok(descriptorTrapCalls > 0, 'descriptor trap 必须真实抵达');
+      assertFrozenReadOnly(revived, transactionId, journalBefore, hostBefore);
+    });
   });
 }
 

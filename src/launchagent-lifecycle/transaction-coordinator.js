@@ -8,6 +8,7 @@ import {
   validateLaunchAgentManifest,
   validateLaunchAgentReceipt,
   validateLaunchAgentTransactionCloseout,
+  validateLaunchAgentTransactionPrefix,
 } from './contracts.js';
 
 const DEPENDENCY_METHODS = Object.freeze({
@@ -17,7 +18,7 @@ const DEPENDENCY_METHODS = Object.freeze({
     'writeAnchor', 'readAnchor',
     'acquireTransactionLock', 'verifyTransactionLock', 'releaseTransactionLock',
     'acquireManualInterventionLock', 'verifyManualInterventionLock',
-    'publishReceipt', 'readReceipt',
+    'publishReceipt', 'readReceipt', 'classifyReceipt',
   ]),
   hostInspector: Object.freeze(['inspect', 'read', 'launchctlHostFacts']),
   profileRenderer: Object.freeze(['render', 'revalidate']),
@@ -29,6 +30,37 @@ const DEPENDENCY_METHODS = Object.freeze({
 });
 
 const TERMINAL_STATES = new Set(['committed', 'recovered', 'no-change', 'blocked']);
+// anchor durable 之后需要携带 recoveryContext 的 nonterminal business checkpoint；
+// prepared/compensating/compensate-*/terminal 一律不写（§4.2、transactions 精确键断言）。
+const RECOVERY_CONTEXT_STATES = new Set([
+  'anchored',
+  'published',
+  'controller-loaded',
+  'controller-ready',
+  'scheduler-loaded',
+  'manual-intervention-required',
+  'controller-publish-intent',
+  'controller-published',
+  'scheduler-publish-intent',
+  'scheduler-published',
+  'manifest-publish-intent',
+  'manifest-published',
+  'controller-load-intent',
+  'scheduler-load-intent',
+  'scheduler-stop-intent',
+  'scheduler-stopped',
+  'controller-stop-intent',
+  'controller-stopped',
+  'controller-remove-intent',
+  'controller-removed',
+  'scheduler-remove-intent',
+  'scheduler-removed',
+  'manifest-remove-intent',
+  'manifest-removed',
+  'role-noop',
+  'role-stop-noop',
+  'role-load-noop',
+]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -382,6 +414,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       mutationCount: 0,
       anchorId: null,
       anchor: null,
+      anchorRef: null,
       facts: null,
       identities: { controller: null, scheduler: null, manifest: null },
       candidateRefs: { controller: null, scheduler: null, manifest: null },
@@ -423,6 +456,17 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   async function appendJournal(context, state, extraPayload = {}) {
     const sequence = context.lastEntry === null ? 0 : context.lastEntry.sequence + 1;
     const payload = { hostMutationCount: context.mutationCount, ...extraPayload };
+    if (context.anchorRef !== null && RECOVERY_CONTEXT_STATES.has(state)) {
+      payload.recoveryContext = {
+        sourceCommit: context.sourceCommit,
+        anchorRef: context.anchorRef,
+        candidateRefs: {
+          controller: context.candidateRefs.controller,
+          scheduler: context.candidateRefs.scheduler,
+          manifest: context.candidateRefs.manifest,
+        },
+      };
+    }
     const entry = {
       schemaVersion: 1,
       transactionId: context.transactionId,
@@ -467,7 +511,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       outcome: options.outcome,
     });
     const receiptSha256 = sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8'));
-    const terminalPayload = { receiptSha256 };
+    const terminalPayload = { receipt, receiptSha256 };
     if (options.state === 'blocked') {
       terminalPayload.blockedByEntrySha256 = options.blockedByEntrySha256 ?? null;
     }
@@ -747,6 +791,11 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     ) {
       invalid();
     }
+    context.anchorRef = {
+      kind: 'anchor',
+      anchorId: context.anchorId,
+      sha256: ref.sha256,
+    };
     context.anchor = anchor;
     await appendJournal(context, 'anchored');
     return anchor;
@@ -1914,28 +1963,8 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
   }
 
-  async function compensationAction(
-    context,
-    snapshot,
-    facts,
-    step,
-    reversePlanSha256,
-    reversePlan,
-    input,
-  ) {
+  async function executeCompensationMutation(context, snapshot, facts, step, input) {
     const { action } = step;
-    await appendJournal(context, `compensate-${action}-intent`, {
-      action,
-      planIndex: step.index,
-      reversePlanSha256,
-    });
-    await verifyCompensationPrecondition(
-      context,
-      snapshot,
-      facts,
-      reversePlan,
-      step.index,
-    );
     let result;
     if (action === 'stop-controller' || action === 'stop-scheduler') {
       const role = action.slice('stop-'.length);
@@ -1947,6 +1976,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
         throw new FlowFailure('manual-intervention-required');
       }
       context.loadedNew[role] = false;
+      context.stopped.add(role);
     } else if (action.startsWith('remove-')) {
       const role = action.slice('remove-'.length);
       await removePublishedIdentity(context, role);
@@ -1992,6 +2022,31 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     } else {
       invalid();
     }
+  }
+
+  async function compensationAction(
+    context,
+    snapshot,
+    facts,
+    step,
+    reversePlanSha256,
+    reversePlan,
+    input,
+  ) {
+    const { action } = step;
+    await appendJournal(context, `compensate-${action}-intent`, {
+      action,
+      planIndex: step.index,
+      reversePlanSha256,
+    });
+    await verifyCompensationPrecondition(
+      context,
+      snapshot,
+      facts,
+      reversePlan,
+      step.index,
+    );
+    await executeCompensationMutation(context, snapshot, facts, step, input);
     await appendJournal(context, `compensate-${action}-completed`, { action });
   }
 
@@ -2549,6 +2604,834 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
   }
 
+  // ------------------------------------------------------------------
+  // Task 5A.3 普通 crash recovery：只依赖 durable journal/anchor/candidate/
+  // receipt 与当前 host identity。普通恢复续写原 transaction（operation 不变，
+  // 绝不写 operation=recover）；无 owner-death 证明时绝不释放/接管旧锁。
+  // ------------------------------------------------------------------
+
+  function validateRecoverInput(value) {
+    const fields = readExactObject(value, ['transactionId']);
+    return requireUuid(fields.transactionId);
+  }
+
+  function recoveryFault() {
+    return new FlowFailure('manual-intervention-required', {
+      forceManualIntervention: true,
+    });
+  }
+
+  async function readRecoverHeads(transactionId) {
+    const snapshot = await deps.metadataStore.readJournalHeads();
+    const fields = readExactObject(snapshot, ['kind', 'journalSha256', 'heads']);
+    if (fields.kind !== 'journal-heads') invalid();
+    requireSha256(fields.journalSha256);
+    if (!Array.isArray(fields.heads)) invalid();
+    let priorTransactionId = null;
+    let target = null;
+    for (const rawHead of fields.heads) {
+      const head = validateLaunchAgentJournal(rawHead);
+      if (priorTransactionId !== null && priorTransactionId >= head.transactionId) invalid();
+      priorTransactionId = head.transactionId;
+      if (head.transactionId === transactionId) {
+        target = head;
+        continue;
+      }
+      if (!TERMINAL_STATES.has(head.state)) {
+        return { snapshot, target, blocker: head };
+      }
+      try {
+        const receipt = validateLaunchAgentReceipt(
+          await deps.metadataStore.readReceipt(head.transactionId),
+        );
+        const receiptSha256 = sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8'));
+        if (
+          receipt.transactionId !== head.transactionId
+          || receipt.operation !== head.operation
+          || receipt.state !== head.state
+          || receipt.hostMutationCount !== head.payload.hostMutationCount
+          || receiptSha256 !== head.payload.receiptSha256
+        ) {
+          return { snapshot, target, blocker: head };
+        }
+      } catch {
+        return { snapshot, target, blocker: head };
+      }
+    }
+    return { snapshot, target, blocker: null };
+  }
+
+  async function readRecoveryChain(transactionId, expectedHead) {
+    const rawEntries = await deps.metadataStore.readJournal({ transactionId });
+    if (!Array.isArray(rawEntries) || rawEntries.length === 0) invalid();
+    // 完整链先过共享 prefix state machine（schema/canonical hash/首条 prepared、
+    // sequence/prev hash、同 transactionId/operation、mutation 单调、精确
+    // forward/terminal/compensation transition 与 frozen reverse-plan 顺序），
+    // 再核对 transactionId 与 expectedHead；全部发生在 acquire fresh lock
+    // 或任何 mutation 之前。
+    const { entries } = validateLaunchAgentTransactionPrefix({ entries: rawEntries });
+    for (const entry of entries) {
+      if (entry.transactionId !== transactionId) invalid();
+    }
+    if (!sameValue(entries[entries.length - 1], expectedHead)) invalid();
+    return entries;
+  }
+
+  async function acquireRecoveryLock(transactionId) {
+    const ownerNonce = requireUuid(deps.clock.newId());
+    const lockRef = await deps.metadataStore.acquireTransactionLock(
+      createLockRecord(transactionId, ownerNonce),
+    );
+    const verified = await deps.metadataStore.verifyTransactionLock(lockRef);
+    if (verified !== true) invalid();
+    return lockRef;
+  }
+
+  // receipt 三态只读分类的闭合 shape：missing/invalid 单键，valid 双键且
+  // receipt 必须过 strict schema。descriptor-first：不执行 status accessor、
+  // 不通过 ordinary property get 读取 status；Proxy descriptor/prototype trap
+  // 可能被执行，但其 raw error 与任何非闭合异常一律归一为 invalid。
+  function readReceiptClassification(value) {
+    try {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) invalid();
+      if (Object.getPrototypeOf(value) !== Object.prototype) invalid();
+      const statusDescriptor = Object.getOwnPropertyDescriptor(value, 'status');
+      if (
+        statusDescriptor === undefined
+        || statusDescriptor.enumerable !== true
+        || !Object.hasOwn(statusDescriptor, 'value')
+      ) {
+        invalid();
+      }
+      const status = statusDescriptor.value;
+      if (status === 'missing' || status === 'invalid') {
+        readExactObject(value, ['status']);
+        return { status };
+      }
+      if (status === 'valid') {
+        const fields = readExactObject(value, ['status', 'receipt']);
+        return { status: 'valid', receipt: validateLaunchAgentReceipt(fields.receipt) };
+      }
+      invalid();
+    } catch (error) {
+      if (error instanceof LaunchAgentLifecycleError) throw error;
+      invalid();
+    }
+  }
+
+  async function classifyExistingReceipt(transactionId) {
+    let raw;
+    try {
+      // dependency boundary：hostile/thenable 返回值会让 await 本身的 `.then`
+      // 探测抛出 raw error；任何非闭合异常一律归一为 invalid。
+      raw = await deps.metadataStore.classifyReceipt(transactionId);
+    } catch (error) {
+      if (error instanceof LaunchAgentLifecycleError) throw error;
+      invalid();
+    }
+    return readReceiptClassification(raw);
+  }
+
+  function receiptMatchesTerminal(head, receipt) {
+    return receipt !== null
+      && receipt.transactionId === head.transactionId
+      && receipt.operation === head.operation
+      && receipt.state === head.state
+      && receipt.hostMutationCount === head.payload.hostMutationCount
+      && sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8')) === head.payload.receiptSha256;
+  }
+
+  function manualInterventionClassification(head, source) {
+    return validateLaunchAgentReceipt({
+      schemaVersion: 1,
+      operation: head.operation,
+      state: 'manual-intervention-required',
+      success: false,
+      sourceCommit: source.sourceCommit,
+      transactionId: head.transactionId,
+      anchorId: source.anchorId,
+      completedAt: deps.clock.now(),
+      roles: source.roles,
+      hostMutationCount: head.payload.hostMutationCount,
+      outcome: 'manual-intervention-required',
+    });
+  }
+
+  function lastRecoveryContext(entries) {
+    let context = null;
+    for (const entry of entries) {
+      if (Object.hasOwn(entry.payload, 'recoveryContext')) context = entry.payload.recoveryContext;
+    }
+    return context;
+  }
+
+  function assertRecoveryContextHistory(entries) {
+    let sourceCommit = null;
+    let anchorRef = null;
+    const candidateRefs = { controller: null, scheduler: null, manifest: null };
+    for (const entry of entries) {
+      if (!Object.hasOwn(entry.payload, 'recoveryContext')) continue;
+      const context = entry.payload.recoveryContext;
+      if (anchorRef === null) {
+        sourceCommit = context.sourceCommit;
+        anchorRef = context.anchorRef;
+      } else if (context.sourceCommit !== sourceCommit || !sameValue(context.anchorRef, anchorRef)) {
+        invalid();
+      }
+      for (const role of ['controller', 'scheduler', 'manifest']) {
+        const ref = context.candidateRefs[role];
+        if (candidateRefs[role] === null) {
+          candidateRefs[role] = ref;
+        } else if (ref === null || !sameValue(candidateRefs[role], ref)) {
+          invalid();
+        }
+      }
+    }
+  }
+
+  async function recoverTerminal(pre, head) {
+    const transactionId = head.transactionId;
+    const embedded = Object.hasOwn(head.payload, 'receipt') ? head.payload.receipt : null;
+    // 三态只读分类先行：valid+exact match 幂等返回；valid conflict 与 invalid
+    // 一律只读 MIR/fail closed，绝不 acquire lock、不写、不 heal、不 takeover。
+    const classification = await classifyExistingReceipt(transactionId);
+    if (classification.status === 'valid') {
+      const existing = classification.receipt;
+      if (receiptMatchesTerminal(head, existing)) return existing;
+      // valid 但 conflicting persisted receipt：只读 MIR 分类，优先 embedded，
+      // fallback existing；journal、conflicting receipt、host、旧 transaction
+      // lock 全部保持，绝不 heal 或 takeover。
+      const source = embedded ?? existing;
+      return manualInterventionClassification(head, {
+        sourceCommit: source.sourceCommit,
+        anchorId: source.anchorId,
+        roles: source.roles,
+      });
+    }
+    if (classification.status === 'invalid') {
+      if (embedded !== null) {
+        // invalid persisted receipt + durable embedded：只读 MIR 分类，来源
+        // embedded terminal；不 acquire lock、不写、不覆盖 corrupt receipt。
+        return manualInterventionClassification(head, {
+          sourceCommit: embedded.sourceCommit,
+          anchorId: embedded.anchorId,
+          roles: embedded.roles,
+        });
+      }
+      // invalid + legacy hash-only terminal：sourceCommit/anchorId 不可重建，
+      // 任何猜测都被禁止；只读 fail closed。
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+    }
+    if (embedded === null) {
+      // legacy hash-only terminal 缺 receipt：sourceCommit/anchorId 不可重建，
+      // 任何猜测都被禁止；只读 fail closed，不写 journal/receipt/lock/host。
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+    }
+    const lockRef = await acquireRecoveryLock(transactionId);
+    let settled = false;
+    try {
+      const post = await readRecoverHeads(transactionId);
+      if (
+        post.blocker !== null
+        || post.target === null
+        || !sameValue(post.snapshot, pre.snapshot)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+      }
+      try {
+        await deps.metadataStore.publishReceipt({ receipt: embedded, lockRef });
+      } catch (error) {
+        if (!(error instanceof LaunchAgentLifecycleError)) throw error;
+        // exact no-clobber race：publish 失败后只重新分类；只有 valid + exact
+        // embedded match 才按幂等成功继续，其余一律 fail closed。
+        const raced = await classifyExistingReceipt(transactionId);
+        if (raced.status !== 'valid' || !receiptMatchesTerminal(head, raced.receipt)) {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+        }
+      }
+      const entries = await deps.metadataStore.readJournal({ transactionId });
+      const persisted = validateLaunchAgentReceipt(
+        await deps.metadataStore.readReceipt(transactionId),
+      );
+      const closeout = validateLaunchAgentTransactionCloseout({ entries, receipt: persisted });
+      if (!sameValue(closeout.receipt, embedded)) invalid();
+      await deps.metadataStore.releaseTransactionLock(lockRef);
+      settled = true;
+      return closeout.receipt;
+    } finally {
+      if (!settled) {
+        try {
+          await deps.metadataStore.releaseTransactionLock(lockRef);
+        } catch {
+          // fail closed：释放不可达时保留 fresh lock，优于遗留未授权写窗口。
+        }
+      }
+    }
+  }
+
+  function recoverMirHeadClassification(head, entries) {
+    const context = lastRecoveryContext(entries);
+    if (context === null) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+    }
+    return manualInterventionClassification(head, {
+      sourceCommit: context.sourceCommit,
+      anchorId: context.anchorRef.anchorId,
+      roles: receiptRoles(
+        { outcome: 'unchanged', changed: false },
+        { outcome: 'unchanged', changed: false },
+      ),
+    });
+  }
+
+  function baseRecoveryContext(head, entries, durable, lockRef) {
+    return {
+      operation: head.operation,
+      sourceCommit: durable.sourceCommit,
+      rendered: null,
+      transactionId: head.transactionId,
+      lockRef,
+      lastEntry: entries.at(-1),
+      mutationCount: head.payload.hostMutationCount,
+      anchorId: durable.anchorRef.anchorId,
+      anchor: null,
+      anchorRef: durable.anchorRef,
+      facts: null,
+      identities: { controller: null, scheduler: null, manifest: null },
+      candidateRefs: {
+        controller: durable.candidateRefs.controller,
+        scheduler: durable.candidateRefs.scheduler,
+        manifest: durable.candidateRefs.manifest,
+      },
+      restorationCandidateTransactionId: null,
+      possiblePublisherMutations: new Set(),
+      published: new Set(),
+      stopped: new Set(),
+      loadedNew: { controller: false, scheduler: false },
+    };
+  }
+
+  async function enterLegacyManualIntervention(head, lockRef) {
+    // legacy nonterminal 无 durable recovery context：不猜测、不扫描目录；取得
+    // fresh lock 后只做 durable MIR handoff。无 sourceCommit/anchorId 可闭合
+    // receipt，handoff 完成后以闭合 MIR 错误收口。
+    const context = {
+      operation: head.operation,
+      sourceCommit: null,
+      rendered: null,
+      transactionId: head.transactionId,
+      lockRef,
+      lastEntry: head,
+      mutationCount: head.payload.hostMutationCount,
+      anchorId: null,
+      anchor: null,
+      anchorRef: null,
+      facts: null,
+      identities: { controller: null, scheduler: null, manifest: null },
+      candidateRefs: { controller: null, scheduler: null, manifest: null },
+      restorationCandidateTransactionId: null,
+      possiblePublisherMutations: new Set(),
+      published: new Set(),
+      stopped: new Set(),
+      loadedNew: { controller: false, scheduler: false },
+    };
+    await appendJournal(context, 'manual-intervention-required');
+    const manualNonce = requireUuid(deps.clock.newId());
+    const mirLockRef = await deps.metadataStore.acquireManualInterventionLock(
+      createLockRecord(context.transactionId, manualNonce),
+    );
+    const verified = await deps.metadataStore.verifyManualInterventionLock(mirLockRef);
+    if (verified !== true) invalid();
+    await deps.metadataStore.releaseTransactionLock(context.lockRef, {
+      manualInterventionLockRef: mirLockRef,
+    });
+    coded(LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED);
+  }
+
+  function snapshotFromAnchor(anchor, facts) {
+    const present = {};
+    const identities = {};
+    const bytes = {};
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      present[role] = anchor[role].priorState === 'bytes';
+      identities[role] = present[role] ? anchor[role].identity : null;
+      bytes[role] = present[role] ? anchorBytes(anchor, role) : null;
+    }
+    if (
+      (anchor.loaded.controller && !present.controller)
+      || (anchor.loaded.scheduler && !present.scheduler)
+    ) {
+      throw recoveryFault();
+    }
+    return {
+      present,
+      identities,
+      bytes,
+      jobs: {
+        controller: { loaded: anchor.loaded.controller },
+        scheduler: { loaded: anchor.loaded.scheduler },
+      },
+      facts,
+    };
+  }
+
+  async function hydrateRecoveryEvidence(context) {
+    const anchor = validateLaunchAgentAnchor(
+      await deps.metadataStore.readAnchor(context.anchorId),
+    );
+    if (
+      anchor.anchorId !== context.anchorId
+      || anchor.transactionId !== context.transactionId
+      || anchor.sourceCommit !== context.sourceCommit
+      || sha256Hex(Buffer.from(JSON.stringify(anchor), 'utf8')) !== context.anchorRef.sha256
+    ) {
+      throw recoveryFault();
+    }
+    context.anchor = anchor;
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      const ref = context.candidateRefs[role];
+      if (ref === null) continue;
+      const bytes = await deps.metadataStore.readCandidate(ref);
+      if (!Buffer.isBuffer(bytes) || sha256Hex(bytes) !== ref.sha256) {
+        throw recoveryFault();
+      }
+    }
+  }
+
+  function intentWindow(state) {
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      for (const verb of ['publish', 'load', 'stop', 'remove']) {
+        if (state === `${role}-${verb}-intent`) return { role, verb };
+      }
+    }
+    return null;
+  }
+
+  function durableRemoveEvidence(entries, role) {
+    return entries.some((entry) => (
+      entry.state === `${role}-remove-intent` || entry.state === `${role}-removed`
+    ));
+  }
+
+  function analyzeLiveWindow(context, entries, snapshot, live) {
+    const deviations = {};
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      if (
+        live.present[role]
+        && sha256Hex(live.bytes[role]) !== live.identities[role].sha256
+      ) {
+        throw recoveryFault();
+      }
+      if (!snapshot.present[role] && !live.present[role]) {
+        deviations[role] = 'same';
+      } else if (
+        snapshot.present[role]
+        && live.present[role]
+        && sameValue(live.identities[role], snapshot.identities[role])
+      ) {
+        deviations[role] = 'same';
+      } else if (!snapshot.present[role] && live.present[role]) {
+        deviations[role] = 'extra';
+      } else if (snapshot.present[role] && !live.present[role]) {
+        deviations[role] = 'missing';
+      } else {
+        deviations[role] = 'different';
+      }
+    }
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      const deviation = deviations[role];
+      if (deviation === 'same') continue;
+      if (deviation === 'extra' || deviation === 'different') {
+        // 只有本 tx durable candidate 能解释 live 文件；drift/foreign 一律 fail closed。
+        const ref = context.candidateRefs[role];
+        if (ref === null || ref.sha256 !== live.identities[role].sha256) {
+          throw recoveryFault();
+        }
+        continue;
+      }
+      // missing 只能由本 tx 已验证 chain 中该 exact role 的 durable remove 证据
+      // 解释（remove-intent 已落账即证明 remove 窗口已到达该 role）；仅凭
+      // operation 是 uninstall/rollback 不再足够，事务外删除一律 fail closed。
+      if (!durableRemoveEvidence(entries, role)) {
+        throw recoveryFault();
+      }
+    }
+    const loadedNow = new Set();
+    const stoppedNow = new Set();
+    for (const role of ['controller', 'scheduler']) {
+      const job = live.jobs[role];
+      if (job.outcome !== 'ok') throw recoveryFault();
+      if (job.loaded) {
+        if (!live.present[role] || job.jobIdentitySha256 !== live.identities[role].sha256) {
+          throw recoveryFault();
+        }
+        if (!snapshot.jobs[role].loaded) loadedNow.add(role);
+      } else {
+        if (job.jobIdentitySha256 !== null) throw recoveryFault();
+        if (snapshot.jobs[role].loaded) stoppedNow.add(role);
+      }
+    }
+    context.identities = { ...live.identities };
+    for (const role of ['controller', 'scheduler']) {
+      context.loadedNew[role] = loadedNow.has(role);
+      if (stoppedNow.has(role)) context.stopped.add(role);
+    }
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      if (deviations[role] !== 'same') context.published.add(role);
+    }
+    return { deviations, loadedNow, stoppedNow };
+  }
+
+  async function proveInstallPostState(context, live) {
+    // 唯一 committed 例外：install 的完整 post-state 必须由 durable candidate、
+    // manifest、job identity、health 与 runtime revalidation 全部独立证明。
+    try {
+      const manifest = validateLaunchAgentManifest(
+        JSON.parse(live.bytes.manifest.toString('utf8')),
+      );
+      if (
+        manifest.transactionId !== context.transactionId
+        || manifest.sourceCommit !== context.sourceCommit
+        || manifest.activeAnchorId !== context.anchorId
+        || manifest.controller.plistSha256 !== live.identities.controller.sha256
+        || manifest.scheduler.plistSha256 !== live.identities.scheduler.sha256
+        || live.identities.manifest.sha256 !== context.candidateRefs.manifest.sha256
+      ) {
+        return false;
+      }
+      const health = await deps.healthChecker.check({
+        port: controllerPortFromPlistBytes(live.bytes.controller),
+      });
+      if (health?.statusCode !== 200 || health?.ready !== true) return false;
+      await revalidateRuntime('before-commit');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function closeRecovered(context, roles) {
+    return closeWithReceipt(context, {
+      state: 'recovered',
+      outcome: 'recovered',
+      success: false,
+      roles,
+    });
+  }
+
+  async function recoverBusinessWindow(context, entries, head, snapshot, live) {
+    const { deviations, loadedNow, stoppedNow } = analyzeLiveWindow(context, entries, snapshot, live);
+    const window = intentWindow(head.state);
+    if (window !== null) {
+      const done = (
+        (window.verb === 'publish'
+          && (deviations[window.role] === 'extra' || deviations[window.role] === 'different'))
+        || (window.verb === 'remove' && deviations[window.role] === 'missing')
+        || (window.verb === 'stop' && stoppedNow.has(window.role))
+        || (window.verb === 'load' && loadedNow.has(window.role))
+      );
+      if (done) {
+        // intent 已落账、mutation 已发生但未落账：如实补记一次，绝不二次执行。
+        context.mutationCount += 1;
+      }
+    }
+
+    if (
+      context.operation === 'install'
+      && head.state === 'scheduler-load-intent'
+      && deviations.controller === 'extra'
+      && deviations.scheduler === 'extra'
+      && deviations.manifest === 'extra'
+      && loadedNow.has('controller')
+      && loadedNow.has('scheduler')
+      && await proveInstallPostState(context, live)
+    ) {
+      await appendJournal(context, 'scheduler-loaded');
+      return closeWithReceipt(context, {
+        state: 'committed',
+        outcome: 'completed',
+        success: true,
+        roles: receiptRoles(
+          { outcome: 'created', changed: true },
+          { outcome: 'created', changed: true },
+        ),
+      });
+    }
+
+    const mode = context.operation === 'install' ? 'install' : 'upgrade';
+    if (mode === 'upgrade') {
+      for (const role of ['controller', 'scheduler', 'manifest']) {
+        if (deviations[role] === 'extra') throw recoveryFault();
+      }
+    }
+    const reversePlan = buildReversePlan(context, snapshot, mode);
+    if (reversePlan.length === 0) {
+      if (context.mutationCount !== 0) throw recoveryFault();
+      await verifyRecoveryTarget(context, snapshot);
+      return closeRecovered(context, receiptRoles(
+        { outcome: 'unchanged', changed: false },
+        { outcome: 'unchanged', changed: false },
+      ));
+    }
+    const reversePlanSha256 = sha256Hex(Buffer.from(JSON.stringify(reversePlan), 'utf8'));
+    const recoveryInput = {
+      controllerEnvironment: snapshot.present.controller
+        ? { PORT: String(controllerPortFromPlistBytes(snapshot.bytes.controller)) }
+        : {},
+    };
+    const compensating = await appendJournal(context, 'compensating', {
+      reversePlan,
+      reversePlanSha256,
+    });
+    for (const step of compensating.payload.reversePlan) {
+      await compensationAction(
+        context,
+        snapshot,
+        live.facts,
+        step,
+        compensating.payload.reversePlanSha256,
+        compensating.payload.reversePlan,
+        recoveryInput,
+      );
+    }
+    await verifyRecoveryTarget(context, snapshot);
+    return closeRecovered(context, receiptRoles(
+      { outcome: mode === 'install' ? 'removed' : 'restored', changed: true },
+      { outcome: mode === 'install' ? 'removed' : 'restored', changed: true },
+    ));
+  }
+
+  function restoredBefore(reversePlan, role, position) {
+    return reversePlan.some((step) => (
+      step.role === role && step.action.startsWith('restore-') && step.index < position
+    ));
+  }
+
+  function matchExpectedLive(live, role, expected, inodeExact) {
+    if (expected.file.state === 'absent') {
+      if (live.present[role]) return false;
+    } else {
+      if (!live.present[role]) return false;
+      const identity = live.identities[role];
+      if (
+        identity.device !== expected.file.identity.device
+        || identity.sha256 !== expected.file.sha256
+        || sha256Hex(live.bytes[role]) !== expected.file.sha256
+        || (inodeExact && identity.inode !== expected.file.identity.inode)
+      ) {
+        return false;
+      }
+    }
+    if (role === 'manifest') return true;
+    const job = live.jobs[role];
+    if (job.outcome !== 'ok') throw recoveryFault();
+    return job.loaded === (expected.job.state === 'loaded')
+      && job.jobIdentitySha256 === expected.job.identitySha256;
+  }
+
+  function resumeBoundary(reversePlan, fromIndex, snapshot, role) {
+    let post = null;
+    for (const step of reversePlan) {
+      if (step.role !== role) continue;
+      if (step.index < fromIndex) {
+        post = step;
+      } else {
+        const expected = step.expectedPre;
+        return {
+          expected,
+          inodeExact: !restoredBefore(reversePlan, role, step.index),
+        };
+      }
+    }
+    if (post !== null) {
+      return {
+        expected: post.expectedPost,
+        inodeExact: !restoredBefore(reversePlan, role, post.index + 1),
+      };
+    }
+    const loaded = role === 'manifest' ? false : snapshot.jobs[role].loaded;
+    return {
+      expected: reverseExpected(snapshot.identities[role], loaded),
+      inodeExact: true,
+    };
+  }
+
+  async function resumeFrozenCompensation(context, entries, head, frozen, snapshot, live) {
+    const reversePlan = frozen.payload.reversePlan;
+    const frozenHash = frozen.payload.reversePlanSha256;
+    // 冻结链形状校验：frozen 之后只能按 plan 顺序成对出现 intent/completed。
+    let nextIndex = 0;
+    let awaitingCompletion = false;
+    for (const entry of entries.slice(entries.indexOf(frozen) + 1)) {
+      if (!entry.state.startsWith('compensate-')) throw recoveryFault();
+      const completed = entry.state.endsWith('-completed');
+      if (!completed && !entry.state.endsWith('-intent')) throw recoveryFault();
+      const step = reversePlan[nextIndex];
+      if (step === undefined || entry.state !== `compensate-${step.action}-${completed ? 'completed' : 'intent'}`) {
+        throw recoveryFault();
+      }
+      if (entry.payload.action !== step.action) throw recoveryFault();
+      if (completed) {
+        if (!awaitingCompletion) throw recoveryFault();
+        awaitingCompletion = false;
+        nextIndex += 1;
+      } else {
+        if (awaitingCompletion) throw recoveryFault();
+        if (
+          entry.payload.planIndex !== step.index
+          || entry.payload.reversePlanSha256 !== frozenHash
+        ) {
+          throw recoveryFault();
+        }
+        awaitingCompletion = true;
+      }
+    }
+
+    await verifyCompensationEvidence(context, reversePlan);
+    const currentStep = awaitingCompletion ? reversePlan[nextIndex] : null;
+    // 任何 host mutation 前先验证全部 evidence 与非 current role 的 union boundary。
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      if (currentStep !== null && currentStep.role === role) continue;
+      const boundary = resumeBoundary(reversePlan, nextIndex, snapshot, role);
+      if (!matchExpectedLive(live, role, boundary.expected, boundary.inodeExact)) {
+        throw recoveryFault();
+      }
+    }
+    const recoveryInput = {
+      controllerEnvironment: snapshot.present.controller
+        ? { PORT: String(controllerPortFromPlistBytes(snapshot.bytes.controller)) }
+        : {},
+    };
+    let startIndex = nextIndex;
+    if (currentStep !== null) {
+      const matchesPre = matchExpectedLive(
+        live,
+        currentStep.role,
+        currentStep.expectedPre,
+        !restoredBefore(reversePlan, currentStep.role, currentStep.index),
+      );
+      const matchesPost = !matchesPre && matchExpectedLive(
+        live,
+        currentStep.role,
+        currentStep.expectedPost,
+        !restoredBefore(reversePlan, currentStep.role, currentStep.index + 1),
+      );
+      if (matchesPre) {
+        // current intent live=expectedPre：同一 frozen step 恰好执行一次，只补 completed。
+        await executeCompensationMutation(context, snapshot, live.facts, currentStep, recoveryInput);
+      } else if (matchesPost) {
+        // live=expectedPost：mutation 已发生未落账，补记一次且绝不二次执行。
+        context.mutationCount += 1;
+      } else {
+        throw recoveryFault();
+      }
+      await appendJournal(context, `compensate-${currentStep.action}-completed`, {
+        action: currentStep.action,
+      });
+      startIndex = nextIndex + 1;
+    }
+    for (let index = startIndex; index < reversePlan.length; index += 1) {
+      await compensationAction(
+        context,
+        snapshot,
+        live.facts,
+        reversePlan[index],
+        frozenHash,
+        reversePlan,
+        recoveryInput,
+      );
+    }
+    await verifyRecoveryTarget(context, snapshot);
+    return closeRecovered(context, receiptRoles(
+      {
+        outcome: context.operation === 'install' ? 'removed' : 'restored',
+        changed: true,
+      },
+      {
+        outcome: context.operation === 'install' ? 'removed' : 'restored',
+        changed: true,
+      },
+    ));
+  }
+
+  async function recoverBusiness(context, entries, head) {
+    await hydrateRecoveryEvidence(context);
+    const live = await inspectCurrentState();
+    context.facts = live.facts;
+    const snapshot = snapshotFromAnchor(context.anchor, live.facts);
+    const frozen = entries.find((entry) => entry.state === 'compensating');
+    if (frozen !== undefined) {
+      // compensation resume：identities/loaded/stopped 先按 live 水合（loadedNew/
+      // stopped 与 expectedCompensationUnion 的生产簿记语义一致：loadedNew 表示
+      // 当前仍 loaded，stopped 表示当前已 unloaded），再由 boundary 逐 role 核验；
+      // 只续同一 frozen plan/hash。
+      context.identities = { ...live.identities };
+      for (const role of ['controller', 'scheduler']) {
+        const job = live.jobs[role];
+        if (job.outcome !== 'ok') throw recoveryFault();
+        if (job.loaded) {
+          if (!live.present[role] || job.jobIdentitySha256 !== live.identities[role].sha256) {
+            throw recoveryFault();
+          }
+          context.loadedNew[role] = true;
+        } else {
+          if (job.jobIdentitySha256 !== null) throw recoveryFault();
+          context.loadedNew[role] = false;
+          context.stopped.add(role);
+        }
+      }
+      return resumeFrozenCompensation(context, entries, head, frozen, snapshot, live);
+    }
+    if (head.state.startsWith('compensate-')) throw recoveryFault();
+    return recoverBusinessWindow(context, entries, head, snapshot, live);
+  }
+
+  async function recoverNonterminal(pre, head, entries) {
+    const transactionId = head.transactionId;
+    const lockRef = await acquireRecoveryLock(transactionId);
+    const durable = lastRecoveryContext(entries);
+    if (durable === null) {
+      // legacy nonterminal 缺 context：不猜测、不扫描目录，fresh lock 后 durable MIR。
+      return enterLegacyManualIntervention(head, lockRef);
+    }
+    const context = baseRecoveryContext(head, entries, durable, lockRef);
+    try {
+      const post = await readRecoverHeads(transactionId);
+      if (
+        post.blocker !== null
+        || post.target === null
+        || !sameValue(post.snapshot, pre.snapshot)
+      ) {
+        throw recoveryFault();
+      }
+      assertRecoveryContextHistory(entries);
+      return await recoverBusiness(context, entries, head);
+    } catch {
+      // fresh recovery lock 已取得后的一切 fault 一律 durable MIR handoff。
+      return enterManualIntervention(context, receiptRoles(
+        { outcome: 'unchanged', changed: false },
+        { outcome: 'unchanged', changed: false },
+      ));
+    }
+  }
+
+  async function runRecover(input) {
+    const transactionId = validateRecoverInput(input);
+    const pre = await readRecoverHeads(transactionId);
+    if (pre.blocker !== null || pre.target === null) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    const head = pre.target;
+    const entries = await readRecoveryChain(transactionId, head);
+    if (head.state === 'manual-intervention-required') {
+      return recoverMirHeadClassification(head, entries);
+    }
+    if (TERMINAL_STATES.has(head.state)) {
+      return recoverTerminal(pre, head);
+    }
+    return recoverNonterminal(pre, head, entries);
+  }
+
   return Object.freeze({
     async install(input) {
       return runInstallOrUpgrade('install', input);
@@ -2568,6 +3451,10 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
 
     async uninstall(input) {
       return runUninstall(input);
+    },
+
+    async recover(input) {
+      return runRecover(input);
     },
   });
 }

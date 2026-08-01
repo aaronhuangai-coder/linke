@@ -33,6 +33,7 @@ const SIMPLE_EVENTS = Object.freeze([
 const SIMPLE_EVENT_SET = new Set(SIMPLE_EVENTS);
 const ADAPTER_CALL_SET = new Set([
   'read-journal-heads', 'read-journal', 'read-anchor', 'read-receipt',
+  'classify-receipt',
   'lock-acquire', 'lock-verify', 'append-journal',
   'inspect-file', 'inspect-job', 'write-anchor',
   'write-candidate', 'plist-validate', 'publish', 'host-mutation',
@@ -1237,6 +1238,27 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       counters.receipt += 1;
       return stored.projection;
     },
+
+    async classifyReceipt(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      recordAdapterCall('classify-receipt');
+      const stored = store.receipts.get(transactionId);
+      if (!stored) return deepFreeze({ status: 'missing' });
+      // 与生产对齐的只读三态分类：strict schema/transaction binding + canonical
+      // sha 复核区分 valid/invalid；不写 receipt 计数、不改 store、不 heal。
+      try {
+        const projection = validateLaunchAgentReceipt(stored.projection);
+        if (projection.transactionId !== transactionId) invalid();
+        const canonical = sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8'));
+        if (canonical !== stored.sha256) invalid();
+        return deepFreeze({ status: 'valid', receipt: projection });
+      } catch (error) {
+        if (error instanceof LaunchAgentLifecycleError) {
+          return deepFreeze({ status: 'invalid' });
+        }
+        throw error;
+      }
+    },
   });
 
   const dependencies = Object.freeze({
@@ -1255,17 +1277,6 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   }
 
   function seedJournalAndReceipt({ transactionId, anchorId, sourceCommit }) {
-    const prepared = {
-      schemaVersion: 1,
-      transactionId,
-      sequence: 0,
-      previousEntrySha256: null,
-      operation: 'install',
-      state: 'prepared',
-      at: nowIso(),
-      payload: { hostMutationCount: 0 },
-    };
-    prepared.entrySha256 = computeJournalEntrySha256(prepared);
     const receipt = validateLaunchAgentReceipt({
       schemaVersion: 1,
       operation: 'install',
@@ -1283,20 +1294,57 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       outcome: 'completed',
     });
     const receiptSha = sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8'));
+    // 完整 install 链（publish×3 + load×2 = 5 mutations）：共享 transaction
+    // prefix validator 不接受压缩的 prepared->committed，seed 必须与真实
+    // coordinator 写出的链一样逐条满足 forward/terminal transition。
+    const chain = [
+      ['prepared', 0, null],
+      ['anchored', 0, null],
+      ['controller-publish-intent', 0, 'controller'],
+      ['controller-published', 1, 'controller'],
+      ['scheduler-publish-intent', 1, 'scheduler'],
+      ['scheduler-published', 2, 'scheduler'],
+      ['manifest-publish-intent', 2, 'manifest'],
+      ['manifest-published', 3, 'manifest'],
+      ['controller-load-intent', 3, 'controller'],
+      ['controller-loaded', 4, null],
+      ['controller-ready', 4, null],
+      ['scheduler-load-intent', 4, 'scheduler'],
+      ['scheduler-loaded', 5, null],
+    ];
+    const entries = [];
+    let previousEntrySha256 = null;
+    for (const [index, [state, hostMutationCount, role]] of chain.entries()) {
+      const payload = { hostMutationCount };
+      if (role !== null) payload.role = role;
+      const entry = {
+        schemaVersion: 1,
+        transactionId,
+        sequence: index,
+        previousEntrySha256,
+        operation: 'install',
+        state,
+        at: nowIso(),
+        payload,
+      };
+      entry.entrySha256 = computeJournalEntrySha256(entry);
+      entries.push(entry);
+      previousEntrySha256 = entry.entrySha256;
+    }
     const committed = {
       schemaVersion: 1,
       transactionId,
-      sequence: 1,
-      previousEntrySha256: prepared.entrySha256,
+      sequence: entries.length,
+      previousEntrySha256,
       operation: 'install',
       state: 'committed',
       at: nowIso(),
       payload: { hostMutationCount: 5, receiptSha256: receiptSha },
     };
     committed.entrySha256 = computeJournalEntrySha256(committed);
+    entries.push(committed);
     store.journal.push(
-      deepFreeze(validateJournalEntryShape(prepared)),
-      deepFreeze(validateJournalEntryShape(committed)),
+      ...entries.map((entry) => deepFreeze(validateJournalEntryShape(entry))),
     );
     store.receipts.set(transactionId, { projection: receipt, sha256: receiptSha });
   }
@@ -1459,7 +1507,7 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
             'writeAnchor', 'readAnchor',
             'acquireTransactionLock', 'verifyTransactionLock', 'releaseTransactionLock',
             'acquireManualInterventionLock', 'verifyManualInterventionLock',
-            'publishReceipt', 'readReceipt',
+            'publishReceipt', 'readReceipt', 'classifyReceipt',
           ],
           hostInspector: ['inspect', 'read', 'launchctlHostFacts'],
           profileRenderer: ['render', 'revalidate'],
@@ -1640,6 +1688,80 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       if (sha256 === stored.sha256) throw harnessError('receipt hash did not change');
       store.receipts.set(transactionId, { projection, sha256 });
       return deepFreeze({ transactionId, sha256 });
+    },
+
+    /**
+     * Task 5A.3 F1 RED seam：只对目标 transaction 的 latest nonterminal checkpoint
+     * 做 test-only rewrite，保持 sequence/previousEntrySha256/operation/at/
+     * recoveryContext，改为另一个 individually-valid checkpoint/payload 并重算
+     * canonical entrySha256。schema/canonical hash/sequence/prevHash/operation/head
+     * 全部保持合法，只留下 transition 层面的非法性供 recover 证明。
+     */
+    rewriteLatestJournalCheckpointForTest(input) {
+      const fields = readExactObject(input, ['transactionId', 'state', 'role']);
+      const transactionId = requireUuid(fields.transactionId);
+      if (typeof fields.state !== 'string' || fields.state.length === 0) {
+        throw harnessError('rewrite state must be non-empty');
+      }
+      if (fields.role !== 'controller' && fields.role !== 'scheduler' && fields.role !== 'manifest') {
+        throw harnessError(`unknown rewrite role: ${String(fields.role)}`);
+      }
+      let index = -1;
+      for (const [cursor, entry] of store.journal.entries()) {
+        if (entry.transactionId === transactionId) index = cursor;
+      }
+      if (index === -1) throw harnessError('cannot rewrite missing journal');
+      const latest = store.journal[index];
+      if (TERMINAL_JOURNAL_STATES.has(latest.state) || latest.state === 'manual-intervention-required') {
+        throw harnessError('rewrite requires a nonterminal latest checkpoint');
+      }
+      const payload = {
+        hostMutationCount: latest.payload.hostMutationCount,
+        role: fields.role,
+      };
+      if (Object.hasOwn(latest.payload, 'recoveryContext')) {
+        payload.recoveryContext = structuredClone(latest.payload.recoveryContext);
+      }
+      const rewritten = {
+        schemaVersion: latest.schemaVersion,
+        transactionId: latest.transactionId,
+        sequence: latest.sequence,
+        previousEntrySha256: latest.previousEntrySha256,
+        entrySha256: '0'.repeat(64),
+        operation: latest.operation,
+        state: fields.state,
+        at: latest.at,
+        payload,
+      };
+      rewritten.entrySha256 = computeJournalEntrySha256(rewritten);
+      // 单条 schema/canonical hash 必须全合法；非法 state/role 组合在此 fail closed。
+      store.journal[index] = validateJournalEntryShape(rewritten);
+      return true;
+    },
+
+    /**
+     * Task 5A.3 F3 RED seam：把 stored receipt projection 改成 exact-schema
+     * invalid（额外键），不是另一份 valid conflicting receipt；保留可冻结快照。
+     */
+    corruptReceiptForTest(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      const stored = store.receipts.get(transactionId);
+      if (!stored) throw harnessError('cannot corrupt missing receipt');
+      const projection = structuredClone(stored.projection);
+      projection.unexpected = 'harness-corrupt';
+      let stillValid = true;
+      try {
+        validateLaunchAgentReceipt(projection);
+      } catch {
+        stillValid = false;
+      }
+      if (stillValid) throw harnessError('receipt corruption must break validateLaunchAgentReceipt');
+      const frozen = deepFreeze(projection);
+      store.receipts.set(transactionId, {
+        projection: frozen,
+        sha256: sha256Hex(Buffer.from(JSON.stringify(frozen), 'utf8')),
+      });
+      return deepFreeze({ transactionId, projection: frozen });
     },
 
     hostSnapshot() {
@@ -2061,6 +2183,21 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       const existing = harness.fileBytes(role);
       if (existing === null) throw harnessError(`cannot drift absent file: ${role}`);
       placeFile(role, Buffer.concat([existing, Buffer.from('\n# harness-drift', 'utf8')]));
+    },
+
+    /**
+     * Task 5A.3 F2 RED seam：模拟事务外部使 host 文件缺失；不记录任何
+     * lifecycle side effect/trace/counter；文件已缺失时 fail closed。
+     */
+    removeHostFileForTest(role) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown remove role: ${String(role)}`);
+      }
+      const rootId = role === 'manifest' ? ROOT_METADATA : ROOT_LAUNCH_AGENTS;
+      if (!files.delete(fileKey(rootId, FILENAMES[role]))) {
+        throw harnessError(`cannot remove absent file: ${role}`);
+      }
+      return true;
     },
 
     sha256(bytes) {

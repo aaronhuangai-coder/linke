@@ -36,6 +36,7 @@ const EXPECTED_STORE_METHODS = Object.freeze([
   'readJournalHeads',
   'publishReceipt',
   'readReceipt',
+  'classifyReceipt',
   'consumeConfirmation',
   'readConsumedConfirmation',
 ]);
@@ -266,6 +267,39 @@ function createMutationTracingFs(mutations) {
       if (typeof value !== 'function') return value;
       return (...args) => {
         if (fsMutators.has(property)) mutations.push(`fs.${String(property)}`);
+        return value.apply(target, args);
+      };
+    },
+  });
+}
+
+/**
+ * H1：记录每一次真实 fs/FileHandle 函数调用的全量 tracing fs（只在实际调用
+ * 时记录，getter 不记录），用于证明 classifyReceipt 非法输入先于任何 fs I/O。
+ */
+function createCallTracingFs(calls) {
+  return new Proxy(fsPromises, {
+    get(target, property, receiver) {
+      if (property === 'open') {
+        return async (...args) => {
+          calls.push('fs.open');
+          const handle = await target.open(...args);
+          return new Proxy(handle, {
+            get(handleTarget, handleProperty) {
+              const value = Reflect.get(handleTarget, handleProperty, handleTarget);
+              if (typeof value !== 'function') return value;
+              return (...methodArgs) => {
+                calls.push(`handle.${String(handleProperty)}`);
+                return value.apply(handleTarget, methodArgs);
+              };
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function') return value;
+      return (...args) => {
+        calls.push(`fs.${String(property)}`);
         return value.apply(target, args);
       };
     },
@@ -4239,3 +4273,142 @@ if (HAS_READ_JOURNAL_HEADS) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Task 5A.3 F4 RED：receipt classification 只读 surface 契约（PM 已批准 GREEN
+// 允许 metadata-store 新增非变更 seam 以区分 missing/valid/invalid）。当前生产
+// 尚无 classifyReceipt：首个 surface 断言即本轮预期 RED；subtests 定义 GREEN
+// 必须满足的精确契约——exact UUID 输入先于文件 I/O 拒绝；结果 exact、
+// deep-frozen、脱敏；status 只能 missing/valid/invalid；仅 valid 携带严格
+// receipt projection；missing/invalid 不写任何 artifact/lock、不返回 path 或
+// raw error。
+// ---------------------------------------------------------------------------
+
+test('Task 5A.3 F4 classifyReceipt surface and exact missing/valid/invalid classification contract', async (t) => {
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const store = createLaunchAgentMetadataStore({ metadataRoot });
+
+  assert.equal(
+    typeof store.classifyReceipt,
+    'function',
+    'expected store.classifyReceipt read-only classification seam (Task 5A.3 F4)',
+  );
+
+  await t.test('invalid input rejects with closed INVALID before any file I/O', async () => {
+    for (const bad of [null, undefined, {}, 'not-a-uuid', 42, ['a1b2c3d4']]) {
+      await assert.rejects(
+        () => store.classifyReceipt(bad),
+        (error) => error instanceof LaunchAgentLifecycleError
+          && error.code === LAUNCHAGENT_LIFECYCLE_CODES.INVALID
+          && error.message === LAUNCHAGENT_LIFECYCLE_CODES.INVALID,
+        `classifyReceipt must reject invalid input before I/O: ${String(bad)}`,
+      );
+    }
+  });
+
+  await t.test('H1 invalid input triggers zero fs calls on an initialized store', async () => {
+    const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+    const tracedRoot = await makeTempMetadataRoot(t);
+    const calls = [];
+    const durabilityEvents = [];
+    const tracedStore = createForTest({
+      metadataRoot: tracedRoot,
+      fs: createCallTracingFs(calls),
+      onDurabilityEvent: (event) => { durabilityEvents.push(event); },
+    });
+    await tracedStore.initialize();
+    const rootListingBefore = (await readdir(tracedRoot)).sort();
+    calls.length = 0;
+    durabilityEvents.length = 0;
+    for (const bad of [null, undefined, {}, 'not-a-uuid', 42, ['a1b2c3d4']]) {
+      await assert.rejects(
+        () => tracedStore.classifyReceipt(bad),
+        (error) => error instanceof LaunchAgentLifecycleError
+          && error.code === LAUNCHAGENT_LIFECYCLE_CODES.INVALID
+          && error.message === LAUNCHAGENT_LIFECYCLE_CODES.INVALID,
+        `classifyReceipt must reject invalid input with closed INVALID: ${String(bad)}`,
+      );
+    }
+    assert.deepEqual(
+      calls,
+      [],
+      'invalid input must not trigger any fs call on an initialized store',
+    );
+    assert.deepEqual(
+      durabilityEvents,
+      [],
+      'invalid input must not emit any durability event',
+    );
+    assert.deepEqual(
+      (await readdir(tracedRoot)).sort(),
+      rootListingBefore,
+      'invalid input must leave the metadata tree unchanged',
+    );
+  });
+
+  await t.test('missing classification is exact frozen sanitized and writes nothing', async () => {
+    await store.initialize();
+    const missing = await store.classifyReceipt(TX_ID_B);
+    assert.deepEqual(missing, { status: 'missing' }, 'missing result must be exact single-key');
+    assert.equal(isDeeplyFrozen(missing), true, 'missing result must be deeply frozen');
+    assertNoAbsolutePaths(missing, 'classifyReceipt missing result');
+    assert.deepEqual(
+      await readdir(join(metadataRoot, 'receipts')),
+      [],
+      'missing classification must not write any receipt artifact',
+    );
+  });
+
+  await t.test('valid classification carries the strict frozen receipt projection', async () => {
+    const receipt = buildReceipt();
+    const { writerLockRef } = await setupTerminalTransaction(store, { receipt });
+    await store.publishReceipt({ receipt, lockRef: writerLockRef });
+    const classified = await store.classifyReceipt(TX_ID);
+    assert.deepEqual(
+      classified,
+      { status: 'valid', receipt },
+      'valid result must be exact status+strict receipt projection',
+    );
+    assert.equal(isDeeplyFrozen(classified), true, 'valid result must be deeply frozen');
+    assertNoAbsolutePaths(classified, 'classifyReceipt valid result');
+    assert.deepEqual(validateLaunchAgentReceipt(classified.receipt), receipt);
+  });
+
+  await t.test('invalid classification is read-only exact frozen and never heals the artifact', async () => {
+    const leafPath = receiptLeafPath(metadataRoot, TX_ID);
+    const validBytes = await readFile(leafPath);
+    const corrupted = { ...buildReceipt(), unexpected: 'corrupt' };
+    assert.throws(
+      () => validateLaunchAgentReceipt(corrupted),
+      /launchagent-lifecycle-invalid/,
+      'fixture corruption must genuinely break validateLaunchAgentReceipt',
+    );
+    await writeFile(leafPath, Buffer.from(JSON.stringify(corrupted), 'utf8'), { mode: 0o600 });
+    const corruptBytesBeforeClassification = await readFile(leafPath);
+    assert.notEqual(
+      Buffer.compare(corruptBytesBeforeClassification, validBytes),
+      0,
+      'fixture corruption must genuinely change the artifact bytes',
+    );
+    const classified = await store.classifyReceipt(TX_ID);
+    assert.deepEqual(classified, { status: 'invalid' }, 'invalid result must be exact single-key');
+    assert.equal(isDeeplyFrozen(classified), true, 'invalid result must be deeply frozen');
+    assertNoAbsolutePaths(classified, 'classifyReceipt invalid result');
+    assert.equal(
+      Buffer.compare(await readFile(leafPath), corruptBytesBeforeClassification),
+      0,
+      'invalid classification must not heal or rewrite the corrupt artifact',
+    );
+    assert.deepEqual(
+      await readdir(join(metadataRoot, 'receipts')),
+      [`${TX_ID}.json`],
+      'invalid classification must not create or delete receipt artifacts',
+    );
+    await assert.rejects(
+      () => store.readReceipt(TX_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'classification must not change the existing readReceipt fail-closed contract',
+    );
+  });
+});

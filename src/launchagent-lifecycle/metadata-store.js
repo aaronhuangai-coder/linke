@@ -1358,6 +1358,42 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
   }
 
   /**
+   * 收据三态只读分类：严格 UUID 在任何 fs I/O（含 bound root/layout 复核）前
+   * 闭合；bound root/layout 与 receipts 目录错误一律上抛（绝不吞成 receipt
+   * invalid）；精确 leaf 仅 non-mutating lstat，ENOENT 为 missing；leaf 存在
+   * 则走既有 strict loadValidatedReceipt，任何叶类型/模式/symlink/read/JSON/
+   * schema/canonical bytes/transaction binding 错误均为 invalid。不写、不修复、
+   * 不删除任何 artifact/lock；结果 exact/deep-frozen，仅 valid 携带 receipt 投影。
+   */
+  async function classifyReceipt(transactionIdInput) {
+    return withLifecycleErrors(async () => {
+      // 输入闭合先于一切 fs I/O：非法 UUID 连 root/layout lstat 都不得发生。
+      const transactionId = requireUuid(transactionIdInput);
+      await assertBoundRootLayout();
+      const receiptsRoot = join(metadataRoot, RECEIPTS_MID_DIR);
+      await assertOwnedDirectory(receiptsRoot);
+      const targetPath = join(receiptsRoot, `${transactionId}.json`);
+      try {
+        await lstatPath(targetPath);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          return deepFreeze({ status: 'missing' });
+        }
+        throw error;
+      }
+      try {
+        const { projection } = await loadValidatedReceipt(transactionId);
+        return deepFreeze({ status: 'valid', receipt: projection });
+      } catch (error) {
+        if (error instanceof LaunchAgentLifecycleError) {
+          return deepFreeze({ status: 'invalid' });
+        }
+        throw error;
+      }
+    });
+  }
+
+  /**
    * 一次性消费确认：参数为直接 record；schema 投影在任何文件 I/O 前闭合。
    * 路径固定 confirmations/<confirmationId>.json；字节为投影精确 JSON.stringify UTF-8，≤256KiB。
    * O_EXCL durable leaf（0600、当前 uid）+ 耐久三元组 artifact=confirmation。
@@ -1441,6 +1477,7 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     readJournalHeads,
     publishReceipt,
     readReceipt,
+    classifyReceipt,
     consumeConfirmation,
     readConsumedConfirmation,
   });

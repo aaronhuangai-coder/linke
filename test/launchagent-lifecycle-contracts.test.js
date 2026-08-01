@@ -26,6 +26,7 @@ if (contractsExists) {
     validateLaunchAgentJournal,
     validateLaunchAgentReceipt,
     validateLaunchAgentTransactionCloseout,
+    validateLaunchAgentTransactionPrefix,
     validateLaunchAgentAcceptanceRequest,
     validateLaunchAgentConfirmationRecord,
     validateLaunchAgentConsumedConfirmation,
@@ -1021,6 +1022,45 @@ if (contractsExists) {
           noChangeCloseout(0, 9),
         );
       });
+    });
+  }
+
+  test('transaction prefix validator export is required for crash recovery chain checks', () => {
+    assert.equal(
+      typeof validateLaunchAgentTransactionPrefix,
+      'function',
+      'expected validateLaunchAgentTransactionPrefix to validate journal prefixes without a receipt',
+    );
+  });
+
+  if (typeof validateLaunchAgentTransactionPrefix === 'function') {
+    test('transaction prefix accepts a legal nonterminal prefix without a receipt', () => {
+      const entries = linkJournalEntries([
+        checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+        checkpointJournal('anchored', { hostMutationCount: 0 }, 'install'),
+        checkpointJournal(
+          'controller-publish-intent',
+          { hostMutationCount: 0, role: 'controller' },
+          'install',
+        ),
+      ]);
+      const projected = assertProjection(validateLaunchAgentTransactionPrefix, { entries });
+      assert.deepEqual(Object.keys(projected), ['entries'], 'prefix projection must be exact single-key');
+    });
+
+    test('transaction prefix rejects a schema/hash-valid but transition-invalid chain', () => {
+      // anchored -> controller-stop-intent 对 install 语义非法；但每条 entry 的
+      // schema 与 canonical hash 全合法（linkJournalEntries 逐条重算）。
+      const entries = linkJournalEntries([
+        checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+        checkpointJournal('anchored', { hostMutationCount: 0 }, 'install'),
+        checkpointJournal(
+          'controller-stop-intent',
+          { hostMutationCount: 0, role: 'controller' },
+          'install',
+        ),
+      ]);
+      assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
     });
   }
 

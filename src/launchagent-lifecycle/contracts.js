@@ -526,25 +526,83 @@ function validateReversePlan(value) {
   return plan;
 }
 
+function hasRecoveryContext(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.hasOwn(value, 'recoveryContext');
+}
+
+function hasEmbeddedReceipt(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.hasOwn(value, 'receipt');
+}
+
+/** §4.1 durable recovery context：anchor ref 闭合，candidate refs 三角色 exact ref|null。 */
+function recoveryContextProjection(value) {
+  const fields = readExactObject(value, ['sourceCommit', 'anchorRef', 'candidateRefs']);
+  const anchorRefFields = readExactObject(fields.anchorRef, ['kind', 'anchorId', 'sha256']);
+  const anchorRef = {
+    kind: requireLiteral(anchorRefFields.kind, 'anchor'),
+    anchorId: requireUuid(anchorRefFields.anchorId),
+    sha256: requireSha256(anchorRefFields.sha256),
+  };
+  const candidateFields = readExactObject(fields.candidateRefs, [
+    'controller', 'scheduler', 'manifest',
+  ]);
+  const candidateRefs = {};
+  for (const role of ['controller', 'scheduler', 'manifest']) {
+    if (candidateFields[role] === null) {
+      candidateRefs[role] = null;
+      continue;
+    }
+    const refFields = readExactObject(candidateFields[role], [
+      'kind', 'transactionId', 'role', 'sha256',
+    ]);
+    candidateRefs[role] = {
+      kind: requireLiteral(refFields.kind, 'candidate'),
+      transactionId: requireUuid(refFields.transactionId),
+      role: requireLiteral(refFields.role, role),
+      sha256: requireSha256(refFields.sha256),
+    };
+  }
+  return {
+    sourceCommit: requireCommit(fields.sourceCommit),
+    anchorRef,
+    candidateRefs,
+  };
+}
+
 /** state-specific exact payload projection；不在 validator 内重算 entry hash。 */
 function validateJournalPayload(state, value) {
+  const withRecoveryContext = hasRecoveryContext(value);
   const allowedRoles = CHECKPOINT_ROLES.get(state);
   if (allowedRoles !== undefined) {
-    const fields = readExactObject(value, ['hostMutationCount', 'role']);
-    return {
+    const fields = readExactObject(
+      value,
+      withRecoveryContext
+        ? ['hostMutationCount', 'role', 'recoveryContext']
+        : ['hostMutationCount', 'role'],
+    );
+    const payload = {
       hostMutationCount: requireInteger(fields.hostMutationCount),
       role: requireEnum(fields.role, allowedRoles),
     };
+    if (withRecoveryContext) {
+      payload.recoveryContext = recoveryContextProjection(fields.recoveryContext);
+    }
+    return payload;
   }
   const compensationAction = COMPENSATION_STATE_ACTION.get(state);
   if (compensationAction !== undefined) {
     const phase = state.endsWith('-intent') ? 'intent' : 'completed';
-    const fields = readExactObject(
-      value,
-      phase === 'intent'
-        ? ['hostMutationCount', 'action', 'planIndex', 'reversePlanSha256']
-        : ['hostMutationCount', 'action'],
-    );
+    const expectedKeys = phase === 'intent'
+      ? ['hostMutationCount', 'action', 'planIndex', 'reversePlanSha256']
+      : ['hostMutationCount', 'action'];
+    if (withRecoveryContext) expectedKeys.push('recoveryContext');
+    const fields = readExactObject(value, expectedKeys);
     const payload = {
       hostMutationCount: requireInteger(fields.hostMutationCount),
       action: requireLiteral(fields.action, compensationAction),
@@ -553,54 +611,82 @@ function validateJournalPayload(state, value) {
       payload.planIndex = requireInteger(fields.planIndex);
       payload.reversePlanSha256 = requireSha256(fields.reversePlanSha256);
     }
+    if (withRecoveryContext) {
+      payload.recoveryContext = recoveryContextProjection(fields.recoveryContext);
+    }
     return payload;
   }
   if (state === 'compensating') {
-    const fields = readExactObject(value, [
-      'hostMutationCount', 'reversePlan', 'reversePlanSha256',
-    ]);
+    const fields = readExactObject(
+      value,
+      withRecoveryContext
+        ? ['hostMutationCount', 'reversePlan', 'reversePlanSha256', 'recoveryContext']
+        : ['hostMutationCount', 'reversePlan', 'reversePlanSha256'],
+    );
     const reversePlan = validateReversePlan(fields.reversePlan);
     const reversePlanSha256 = requireSha256(fields.reversePlanSha256);
     const calculated = createHash('sha256')
       .update(Buffer.from(JSON.stringify(reversePlan), 'utf8'))
       .digest('hex');
     if (calculated !== reversePlanSha256) invalid();
-    return {
+    const payload = {
       hostMutationCount: requireInteger(fields.hostMutationCount),
       reversePlan,
       reversePlanSha256,
     };
+    if (withRecoveryContext) {
+      payload.recoveryContext = recoveryContextProjection(fields.recoveryContext);
+    }
+    return payload;
+  }
+  if (state === 'prepared') {
+    const fields = readExactObject(value, ['hostMutationCount']);
+    return { hostMutationCount: requireInteger(fields.hostMutationCount) };
   }
   if (
-    state === 'prepared'
-    || state === 'anchored'
+    state === 'anchored'
     || state === 'published'
     || state === 'controller-loaded'
     || state === 'controller-ready'
     || state === 'scheduler-loaded'
     || state === 'manual-intervention-required'
   ) {
-    const fields = readExactObject(value, ['hostMutationCount']);
-    return { hostMutationCount: requireInteger(fields.hostMutationCount) };
+    const fields = readExactObject(
+      value,
+      withRecoveryContext ? ['hostMutationCount', 'recoveryContext'] : ['hostMutationCount'],
+    );
+    const payload = { hostMutationCount: requireInteger(fields.hostMutationCount) };
+    if (withRecoveryContext) {
+      payload.recoveryContext = recoveryContextProjection(fields.recoveryContext);
+    }
+    return payload;
   }
   if (state === 'committed' || state === 'recovered' || state === 'no-change') {
-    const fields = readExactObject(value, ['hostMutationCount', 'receiptSha256']);
-    return {
-      hostMutationCount: requireInteger(fields.hostMutationCount),
-      receiptSha256: requireSha256(fields.receiptSha256),
-    };
+    const withReceipt = hasEmbeddedReceipt(value);
+    const fields = readExactObject(
+      value,
+      withReceipt
+        ? ['hostMutationCount', 'receipt', 'receiptSha256']
+        : ['hostMutationCount', 'receiptSha256'],
+    );
+    const payload = { hostMutationCount: requireInteger(fields.hostMutationCount) };
+    if (withReceipt) payload.receipt = receiptProjection(fields.receipt);
+    payload.receiptSha256 = requireSha256(fields.receiptSha256);
+    return payload;
   }
   if (state === 'blocked') {
-    const fields = readExactObject(value, [
-      'hostMutationCount',
-      'receiptSha256',
-      'blockedByEntrySha256',
-    ]);
-    return {
-      hostMutationCount: requireInteger(fields.hostMutationCount),
-      receiptSha256: requireSha256(fields.receiptSha256),
-      blockedByEntrySha256: requireSha256OrNull(fields.blockedByEntrySha256),
-    };
+    const withReceipt = hasEmbeddedReceipt(value);
+    const fields = readExactObject(
+      value,
+      withReceipt
+        ? ['hostMutationCount', 'receipt', 'receiptSha256', 'blockedByEntrySha256']
+        : ['hostMutationCount', 'receiptSha256', 'blockedByEntrySha256'],
+    );
+    const payload = { hostMutationCount: requireInteger(fields.hostMutationCount) };
+    if (withReceipt) payload.receipt = receiptProjection(fields.receipt);
+    payload.receiptSha256 = requireSha256(fields.receiptSha256);
+    payload.blockedByEntrySha256 = requireSha256OrNull(fields.blockedByEntrySha256);
+    return payload;
   }
   invalid();
 }
@@ -624,16 +710,35 @@ function journalProjection(value) {
   if ((sequence === 0) !== (previousEntrySha256 === null)) invalid();
   // 先验证 state，再按 state 投影 payload（existing prepared 行为不回归）。
   const state = requireEnum(fields.state, JOURNAL_STATES);
+  const transactionId = requireUuid(fields.transactionId);
+  const operation = requireEnum(fields.operation, JOURNAL_OPERATIONS);
+  const payload = validateJournalPayload(state, fields.payload);
+  // new terminal 双形：embedded receipt 必须与 journal transaction/operation/state、
+  // payload hostMutationCount 及 canonical receipt hash 逐一交叉对齐。
+  if (Object.hasOwn(payload, 'receipt')) {
+    const embeddedSha256 = createHash('sha256')
+      .update(Buffer.from(JSON.stringify(payload.receipt), 'utf8'))
+      .digest('hex');
+    if (
+      payload.receipt.transactionId !== transactionId
+      || payload.receipt.operation !== operation
+      || payload.receipt.state !== state
+      || payload.receipt.hostMutationCount !== payload.hostMutationCount
+      || payload.receiptSha256 !== embeddedSha256
+    ) {
+      invalid();
+    }
+  }
   return {
     schemaVersion: requireLiteral(fields.schemaVersion, 1),
-    transactionId: requireUuid(fields.transactionId),
+    transactionId,
     sequence,
     previousEntrySha256,
     entrySha256: requireSha256(fields.entrySha256),
-    operation: requireEnum(fields.operation, JOURNAL_OPERATIONS),
+    operation,
     state,
     at: requireUtc(fields.at),
-    payload: validateJournalPayload(state, fields.payload),
+    payload,
   };
 }
 
@@ -674,6 +779,7 @@ const RECEIPT_OUTCOMES = new Set([
   'rollback-unload-incomplete',
   'stop-incomplete',
   'uninstall-unload-incomplete',
+  'recovered',
 ]);
 const RECEIPT_STATE_OUTCOMES = new Map([
   ['committed', { success: true, outcomes: new Set(['completed']) }],
@@ -703,6 +809,7 @@ const RECEIPT_STATE_OUTCOMES = new Map([
       'rollback-unload-incomplete',
       'stop-incomplete',
       'uninstall-unload-incomplete',
+      'recovered',
     ]),
   }],
   ['manual-intervention-required', {
@@ -752,6 +859,8 @@ function receiptProjection(value) {
       && (success !== mapping.success || !mapping.outcomes.has(outcome))
     )
     || (state === 'no-change' && hostMutationCount !== 0)
+    // outcome=recovered 仅允许普通 operation；operation=recover 保留给后续 manual repair。
+    || (outcome === 'recovered' && operation === 'recover')
   ) {
     invalid();
   }
@@ -1028,11 +1137,30 @@ function isValidTerminalTransition(operation, prior, entry) {
       || prior.state === 'scheduler-stop-intent'
       || prior.state === 'controller-stop-intent';
   }
+  // 普通 crash recovery 的零变异收口：任意 nonterminal business checkpoint 在
+  // 双方都无 host mutation 时允许直接 close recovered（其余 nonterminal 先落
+  // compensating，经既有 compensation 链规则收口，不经本分支）。
+  if (entry.state === 'recovered') {
+    return prior.payload.hostMutationCount === 0
+      && entry.payload.hostMutationCount === 0
+      && prior.state !== 'prepared'
+      && prior.state !== 'committed'
+      && prior.state !== 'recovered'
+      && prior.state !== 'no-change'
+      && prior.state !== 'blocked'
+      && prior.state !== 'manual-intervention-required'
+      && prior.state !== 'compensating'
+      && !COMPENSATION_STATE_ACTION.has(prior.state);
+  }
   return false;
 }
 
-function transactionCloseoutProjection(value) {
-  const fields = readExactObject(value, ['entries', 'receipt']);
+// 单一 transaction prefix state machine：schema/canonical hash/首条 prepared、
+// 同 transactionId/operation、sequence/prev hash、hostMutationCount 单调、精确
+// forward/terminal/compensation transition 与 frozen reverse-plan 顺序全在这里
+// 定义一次；closeout 与 crash recovery 共享，禁止第二份 transition table。
+function transactionPrefixProjection(value) {
+  const fields = readExactObject(value, ['entries']);
   if (!Array.isArray(fields.entries) || fields.entries.length === 0 || fields.entries.length > 4096) {
     invalid();
   }
@@ -1113,10 +1241,18 @@ function transactionCloseoutProjection(value) {
     entries.push(entry);
     prior = entry;
   }
+  return { entries };
+}
 
+function transactionCloseoutProjection(value) {
+  const fields = readExactObject(value, ['entries', 'receipt']);
+  // 复用共享 prefix state machine；此处仅追加 terminal receipt 对齐校验。
+  const { entries } = transactionPrefixProjection({ entries: fields.entries });
+  const first = entries[0];
+  const prior = entries[entries.length - 1];
   const receipt = receiptProjection(fields.receipt);
-  if (receipt.transactionId !== transactionId) invalid();
-  if (receipt.operation !== operation) invalid();
+  if (receipt.transactionId !== first.transactionId) invalid();
+  if (receipt.operation !== first.operation) invalid();
   if (receipt.state !== prior.state) invalid();
   if (receipt.hostMutationCount !== prior.payload.hostMutationCount) invalid();
   if (!Object.hasOwn(prior.payload, 'receiptSha256')) invalid();
@@ -1124,7 +1260,19 @@ function transactionCloseoutProjection(value) {
     .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
     .digest('hex');
   if (prior.payload.receiptSha256 !== receiptSha256) invalid();
+  // new terminal 双形：embedded receipt 必须与持久化/传入 receipt 逐字节一致。
+  if (
+    Object.hasOwn(prior.payload, 'receipt')
+    && JSON.stringify(prior.payload.receipt) !== JSON.stringify(receipt)
+  ) {
+    invalid();
+  }
   return { entries, receipt };
+}
+
+/** 校验 journal prefix：transition/compensation 全链闭合，允许合法 nonterminal 收口，不要求 receipt。 */
+export function validateLaunchAgentTransactionPrefix(value) {
+  return project(transactionPrefixProjection, value);
 }
 
 /** 校验完整 journal 链与 terminal receipt 的 transaction/operation/hash 对齐。 */
