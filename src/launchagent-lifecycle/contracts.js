@@ -44,6 +44,7 @@ export const LAUNCHAGENT_LIFECYCLE_CODES = deepFreeze({
   LAUNCHCTL_DISABLED: 'launchctl-disabled',
   ACCEPTANCE_GATE_DENIED: 'acceptance-gate-denied',
   CONFIRMATION_CONSUMED: 'confirmation-consumed',
+  RECOVERY_CLAIM_STALLED: 'recovery-claim-stalled',
 });
 
 /** 闭合结果码集合：constructor 只接受其中成员，未知/非 string 归一为 INVALID。 */
@@ -1112,6 +1113,17 @@ function isExactForwardTransition(operation, prior, entry) {
 }
 
 function isValidTerminalTransition(operation, prior, entry) {
+  // MIR pure closeout：仅 recovered|blocked；hostMutationCount 必须相等（允许非零）；
+  // 必须嵌入 receipt（hash-only 非法）；blocked 额外绑定 prior.entrySha256。
+  if (prior.state === 'manual-intervention-required') {
+    if (entry.state !== 'recovered' && entry.state !== 'blocked') return false;
+    if (prior.payload.hostMutationCount !== entry.payload.hostMutationCount) return false;
+    if (!Object.hasOwn(entry.payload, 'receipt')) return false;
+    if (entry.state === 'blocked') {
+      return entry.payload.blockedByEntrySha256 === prior.entrySha256;
+    }
+    return true;
+  }
   if (entry.state === 'blocked') {
     return prior.payload.hostMutationCount === 0 && entry.payload.hostMutationCount === 0;
   }
@@ -1224,6 +1236,11 @@ function transactionPrefixProjection(value) {
         }
       } else if (entry.state === 'compensating') {
         if (compensation !== null || entry.payload.hostMutationCount === 0) invalid();
+      } else if (prior.state === 'manual-intervention-required') {
+        // MIR pure closeout 仅经 isValidTerminalTransition（recovered|blocked）；
+        // 拒绝 MIR→MIR / committed / no-change 及一切其它直接迁移，且不经
+        // incomplete reverse-plan recovered 分支放行。
+        if (!isValidTerminalTransition(operation, prior, entry)) invalid();
       } else if (entry.state === 'recovered' && compensation !== null) {
         if (
           compensation.awaitingCompletion
@@ -1504,4 +1521,45 @@ function capabilityProjection(value) {
 /** 校验并投影不含模块私有授权 brand 的能力摘要。 */
 export function validateLaunchAgentCapabilityProjection(value) {
   return project(capabilityProjection, value);
+}
+
+function manualRepairAttestationProjection(value) {
+  const fields = readExactObject(value, [
+    'schemaVersion',
+    'kind',
+    'manualRepairConfirmationId',
+    'manualRepairRequestId',
+    'mirTransactionId',
+    'mirLockIdentitySha256',
+    'anchorId',
+    'repairDeclarationSha256',
+    'authorizedAt',
+    'attestedAt',
+  ]);
+  const manualRepairConfirmationId = requireUuid(fields.manualRepairConfirmationId);
+  const manualRepairRequestId = requireUuid(fields.manualRepairRequestId);
+  if (manualRepairConfirmationId === manualRepairRequestId) invalid();
+  const authorizedAt = requireUtc(fields.authorizedAt);
+  const attestedAt = requireUtc(fields.attestedAt);
+  if (new Date(attestedAt).getTime() < new Date(authorizedAt).getTime()) invalid();
+  return {
+    schemaVersion: requireLiteral(fields.schemaVersion, 1),
+    kind: requireLiteral(fields.kind, 'launchagent-manual-repair-attestation'),
+    manualRepairConfirmationId,
+    manualRepairRequestId,
+    mirTransactionId: requireUuid(fields.mirTransactionId),
+    mirLockIdentitySha256: requireSha256(fields.mirLockIdentitySha256),
+    anchorId: requireUuid(fields.anchorId),
+    repairDeclarationSha256: requireSha256(fields.repairDeclarationSha256),
+    authorizedAt,
+    attestedAt,
+  };
+}
+
+/**
+ * 校验并投影人工修复 attestation（深导出，不经 safe index）。
+ * 闭合键序与 confirmation/request 身份互异；attestedAt >= authorizedAt。
+ */
+export function validateLaunchAgentManualRepairAttestation(value) {
+  return project(manualRepairAttestationProjection, value);
 }

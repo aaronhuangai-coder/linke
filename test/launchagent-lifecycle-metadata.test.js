@@ -33,7 +33,10 @@ const EXPECTED_STORE_METHODS = Object.freeze([
   'releaseManualInterventionLock',
   'readTransactionLockObservation',
   'readRecoveryClaimObservation',
+  'readManualInterventionLockObservation',
   'acquireRecoveryLockForManualRepair',
+  'abortRecoveryLockForManualRepair',
+  'resolveRecoveryClaimForManualRepair',
   'appendJournal',
   'readJournal',
   'readJournalHeads',
@@ -42,6 +45,8 @@ const EXPECTED_STORE_METHODS = Object.freeze([
   'classifyReceipt',
   'consumeConfirmation',
   'readConsumedConfirmation',
+  'writeManualRepairAttestation',
+  'readManualRepairAttestation',
 ]);
 
 const FORBIDDEN_STORE_METHODS = Object.freeze([
@@ -53,7 +58,13 @@ const FORBIDDEN_STORE_METHODS = Object.freeze([
   'publishPath',
 ]);
 
-const FIXED_MID_DIRS = Object.freeze(['candidates', 'anchors', 'receipts', 'confirmations']);
+const FIXED_MID_DIRS = Object.freeze([
+  'candidates',
+  'anchors',
+  'receipts',
+  'confirmations',
+  'manual-repair-attestations',
+]);
 const ONE_MIB = 1024 * 1024;
 const FOUR_MIB = 4 * 1024 * 1024;
 
@@ -65,11 +76,14 @@ const OWNER_NONCE_A = 'd4e5f6a7-b8c9-4a12-bdef-012345678901';
 const OWNER_NONCE_B = 'e5f6a7b8-c9d0-4b23-8ef0-123456789012';
 const OWNER_NONCE_C = 'f6a7b8c9-d0e1-4c34-8f01-234567890123';
 const OWNER_NONCE_MIR = 'a7b8c9d0-e1f2-4d45-8012-345678901234';
+/** Distinct claimId for acquireRecoveryLockForManualRepair (≠ tx / nonces). */
+const RECOVERY_CLAIM_ID = 'b8c9d0e1-f2a3-4e56-8123-456789012345';
 const SOURCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const CREATED_AT = '2024-01-15T12:00:00.000Z';
 
 const TRANSACTION_LOCK_LEAF = 'transaction.lock';
 const MANUAL_INTERVENTION_LOCK_LEAF = 'manual-intervention.lock';
+const RECOVERY_CLAIM_LEAF = 'recovery-claim.lock';
 const JOURNAL_LEAF = 'transaction-journal.json';
 const FIXED_OWNER_PID = 4242;
 const SIXTEEN_MIB = 16 * 1024 * 1024;
@@ -81,6 +95,7 @@ const JOURNAL_AT = '2024-01-15T12:00:00.000Z';
 const COMPLETED_AT = '2024-01-15T12:00:00.000Z';
 const RECEIPT_MAX_BYTES = 256 * 1024;
 const CONFIRMATION_MAX_BYTES = 256 * 1024;
+const ATTESTATION_MAX_BYTES = 256 * 1024;
 const CONTROLLER_LABEL = 'com.linke.controller';
 const SCHEDULER_LABEL = 'com.linke.scheduler';
 /** Canonical UUIDs for durable consumed-confirmation fixtures (distinct acceptance vs confirmation). */
@@ -91,6 +106,11 @@ const ACCEPTANCE_ID_B = 'b3c4d5e6-f7a8-4901-acde-23456789abcd';
 const RUNTIME_ARTIFACTS_SHA256 =
   'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
 const CONSUMED_AT = '2024-01-15T12:00:00.000Z';
+/** Canonical UTC for durable manual-repair attestation fixtures. */
+const AUTHORIZED_AT = '2024-01-15T12:00:00.000Z';
+const ATTESTED_AT = '2024-01-15T12:00:30.000Z';
+const MANUAL_REPAIR_ATTESTATIONS_MID_DIR = 'manual-repair-attestations';
+const MANUAL_REPAIR_ATTESTATION_ARTIFACT = 'manual-repair-attestation';
 
 function sha256Hex(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -575,6 +595,61 @@ function manualConsumedConfirmationBytes(record) {
 
 function manualConsumedConfirmationSha(record) {
   return sha256Hex(manualConsumedConfirmationBytes(record));
+}
+
+/**
+ * Exact valid manual-repair attestation plain object (closed projection keys).
+ * Independent literal fixture; does not call production validators/helpers.
+ * confirmationId (CONFIRMATION_ID) !== requestId (ACCEPTANCE_ID).
+ */
+function buildManualRepairAttestation(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    kind: 'launchagent-manual-repair-attestation',
+    manualRepairConfirmationId: CONFIRMATION_ID,
+    manualRepairRequestId: ACCEPTANCE_ID,
+    mirTransactionId: TX_ID,
+    mirLockIdentitySha256: RUNTIME_ARTIFACTS_SHA256,
+    anchorId: ANCHOR_ID,
+    repairDeclarationSha256: RECEIPT_SHA256,
+    authorizedAt: AUTHORIZED_AT,
+    attestedAt: ATTESTED_AT,
+    ...overrides,
+  };
+}
+
+/**
+ * Test-side independent UTF-8 JSON bytes for a manual-repair attestation projection
+ * (fixed key order matching the closed attestation schema).
+ */
+function manualRepairAttestationBytes(record) {
+  return Buffer.from(JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    kind: record.kind,
+    manualRepairConfirmationId: record.manualRepairConfirmationId,
+    manualRepairRequestId: record.manualRepairRequestId,
+    mirTransactionId: record.mirTransactionId,
+    mirLockIdentitySha256: record.mirLockIdentitySha256,
+    anchorId: record.anchorId,
+    repairDeclarationSha256: record.repairDeclarationSha256,
+    authorizedAt: record.authorizedAt,
+    attestedAt: record.attestedAt,
+  }), 'utf8');
+}
+
+function manualRepairAttestationSha(record) {
+  return sha256Hex(manualRepairAttestationBytes(record));
+}
+
+function manualRepairAttestationLeafPath(
+  metadataRoot,
+  manualRepairConfirmationId = CONFIRMATION_ID,
+) {
+  return join(
+    metadataRoot,
+    MANUAL_REPAIR_ATTESTATIONS_MID_DIR,
+    `${manualRepairConfirmationId}.json`,
+  );
 }
 
 /**
@@ -4266,6 +4341,653 @@ test('manual confirmation cross-branch same-ID no-clobber for both overwrite ord
 });
 
 // ---------------------------------------------------------------------------
+// Task 6B.1 Task 1 RED: durable manual-repair attestation leaf store
+// (names contain "manual repair attestation" for Codex focus patterns).
+// Reuses consumed-confirmation durable-leaf conventions; not a generic writer test.
+// ---------------------------------------------------------------------------
+
+test('manual repair attestation roundtrip mode ref and frozen projection', async (t) => {
+  // Production bug: writeManualRepairAttestation/readManualRepairAttestation missing
+  // or wrong directory/mode/canonical-byte durability contract.
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const store = createLaunchAgentMetadataStore({ metadataRoot });
+
+  assert.equal(
+    typeof store.writeManualRepairAttestation,
+    'function',
+    'store.writeManualRepairAttestation must be a function',
+  );
+  assert.equal(
+    typeof store.readManualRepairAttestation,
+    'function',
+    'store.readManualRepairAttestation must be a function',
+  );
+
+  const record = buildManualRepairAttestation();
+  const expectedBytes = manualRepairAttestationBytes(record);
+  const expectedSha = manualRepairAttestationSha(record);
+  assert.ok(
+    expectedBytes.byteLength <= ATTESTATION_MAX_BYTES,
+    'fixture manual repair attestation must stay within 256KiB',
+  );
+  assert.notEqual(
+    record.manualRepairConfirmationId,
+    record.manualRepairRequestId,
+    'confirmation and request identities must be distinct',
+  );
+  assert.equal(record.kind, 'launchagent-manual-repair-attestation');
+  assert.deepEqual(
+    Object.keys(record),
+    [
+      'schemaVersion',
+      'kind',
+      'manualRepairConfirmationId',
+      'manualRepairRequestId',
+      'mirTransactionId',
+      'mirLockIdentitySha256',
+      'anchorId',
+      'repairDeclarationSha256',
+      'authorizedAt',
+      'attestedAt',
+    ],
+  );
+
+  await store.initialize();
+
+  const attDirStat = await lstat(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR));
+  assert.equal(
+    attDirStat.isDirectory(),
+    true,
+    'manual-repair-attestations mid-dir must exist after initialize',
+  );
+  assert.equal(
+    attDirStat.mode & 0o777,
+    0o700,
+    'manual-repair-attestations mid-dir must be mode 0700',
+  );
+  assert.equal(
+    attDirStat.uid,
+    process.getuid(),
+    'manual-repair-attestations mid-dir owner must be current uid',
+  );
+
+  const written = await store.writeManualRepairAttestation(record);
+  assert.deepEqual(written, {
+    kind: 'manual-repair-attestation',
+    manualRepairConfirmationId: CONFIRMATION_ID,
+    sha256: expectedSha,
+  });
+  assert.equal(isDeeplyFrozen(written), true, 'writeManualRepairAttestation result must be deeply frozen');
+  assertNoAbsolutePaths(written, 'writeManualRepairAttestation result');
+  assert.deepEqual(
+    Reflect.ownKeys(written).filter((k) => typeof k === 'string').sort(),
+    ['kind', 'manualRepairConfirmationId', 'sha256'].sort(),
+    'writeManualRepairAttestation result must be closed to kind/manualRepairConfirmationId/sha256',
+  );
+
+  const leafPath = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+  const leafStat = await lstat(leafPath);
+  assert.equal(leafStat.isFile(), true, 'manual repair attestation must be a regular file');
+  assert.equal(leafStat.isSymbolicLink(), false, 'manual repair attestation must not be a symlink');
+  assert.equal(leafStat.mode & 0o777, 0o600, 'manual repair attestation leaf must be mode 0600');
+  assert.equal(leafStat.uid, process.getuid(), 'manual repair attestation leaf owner must be current uid');
+  assert.equal(
+    leafStat.size,
+    expectedBytes.byteLength,
+    'manual repair attestation on-disk size must match exact UTF-8 bytes',
+  );
+
+  const onDisk = await readFile(leafPath);
+  assert.equal(
+    Buffer.compare(onDisk, expectedBytes),
+    0,
+    'manual repair attestation on-disk bytes must equal independent JSON.stringify projection',
+  );
+  assert.equal(sha256Hex(onDisk), expectedSha);
+
+  const readBack = await store.readManualRepairAttestation(CONFIRMATION_ID);
+  assert.deepEqual(
+    readBack,
+    record,
+    'readManualRepairAttestation must return frozen closed projection',
+  );
+  assert.equal(isDeeplyFrozen(readBack), true, 'readManualRepairAttestation projection must be deeply frozen');
+  assertNoAbsolutePaths(readBack, 'readManualRepairAttestation result');
+});
+
+test('manual repair attestation two independent stores exactly-one winner same and rebound replay', async (t) => {
+  // Production bug: missing O_EXCL no-clobber / concurrent exactly-one winner semantics
+  // for manual-repair-attestations leaves.
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+
+  const storeA = createLaunchAgentMetadataStore({ metadataRoot });
+  const storeB = createLaunchAgentMetadataStore({ metadataRoot });
+  assert.equal(
+    typeof storeA.writeManualRepairAttestation,
+    'function',
+    'storeA.writeManualRepairAttestation must be a function',
+  );
+  assert.equal(
+    typeof storeB.writeManualRepairAttestation,
+    'function',
+    'storeB.writeManualRepairAttestation must be a function',
+  );
+  await storeA.initialize();
+  await storeB.initialize();
+
+  const record = buildManualRepairAttestation();
+  const expectedBytes = manualRepairAttestationBytes(record);
+  const expectedSha = manualRepairAttestationSha(record);
+
+  const settled = await Promise.allSettled([
+    storeA.writeManualRepairAttestation(record),
+    storeB.writeManualRepairAttestation(record),
+  ]);
+
+  const fulfilled = settled.filter((entry) => entry.status === 'fulfilled');
+  const rejected = settled.filter((entry) => entry.status === 'rejected');
+  assert.equal(fulfilled.length, 1, 'exactly one concurrent manual repair attestation write must fulfill');
+  assert.equal(rejected.length, 1, 'exactly one concurrent manual repair attestation write must reject');
+  assert.equal(
+    rejected[0].reason instanceof LaunchAgentLifecycleError,
+    true,
+    'loser must throw LaunchAgentLifecycleError (not EEXIST/path leak)',
+  );
+
+  const winner = fulfilled[0].value;
+  assert.deepEqual(winner, {
+    kind: 'manual-repair-attestation',
+    manualRepairConfirmationId: CONFIRMATION_ID,
+    sha256: expectedSha,
+  });
+  assert.equal(isDeeplyFrozen(winner), true);
+  assertNoAbsolutePaths(winner, 'concurrent manual repair attestation winner ref');
+
+  const leafPath = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+  const originalBytes = await readFile(leafPath);
+  assert.equal(Buffer.compare(originalBytes, expectedBytes), 0);
+  const originalStat = await lstat(leafPath);
+  assert.equal(originalStat.mode & 0o777, 0o600);
+  const originalMode = originalStat.mode;
+  const originalSha = sha256Hex(originalBytes);
+
+  await assert.rejects(
+    () => storeB.writeManualRepairAttestation(record),
+    (error) => error instanceof LaunchAgentLifecycleError,
+    'replay of same manual repair attestation must reject',
+  );
+  await assert.rejects(
+    () => storeA.writeManualRepairAttestation(record),
+    (error) => error instanceof LaunchAgentLifecycleError,
+    'winner-store manual repair attestation replay must also reject',
+  );
+
+  const rebound = buildManualRepairAttestation({
+    manualRepairRequestId: ACCEPTANCE_ID_B,
+    mirTransactionId: TX_ID_B,
+    attestedAt: '2024-01-15T12:00:01.000Z',
+    mirLockIdentitySha256: RECEIPT_SHA256,
+    repairDeclarationSha256:
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  });
+  assert.equal(rebound.manualRepairConfirmationId, CONFIRMATION_ID);
+  assert.notEqual(manualRepairAttestationSha(rebound), expectedSha);
+  await assert.rejects(
+    () => storeA.writeManualRepairAttestation(rebound),
+    (error) => error instanceof LaunchAgentLifecycleError,
+    'rebound replay for same manualRepairConfirmationId must reject without clobber',
+  );
+
+  const afterReplay = await readFile(leafPath);
+  assert.equal(
+    Buffer.compare(afterReplay, originalBytes),
+    0,
+    'manual repair attestation replay/no-clobber must leave original bytes exact',
+  );
+  assert.equal(sha256Hex(afterReplay), originalSha);
+  const afterStat = await lstat(leafPath);
+  assert.equal(afterStat.mode, originalMode, 'replay must not alter attestation mode');
+  assert.equal(afterStat.mode & 0o777, 0o600);
+
+  const other = buildManualRepairAttestation({
+    manualRepairConfirmationId: CONFIRMATION_ID_B,
+    manualRepairRequestId: ACCEPTANCE_ID_B,
+  });
+  const otherRef = await storeB.writeManualRepairAttestation(other);
+  assert.deepEqual(otherRef, {
+    kind: 'manual-repair-attestation',
+    manualRepairConfirmationId: CONFIRMATION_ID_B,
+    sha256: manualRepairAttestationSha(other),
+  });
+  assert.equal(
+    Buffer.compare(await readFile(leafPath), originalBytes),
+    0,
+    'writing a distinct confirmationId must not clobber the original attestation leaf',
+  );
+});
+
+test('manual repair attestation fail-closed: corrupt noncanonical mode symlink directory oversize invalid', async (t) => {
+  // Production bug: missing fail-closed read gates for attestation leaves.
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+
+  // Behavioral gate: planted canonical bytes must be readable when methods exist.
+  {
+    const metadataRoot = await makeTempMetadataRoot(t);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    assert.equal(
+      typeof store.readManualRepairAttestation,
+      'function',
+      'store.readManualRepairAttestation must be a function',
+    );
+    const record = buildManualRepairAttestation();
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    await writeFile(leaf, manualRepairAttestationBytes(record), { mode: 0o600 });
+    const readBack = await store.readManualRepairAttestation(CONFIRMATION_ID);
+    assert.deepEqual(
+      readBack,
+      record,
+      'valid planted manual repair attestation control must return closed projection',
+    );
+    assert.equal(isDeeplyFrozen(readBack), true);
+  }
+
+  await t.test('missing manualRepairConfirmationId', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'readManualRepairAttestation of absent leaf must fail closed',
+    );
+    await assert.rejects(
+      () => access(manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID)),
+      (error) => error && error.code === 'ENOENT',
+      'missing read must not create attestation leaf',
+    );
+  });
+
+  await t.test('corrupt JSON', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    const corrupt = Buffer.from('{not-json', 'utf8');
+    await writeFile(leaf, corrupt, { mode: 0o600 });
+    const before = await readFile(leaf);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'corrupt attestation JSON must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(leaf), before),
+      0,
+      'corrupt reject must not rewrite attestation bytes',
+    );
+  });
+
+  await t.test('extra fields on disk', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    const record = buildManualRepairAttestation();
+    const withExtra = {
+      ...JSON.parse(manualRepairAttestationBytes(record).toString('utf8')),
+      secret: 'must-not-accept',
+    };
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    const bytes = Buffer.from(JSON.stringify(withExtra), 'utf8');
+    await writeFile(leaf, bytes, { mode: 0o600 });
+    const before = await readFile(leaf);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'extra on-disk fields must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(leaf), before),
+      0,
+      'extra-field reject must not rewrite attestation bytes',
+    );
+  });
+
+  await t.test('non-canonical key order bytes', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    const record = buildManualRepairAttestation();
+    const canonical = manualRepairAttestationBytes(record);
+    const nonCanonical = Buffer.from(JSON.stringify({
+      attestedAt: record.attestedAt,
+      authorizedAt: record.authorizedAt,
+      repairDeclarationSha256: record.repairDeclarationSha256,
+      anchorId: record.anchorId,
+      mirLockIdentitySha256: record.mirLockIdentitySha256,
+      mirTransactionId: record.mirTransactionId,
+      manualRepairRequestId: record.manualRepairRequestId,
+      manualRepairConfirmationId: record.manualRepairConfirmationId,
+      kind: record.kind,
+      schemaVersion: record.schemaVersion,
+    }), 'utf8');
+    assert.notEqual(
+      Buffer.compare(nonCanonical, canonical),
+      0,
+      'precondition: non-canonical key order must differ from projection stringify',
+    );
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    await writeFile(leaf, nonCanonical, { mode: 0o600 });
+    const before = await readFile(leaf);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'non-canonical attestation bytes must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(leaf), before),
+      0,
+      'non-canonical reject must not rewrite attestation bytes',
+    );
+  });
+
+  await t.test('mode drift 0644 without auto-repair', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    const record = buildManualRepairAttestation();
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    await writeFile(leaf, manualRepairAttestationBytes(record), { mode: 0o600 });
+    await chmod(leaf, 0o644);
+    const degraded = await lstat(leaf);
+    assert.equal(degraded.mode & 0o777, 0o644, 'precondition: attestation mode degraded to 0644');
+    const before = await readFile(leaf);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'mode-drift attestation must fail closed',
+    );
+    const after = await lstat(leaf);
+    assert.equal(after.mode & 0o777, 0o644, 'read must not auto-chmod attestation back to 0600');
+    assert.equal(
+      Buffer.compare(await readFile(leaf), before),
+      0,
+      'mode-drift reject must not rewrite attestation bytes',
+    );
+  });
+
+  await t.test('symlink leaf', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+
+    const victimDir = await mkdtemp(join(tmpdir(), 'linke-la-att-victim-'));
+    st.after(async () => {
+      await rm(victimDir, { recursive: true, force: true });
+    });
+    const victimPath = join(victimDir, 'victim.json');
+    const victimBytes = Buffer.from('do-not-clobber-attestation-victim');
+    await writeFile(victimPath, victimBytes, { mode: 0o600 });
+
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await symlink(victimPath, leaf);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'symlink attestation leaf must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(victimPath), victimBytes),
+      0,
+      'symlink reject must not clobber victim bytes',
+    );
+    const linkStat = await lstat(leaf);
+    assert.equal(linkStat.isSymbolicLink(), true, 'attestation leaf must remain a symlink');
+  });
+
+  await t.test('directory at leaf path', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    await mkdir(leaf, { mode: 0o700 });
+    const beforeStat = await lstat(leaf);
+    assert.equal(beforeStat.isDirectory(), true, 'precondition: leaf path is a directory');
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'directory at attestation leaf path must fail closed',
+    );
+    const afterStat = await lstat(leaf);
+    assert.equal(afterStat.isDirectory(), true, 'directory leaf must remain a directory');
+  });
+
+  await t.test('oversize leaf', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    await mkdir(join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR), { recursive: true, mode: 0o700 });
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+    const oversize = Buffer.alloc(ATTESTATION_MAX_BYTES + 1, 0x61);
+    await writeFile(leaf, oversize, { mode: 0o600 });
+    const before = await readFile(leaf);
+    assert.equal(before.byteLength, ATTESTATION_MAX_BYTES + 1);
+
+    await assert.rejects(
+      () => store.readManualRepairAttestation(CONFIRMATION_ID),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'oversize attestation leaf must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(leaf), before),
+      0,
+      'oversize reject must not rewrite attestation bytes',
+    );
+  });
+
+  await t.test('invalid record rejects before filesystem mutation', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+    assert.equal(
+      typeof store.writeManualRepairAttestation,
+      'function',
+      'store.writeManualRepairAttestation must be a function',
+    );
+    const base = buildManualRepairAttestation();
+    const leaf = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+
+    const forbiddenExtras = [
+      ['path', '/tmp/evil'],
+      ['argv', ['--evil']],
+      ['env', { HOME: '/tmp' }],
+      ['rawError', 'EEXIST leak'],
+      ['secret', 'must-not-persist'],
+    ];
+
+    for (const [field, value] of forbiddenExtras) {
+      const invalid = { ...base, [field]: value };
+      await assert.rejects(
+        () => store.writeManualRepairAttestation(invalid),
+        isInvalidLifecycleError,
+        `write with extra field ${field} must reject INVALID before mutation`,
+      );
+      await assert.rejects(
+        () => access(leaf),
+        (error) => error && error.code === 'ENOENT',
+        `invalid ${field} write must not create attestation leaf`,
+      );
+    }
+
+    const sameIds = buildManualRepairAttestation({
+      manualRepairConfirmationId: CONFIRMATION_ID,
+      manualRepairRequestId: CONFIRMATION_ID,
+    });
+    await assert.rejects(
+      () => store.writeManualRepairAttestation(sameIds),
+      isInvalidLifecycleError,
+      'confirmationId === requestId must reject INVALID before mutation',
+    );
+    await assert.rejects(
+      () => access(leaf),
+      (error) => error && error.code === 'ENOENT',
+      'same-id invalid write must not create attestation leaf',
+    );
+  });
+});
+
+test('manual repair attestation durability triple closed frozen ordering and failure silence', async (t) => {
+  // Production bug: missing file-sync → directory-sync → verify durability triple
+  // for successful attestation writes; failures must emit zero success events.
+  const createLaunchAgentMetadataStoreForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const events = [];
+  const store = createLaunchAgentMetadataStoreForTest({
+    metadataRoot,
+    fs: fsPromises,
+    onDurabilityEvent: (event) => {
+      events.push(event);
+    },
+  });
+
+  assert.equal(
+    typeof store.writeManualRepairAttestation,
+    'function',
+    'test store.writeManualRepairAttestation must be a function',
+  );
+
+  await store.initialize();
+  events.length = 0;
+
+  const record = buildManualRepairAttestation();
+  const expectedSha = manualRepairAttestationSha(record);
+
+  const written = await store.writeManualRepairAttestation(record);
+  assert.deepEqual(written, {
+    kind: 'manual-repair-attestation',
+    manualRepairConfirmationId: CONFIRMATION_ID,
+    sha256: expectedSha,
+  });
+
+  const attestationEvents = events.filter(
+    (event) => event && event.artifact === MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  );
+  assert.equal(
+    attestationEvents.length,
+    3,
+    'successful writeManualRepairAttestation must emit exact attestation durability triple',
+  );
+  assert.deepEqual(
+    attestationEvents.map((event) => event.kind),
+    ['file-sync', 'directory-sync', 'verify'],
+    'attestation durability kinds must be ordered file-sync → directory-sync → verify',
+  );
+  for (const event of attestationEvents) {
+    assertClosedDurabilityEvent(event, MANUAL_REPAIR_ATTESTATION_ARTIFACT);
+  }
+  assert.deepEqual(attestationEvents[0], {
+    kind: 'file-sync',
+    artifact: MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  });
+  assert.deepEqual(attestationEvents[1], {
+    kind: 'directory-sync',
+    artifact: MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  });
+  assert.deepEqual(attestationEvents[2], {
+    kind: 'verify',
+    artifact: MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  });
+
+  for (const event of events) {
+    assertNoSensitiveEventFields(event);
+    assertNoAbsolutePaths(event, 'manual repair attestation durability stream');
+  }
+
+  const leafPath = manualRepairAttestationLeafPath(metadataRoot, CONFIRMATION_ID);
+  const originalBytes = await readFile(leafPath);
+  assert.equal(Buffer.compare(originalBytes, manualRepairAttestationBytes(record)), 0);
+
+  events.length = 0;
+  await assert.rejects(
+    () => store.writeManualRepairAttestation(record),
+    (error) => error instanceof LaunchAgentLifecycleError,
+    'replay after success must reject without durability success triple',
+  );
+  const replayAttestationEvents = events.filter(
+    (event) => event && event.artifact === MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  );
+  assert.equal(
+    replayAttestationEvents.length,
+    0,
+    'attestation no-clobber failure must not emit attestation durability triple',
+  );
+  assert.equal(
+    Buffer.compare(await readFile(leafPath), originalBytes),
+    0,
+    'failed replay must leave attestation bytes exact',
+  );
+
+  events.length = 0;
+  const invalid = {
+    ...record,
+    path: '/tmp/must-not-reach-disk',
+    secret: 'nope',
+  };
+  await assert.rejects(
+    () => store.writeManualRepairAttestation(invalid),
+    isInvalidLifecycleError,
+    'invalid record must reject INVALID without durability success triple',
+  );
+  const invalidAttestationEvents = events.filter(
+    (event) => event && event.artifact === MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  );
+  assert.equal(
+    invalidAttestationEvents.length,
+    0,
+    'INVALID attestation write must not emit attestation durability triple',
+  );
+  assert.equal(
+    Buffer.compare(await readFile(leafPath), originalBytes),
+    0,
+    'invalid write after success must not clobber existing attestation leaf',
+  );
+
+  events.length = 0;
+  const other = buildManualRepairAttestation({
+    manualRepairConfirmationId: CONFIRMATION_ID_B,
+    manualRepairRequestId: ACCEPTANCE_ID_B,
+  });
+  await store.writeManualRepairAttestation(other);
+  const otherEvents = events.filter(
+    (event) => event && event.artifact === MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+  );
+  assert.equal(otherEvents.length, 3, 'second distinct attestation must emit its own durability triple');
+  assert.deepEqual(
+    otherEvents.map((event) => event.kind),
+    ['file-sync', 'directory-sync', 'verify'],
+  );
+  for (const event of otherEvents) {
+    assertClosedDurabilityEvent(event, MANUAL_REPAIR_ATTESTATION_ARTIFACT);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Task 2.5 RED: zero-argument global journal-head snapshot.
 // 完整行为仅在 method surface 出现后注册；当前基线只有 frozen surface 的
 // readJournalHeads 缺失断言失败，不允许 TypeError/import/fixture 假 RED。
@@ -4738,4 +5460,2226 @@ test('Task 5A.3 F4 classifyReceipt surface and exact missing/valid/invalid class
       'classification must not change the existing readReceipt fail-closed contract',
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6B.1 Task 3 RED: MIR lock observation + exact recovery-lock abort
+// Focus: "MIR lock observation|abort recovery lock"
+// Fail only because methods are absent (typeof === 'function'), not import/syntax.
+// Reuses S/T MIR journal+lock handoff and existing recovery acquire primitives.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build real canonical MIR recovery state in a temp metadata root:
+ * held tx → prepared journal → MIR journal head → MIR lock → special release →
+ * fresh recovery transaction lock via acquireRecoveryLockForManualRepair.
+ * Returns exact fresh tx bytes, MIR bytes, journal bytes, and MIR head.
+ */
+async function setupMirRecoveryHeldFreshLock(store, options = {}) {
+  const oldRecord = options.oldRecord ?? validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_A,
+  });
+  const mirRecord = options.mirRecord ?? validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_MIR,
+    ownerPid: FIXED_OWNER_PID + 3,
+  });
+  const freshRecord = options.freshRecord ?? validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_B,
+    ownerPid: FIXED_OWNER_PID + 10,
+    bootSessionIdentity: identityAvailable('opaque-boot-session-identity-v1'),
+    processStartIdentity: identityAvailable('opaque-process-start-identity-v1'),
+  });
+  const claimId = options.claimId ?? RECOVERY_CLAIM_ID;
+
+  const oldTxRef = await store.acquireTransactionLock(oldRecord);
+
+  const prepared = buildJournalEntry({
+    transactionId: TX_ID,
+    sequence: 0,
+    previousEntrySha256: null,
+    state: 'prepared',
+    payload: { hostMutationCount: 0 },
+  });
+  await store.appendJournal({
+    entry: prepared,
+    expectedPrior: null,
+    writerLockRef: oldTxRef,
+  });
+
+  const mirJournal = buildJournalEntry({
+    transactionId: TX_ID,
+    sequence: 1,
+    previousEntrySha256: prepared.entrySha256,
+    state: 'manual-intervention-required',
+    at: '2024-01-15T12:00:01.000Z',
+    payload: { hostMutationCount: 0 },
+  });
+  await store.appendJournal({
+    entry: mirJournal,
+    expectedPrior: priorRefFromEntry(prepared),
+    writerLockRef: oldTxRef,
+  });
+
+  const mirRef = await store.acquireManualInterventionLock(mirRecord);
+  await store.releaseTransactionLock(oldTxRef, {
+    manualInterventionLockRef: mirRef,
+  });
+  await assertNoLockLeaf(
+    options.metadataRoot,
+    TRANSACTION_LOCK_LEAF,
+  );
+
+  const freshTxRef = await store.acquireRecoveryLockForManualRepair({
+    record: freshRecord,
+    claimId,
+    expectedTransactionLockRef: null,
+    manualInterventionLockRef: mirRef,
+  });
+
+  const metadataRoot = options.metadataRoot;
+  const freshTxBytes = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+  const mirBytes = await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+  const journalBytes = await readJournalLeafBytes(metadataRoot);
+  const expectedMirHead = Object.freeze({
+    transactionId: mirJournal.transactionId,
+    entrySha256: mirJournal.entrySha256,
+  });
+
+  return {
+    oldRecord,
+    mirRecord,
+    freshRecord,
+    oldTxRef,
+    mirRef,
+    freshTxRef,
+    prepared,
+    mirJournal,
+    expectedMirHead,
+    freshTxBytes,
+    mirBytes,
+    journalBytes,
+    claimId,
+  };
+}
+
+function leafBaseName(pathLike) {
+  if (typeof pathLike !== 'string') return '';
+  const parts = pathLike.split(/[/\\]/);
+  return parts[parts.length - 1] || '';
+}
+
+/**
+ * Trace unlink + FileHandle.sync for abort durability ordering (metadata-root sync).
+ * Injects only through ForTest fs wrapper — no production hooks.
+ * Unlink injection is off during fixture setup; enable after fresh lock is held.
+ */
+function createAbortFsTracer(metadataRoot) {
+  const ops = [];
+  const injectState = {
+    unlinkErrorArmed: false,
+    unlinkErrorOnce: true,
+  };
+
+  const wrappedFs = new Proxy(fsPromises, {
+    get(target, property, receiver) {
+      if (property === 'open') {
+        return async (path, flags, mode) => {
+          const handle = await target.open(path, flags, mode);
+          const leaf = leafBaseName(path);
+          const isRoot = path === metadataRoot;
+          return new Proxy(handle, {
+            get(handleTarget, handleProperty) {
+              const value = Reflect.get(handleTarget, handleProperty, handleTarget);
+              if (typeof value !== 'function') return value;
+              if (handleProperty === 'sync') {
+                return async (...args) => {
+                  ops.push({
+                    op: 'sync',
+                    leaf: isRoot ? '.' : leaf,
+                    path,
+                  });
+                  return value.apply(handleTarget, args);
+                };
+              }
+              return (...args) => value.apply(handleTarget, args);
+            },
+          });
+        };
+      }
+      if (property === 'unlink') {
+        return async (path) => {
+          const leaf = leafBaseName(path);
+          ops.push({ op: 'unlink', leaf });
+          if (
+            injectState.unlinkErrorArmed
+            && leaf === TRANSACTION_LOCK_LEAF
+          ) {
+            if (injectState.unlinkErrorOnce) {
+              injectState.unlinkErrorArmed = false;
+            }
+            const err = new Error('injected-race-before-transaction-unlink');
+            err.code = 'EIO';
+            throw err;
+          }
+          return target.unlink(path);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value === 'function') return value.bind(target);
+      return value;
+    },
+  });
+
+  return {
+    fs: wrappedFs,
+    ops,
+    armUnlinkInjectionOnce() {
+      injectState.unlinkErrorArmed = true;
+      injectState.unlinkErrorOnce = true;
+    },
+  };
+}
+
+test('MIR lock observation returns null without mutation when manual-intervention.lock is absent', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const mutations = [];
+  const store = createForTest({
+    metadataRoot,
+    fs: createMutationTracingFs(mutations),
+    onDurabilityEvent: () => {},
+  });
+
+  assert.equal(
+    typeof store.readManualInterventionLockObservation,
+    'function',
+    'production bug: store.readManualInterventionLockObservation must exist for MIR lock observation',
+  );
+
+  await store.initialize();
+  mutations.length = 0;
+
+  const beforeListing = (await readdir(metadataRoot)).sort();
+  const beforeTree = await snapshotMetadataTree(metadataRoot);
+  const observation = await store.readManualInterventionLockObservation();
+  assert.equal(
+    observation,
+    null,
+    'production bug: absent MIR must yield null observation without inventing a lock',
+  );
+  assert.deepEqual(
+    (await readdir(metadataRoot)).sort(),
+    beforeListing,
+    'absence MIR observation must not mutate metadata root listing',
+  );
+  assert.deepEqual(
+    await snapshotMetadataTree(metadataRoot),
+    beforeTree,
+    'absence MIR observation must not mutate metadata tree',
+  );
+  assert.deepEqual(mutations, [], 'absence MIR observation must not perform write mutations');
+  await assertNoLockLeaf(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+});
+
+test('MIR lock observation returns exact detached deeply frozen observation and ref', async (t) => {
+  const createStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const store = createStore({ metadataRoot });
+
+  assert.equal(
+    typeof store.readManualInterventionLockObservation,
+    'function',
+    'production bug: store.readManualInterventionLockObservation must exist for MIR lock observation',
+  );
+
+  await store.initialize();
+
+  const txRecord = validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_A,
+  });
+  const mirRecord = validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_MIR,
+    ownerPid: FIXED_OWNER_PID + 3,
+  });
+  await store.acquireTransactionLock(txRecord);
+  const mirRef = await store.acquireManualInterventionLock(mirRecord);
+  const mirBytes = await assertOwnedLockLeaf(
+    metadataRoot,
+    MANUAL_INTERVENTION_LOCK_LEAF,
+    mirRecord,
+  );
+  assert.equal(sha256Hex(mirBytes), mirRef.sha256);
+
+  const observation = await store.readManualInterventionLockObservation();
+  assert.equal(
+    observation === null,
+    false,
+    'production bug: existing MIR must return observation not null',
+  );
+  assert.deepEqual(
+    Reflect.ownKeys(observation).filter((k) => typeof k === 'string').sort(),
+    ['kind', 'record', 'ref'].sort(),
+    'MIR observation exact keys',
+  );
+  assert.equal(observation.kind, 'manual-intervention-lock-observation');
+  assert.deepEqual(
+    observation.ref,
+    {
+      kind: 'manual-intervention-lock',
+      transactionId: TX_ID,
+      ownerNonce: OWNER_NONCE_MIR,
+      sha256: mirRef.sha256,
+    },
+    'MIR observation.ref must be independently literal-exact',
+  );
+  assert.deepEqual(
+    observation.record,
+    mirRecord,
+    'MIR observation.record must be independently literal-exact',
+  );
+  assert.equal(isDeeplyFrozen(observation), true, 'MIR observation must be deeply frozen');
+  assertNoAbsolutePaths(observation, 'MIR lock observation');
+
+  // Detached: mutate returned surfaces must not alter later rereads / on-disk bytes.
+  assert.throws(() => {
+    observation.kind = 'mutated';
+  });
+  try {
+    observation.record.ownerPid = 99999;
+  } catch {
+    // frozen may throw
+  }
+  try {
+    observation.ref.sha256 = '0'.repeat(64);
+  } catch {
+    // frozen
+  }
+
+  const reread = await store.readManualInterventionLockObservation();
+  assert.deepEqual(reread.record, mirRecord);
+  assert.deepEqual(reread.ref, {
+    kind: 'manual-intervention-lock',
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_MIR,
+    sha256: mirRef.sha256,
+  });
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      mirBytes,
+    ),
+    0,
+    'observation mutation must not rewrite manual-intervention.lock bytes',
+  );
+  assert.notEqual(reread, observation, 'each MIR observation must be detached');
+  assert.equal(
+    (await lstat(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF))).uid,
+    process.getuid(),
+    'owned MIR leaf uid must remain current uid',
+  );
+});
+
+test('MIR lock observation fail-closed on malformed type mode symlink directory noncanonical', async (t) => {
+  const createStore = requireFactory('createLaunchAgentMetadataStore');
+
+  // One clean missing-method RED for the fail-closed observation group.
+  {
+    const probeRoot = await makeTempMetadataRoot(t);
+    const probe = createStore({ metadataRoot: probeRoot });
+    assert.equal(
+      typeof probe.readManualInterventionLockObservation,
+      'function',
+      'production bug: store.readManualInterventionLockObservation must exist for MIR lock observation',
+    );
+  }
+
+  await t.test('malformed schema fails closed and preserves leaf bytes', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    const badBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, kind: 'not-a-lock' }), 'utf8');
+    await writeFile(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF), badBytes, { mode: 0o600 });
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'malformed MIR schema must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        badBytes,
+      ),
+      0,
+      'malformed MIR observation must preserve leaf bytes',
+    );
+  });
+
+  await t.test('type drift fails closed and preserves leaf bytes', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    const badBytes = Buffer.from(JSON.stringify({
+      schemaVersion: '1',
+      transactionId: TX_ID,
+      ownerPid: FIXED_OWNER_PID,
+      ownerNonce: OWNER_NONCE_MIR,
+      bootSessionIdentity: { available: false, value: null },
+      processStartIdentity: { available: false, value: null },
+    }), 'utf8');
+    await writeFile(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF), badBytes, { mode: 0o600 });
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'type-drift MIR leaf must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        badBytes,
+      ),
+      0,
+    );
+  });
+
+  await t.test('mode drift 0644 fails closed without auto-repair', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    await store.acquireTransactionLock(validLockRecord({ ownerNonce: OWNER_NONCE_A }));
+    await store.acquireManualInterventionLock(validLockRecord({
+      ownerNonce: OWNER_NONCE_MIR,
+      ownerPid: FIXED_OWNER_PID + 3,
+    }));
+    const leafPath = join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    const before = await readFile(leafPath);
+    await chmod(leafPath, 0o644);
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'mode-drift MIR must fail closed',
+    );
+    assert.equal((await lstat(leafPath)).mode & 0o777, 0o644);
+    assert.equal(Buffer.compare(await readFile(leafPath), before), 0);
+  });
+
+  await t.test('uid drift fails closed without auto-repair', async (st) => {
+    // Cannot chown without root; inject wrong uid via ForTest FileHandle.stat only.
+    const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const mirLeaf = join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    const uidDriftFs = new Proxy(fsPromises, {
+      get(target, property, receiver) {
+        if (property === 'open') {
+          return async (path, flags, mode) => {
+            const handle = await target.open(path, flags, mode);
+            if (path !== mirLeaf) return handle;
+            return new Proxy(handle, {
+              get(handleTarget, handleProperty) {
+                const value = Reflect.get(handleTarget, handleProperty, handleTarget);
+                if (handleProperty === 'stat' && typeof value === 'function') {
+                  return async (...args) => {
+                    const stResult = await value.apply(handleTarget, args);
+                    return Object.assign(Object.create(Object.getPrototypeOf(stResult)), stResult, {
+                      uid: stResult.uid + 1,
+                    });
+                  };
+                }
+                if (typeof value === 'function') return value.bind(handleTarget);
+                return value;
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value === 'function') return value.bind(target);
+        return value;
+      },
+    });
+    const seedStore = createStore({ metadataRoot });
+    await seedStore.initialize();
+    await seedStore.acquireTransactionLock(validLockRecord({ ownerNonce: OWNER_NONCE_A }));
+    await seedStore.acquireManualInterventionLock(validLockRecord({
+      ownerNonce: OWNER_NONCE_MIR,
+      ownerPid: FIXED_OWNER_PID + 3,
+    }));
+    const before = await readFile(mirLeaf);
+    const store = createForTest({
+      metadataRoot,
+      fs: uidDriftFs,
+      onDurabilityEvent: () => {},
+    });
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'uid-drift MIR must fail closed',
+    );
+    assert.equal(Buffer.compare(await readFile(mirLeaf), before), 0);
+    assert.equal((await lstat(mirLeaf)).uid, process.getuid());
+  });
+
+  await t.test('symlink fails closed without following external victim', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    const victimDir = await mkdtemp(join(tmpdir(), 'linke-la-mir-obs-victim-'));
+    st.after(async () => {
+      await rm(victimDir, { recursive: true, force: true });
+    });
+    const victim = join(victimDir, 'victim.lock');
+    const victimBytes = Buffer.from('do-not-follow-mir-symlink');
+    await writeFile(victim, victimBytes, { mode: 0o600 });
+    await symlink(victim, join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF));
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'MIR symlink must fail closed without follow',
+    );
+    assert.equal(Buffer.compare(await readFile(victim), victimBytes), 0);
+    assert.equal(
+      (await lstat(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF))).isSymbolicLink(),
+      true,
+    );
+  });
+
+  await t.test('directory at leaf fails closed', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    await mkdir(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF), { mode: 0o700 });
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'directory at MIR leaf must fail closed',
+    );
+    assert.equal(
+      (await lstat(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF))).isDirectory(),
+      true,
+    );
+  });
+
+  await t.test('noncanonical key order fails closed and preserves leaf bytes', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const store = createStore({ metadataRoot });
+    await store.initialize();
+    await store.acquireTransactionLock(validLockRecord({ ownerNonce: OWNER_NONCE_A }));
+    const mirRecord = validLockRecord({
+      ownerNonce: OWNER_NONCE_MIR,
+      ownerPid: FIXED_OWNER_PID + 3,
+    });
+    await store.acquireManualInterventionLock(mirRecord);
+    const leafPath = join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    const canonical = await readFile(leafPath);
+    const nonCanonical = Buffer.from(JSON.stringify({
+      processStartIdentity: mirRecord.processStartIdentity,
+      bootSessionIdentity: mirRecord.bootSessionIdentity,
+      ownerNonce: mirRecord.ownerNonce,
+      ownerPid: mirRecord.ownerPid,
+      transactionId: mirRecord.transactionId,
+      schemaVersion: mirRecord.schemaVersion,
+    }), 'utf8');
+    assert.notEqual(Buffer.compare(nonCanonical, canonical), 0);
+    await writeFile(leafPath, nonCanonical, { mode: 0o600 });
+    await assert.rejects(
+      () => store.readManualInterventionLockObservation(),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'noncanonical MIR bytes must fail closed',
+    );
+    assert.equal(Buffer.compare(await readFile(leafPath), nonCanonical), 0);
+  });
+});
+
+test('abort recovery lock success removes only transaction.lock preserving MIR and journal', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const events = [];
+  const tracer = createAbortFsTracer(metadataRoot);
+  const store = createForTest({
+    metadataRoot,
+    fs: tracer.fs,
+    onDurabilityEvent: (event) => {
+      events.push(event);
+    },
+  });
+
+  assert.equal(
+    typeof store.abortRecoveryLockForManualRepair,
+    'function',
+    'production bug: store.abortRecoveryLockForManualRepair must exist for abort recovery lock',
+  );
+
+  await store.initialize();
+
+  const fixture = await setupMirRecoveryHeldFreshLock(store, { metadataRoot });
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+      fixture.freshTxBytes,
+    ),
+    0,
+    'precondition: exact fresh recovery transaction.lock bytes',
+  );
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      fixture.mirBytes,
+    ),
+    0,
+    'precondition: exact MIR bytes',
+  );
+  assert.deepEqual(fixture.expectedMirHead, {
+    transactionId: TX_ID,
+    entrySha256: fixture.mirJournal.entrySha256,
+  });
+
+  events.length = 0;
+  tracer.ops.length = 0;
+
+  const aborted = await store.abortRecoveryLockForManualRepair({
+    transactionLockRef: fixture.freshTxRef,
+    manualInterventionLockRef: fixture.mirRef,
+    expectedMirHead: {
+      transactionId: fixture.expectedMirHead.transactionId,
+      entrySha256: fixture.expectedMirHead.entrySha256,
+    },
+  });
+  assert.equal(aborted, true, 'successful abort recovery lock must return true');
+
+  await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      fixture.mirBytes,
+    ),
+    0,
+    'abort must leave MIR lock bytes byte-identical',
+  );
+  assert.equal(
+    await store.verifyManualInterventionLock(fixture.mirRef),
+    true,
+    'MIR must still verify true after abort removes only transaction.lock',
+  );
+  assert.equal(
+    Buffer.compare(await readJournalLeafBytes(metadataRoot), fixture.journalBytes),
+    0,
+    'abort must leave journal bytes unchanged',
+  );
+  const journalEntries = await store.readJournal({ transactionId: TX_ID });
+  assert.deepEqual(
+    journalEntries.find(
+      (entry) => entry.entrySha256 === fixture.mirJournal.entrySha256,
+    ),
+    fixture.mirJournal,
+    'MIR journal head entry must remain unchanged',
+  );
+  assert.equal(
+    journalEntries[journalEntries.length - 1].entrySha256,
+    fixture.mirJournal.entrySha256,
+    'latest journal head for transaction must remain the MIR entry',
+  );
+
+  const mirReleaseEvents = events.filter(
+    (event) => event
+      && event.kind === 'lock-release'
+      && event.artifact === 'manual-intervention-lock',
+  );
+  assert.equal(
+    mirReleaseEvents.length,
+    0,
+    'abort recovery lock must emit no MIR lock-release event',
+  );
+
+  const unlinkIdx = tracer.ops.findIndex(
+    (op) => op.op === 'unlink' && op.leaf === TRANSACTION_LOCK_LEAF,
+  );
+  assert.notEqual(unlinkIdx, -1, 'successful abort must unlink transaction.lock');
+  const rootSyncAfterUnlink = tracer.ops.findIndex(
+    (op, index) => index > unlinkIdx && op.op === 'sync' && op.leaf === '.',
+  );
+  assert.notEqual(
+    rootSyncAfterUnlink,
+    -1,
+    'durability ordering must include metadata-root sync after transaction.lock unlink',
+  );
+  assert.equal(
+    tracer.ops.some((op) => op.op === 'unlink' && op.leaf === MANUAL_INTERVENTION_LOCK_LEAF),
+    false,
+    'abort must not unlink manual-intervention.lock',
+  );
+});
+
+test('abort recovery lock fail-closed matrix preserves all preexisting bytes', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+
+  // One clean missing-method RED for the whole matrix group.
+  {
+    const probeRoot = await makeTempMetadataRoot(t);
+    const probe = createForTest({
+      metadataRoot: probeRoot,
+      fs: fsPromises,
+      onDurabilityEvent: () => {},
+    });
+    assert.equal(
+      typeof probe.abortRecoveryLockForManualRepair,
+      'function',
+      'production bug: store.abortRecoveryLockForManualRepair must exist for abort recovery lock',
+    );
+  }
+
+  async function freshAbortFixture(st) {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const events = [];
+    const tracer = createAbortFsTracer(metadataRoot);
+    const store = createForTest({
+      metadataRoot,
+      fs: tracer.fs,
+      onDurabilityEvent: (event) => {
+        events.push(event);
+      },
+    });
+    await store.initialize();
+    const fixture = await setupMirRecoveryHeldFreshLock(store, { metadataRoot });
+    events.length = 0;
+    tracer.ops.length = 0;
+    return { metadataRoot, store, fixture, events, tracer };
+  }
+
+  async function assertAllBytesPreserved(metadataRoot, fixture, label) {
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        fixture.freshTxBytes,
+      ),
+      0,
+      `${label}: transaction.lock bytes must be retained`,
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        fixture.mirBytes,
+      ),
+      0,
+      `${label}: MIR bytes must be retained`,
+    );
+    assert.equal(
+      Buffer.compare(await readJournalLeafBytes(metadataRoot), fixture.journalBytes),
+      0,
+      `${label}: journal bytes must be retained`,
+    );
+  }
+
+  function assertNoSuccessfulAbortSignal(events, label) {
+    const releaseEvents = events.filter(
+      (event) => event && event.kind === 'lock-release',
+    );
+    assert.equal(
+      releaseEvents.length,
+      0,
+      `${label}: fail-closed abort must emit no successful abort/release signal`,
+    );
+  }
+
+  const wrongTxCases = [
+    {
+      name: 'wrong transaction ref kind',
+      mutate: (fixture) => ({
+        ...fixture.freshTxRef,
+        kind: 'manual-intervention-lock',
+      }),
+    },
+    {
+      name: 'wrong transaction ref transactionId',
+      mutate: (fixture) => ({
+        ...fixture.freshTxRef,
+        transactionId: TX_ID_B,
+      }),
+    },
+    {
+      name: 'wrong transaction ref ownerNonce',
+      mutate: (fixture) => ({
+        ...fixture.freshTxRef,
+        ownerNonce: OWNER_NONCE_C,
+      }),
+    },
+    {
+      name: 'wrong transaction ref sha256',
+      mutate: (fixture) => ({
+        ...fixture.freshTxRef,
+        sha256: '0'.repeat(64),
+      }),
+    },
+  ];
+
+  for (const c of wrongTxCases) {
+    await t.test(c.name, async (st) => {
+      const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+      await assert.rejects(
+        () => store.abortRecoveryLockForManualRepair({
+          transactionLockRef: c.mutate(fixture),
+          manualInterventionLockRef: fixture.mirRef,
+          expectedMirHead: {
+            transactionId: fixture.expectedMirHead.transactionId,
+            entrySha256: fixture.expectedMirHead.entrySha256,
+          },
+        }),
+        (error) => error instanceof LaunchAgentLifecycleError,
+        `${c.name} must fail closed`,
+      );
+      await assertAllBytesPreserved(metadataRoot, fixture, c.name);
+      assertNoSuccessfulAbortSignal(events, c.name);
+    });
+  }
+
+  const wrongMirCases = [
+    {
+      name: 'wrong MIR ref kind',
+      mutate: (fixture) => ({
+        ...fixture.mirRef,
+        kind: 'transaction-lock',
+      }),
+    },
+    {
+      name: 'wrong MIR ref transactionId',
+      mutate: (fixture) => ({
+        ...fixture.mirRef,
+        transactionId: TX_ID_B,
+      }),
+    },
+    {
+      name: 'wrong MIR ref ownerNonce',
+      mutate: (fixture) => ({
+        ...fixture.mirRef,
+        ownerNonce: OWNER_NONCE_C,
+      }),
+    },
+    {
+      name: 'wrong MIR ref sha256',
+      mutate: (fixture) => ({
+        ...fixture.mirRef,
+        sha256: '0'.repeat(64),
+      }),
+    },
+  ];
+
+  for (const c of wrongMirCases) {
+    await t.test(c.name, async (st) => {
+      const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+      await assert.rejects(
+        () => store.abortRecoveryLockForManualRepair({
+          transactionLockRef: fixture.freshTxRef,
+          manualInterventionLockRef: c.mutate(fixture),
+          expectedMirHead: {
+            transactionId: fixture.expectedMirHead.transactionId,
+            entrySha256: fixture.expectedMirHead.entrySha256,
+          },
+        }),
+        (error) => error instanceof LaunchAgentLifecycleError,
+        `${c.name} must fail closed`,
+      );
+      await assertAllBytesPreserved(metadataRoot, fixture, c.name);
+      assertNoSuccessfulAbortSignal(events, c.name);
+    });
+  }
+
+  await t.test('expectedMirHead extra key', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+          sequence: 1,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError
+        || isInvalidLifecycleError(error),
+      'expectedMirHead extra key must fail closed',
+    );
+    await assertAllBytesPreserved(metadataRoot, fixture, 'expectedMirHead extra');
+    assertNoSuccessfulAbortSignal(events, 'expectedMirHead extra');
+  });
+
+  await t.test('expectedMirHead missing entrySha256', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError
+        || isInvalidLifecycleError(error),
+      'expectedMirHead missing entrySha256 must fail closed',
+    );
+    await assertAllBytesPreserved(metadataRoot, fixture, 'expectedMirHead missing');
+    assertNoSuccessfulAbortSignal(events, 'expectedMirHead missing');
+  });
+
+  await t.test('expectedMirHead wrong transactionId', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: TX_ID_B,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'expectedMirHead wrong transactionId must fail closed',
+    );
+    await assertAllBytesPreserved(metadataRoot, fixture, 'expectedMirHead wrong tx');
+    assertNoSuccessfulAbortSignal(events, 'expectedMirHead wrong tx');
+  });
+
+  await t.test('expectedMirHead wrong entrySha256', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: '0'.repeat(64),
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'expectedMirHead wrong entrySha256 must fail closed',
+    );
+    await assertAllBytesPreserved(metadataRoot, fixture, 'expectedMirHead wrong sha');
+    assertNoSuccessfulAbortSignal(events, 'expectedMirHead wrong sha');
+  });
+
+  await t.test('journal head changed after snapshot', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    const advanced = buildJournalEntry({
+      transactionId: TX_ID,
+      sequence: 2,
+      previousEntrySha256: fixture.mirJournal.entrySha256,
+      operation: 'recover',
+      state: 'recovered',
+      at: '2024-01-15T12:00:02.000Z',
+      payload: {
+        hostMutationCount: 1,
+        receiptSha256: RECEIPT_SHA256,
+      },
+    });
+    await store.appendJournal({
+      entry: advanced,
+      expectedPrior: priorRefFromEntry(fixture.mirJournal),
+      writerLockRef: fixture.freshTxRef,
+    });
+    // Snapshot-relative expected head is stale MIR; journal advanced.
+    const journalAfterAdvance = await readJournalLeafBytes(metadataRoot);
+    const txAfterAdvance = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+    const mirAfterAdvance = await readLockLeafBytes(
+      metadataRoot,
+      MANUAL_INTERVENTION_LOCK_LEAF,
+    );
+    events.length = 0;
+
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'stale MIR head after journal advance must fail closed',
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        txAfterAdvance,
+      ),
+      0,
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        mirAfterAdvance,
+      ),
+      0,
+    );
+    assert.equal(
+      Buffer.compare(await readJournalLeafBytes(metadataRoot), journalAfterAdvance),
+      0,
+    );
+    assertNoSuccessfulAbortSignal(events, 'journal head changed');
+  });
+
+  await t.test('latest head is terminal rather than exact MIR', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    const terminal = buildJournalEntry({
+      transactionId: TX_ID,
+      sequence: 2,
+      previousEntrySha256: fixture.mirJournal.entrySha256,
+      operation: 'recover',
+      state: 'recovered',
+      at: '2024-01-15T12:00:03.000Z',
+      payload: {
+        hostMutationCount: 2,
+        receiptSha256: RECEIPT_SHA256,
+      },
+    });
+    await store.appendJournal({
+      entry: terminal,
+      expectedPrior: priorRefFromEntry(fixture.mirJournal),
+      writerLockRef: fixture.freshTxRef,
+    });
+    const journalAfter = await readJournalLeafBytes(metadataRoot);
+    const txAfter = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+    const mirAfter = await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    events.length = 0;
+
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: terminal.transactionId,
+          entrySha256: terminal.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'terminal latest head must fail closed for abort recovery lock',
+    );
+    assert.equal(
+      Buffer.compare(await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF), txAfter),
+      0,
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        mirAfter,
+      ),
+      0,
+    );
+    assert.equal(Buffer.compare(await readJournalLeafBytes(metadataRoot), journalAfter), 0);
+    assertNoSuccessfulAbortSignal(events, 'terminal latest head');
+  });
+
+  await t.test('missing transaction lock', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await fsPromises.unlink(join(metadataRoot, TRANSACTION_LOCK_LEAF));
+    const mirAfter = await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    const journalAfter = await readJournalLeafBytes(metadataRoot);
+    events.length = 0;
+
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'missing transaction.lock must fail closed',
+    );
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        mirAfter,
+      ),
+      0,
+    );
+    assert.equal(Buffer.compare(await readJournalLeafBytes(metadataRoot), journalAfter), 0);
+    assertNoSuccessfulAbortSignal(events, 'missing transaction lock');
+  });
+
+  await t.test('missing MIR lock', async (st) => {
+    const { metadataRoot, store, fixture, events } = await freshAbortFixture(st);
+    await fsPromises.unlink(join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF));
+    const txAfter = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+    const journalAfter = await readJournalLeafBytes(metadataRoot);
+    events.length = 0;
+
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      'missing MIR lock must fail closed',
+    );
+    await assertNoLockLeaf(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+    assert.equal(
+      Buffer.compare(await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF), txAfter),
+      0,
+    );
+    assert.equal(Buffer.compare(await readJournalLeafBytes(metadataRoot), journalAfter), 0);
+    assertNoSuccessfulAbortSignal(events, 'missing MIR lock');
+  });
+
+  await t.test('injected race immediately before unlink', async (st) => {
+    const { metadataRoot, store, fixture, events, tracer } = await freshAbortFixture(st);
+    events.length = 0;
+    tracer.ops.length = 0;
+    // Arm only after fixture holds exact fresh tx + MIR; first tx unlink throws.
+    tracer.armUnlinkInjectionOnce();
+
+    await assert.rejects(
+      () => store.abortRecoveryLockForManualRepair({
+        transactionLockRef: fixture.freshTxRef,
+        manualInterventionLockRef: fixture.mirRef,
+        expectedMirHead: {
+          transactionId: fixture.expectedMirHead.transactionId,
+          entrySha256: fixture.expectedMirHead.entrySha256,
+        },
+      }),
+      (error) => error instanceof LaunchAgentLifecycleError
+        || (error && error.code === 'EIO'),
+      'injected unlink race must fail closed without successful abort',
+    );
+    await assertAllBytesPreserved(metadataRoot, fixture, 'injected unlink race');
+    assertNoSuccessfulAbortSignal(events, 'injected unlink race');
+    assert.equal(
+      tracer.ops.some((op) => op.op === 'unlink' && op.leaf === MANUAL_INTERVENTION_LOCK_LEAF),
+      false,
+      'race path must not unlink MIR',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6B.1 Task 4 RED: residual recovery claim exact resolve
+// Focus pattern: "residual recovery claim"
+// Fail only because store.resolveRecoveryClaimForManualRepair is undefined.
+// Do not invent coordinator recoverAfterManualRepair (Task 5).
+// ---------------------------------------------------------------------------
+
+/**
+ * Independent lock-record UTF-8 JSON oracle (exact projected key order).
+ * Mirrors production serializeLockRecord; used only at the test boundary.
+ */
+function residualLockRecordCanonicalBytes(record) {
+  return Buffer.from(JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    transactionId: record.transactionId,
+    ownerPid: record.ownerPid,
+    ownerNonce: record.ownerNonce,
+    bootSessionIdentity: {
+      available: record.bootSessionIdentity.available,
+      value: record.bootSessionIdentity.value,
+    },
+    processStartIdentity: {
+      available: record.processStartIdentity.available,
+      value: record.processStartIdentity.value,
+    },
+  }), 'utf8');
+}
+
+function residualLockRefFromRecord(kind, record) {
+  const bytes = residualLockRecordCanonicalBytes(record);
+  return {
+    kind,
+    transactionId: record.transactionId,
+    ownerNonce: record.ownerNonce,
+    sha256: sha256Hex(bytes),
+  };
+}
+
+/**
+ * Independent recovery-claim UTF-8 JSON oracle (exact projected key order).
+ * Mirrors production serializeRecoveryClaim; residual claims are the reachable
+ * on-disk shape left by post-claim crash during acquireRecoveryLockForManualRepair.
+ */
+function residualClaimRecordCanonicalBytes(record) {
+  return Buffer.from(JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    kind: record.kind,
+    claimId: record.claimId,
+    transactionId: record.transactionId,
+    ownerPid: record.ownerPid,
+    ownerNonce: record.ownerNonce,
+    bootSessionIdentity: {
+      available: record.bootSessionIdentity.available,
+      value: record.bootSessionIdentity.value,
+    },
+    processStartIdentity: {
+      available: record.processStartIdentity.available,
+      value: record.processStartIdentity.value,
+    },
+    expectedTransactionLockRef: record.expectedTransactionLockRef === null
+      ? null
+      : {
+        kind: record.expectedTransactionLockRef.kind,
+        transactionId: record.expectedTransactionLockRef.transactionId,
+        ownerNonce: record.expectedTransactionLockRef.ownerNonce,
+        sha256: record.expectedTransactionLockRef.sha256,
+      },
+    manualInterventionLockRef: {
+      kind: record.manualInterventionLockRef.kind,
+      transactionId: record.manualInterventionLockRef.transactionId,
+      ownerNonce: record.manualInterventionLockRef.ownerNonce,
+      sha256: record.manualInterventionLockRef.sha256,
+    },
+    freshTransactionLockRef: {
+      kind: record.freshTransactionLockRef.kind,
+      transactionId: record.freshTransactionLockRef.transactionId,
+      ownerNonce: record.freshTransactionLockRef.ownerNonce,
+      sha256: record.freshTransactionLockRef.sha256,
+    },
+  }), 'utf8');
+}
+
+function residualClaimRefFromRecord(record) {
+  const bytes = residualClaimRecordCanonicalBytes(record);
+  return {
+    kind: 'recovery-claim-lock',
+    claimId: record.claimId,
+    transactionId: record.transactionId,
+    ownerNonce: record.ownerNonce,
+    sha256: sha256Hex(bytes),
+  };
+}
+
+async function plantOwnedResidualLeaf(metadataRoot, leafName, bytes) {
+  const leafPath = join(metadataRoot, leafName);
+  await writeFile(leafPath, bytes, { mode: 0o600 });
+  const st = await lstat(leafPath);
+  assert.equal(st.isFile(), true, `${leafName} must be a regular file`);
+  assert.equal(st.isSymbolicLink(), false, `${leafName} must not be a symlink`);
+  assert.equal(st.mode & 0o777, 0o600, `${leafName} must be mode 0600`);
+  assert.equal(st.uid, process.getuid(), `${leafName} owner must be current uid`);
+  return leafPath;
+}
+
+/**
+ * Real MIR journal+lock handoff then plant a residual recovery-claim.lock in one of
+ * the three safe current-transaction classifications (or raw MIR-held base).
+ *
+ * Claim body is the exact durable shape production writes during
+ * acquireRecoveryLockForManualRepair (refs from real store ops; independent oracle).
+ */
+async function setupResidualRecoveryClaimFixture(store, metadataRoot, status) {
+  const oldRecord = validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_A,
+  });
+  const mirRecord = validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_MIR,
+    ownerPid: FIXED_OWNER_PID + 3,
+  });
+  const freshRecord = validLockRecord({
+    transactionId: TX_ID,
+    ownerNonce: OWNER_NONCE_B,
+    ownerPid: FIXED_OWNER_PID + 10,
+    bootSessionIdentity: identityAvailable('opaque-boot-session-identity-v1'),
+    processStartIdentity: identityAvailable('opaque-process-start-identity-v1'),
+  });
+  const claimId = RECOVERY_CLAIM_ID;
+
+  const oldTxRef = await store.acquireTransactionLock(oldRecord);
+
+  const prepared = buildJournalEntry({
+    transactionId: TX_ID,
+    sequence: 0,
+    previousEntrySha256: null,
+    state: 'prepared',
+    payload: { hostMutationCount: 0 },
+  });
+  await store.appendJournal({
+    entry: prepared,
+    expectedPrior: null,
+    writerLockRef: oldTxRef,
+  });
+
+  const mirJournal = buildJournalEntry({
+    transactionId: TX_ID,
+    sequence: 1,
+    previousEntrySha256: prepared.entrySha256,
+    state: 'manual-intervention-required',
+    at: '2024-01-15T12:00:01.000Z',
+    payload: { hostMutationCount: 0 },
+  });
+  await store.appendJournal({
+    entry: mirJournal,
+    expectedPrior: priorRefFromEntry(prepared),
+    writerLockRef: oldTxRef,
+  });
+
+  const mirRef = await store.acquireManualInterventionLock(mirRecord);
+
+  let currentTxRef = null;
+  let expectedTransactionLockRef = null;
+  let oldTxBytes = null;
+
+  if (status === 'old-intact') {
+    // Residual after claim durable, before old transaction unlink: old lock still exact.
+    expectedTransactionLockRef = {
+      kind: oldTxRef.kind,
+      transactionId: oldTxRef.transactionId,
+      ownerNonce: oldTxRef.ownerNonce,
+      sha256: oldTxRef.sha256,
+    };
+    currentTxRef = expectedTransactionLockRef;
+    oldTxBytes = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+  } else if (status === 'fresh-published') {
+    // Residual after fresh publish, before claim unlink: release old → publish fresh via real acquire.
+    await store.releaseTransactionLock(oldTxRef, {
+      manualInterventionLockRef: mirRef,
+    });
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+    const freshTxRef = await store.acquireRecoveryLockForManualRepair({
+      record: freshRecord,
+      claimId,
+      expectedTransactionLockRef: null,
+      manualInterventionLockRef: mirRef,
+    });
+    // Normal success unlinks claim; re-plant the exact residual claim shape that
+    // would remain if crash occurred after fresh durable write, before claim cleanup.
+    await assertNoLockLeaf(metadataRoot, RECOVERY_CLAIM_LEAF);
+    expectedTransactionLockRef = null;
+    currentTxRef = {
+      kind: freshTxRef.kind,
+      transactionId: freshTxRef.transactionId,
+      ownerNonce: freshTxRef.ownerNonce,
+      sha256: freshTxRef.sha256,
+    };
+  } else if (status === 'transaction-lock-absent') {
+    // Residual after claim durable with expected=null, before fresh O_EXCL publish.
+    await store.releaseTransactionLock(oldTxRef, {
+      manualInterventionLockRef: mirRef,
+    });
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+    expectedTransactionLockRef = null;
+    currentTxRef = null;
+  } else {
+    throw new Error(`unexpected residual claim status fixture: ${status}`);
+  }
+
+  const freshTransactionLockRef = residualLockRefFromRecord('transaction-lock', freshRecord);
+  if (status === 'fresh-published') {
+    assert.deepEqual(
+      currentTxRef,
+      freshTransactionLockRef,
+      'fresh-published fixture: current tx ref must equal store-computed fresh ref',
+    );
+  }
+
+  const claimRecord = {
+    schemaVersion: 1,
+    kind: 'recovery-claim-lock',
+    claimId,
+    transactionId: TX_ID,
+    ownerPid: freshRecord.ownerPid,
+    ownerNonce: freshRecord.ownerNonce,
+    bootSessionIdentity: freshRecord.bootSessionIdentity,
+    processStartIdentity: freshRecord.processStartIdentity,
+    expectedTransactionLockRef,
+    manualInterventionLockRef: {
+      kind: mirRef.kind,
+      transactionId: mirRef.transactionId,
+      ownerNonce: mirRef.ownerNonce,
+      sha256: mirRef.sha256,
+    },
+    freshTransactionLockRef,
+  };
+  const claimBytes = residualClaimRecordCanonicalBytes(claimRecord);
+  const recoveryClaimRef = residualClaimRefFromRecord(claimRecord);
+  await plantOwnedResidualLeaf(metadataRoot, RECOVERY_CLAIM_LEAF, claimBytes);
+
+  // Cross-check observation path accepts the planted residual claim (reachable shape).
+  const claimObs = await store.readRecoveryClaimObservation();
+  assert.equal(claimObs === null, false, 'planted residual recovery claim must be observable');
+  assert.deepEqual(claimObs.ref, recoveryClaimRef);
+  assert.deepEqual(claimObs.record, claimRecord);
+
+  const mirBytes = await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF);
+  const journalBytes = await readJournalLeafBytes(metadataRoot);
+  let transactionBytes = null;
+  if (status !== 'transaction-lock-absent') {
+    transactionBytes = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+  } else {
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+  }
+
+  return {
+    status,
+    oldRecord,
+    mirRecord,
+    freshRecord,
+    oldTxRef,
+    mirRef,
+    currentTxRef,
+    expectedTransactionLockRef,
+    freshTransactionLockRef,
+    claimId,
+    claimRecord,
+    claimBytes,
+    recoveryClaimRef,
+    mirBytes,
+    journalBytes,
+    transactionBytes,
+    oldTxBytes,
+    prepared,
+    mirJournal,
+  };
+}
+
+/**
+ * Trace residual-claim resolve durability: only recovery-claim.lock unlink + root fsync.
+ * Optional one-shot race inject: after initial claim+MIR+current-tx classification
+ * completes, the 2nd recovery-claim open (reverify before unlink) rewrites a leaf so
+ * pre-unlink revalidation must fail closed. 1st claim open is observation only.
+ * Optional uidDriftArmed: recovery-claim.lock read handle.stat() returns drifted uid
+ * (arm only after fixture; never during plant/observe setup).
+ */
+function createResidualClaimResolveFsTracer(metadataRoot, options = {}) {
+  const ops = [];
+  // raceArmed / uidDriftArmed default false so fixture setup never trips inject.
+  // Callers arm only immediately before resolveRecoveryClaimForManualRepair.
+  const injectState = {
+    claimOpenCount: 0,
+    raceArmed: false,
+    raceKind: options.raceKind ?? null,
+    raceApplied: false,
+    uidDriftArmed: false,
+    uidDriftApplied: false,
+  };
+  const racePayload = options.racePayload ?? null;
+
+  const wrappedFs = new Proxy(fsPromises, {
+    get(target, property, receiver) {
+      if (property === 'open') {
+        return async (path, flags, mode) => {
+          const handle = await target.open(path, flags, mode);
+          const leaf = leafBaseName(path);
+          const isRoot = path === metadataRoot;
+          const isClaimLeaf = leaf === RECOVERY_CLAIM_LEAF;
+          if (isClaimLeaf) {
+            injectState.claimOpenCount += 1;
+            // 1st claim open = initial observe/classify only.
+            // 2nd claim open = begin reverify claim after initial classification,
+            // before unlink — inject one-shot race drift here.
+            if (
+              injectState.raceArmed
+              && !injectState.raceApplied
+              && injectState.claimOpenCount === 2
+              && injectState.raceKind != null
+            ) {
+              injectState.raceApplied = true;
+              if (injectState.raceKind === 'transaction-drift' && racePayload) {
+                await target.writeFile(
+                  join(metadataRoot, TRANSACTION_LOCK_LEAF),
+                  racePayload,
+                  { mode: 0o600 },
+                );
+              } else if (injectState.raceKind === 'mir-drift' && racePayload) {
+                await target.writeFile(
+                  join(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+                  racePayload,
+                  { mode: 0o600 },
+                );
+              } else if (injectState.raceKind === 'claim-drift' && racePayload) {
+                await target.writeFile(
+                  join(metadataRoot, RECOVERY_CLAIM_LEAF),
+                  racePayload,
+                  { mode: 0o600 },
+                );
+              }
+            }
+          }
+          return new Proxy(handle, {
+            get(handleTarget, handleProperty) {
+              const value = Reflect.get(handleTarget, handleProperty, handleTarget);
+              if (typeof value !== 'function') return value;
+              if (handleProperty === 'sync') {
+                return async (...args) => {
+                  ops.push({
+                    op: 'sync',
+                    leaf: isRoot ? '.' : leaf,
+                    path,
+                  });
+                  return value.apply(handleTarget, args);
+                };
+              }
+              // Optional claim-only uid drift for conflict matrix (stat on claim handle).
+              if (
+                isClaimLeaf
+                && handleProperty === 'stat'
+                && injectState.uidDriftArmed
+              ) {
+                return async (...args) => {
+                  const stResult = await value.apply(handleTarget, args);
+                  injectState.uidDriftApplied = true;
+                  return Object.assign(
+                    Object.create(Object.getPrototypeOf(stResult)),
+                    stResult,
+                    { uid: stResult.uid + 1 },
+                  );
+                };
+              }
+              return (...args) => value.apply(handleTarget, args);
+            },
+          });
+        };
+      }
+      if (property === 'unlink') {
+        return async (path) => {
+          const leaf = leafBaseName(path);
+          ops.push({ op: 'unlink', leaf });
+          return target.unlink(path);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value === 'function') return value.bind(target);
+      return value;
+    },
+  });
+
+  return { fs: wrappedFs, ops, injectState };
+}
+
+function assertResidualResolveResult(result, expectedStatus) {
+  assert.equal(result === null || typeof result !== 'object', false, 'resolve result must be object');
+  assert.deepEqual(
+    Reflect.ownKeys(result).filter((k) => typeof k === 'string').sort(),
+    ['status'],
+    'resolve result must be exact single key { status }',
+  );
+  assert.equal(result.status, expectedStatus);
+  assert.equal(isDeeplyFrozen(result), true, 'resolve result must be deeply frozen');
+  assertNoAbsolutePaths(result, 'resolveRecoveryClaimForManualRepair result');
+}
+
+async function assertResidualSafeSideEffects(metadataRoot, fixture, label) {
+  await assertNoLockLeaf(metadataRoot, RECOVERY_CLAIM_LEAF);
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      fixture.mirBytes,
+    ),
+    0,
+    `${label}: MIR bytes must be byte-identical`,
+  );
+  assert.equal(
+    Buffer.compare(await readJournalLeafBytes(metadataRoot), fixture.journalBytes),
+    0,
+    `${label}: journal bytes must be unchanged`,
+  );
+  if (fixture.transactionBytes === null) {
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+  } else {
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        fixture.transactionBytes,
+      ),
+      0,
+      `${label}: transaction.lock bytes must be byte-identical`,
+    );
+  }
+}
+
+async function assertResidualAllBytesPreserved(metadataRoot, fixture, label) {
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF),
+      fixture.claimBytes,
+    ),
+    0,
+    `${label}: recovery-claim.lock bytes must be retained`,
+  );
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      fixture.mirBytes,
+    ),
+    0,
+    `${label}: MIR bytes must be retained`,
+  );
+  assert.equal(
+    Buffer.compare(await readJournalLeafBytes(metadataRoot), fixture.journalBytes),
+    0,
+    `${label}: journal bytes must be retained`,
+  );
+  if (fixture.transactionBytes === null) {
+    await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+  } else {
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        fixture.transactionBytes,
+      ),
+      0,
+      `${label}: transaction.lock bytes must be retained`,
+    );
+  }
+}
+
+function isRecoveryClaimStalledError(error) {
+  return isLifecycleErrorWithCode(
+    error,
+    LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED,
+  );
+}
+
+test('residual recovery claim resolve: fresh-published unlinks only claim preserving MIR transaction and journal', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const tracer = createResidualClaimResolveFsTracer(metadataRoot);
+  const store = createForTest({
+    metadataRoot,
+    fs: tracer.fs,
+    onDurabilityEvent: () => {},
+  });
+
+  assert.equal(
+    typeof store.resolveRecoveryClaimForManualRepair,
+    'function',
+    'production bug: store.resolveRecoveryClaimForManualRepair must exist for residual recovery claim resolve',
+  );
+
+  await store.initialize();
+  const fixture = await setupResidualRecoveryClaimFixture(
+    store,
+    metadataRoot,
+    'fresh-published',
+  );
+  assert.equal(
+    fixture.currentTxRef.sha256,
+    fixture.freshTransactionLockRef.sha256,
+    'precondition: current transaction ref equals claim.freshTransactionLockRef',
+  );
+
+  tracer.ops.length = 0;
+  const result = await store.resolveRecoveryClaimForManualRepair({
+    recoveryClaimRef: fixture.recoveryClaimRef,
+    manualInterventionLockRef: fixture.mirRef,
+  });
+  assertResidualResolveResult(result, 'fresh-published');
+  await assertResidualSafeSideEffects(metadataRoot, fixture, 'fresh-published');
+
+  const claimUnlinkIdx = tracer.ops.findIndex(
+    (op) => op.op === 'unlink' && op.leaf === RECOVERY_CLAIM_LEAF,
+  );
+  assert.notEqual(claimUnlinkIdx, -1, 'fresh-published must unlink recovery-claim.lock');
+  const rootSyncAfter = tracer.ops.findIndex(
+    (op, index) => index > claimUnlinkIdx && op.op === 'sync' && op.leaf === '.',
+  );
+  assert.notEqual(
+    rootSyncAfter,
+    -1,
+    'durability ordering must fsync metadataRoot after recovery-claim.lock unlink',
+  );
+  assert.equal(
+    tracer.ops.some((op) => op.op === 'unlink' && op.leaf === TRANSACTION_LOCK_LEAF),
+    false,
+    'fresh-published must not unlink transaction.lock',
+  );
+  assert.equal(
+    tracer.ops.some((op) => op.op === 'unlink' && op.leaf === MANUAL_INTERVENTION_LOCK_LEAF),
+    false,
+    'fresh-published must not unlink manual-intervention.lock',
+  );
+  assert.equal(
+    tracer.ops.some((op) => op.op === 'unlink' && op.leaf === JOURNAL_LEAF),
+    false,
+    'fresh-published must not unlink journal',
+  );
+});
+
+test('residual recovery claim resolve: old-intact unlinks only claim preserving exact old transaction MIR and journal', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const tracer = createResidualClaimResolveFsTracer(metadataRoot);
+  const store = createForTest({
+    metadataRoot,
+    fs: tracer.fs,
+    onDurabilityEvent: () => {},
+  });
+
+  assert.equal(
+    typeof store.resolveRecoveryClaimForManualRepair,
+    'function',
+    'production bug: store.resolveRecoveryClaimForManualRepair must exist for residual recovery claim resolve',
+  );
+
+  await store.initialize();
+  const fixture = await setupResidualRecoveryClaimFixture(store, metadataRoot, 'old-intact');
+  assert.deepEqual(
+    fixture.currentTxRef,
+    fixture.expectedTransactionLockRef,
+    'precondition: current transaction ref equals claim.expectedTransactionLockRef',
+  );
+  assert.notEqual(
+    fixture.currentTxRef.sha256,
+    fixture.freshTransactionLockRef.sha256,
+    'precondition: old-intact is not the fresh ref',
+  );
+
+  tracer.ops.length = 0;
+  const result = await store.resolveRecoveryClaimForManualRepair({
+    recoveryClaimRef: {
+      kind: fixture.recoveryClaimRef.kind,
+      claimId: fixture.recoveryClaimRef.claimId,
+      transactionId: fixture.recoveryClaimRef.transactionId,
+      ownerNonce: fixture.recoveryClaimRef.ownerNonce,
+      sha256: fixture.recoveryClaimRef.sha256,
+    },
+    manualInterventionLockRef: {
+      kind: fixture.mirRef.kind,
+      transactionId: fixture.mirRef.transactionId,
+      ownerNonce: fixture.mirRef.ownerNonce,
+      sha256: fixture.mirRef.sha256,
+    },
+  });
+  assertResidualResolveResult(result, 'old-intact');
+  await assertResidualSafeSideEffects(metadataRoot, fixture, 'old-intact');
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+      fixture.oldTxBytes,
+    ),
+    0,
+    'old-intact must leave exact original old transaction.lock bytes',
+  );
+});
+
+test('residual recovery claim resolve: transaction-lock-absent unlinks only claim while transaction remains exact-missing', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const tracer = createResidualClaimResolveFsTracer(metadataRoot);
+  const store = createForTest({
+    metadataRoot,
+    fs: tracer.fs,
+    onDurabilityEvent: () => {},
+  });
+
+  assert.equal(
+    typeof store.resolveRecoveryClaimForManualRepair,
+    'function',
+    'production bug: store.resolveRecoveryClaimForManualRepair must exist for residual recovery claim resolve',
+  );
+
+  await store.initialize();
+  const fixture = await setupResidualRecoveryClaimFixture(
+    store,
+    metadataRoot,
+    'transaction-lock-absent',
+  );
+  await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+
+  tracer.ops.length = 0;
+  const result = await store.resolveRecoveryClaimForManualRepair({
+    recoveryClaimRef: fixture.recoveryClaimRef,
+    manualInterventionLockRef: fixture.mirRef,
+  });
+  assertResidualResolveResult(result, 'transaction-lock-absent');
+  await assertResidualSafeSideEffects(metadataRoot, fixture, 'transaction-lock-absent');
+  await assertNoLockLeaf(metadataRoot, TRANSACTION_LOCK_LEAF);
+  assert.equal(
+    tracer.ops.some((op) => op.op === 'unlink' && op.leaf === TRANSACTION_LOCK_LEAF),
+    false,
+    'transaction-lock-absent path must never invent or unlink a transaction.lock',
+  );
+});
+
+test('residual recovery claim resolve: conflict throws recovery-claim-stalled and preserves all preexisting bytes', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+
+  // One clean missing-method RED for the conflict matrix group.
+  {
+    const probeRoot = await makeTempMetadataRoot(t);
+    const probe = createForTest({
+      metadataRoot: probeRoot,
+      fs: fsPromises,
+      onDurabilityEvent: () => {},
+    });
+    assert.equal(
+      typeof probe.resolveRecoveryClaimForManualRepair,
+      'function',
+      'production bug: store.resolveRecoveryClaimForManualRepair must exist for residual recovery claim resolve',
+    );
+  }
+
+  async function baseFreshPublished(st) {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const mutations = [];
+    const store = createForTest({
+      metadataRoot,
+      fs: createMutationTracingFs(mutations),
+      onDurabilityEvent: () => {},
+    });
+    await store.initialize();
+    const fixture = await setupResidualRecoveryClaimFixture(
+      store,
+      metadataRoot,
+      'fresh-published',
+    );
+    mutations.length = 0;
+    return { metadataRoot, store, fixture, mutations };
+  }
+
+  await t.test('current transaction ref equals neither fresh nor expected (conflict)', async (st) => {
+    const { metadataRoot, store, fixture, mutations } = await baseFreshPublished(st);
+    // Plant an unrelated owned transaction.lock (neither fresh nor expected=null).
+    const foreignRecord = validLockRecord({
+      transactionId: TX_ID,
+      ownerNonce: OWNER_NONCE_C,
+      ownerPid: FIXED_OWNER_PID + 99,
+    });
+    const foreignBytes = residualLockRecordCanonicalBytes(foreignRecord);
+    await plantOwnedResidualLeaf(metadataRoot, TRANSACTION_LOCK_LEAF, foreignBytes);
+    const foreignTxBytes = await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF);
+    const preserved = {
+      ...fixture,
+      transactionBytes: foreignTxBytes,
+      claimBytes: await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF),
+      mirBytes: await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+      journalBytes: await readJournalLeafBytes(metadataRoot),
+    };
+    mutations.length = 0;
+
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'foreign current transaction ref must throw recovery-claim-stalled',
+    );
+    await assertResidualAllBytesPreserved(metadataRoot, preserved, 'foreign current tx');
+    assert.equal(
+      mutations.some((m) => m === 'fs.unlink' || m === 'handle.write'),
+      false,
+      'conflict must not mutate host leafs via unlink/write',
+    );
+  });
+
+  await t.test('wrong recoveryClaimRef sha256 fails closed as recovery-claim-stalled', async (st) => {
+    const { metadataRoot, store, fixture, mutations } = await baseFreshPublished(st);
+    mutations.length = 0;
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: {
+          ...fixture.recoveryClaimRef,
+          sha256: '0'.repeat(64),
+        },
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'claim ref sha drift must throw recovery-claim-stalled',
+    );
+    await assertResidualAllBytesPreserved(metadataRoot, fixture, 'claim ref sha drift');
+    assert.equal(mutations.length, 0, 'claim ref sha drift must perform no write mutations');
+  });
+
+  await t.test('wrong MIR ref sha256 fails closed as recovery-claim-stalled', async (st) => {
+    const { metadataRoot, store, fixture, mutations } = await baseFreshPublished(st);
+    mutations.length = 0;
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: {
+          ...fixture.mirRef,
+          sha256: '0'.repeat(64),
+        },
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'MIR ref sha drift must throw recovery-claim-stalled',
+    );
+    await assertResidualAllBytesPreserved(metadataRoot, fixture, 'MIR ref sha drift');
+  });
+
+  await t.test('claim leaf mode drift 0644 fails closed without auto-repair', async (st) => {
+    const { metadataRoot, store, fixture } = await baseFreshPublished(st);
+    const claimPath = join(metadataRoot, RECOVERY_CLAIM_LEAF);
+    await chmod(claimPath, 0o644);
+    const claimAfter = await readFile(claimPath);
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'claim mode drift must throw recovery-claim-stalled',
+    );
+    assert.equal((await lstat(claimPath)).mode & 0o777, 0o644);
+    assert.equal(Buffer.compare(await readFile(claimPath), claimAfter), 0);
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        fixture.mirBytes,
+      ),
+      0,
+    );
+  });
+
+  await t.test('claim noncanonical key order fails closed and preserves bytes', async (st) => {
+    const { metadataRoot, store, fixture } = await baseFreshPublished(st);
+    const claimPath = join(metadataRoot, RECOVERY_CLAIM_LEAF);
+    const nonCanonical = Buffer.from(JSON.stringify({
+      freshTransactionLockRef: fixture.claimRecord.freshTransactionLockRef,
+      manualInterventionLockRef: fixture.claimRecord.manualInterventionLockRef,
+      expectedTransactionLockRef: fixture.claimRecord.expectedTransactionLockRef,
+      processStartIdentity: fixture.claimRecord.processStartIdentity,
+      bootSessionIdentity: fixture.claimRecord.bootSessionIdentity,
+      ownerNonce: fixture.claimRecord.ownerNonce,
+      ownerPid: fixture.claimRecord.ownerPid,
+      transactionId: fixture.claimRecord.transactionId,
+      claimId: fixture.claimRecord.claimId,
+      kind: fixture.claimRecord.kind,
+      schemaVersion: fixture.claimRecord.schemaVersion,
+    }), 'utf8');
+    assert.notEqual(Buffer.compare(nonCanonical, fixture.claimBytes), 0);
+    await writeFile(claimPath, nonCanonical, { mode: 0o600 });
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'noncanonical claim must throw recovery-claim-stalled',
+    );
+    assert.equal(Buffer.compare(await readFile(claimPath), nonCanonical), 0);
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        fixture.transactionBytes,
+      ),
+      0,
+    );
+  });
+
+  await t.test('malformed claim schema fails closed and preserves bytes', async (st) => {
+    const { metadataRoot, store, fixture } = await baseFreshPublished(st);
+    const badBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, kind: 'not-a-claim' }), 'utf8');
+    await writeFile(join(metadataRoot, RECOVERY_CLAIM_LEAF), badBytes, { mode: 0o600 });
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'malformed claim must throw recovery-claim-stalled',
+    );
+    assert.equal(
+      Buffer.compare(await readFile(join(metadataRoot, RECOVERY_CLAIM_LEAF)), badBytes),
+      0,
+    );
+  });
+
+  await t.test('directory at recovery-claim.lock fails closed', async (st) => {
+    const { metadataRoot, store, fixture } = await baseFreshPublished(st);
+    await fsPromises.unlink(join(metadataRoot, RECOVERY_CLAIM_LEAF));
+    await mkdir(join(metadataRoot, RECOVERY_CLAIM_LEAF), { mode: 0o700 });
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'directory at claim leaf must throw recovery-claim-stalled',
+    );
+    assert.equal(
+      (await lstat(join(metadataRoot, RECOVERY_CLAIM_LEAF))).isDirectory(),
+      true,
+    );
+  });
+
+  await t.test('claim leaf uid drift fails closed as recovery-claim-stalled', async (st) => {
+    // Cannot chown without root; inject wrong uid via claim-handle stat only.
+    // Arm after fixture so plant/observe setup never sees drifted uid.
+    const metadataRoot = await makeTempMetadataRoot(st);
+    const tracer = createResidualClaimResolveFsTracer(metadataRoot);
+    const store = createForTest({
+      metadataRoot,
+      fs: tracer.fs,
+      onDurabilityEvent: () => {},
+    });
+    await store.initialize();
+    const fixture = await setupResidualRecoveryClaimFixture(
+      store,
+      metadataRoot,
+      'fresh-published',
+    );
+    tracer.injectState.uidDriftArmed = true;
+    tracer.injectState.uidDriftApplied = false;
+    tracer.ops.length = 0;
+
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'claim uid drift must throw recovery-claim-stalled',
+    );
+    await assertResidualAllBytesPreserved(metadataRoot, fixture, 'claim uid drift');
+    assert.equal(
+      tracer.ops.some((op) => op.op === 'unlink'),
+      false,
+      'claim uid drift must not unlink any leaf',
+    );
+    assert.equal(
+      tracer.ops.some((op) => op.op === 'sync'),
+      false,
+      'claim uid drift must not fsync (no durable mutation path)',
+    );
+    assert.equal(
+      (await lstat(join(metadataRoot, RECOVERY_CLAIM_LEAF))).uid,
+      process.getuid(),
+      'real on-disk claim uid must remain current (inject is handle.stat only)',
+    );
+  });
+
+  await t.test('injected race after initial classification before unlink retains claim', async (st) => {
+    const metadataRoot = await makeTempMetadataRoot(st);
+    // Foreign transaction planted at 2nd claim open (reverify after initial
+    // claim+MIR+current-tx classification completes, before claim unlink).
+    const foreignRecord = validLockRecord({
+      transactionId: TX_ID,
+      ownerNonce: OWNER_NONCE_C,
+      ownerPid: FIXED_OWNER_PID + 77,
+    });
+    const foreignBytes = residualLockRecordCanonicalBytes(foreignRecord);
+    const tracer = createResidualClaimResolveFsTracer(metadataRoot, {
+      raceKind: 'transaction-drift',
+      racePayload: foreignBytes,
+    });
+    const store = createForTest({
+      metadataRoot,
+      fs: tracer.fs,
+      onDurabilityEvent: () => {},
+    });
+    await store.initialize();
+    const fixture = await setupResidualRecoveryClaimFixture(
+      store,
+      metadataRoot,
+      'fresh-published',
+    );
+    // Arm race only for resolve; zero counters after fixture (1st open observes only).
+    tracer.injectState.raceArmed = true;
+    tracer.injectState.raceApplied = false;
+    tracer.injectState.claimOpenCount = 0;
+    tracer.ops.length = 0;
+
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair({
+        recoveryClaimRef: fixture.recoveryClaimRef,
+        manualInterventionLockRef: fixture.mirRef,
+      }),
+      (error) => isRecoveryClaimStalledError(error),
+      'transaction drift after initial classification before unlink must throw recovery-claim-stalled',
+    );
+
+    // Claim must remain (fail closed — no successful resolve unlink).
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF),
+        fixture.claimBytes,
+      ),
+      0,
+      'race must retain exact residual recovery-claim.lock bytes',
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, MANUAL_INTERVENTION_LOCK_LEAF),
+        fixture.mirBytes,
+      ),
+      0,
+      'race must leave MIR bytes unchanged',
+    );
+    assert.equal(
+      Buffer.compare(await readJournalLeafBytes(metadataRoot), fixture.journalBytes),
+      0,
+      'race must leave journal bytes unchanged',
+    );
+    // Injected foreign tx retained (revalidation saw drift; no silent rewrite).
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, TRANSACTION_LOCK_LEAF),
+        foreignBytes,
+      ),
+      0,
+      'race planted foreign transaction bytes must remain (no silent rewrite)',
+    );
+    assert.equal(
+      tracer.ops.some((op) => op.op === 'unlink' && op.leaf === RECOVERY_CLAIM_LEAF),
+      false,
+      'race fail-closed path must not unlink recovery-claim.lock',
+    );
+  });
+});
+
+test('residual recovery claim resolve: descriptor-first input rejects extra keys Proxy force status before leaf I/O', async (t) => {
+  const createForTest = requireFactory('createLaunchAgentMetadataStoreForTest');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const calls = [];
+  const store = createForTest({
+    metadataRoot,
+    fs: createCallTracingFs(calls),
+    onDurabilityEvent: () => {},
+  });
+
+  assert.equal(
+    typeof store.resolveRecoveryClaimForManualRepair,
+    'function',
+    'production bug: store.resolveRecoveryClaimForManualRepair must exist for residual recovery claim resolve',
+  );
+
+  await store.initialize();
+  const fixture = await setupResidualRecoveryClaimFixture(
+    store,
+    metadataRoot,
+    'fresh-published',
+  );
+  const beforeTree = await snapshotMetadataTree(metadataRoot);
+  const beforeClaim = await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF);
+
+  const closedInput = {
+    recoveryClaimRef: fixture.recoveryClaimRef,
+    manualInterventionLockRef: fixture.mirRef,
+  };
+
+  // Hostile Proxy: traps return illegal closed structure (wrong prototype / ownKeys /
+  // accessor descriptors). readExactObject rejects without util.types.isProxy.
+  // Transparent `new Proxy(target, {})` is intentionally NOT used — production must
+  // not pretend to detect inert proxies.
+  const hostileProxyInput = new Proxy(closedInput, {
+    getPrototypeOf() {
+      return null;
+    },
+    ownKeys() {
+      return ['recoveryClaimRef', 'manualInterventionLockRef', 'hostileExtra'];
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      if (prop === 'hostileExtra') {
+        return {
+          configurable: true,
+          enumerable: true,
+          get() {
+            throw new Error('hostile proxy accessor must not be read as data');
+          },
+        };
+      }
+      return {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throw new Error(`hostile proxy must not yield data bag field: ${String(prop)}`);
+        },
+      };
+    },
+  });
+
+  const denialCases = [
+    {
+      name: 'extra status key',
+      input: { ...closedInput, status: 'fresh-published' },
+    },
+    {
+      name: 'extra disposition key',
+      input: { ...closedInput, disposition: 'force' },
+    },
+    {
+      name: 'extra force key',
+      input: { ...closedInput, force: true },
+    },
+    {
+      name: 'missing recoveryClaimRef',
+      input: { manualInterventionLockRef: fixture.mirRef },
+    },
+    {
+      name: 'missing manualInterventionLockRef',
+      input: { recoveryClaimRef: fixture.recoveryClaimRef },
+    },
+    {
+      name: 'null input',
+      input: null,
+    },
+    {
+      name: 'undefined input',
+      input: undefined,
+    },
+    {
+      name: 'hostile Proxy input (illegal closed structure traps)',
+      input: hostileProxyInput,
+    },
+  ];
+
+  for (const c of denialCases) {
+    calls.length = 0;
+    await assert.rejects(
+      () => store.resolveRecoveryClaimForManualRepair(c.input),
+      // Input shape errors are ordinary INVALID — never recovery-claim-stalled (disk conflict).
+      (error) => isInvalidLifecycleError(error),
+      `${c.name} must fail closed as INVALID before residual claim mutation`,
+    );
+    assert.equal(
+      calls.length,
+      0,
+      `${c.name} must perform zero leaf I/O before structure denial`,
+    );
+    assert.equal(
+      Buffer.compare(
+        await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF),
+        beforeClaim,
+      ),
+      0,
+      `${c.name} must not rewrite recovery-claim.lock`,
+    );
+    assert.deepEqual(
+      await snapshotMetadataTree(metadataRoot),
+      beforeTree,
+      `${c.name} must not mutate metadata tree`,
+    );
+  }
+
+  // Accessor/getter input must not be accepted as a plain data bag (descriptor-first).
+  calls.length = 0;
+  const accessorInput = {};
+  Object.defineProperty(accessorInput, 'recoveryClaimRef', {
+    enumerable: true,
+    get() {
+      return fixture.recoveryClaimRef;
+    },
+  });
+  Object.defineProperty(accessorInput, 'manualInterventionLockRef', {
+    enumerable: true,
+    get() {
+      return fixture.mirRef;
+    },
+  });
+  await assert.rejects(
+    () => store.resolveRecoveryClaimForManualRepair(accessorInput),
+    (error) => isInvalidLifecycleError(error),
+    'accessor/getter input must fail closed as INVALID before leaf I/O',
+  );
+  assert.equal(
+    calls.length,
+    0,
+    'accessor input must perform zero leaf I/O',
+  );
+  assert.equal(
+    Buffer.compare(
+      await readLockLeafBytes(metadataRoot, RECOVERY_CLAIM_LEAF),
+      beforeClaim,
+    ),
+    0,
+    'accessor input must leave claim bytes exact',
+  );
 });

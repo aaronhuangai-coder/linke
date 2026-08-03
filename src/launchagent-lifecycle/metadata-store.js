@@ -7,7 +7,8 @@
  * - 所有对外错误归一为 LaunchAgentLifecycleError，绝不回显本机 path 或原始异常消息。
  * - 实现 initialize / candidate / anchor / lock / journal append-only chain CAS、receipt 发布/读取、
  *   terminal 与 MIR handoff 的 lock release 与 durability events；
- *   consumed-confirmation 以 O_EXCL durable leaf 持久化（no-clobber → confirmation-consumed）。
+ *   consumed-confirmation 与 manual-repair-attestation 以 O_EXCL durable leaf 持久化
+ *   （no-clobber → confirmation-consumed）。
  * - 叶写使用 O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW；journal 追加使用 O_APPEND（absent 时 O_CREAT|O_EXCL）；
  *   平台缺少 O_NOFOLLOW 时 factory 直接 fail-closed，不降级。
  * - 并发 lock 仅依赖真实 O_EXCL exactly-one，禁止内存 mutex。
@@ -24,6 +25,7 @@ import {
   validateLaunchAgentAnchor,
   validateLaunchAgentConsumedConfirmation,
   validateLaunchAgentJournal,
+  validateLaunchAgentManualRepairAttestation,
   validateLaunchAgentReceipt,
 } from './contracts.js';
 
@@ -36,6 +38,7 @@ const FIXED_MID_DIRS = Object.freeze([
   'anchors',
   'receipts',
   'confirmations',
+  'manual-repair-attestations',
 ]);
 
 const ROLE_LEAVES = Object.freeze({
@@ -57,6 +60,8 @@ const RECEIPT_ARTIFACT = 'receipt';
 const RECEIPTS_MID_DIR = 'receipts';
 const CONFIRMATION_ARTIFACT = 'confirmation';
 const CONFIRMATIONS_MID_DIR = 'confirmations';
+const MANUAL_REPAIR_ATTESTATION_ARTIFACT = 'manual-repair-attestation';
+const MANUAL_REPAIR_ATTESTATIONS_MID_DIR = 'manual-repair-attestations';
 
 const ONE_MIB = 1024 * 1024;
 const FOUR_MIB = 4 * 1024 * 1024;
@@ -65,6 +70,8 @@ const LOCK_MAX_BYTES = 256 * 1024;
 const RECEIPT_MAX_BYTES = 256 * 1024;
 /** consumed-confirmation 单文件上限。 */
 const CONFIRMATION_MAX_BYTES = 256 * 1024;
+/** manual-repair-attestation 单文件上限（整棵 canonical root object UTF-8 字节）。 */
+const ATTESTATION_MAX_BYTES = 256 * 1024;
 /** journal 单行上限（含末尾 LF）。 */
 const JOURNAL_LINE_MAX_BYTES = 256 * 1024;
 /** journal 文件总量上限。 */
@@ -243,6 +250,34 @@ function validateLockRefShape(value, expectedKind) {
   };
 }
 
+/**
+ * 校验 recovery-claim ref 闭合投影：精确五键 kind/claimId/transactionId/ownerNonce/sha256；
+ * kind 固定 recovery-claim-lock；claimId/transactionId/ownerNonce 两两不同。
+ */
+function validateRecoveryClaimRefShape(value) {
+  const fields = readExactObject(value, [
+    'kind',
+    'claimId',
+    'transactionId',
+    'ownerNonce',
+    'sha256',
+  ]);
+  if (fields.kind !== RECOVERY_CLAIM_LOCK_KIND) invalid();
+  const claimId = requireUuid(fields.claimId);
+  const transactionId = requireUuid(fields.transactionId);
+  const ownerNonce = requireUuid(fields.ownerNonce);
+  if (claimId === transactionId || claimId === ownerNonce || transactionId === ownerNonce) {
+    invalid();
+  }
+  return {
+    kind: RECOVERY_CLAIM_LOCK_KIND,
+    claimId,
+    transactionId,
+    ownerNonce,
+    sha256: requireSha256(fields.sha256),
+  };
+}
+
 function lockRefsEqual(left, right) {
   return (
     left !== null
@@ -252,6 +287,64 @@ function lockRefsEqual(left, right) {
     && left.ownerNonce === right.ownerNonce
     && left.sha256 === right.sha256
   );
+}
+
+function recoveryClaimRefsEqual(left, right) {
+  return (
+    left !== null
+    && right !== null
+    && left.kind === right.kind
+    && left.claimId === right.claimId
+    && left.transactionId === right.transactionId
+    && left.ownerNonce === right.ownerNonce
+    && left.sha256 === right.sha256
+  );
+}
+
+/**
+ * 将“磁盘事实校验”内部异常归一为 RECOVERY_CLAIM_STALLED。
+ * 成功原样返回；已是 stalled 的契约错误原样抛出；不泄漏 path/raw message。
+ */
+async function asRecoveryClaimStalled(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (
+      error instanceof LaunchAgentLifecycleError
+      && error.code === LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED
+    ) {
+      throw error;
+    }
+    coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED);
+  }
+}
+
+/** 当前 transaction observation 与 residual claim 的固定四分类。 */
+function classifyResidualRecoveryClaimStatus(claimRecord, currentPayload) {
+  const currentRef = currentPayload === null ? null : currentPayload.ref;
+  if (
+    currentRef !== null
+    && lockRefsEqual(currentRef, claimRecord.freshTransactionLockRef)
+  ) {
+    return 'fresh-published';
+  }
+  if (
+    claimRecord.expectedTransactionLockRef !== null
+    && currentRef !== null
+    && lockRefsEqual(currentRef, claimRecord.expectedTransactionLockRef)
+  ) {
+    return 'old-intact';
+  }
+  if (currentPayload === null) {
+    return 'transaction-lock-absent';
+  }
+  return 'recovery-claim-stalled';
+}
+
+function sameTransactionObservationFact(left, right) {
+  if (left === null && right === null) return true;
+  if (left === null || right === null) return false;
+  return lockRefsEqual(left.ref, right.ref);
 }
 
 /**
@@ -1325,6 +1418,50 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     });
   }
 
+  /**
+   * 内部：读取 manual-intervention.lock 观察载荷；精确 ENOENT→null；
+   * 存在时校验 regular/0600/uid/size/JSON/canonical bytes 与 lock schema。
+   */
+  async function loadManualInterventionLockObservationPayload() {
+    const bytes = await readOptionalOwnedLeafBytes(
+      MANUAL_INTERVENTION_LOCK_LEAF,
+      LOCK_MAX_BYTES,
+    );
+    if (bytes === null) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      invalid();
+    }
+    const record = validateLockRecord(parsed);
+    const expectedBytes = serializeLockRecord(record);
+    if (Buffer.compare(bytes, expectedBytes) !== 0) invalid();
+    return {
+      record,
+      ref: {
+        kind: MANUAL_INTERVENTION_LOCK_KIND,
+        transactionId: record.transactionId,
+        ownerNonce: record.ownerNonce,
+        sha256: sha256Hex(bytes),
+      },
+    };
+  }
+
+  /** 只读 manual-intervention.lock 观察：null 或深冻结 detached observation。 */
+  async function readManualInterventionLockObservation() {
+    return withLifecycleErrors(async () => {
+      await assertBoundRootLayout();
+      const payload = await loadManualInterventionLockObservationPayload();
+      if (payload === null) return null;
+      return deepFreeze({
+        kind: 'manual-intervention-lock-observation',
+        ref: payload.ref,
+        record: payload.record,
+      });
+    });
+  }
+
   /** 只读 recovery-claim.lock 观察：null 或深冻结 detached observation。 */
   async function readRecoveryClaimObservation() {
     return withLifecycleErrors(async () => {
@@ -1335,6 +1472,229 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
         kind: 'recovery-claim-observation',
         ref: payload.ref,
         record: payload.record,
+      });
+    });
+  }
+
+  /**
+   * 精确中止 recovery transaction.lock：仅在 MIR 锁与 journal 头均为
+   * manual-intervention-required 且与 expectedMirHead 对齐时，unlink transaction.lock。
+   * 禁止删除/改写 MIR、禁止清理 journal、禁止 catch/finally 补偿；任一失败 fail-closed。
+   */
+  async function abortRecoveryLockForManualRepair(input) {
+    return withLifecycleErrors(async () => {
+      // 任何 leaf I/O 前闭合验证精确三键输入
+      const fields = readExactObject(input, [
+        'transactionLockRef',
+        'manualInterventionLockRef',
+        'expectedMirHead',
+      ]);
+      const transactionLockRef = validateLockRefShape(
+        fields.transactionLockRef,
+        TRANSACTION_LOCK_KIND,
+      );
+      const manualInterventionLockRef = validateLockRefShape(
+        fields.manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+      );
+      const mirHeadFields = readExactObject(fields.expectedMirHead, [
+        'transactionId',
+        'entrySha256',
+      ]);
+      const expectedMirHead = {
+        transactionId: requireUuid(mirHeadFields.transactionId),
+        entrySha256: requireSha256(mirHeadFields.entrySha256),
+      };
+
+      // 三方 transactionId 必须完全一致（mutation 前）
+      if (transactionLockRef.transactionId !== manualInterventionLockRef.transactionId) {
+        invalid();
+      }
+      if (transactionLockRef.transactionId !== expectedMirHead.transactionId) {
+        invalid();
+      }
+      const transactionId = transactionLockRef.transactionId;
+
+      await assertBoundRootLayout();
+
+      // 1. 验证 transaction.lock ref
+      await verifyLockRefAgainstLeaf(
+        transactionLockRef,
+        TRANSACTION_LOCK_KIND,
+        TRANSACTION_LOCK_LEAF,
+      );
+      // 2. 验证 MIR ref
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+
+      // 3. 读取完整 journal snapshot；定位该 transaction 最新 entry
+      const snapshot = await loadJournalSnapshot();
+      if (!snapshot.present) invalid();
+      const latest = latestJournalEntryFor(snapshot.entries, transactionId);
+      if (latest === null) invalid();
+      // 必须恰好是 manual-intervention-required，且 entrySha256 与 expectedMirHead 完全一致
+      if (latest.state !== 'manual-intervention-required') invalid();
+      if (latest.transactionId !== expectedMirHead.transactionId) invalid();
+      if (latest.entrySha256 !== expectedMirHead.entrySha256) invalid();
+
+      // 4. 紧靠 unlink 前再次验证两个锁 ref
+      await verifyLockRefAgainstLeaf(
+        transactionLockRef,
+        TRANSACTION_LOCK_KIND,
+        TRANSACTION_LOCK_LEAF,
+      );
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+
+      // 5. 只 unlink transaction.lock；fsync metadata root
+      await unlinkOwnedLeaf(TRANSACTION_LOCK_LEAF);
+      await fsyncMetadataRoot();
+
+      // 6. 删除后再次验证 MIR ref（MIR 字节必须原样保留）
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+
+      // 7. 再次读取 journal 并验证该 transaction 最新 entry 仍是相同 MIR 头
+      const afterSnapshot = await loadJournalSnapshot();
+      if (!afterSnapshot.present) invalid();
+      const afterLatest = latestJournalEntryFor(afterSnapshot.entries, transactionId);
+      if (afterLatest === null) invalid();
+      if (afterLatest.state !== 'manual-intervention-required') invalid();
+      if (afterLatest.transactionId !== expectedMirHead.transactionId) invalid();
+      if (afterLatest.entrySha256 !== expectedMirHead.entrySha256) invalid();
+
+      return true;
+    });
+  }
+
+  /**
+   * residual recovery-claim 精确解析（手动修复路径）：仅在安全分类下 unlink exact claim。
+   * - 输入 shape 不闭合 → INVALID，且任何 leaf I/O 前返回；
+   * - 磁盘事实 missing/ref mismatch/malformed/race/分类冲突 → RECOVERY_CLAIM_STALLED，
+   *   unlink 前保留全部既有字节；
+   * - 禁止创建/删除/改写 transaction.lock 与 MIR；禁止 journal/receipt/host；
+   * - 禁止 catch/finally 补偿性删除；安全分支只删 exact recovery-claim.lock。
+   */
+  async function resolveRecoveryClaimForManualRepair(input) {
+    return withLifecycleErrors(async () => {
+      // 任何 leaf I/O 前：descriptor-first 闭合为精确二键；shape 失败保持 INVALID。
+      const fields = readExactObject(input, [
+        'recoveryClaimRef',
+        'manualInterventionLockRef',
+      ]);
+      const recoveryClaimRef = validateRecoveryClaimRefShape(fields.recoveryClaimRef);
+      const manualInterventionLockRef = validateLockRefShape(
+        fields.manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+      );
+
+      // 磁盘事实路径：内部 INVALID 等归一为 recovery-claim-stalled。
+      return asRecoveryClaimStalled(async () => {
+        await assertBoundRootLayout();
+
+        // 1. 读取并 canonical 校验 recovery-claim.lock，精确匹配 recoveryClaimRef
+        const claimPayload = await loadRecoveryClaimObservationPayload();
+        if (claimPayload === null) invalid();
+        if (!recoveryClaimRefsEqual(claimPayload.ref, recoveryClaimRef)) invalid();
+
+        // 2. 严格验证 MIR leaf 与 manualInterventionLockRef
+        await verifyLockRefAgainstLeaf(
+          manualInterventionLockRef,
+          MANUAL_INTERVENTION_LOCK_KIND,
+          MANUAL_INTERVENTION_LOCK_LEAF,
+        );
+
+        // 3. claim.record.manualInterventionLockRef 必须与传入 MIR ref 完全相同
+        if (
+          !lockRefsEqual(
+            claimPayload.record.manualInterventionLockRef,
+            manualInterventionLockRef,
+          )
+        ) {
+          invalid();
+        }
+
+        // 4. claim/MIR/refs transactionId 必须一致
+        if (claimPayload.record.transactionId !== recoveryClaimRef.transactionId) {
+          invalid();
+        }
+        if (claimPayload.record.transactionId !== manualInterventionLockRef.transactionId) {
+          invalid();
+        }
+        if (recoveryClaimRef.transactionId !== manualInterventionLockRef.transactionId) {
+          invalid();
+        }
+
+        // 5. 读取 canonical 当前 transaction observation 或精确 absent
+        const currentBefore = await loadTransactionLockObservationPayload();
+
+        // 6. 内部计算 status；冲突分类 → stalled，零 mutation
+        const status = classifyResidualRecoveryClaimStatus(
+          claimPayload.record,
+          currentBefore,
+        );
+        if (status === 'recovery-claim-stalled') {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED);
+        }
+
+        // 7. 重验 exact claim + exact MIR + 同一 current transaction fact
+        const claimAgain = await loadRecoveryClaimObservationPayload();
+        if (claimAgain === null) invalid();
+        if (!recoveryClaimRefsEqual(claimAgain.ref, recoveryClaimRef)) invalid();
+        if (
+          !lockRefsEqual(
+            claimAgain.record.manualInterventionLockRef,
+            manualInterventionLockRef,
+          )
+        ) {
+          invalid();
+        }
+        await verifyLockRefAgainstLeaf(
+          manualInterventionLockRef,
+          MANUAL_INTERVENTION_LOCK_KIND,
+          MANUAL_INTERVENTION_LOCK_LEAF,
+        );
+        const currentRecheck = await loadTransactionLockObservationPayload();
+        if (!sameTransactionObservationFact(currentBefore, currentRecheck)) {
+          invalid();
+        }
+        // 分类不得因 race 漂移
+        const statusRecheck = classifyResidualRecoveryClaimStatus(
+          claimAgain.record,
+          currentRecheck,
+        );
+        if (statusRecheck !== status) {
+          invalid();
+        }
+
+        // 8. 只 unlink recovery-claim.lock → fsync metadataRoot
+        await unlinkOwnedLeaf(RECOVERY_CLAIM_LEAF);
+        await fsyncMetadataRoot();
+
+        // 9. 验证 claim 精确 absent
+        if (await leafExists(RECOVERY_CLAIM_LEAF)) invalid();
+
+        // 10. 再次验证 MIR 与 transaction fact 未变
+        await verifyLockRefAgainstLeaf(
+          manualInterventionLockRef,
+          MANUAL_INTERVENTION_LOCK_KIND,
+          MANUAL_INTERVENTION_LOCK_LEAF,
+        );
+        const currentAfter = await loadTransactionLockObservationPayload();
+        if (!sameTransactionObservationFact(currentBefore, currentAfter)) {
+          invalid();
+        }
+
+        return deepFreeze({ status });
       });
     });
   }
@@ -1883,6 +2243,74 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     });
   }
 
+  /**
+   * 人工修复 attestation 持久化：参数为直接 record；schema 投影在任何文件 I/O 前闭合。
+   * 路径固定 manual-repair-attestations/<manualRepairConfirmationId>.json；
+   * 字节为投影精确 JSON.stringify UTF-8（无尾部分隔符），≤256KiB。
+   * O_EXCL durable leaf（0600、当前 uid）+ 耐久三元组 artifact=manual-repair-attestation。
+   * 任意目标 leaf 已存在（并发 loser / 同或不同有效绑定 replay / symlink|dir 占位 EEXIST）
+   * → confirmation-consumed，不改原字节/模式，不泄露 EEXIST/路径。
+   */
+  async function writeManualRepairAttestation(record) {
+    return withLifecycleErrors(async () => {
+      // 任意文件 I/O 前闭合投影；invalid 绝不触碰 attestation leaf。
+      const projection = validateLaunchAgentManualRepairAttestation(record);
+      const bytes = Buffer.from(JSON.stringify(projection), 'utf8');
+      if (bytes.byteLength > ATTESTATION_MAX_BYTES) invalid();
+      const expectedSha = sha256Hex(bytes);
+      const manualRepairConfirmationId = projection.manualRepairConfirmationId;
+
+      await assertBoundRootLayout();
+      const attestationsRoot = join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR);
+      await assertOwnedDirectory(attestationsRoot);
+      const targetPath = join(attestationsRoot, `${manualRepairConfirmationId}.json`);
+      await durableWriteLeaf(
+        targetPath,
+        attestationsRoot,
+        bytes,
+        expectedSha,
+        MANUAL_REPAIR_ATTESTATION_ARTIFACT,
+        LAUNCHAGENT_LIFECYCLE_CODES.CONFIRMATION_CONSUMED,
+      );
+
+      return deepFreeze({
+        kind: 'manual-repair-attestation',
+        manualRepairConfirmationId,
+        sha256: expectedSha,
+      });
+    });
+  }
+
+  /**
+   * 读取人工修复 attestation：严格 UUID；固定 manual-repair-attestations/<id>.json；
+   * readOwnedLeaf 先 size gate；解析 → validator 投影 → manualRepairConfirmationId 绑定 →
+   * 投影精确 canonical bytes 比较。缺失/corrupt/extra/noncanonical/mode drift/
+   * symlink/directory/oversize 全部 fail-closed，不修复；返回 validator 深冻结投影。
+   */
+  async function readManualRepairAttestation(manualRepairConfirmationIdInput) {
+    return withLifecycleErrors(async () => {
+      const manualRepairConfirmationId = requireUuid(manualRepairConfirmationIdInput);
+      await assertBoundRootLayout();
+      const attestationsRoot = join(metadataRoot, MANUAL_REPAIR_ATTESTATIONS_MID_DIR);
+      await assertOwnedDirectory(attestationsRoot);
+      const targetPath = join(attestationsRoot, `${manualRepairConfirmationId}.json`);
+      const bytes = await readOwnedLeaf(targetPath, ATTESTATION_MAX_BYTES);
+
+      let parsed;
+      try {
+        parsed = JSON.parse(bytes.toString('utf8'));
+      } catch {
+        invalid();
+      }
+      const projection = validateLaunchAgentManualRepairAttestation(parsed);
+      if (projection.manualRepairConfirmationId !== manualRepairConfirmationId) invalid();
+      const expectedBytes = Buffer.from(JSON.stringify(projection), 'utf8');
+      if (expectedBytes.byteLength > ATTESTATION_MAX_BYTES) invalid();
+      if (Buffer.compare(bytes, expectedBytes) !== 0) invalid();
+      return projection;
+    });
+  }
+
   return Object.freeze({
     initialize,
     writeCandidate,
@@ -1897,7 +2325,10 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     releaseManualInterventionLock,
     readTransactionLockObservation,
     readRecoveryClaimObservation,
+    readManualInterventionLockObservation,
     acquireRecoveryLockForManualRepair,
+    abortRecoveryLockForManualRepair,
+    resolveRecoveryClaimForManualRepair,
     appendJournal,
     readJournal,
     readJournalHeads,
@@ -1906,6 +2337,8 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     classifyReceipt,
     consumeConfirmation,
     readConsumedConfirmation,
+    writeManualRepairAttestation,
+    readManualRepairAttestation,
   });
 }
 

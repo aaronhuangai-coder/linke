@@ -12,7 +12,10 @@ import {
   validateLaunchAgentAnchor,
   validateLaunchAgentJournal,
   validateLaunchAgentManifest,
+  validateLaunchAgentManualRepairAttestation,
   validateLaunchAgentReceipt,
+  validateLaunchAgentTransactionCloseout,
+  validateLaunchAgentTransactionPrefix,
 } from '../../src/launchagent-lifecycle/contracts.js';
 import { validateLaunchctlRequest } from '../../src/launchagent-lifecycle/host-adapter.js';
 
@@ -29,6 +32,18 @@ const SIMPLE_EVENTS = Object.freeze([
   'mir-transaction-lock-release', 'mir-lock-release',
   'receipt', 'lock-release',
   'recovery-lock-seam',
+  // Task 6B.1 Task 5：authorized entry / attestation / recovery-lock acquisition
+  'authority-consumed',
+  'attestation-file-sync',
+  'attestation-directory-sync',
+  'attestation-verify',
+  'owner-observe-1',
+  'owner-observe-2',
+  'claim-owner-observe-1',
+  'claim-owner-observe-2',
+  'claim-resolve',
+  'recovery-lock-acquire',
+  'post-lock-snapshot',
 ]);
 const SIMPLE_EVENT_SET = new Set(SIMPLE_EVENTS);
 const ADAPTER_CALL_SET = new Set([
@@ -71,6 +86,34 @@ const LABELS = LAUNCHAGENT_LIFECYCLE.labels;
 const CODE_INVALID = LAUNCHAGENT_LIFECYCLE_CODES.INVALID;
 const CODE_TX = LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS;
 const CODE_MIR = LAUNCHAGENT_LIFECYCLE_CODES.MANUAL_INTERVENTION_REQUIRED;
+const CODE_CONFIRMATION_CONSUMED = LAUNCHAGENT_LIFECYCLE_CODES.CONFIRMATION_CONSUMED;
+const CODE_RECOVERY_CLAIM_STALLED = LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED;
+
+/**
+ * 冻结 coordinator DEPENDENCY_METHODS.metadataStore 完整表面（单一 FULL 契约）。
+ * 与生产 transaction-coordinator DEPENDENCY_METHODS.metadataStore 精确对齐；
+ * 不得再暴露 BASE/FULL 双表面或可选依赖。
+ */
+const COORDINATOR_METADATA_METHODS = Object.freeze([
+  'readJournalHeads', 'readJournal', 'appendJournal',
+  'writeCandidate', 'readCandidate',
+  'writeAnchor', 'readAnchor',
+  'acquireTransactionLock', 'verifyTransactionLock', 'releaseTransactionLock',
+  'acquireManualInterventionLock', 'verifyManualInterventionLock',
+  'publishReceipt', 'readReceipt', 'classifyReceipt',
+  'writeManualRepairAttestation', 'readManualRepairAttestation',
+  'readTransactionLockObservation', 'readRecoveryClaimObservation',
+  'readManualInterventionLockObservation',
+  'acquireRecoveryLockForManualRepair', 'abortRecoveryLockForManualRepair',
+  'resolveRecoveryClaimForManualRepair',
+  'releaseManualInterventionLock',
+]);
+const OBSERVE_STATUSES = new Set([
+  'dead', 'alive-same-owner', 'pid-reused', 'unavailable', 'boot-session-mismatch',
+]);
+const SAFE_CLAIM_RESOLVE_STATUSES = new Set([
+  'fresh-published', 'old-intact', 'transaction-lock-absent',
+]);
 
 /** 纯合成 temp-root 路径，不来自真实 HOME。 */
 const SYNTH_LAUNCH_AGENTS_DIR = '/tmp/linke-v146-harness/LaunchAgents';
@@ -279,6 +322,9 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     receipts: new Map(),
     transactionLock: null,
     manualInterventionLock: null,
+    // Task 5 fake durable: attestations + single recovery claim
+    attestations: new Map(),
+    recoveryClaim: null,
   };
   const state = {
     loaded: { controller: false, scheduler: false },
@@ -342,6 +388,23 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   // Task 6B.0 process-identity 观测：不写入 crash image；resetObservations 复位。
   let processIdentityCurrentCount = 0;
   const lockAcquisitionHistory = [];
+  // Task 5：recovery acquire 成功后 detached 观察（claim 已删除仍可证明传入 claimId）。
+  // exact {claimId,transactionId,ownerNonce}；不暴露 capability/authority/brand。
+  const recoveryAcquisitionHistory = [];
+  // Task 5：owner / claim-owner observe 队列（显式 arm，默认 unavailable）。
+  const ownerObserveQueue = [];
+  const claimOwnerObserveQueue = [];
+  let observeChannel = 'owner'; // 'owner' | 'claim'
+  let ownerObserveCount = 0;
+  let claimOwnerObserveCount = 0;
+  // Task 5：authority-consumed 仅能由显式 test seam 或 coordinator 路径记录；
+  // 不伪造 production success。harness 提供 recordAuthorityConsumedForTest。
+  let postLockSnapshotArmed = false;
+  // Task 5 test-only：下一次 acquire 原子 claim 检查点一次性注入 winner claim。
+  // 不写入 crash image；不进 dependencies/factoryContract；resetObservations 清除。
+  let raceRecoveryClaimArm = null;
+  // Task 5 test-only：readRecoveryClaimObservation 只读历史（present/absent）。
+  const recoveryClaimObservationHistory = [];
 
   // crash image 只恢复 durable allowlist；hooks/失败注入/trace/计数保持新 harness 默认。
   if (revivedImage !== null) {
@@ -1300,10 +1363,354 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         throw error;
       }
     },
+
+    // ---- Task 6B.1 Task 5：attestation / lock observation / recovery claim / recovery lock ----
+
+    async writeManualRepairAttestation(record) {
+      const projection = validateLaunchAgentManualRepairAttestation(record);
+      const manualRepairConfirmationId = projection.manualRepairConfirmationId;
+      if (store.attestations.has(manualRepairConfirmationId)) {
+        coded(CODE_CONFIRMATION_CONSUMED);
+      }
+      recordSimpleEvent('attestation-file-sync');
+      recordSimpleEvent('attestation-directory-sync');
+      const frozen = deepFreeze(structuredClone(projection));
+      store.attestations.set(manualRepairConfirmationId, frozen);
+      recordSimpleEvent('attestation-verify');
+      return deepFreeze({
+        kind: 'manual-repair-attestation',
+        manualRepairConfirmationId,
+        sha256: sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8')),
+      });
+    },
+
+    async readManualRepairAttestation(manualRepairConfirmationIdInput) {
+      const manualRepairConfirmationId = requireUuid(manualRepairConfirmationIdInput);
+      const stored = store.attestations.get(manualRepairConfirmationId);
+      if (stored === undefined) invalid();
+      return deepFreeze(structuredClone(stored));
+    },
+
+    async readTransactionLockObservation() {
+      if (arguments.length !== 0) invalid();
+      if (store.transactionLock === null) return null;
+      const record = deepFreeze(structuredClone(store.transactionLock));
+      return deepFreeze({
+        kind: 'transaction-lock-observation',
+        ref: deepFreeze({
+          kind: 'transaction-lock',
+          transactionId: record.transactionId,
+          ownerNonce: record.ownerNonce,
+          sha256: lockSha256(record),
+        }),
+        record,
+      });
+    },
+
+    async readManualInterventionLockObservation() {
+      if (arguments.length !== 0) invalid();
+      if (store.manualInterventionLock === null) return null;
+      const record = deepFreeze(structuredClone(store.manualInterventionLock));
+      return deepFreeze({
+        kind: 'manual-intervention-lock-observation',
+        ref: deepFreeze({
+          kind: 'manual-intervention-lock',
+          transactionId: record.transactionId,
+          ownerNonce: record.ownerNonce,
+          sha256: lockSha256(record),
+        }),
+        record,
+      });
+    },
+
+    async readRecoveryClaimObservation() {
+      if (arguments.length !== 0) invalid();
+      const present = store.recoveryClaim !== null;
+      // Test-only observation history（不进 production contract / dependencies）。
+      recoveryClaimObservationHistory.push(deepFreeze({ present }));
+      if (!present) return null;
+      const record = deepFreeze(structuredClone(store.recoveryClaim.record));
+      return deepFreeze({
+        kind: 'recovery-claim-observation',
+        ref: deepFreeze(structuredClone(store.recoveryClaim.ref)),
+        record,
+      });
+    },
+
+    async acquireRecoveryLockForManualRepair(input) {
+      const fields = readExactObject(input, [
+        'record', 'claimId', 'expectedTransactionLockRef', 'manualInterventionLockRef',
+      ]);
+      const freshRecord = validateLockRecord(fields.record);
+      const claimId = requireUuid(fields.claimId);
+      if (claimId === freshRecord.transactionId || claimId === freshRecord.ownerNonce) invalid();
+
+      let expectedTransactionLockRef = null;
+      if (fields.expectedTransactionLockRef !== null) {
+        const er = readExactObject(fields.expectedTransactionLockRef, [
+          'kind', 'transactionId', 'ownerNonce', 'sha256',
+        ]);
+        if (er.kind !== 'transaction-lock') invalid();
+        expectedTransactionLockRef = deepFreeze({
+          kind: 'transaction-lock',
+          transactionId: requireUuid(er.transactionId),
+          ownerNonce: requireUuid(er.ownerNonce),
+          sha256: requireSha256(er.sha256),
+        });
+      }
+      const mirRefFields = readExactObject(fields.manualInterventionLockRef, [
+        'kind', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (mirRefFields.kind !== 'manual-intervention-lock') invalid();
+      const manualInterventionLockRef = deepFreeze({
+        kind: 'manual-intervention-lock',
+        transactionId: requireUuid(mirRefFields.transactionId),
+        ownerNonce: requireUuid(mirRefFields.ownerNonce),
+        sha256: requireSha256(mirRefFields.sha256),
+      });
+
+      if (!lockRefMatches(store.manualInterventionLock, manualInterventionLockRef, 'manual-intervention-lock')) {
+        invalid();
+      }
+
+      if (expectedTransactionLockRef === null) {
+        if (store.transactionLock !== null) invalid();
+      } else if (!lockRefMatches(store.transactionLock, expectedTransactionLockRef, 'transaction-lock')) {
+        invalid();
+      }
+
+      // Test-only race arm：仅在已验证 input/MIR/expected 之后、claim 检查点之前注入 winner。
+      // 此前 readRecoveryClaimObservation 必须真实返回 null；注入后既有 race-loser 路径失败。
+      if (raceRecoveryClaimArm !== null) {
+        store.recoveryClaim = raceRecoveryClaimArm;
+        raceRecoveryClaimArm = null;
+      }
+
+      // Claim race loser: keep winner, zero tx mutation
+      if (store.recoveryClaim !== null) {
+        coded(CODE_TX);
+      }
+
+      const freshSha = lockSha256(freshRecord);
+      const freshTransactionLockRef = deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+        sha256: freshSha,
+      });
+
+      const claimRecord = deepFreeze({
+        schemaVersion: 1,
+        kind: 'recovery-claim-lock',
+        claimId,
+        transactionId: freshRecord.transactionId,
+        ownerPid: freshRecord.ownerPid,
+        ownerNonce: freshRecord.ownerNonce,
+        bootSessionIdentity: {
+          available: freshRecord.bootSessionIdentity.available,
+          value: freshRecord.bootSessionIdentity.value,
+        },
+        processStartIdentity: {
+          available: freshRecord.processStartIdentity.available,
+          value: freshRecord.processStartIdentity.value,
+        },
+        expectedTransactionLockRef,
+        manualInterventionLockRef,
+        freshTransactionLockRef,
+      });
+      const claimSha = sha256Hex(Buffer.from(JSON.stringify(claimRecord), 'utf8'));
+      const claimRef = deepFreeze({
+        kind: 'recovery-claim-lock',
+        claimId,
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+        sha256: claimSha,
+      });
+
+      store.recoveryClaim = { record: claimRecord, ref: claimRef };
+
+      if (expectedTransactionLockRef !== null) {
+        if (!lockRefMatches(store.transactionLock, expectedTransactionLockRef, 'transaction-lock')) {
+          coded(CODE_TX);
+        }
+        store.transactionLock = null;
+      }
+
+      if (store.transactionLock !== null) {
+        coded(CODE_TX);
+      }
+      store.transactionLock = {
+        schemaVersion: 1,
+        transactionId: freshRecord.transactionId,
+        ownerPid: freshRecord.ownerPid,
+        ownerNonce: freshRecord.ownerNonce,
+        bootSessionIdentity: { ...freshRecord.bootSessionIdentity },
+        processStartIdentity: { ...freshRecord.processStartIdentity },
+      };
+      lockAcquisitionHistory.push(deepFreeze({
+        kind: 'transaction-lock',
+        record: deepFreeze(structuredClone(store.transactionLock)),
+      }));
+
+      store.recoveryClaim = null;
+      // Claim 已精确删除：detached history 仍可证明 coordinator 传入的 claimId/tx/nonce。
+      recoveryAcquisitionHistory.push(deepFreeze({
+        claimId,
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+      }));
+      recordSimpleEvent('recovery-lock-acquire');
+      if (postLockSnapshotArmed) {
+        postLockSnapshotArmed = false;
+        recordSimpleEvent('post-lock-snapshot');
+      }
+      return deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+        sha256: freshSha,
+      });
+    },
+
+    async abortRecoveryLockForManualRepair(input) {
+      const fields = readExactObject(input, [
+        'transactionLockRef', 'manualInterventionLockRef', 'expectedMirHead',
+      ]);
+      const txRef = readExactObject(fields.transactionLockRef, [
+        'kind', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (txRef.kind !== 'transaction-lock') invalid();
+      const mirRef = readExactObject(fields.manualInterventionLockRef, [
+        'kind', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (mirRef.kind !== 'manual-intervention-lock') invalid();
+      const mirHead = readExactObject(fields.expectedMirHead, ['transactionId', 'entrySha256']);
+      const expectedMirHead = {
+        transactionId: requireUuid(mirHead.transactionId),
+        entrySha256: requireSha256(mirHead.entrySha256),
+      };
+      if (txRef.transactionId !== mirRef.transactionId) invalid();
+      if (txRef.transactionId !== expectedMirHead.transactionId) invalid();
+      if (!lockRefMatches(store.transactionLock, txRef, 'transaction-lock')) invalid();
+      if (!lockRefMatches(store.manualInterventionLock, mirRef, 'manual-intervention-lock')) invalid();
+      const latest = latestJournalEntry(txRef.transactionId);
+      if (latest === null || latest.state !== 'manual-intervention-required') invalid();
+      if (latest.entrySha256 !== expectedMirHead.entrySha256) invalid();
+      store.transactionLock = null;
+      if (!lockRefMatches(store.manualInterventionLock, mirRef, 'manual-intervention-lock')) invalid();
+      const after = latestJournalEntry(txRef.transactionId);
+      if (after === null || after.state !== 'manual-intervention-required') invalid();
+      if (after.entrySha256 !== expectedMirHead.entrySha256) invalid();
+      return true;
+    },
+
+    async resolveRecoveryClaimForManualRepair(input) {
+      const fields = readExactObject(input, [
+        'recoveryClaimRef', 'manualInterventionLockRef',
+      ]);
+      const claimRefIn = readExactObject(fields.recoveryClaimRef, [
+        'kind', 'claimId', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (claimRefIn.kind !== 'recovery-claim-lock') invalid();
+      const recoveryClaimRef = {
+        kind: 'recovery-claim-lock',
+        claimId: requireUuid(claimRefIn.claimId),
+        transactionId: requireUuid(claimRefIn.transactionId),
+        ownerNonce: requireUuid(claimRefIn.ownerNonce),
+        sha256: requireSha256(claimRefIn.sha256),
+      };
+      const mirRefIn = readExactObject(fields.manualInterventionLockRef, [
+        'kind', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (mirRefIn.kind !== 'manual-intervention-lock') invalid();
+      const manualInterventionLockRef = {
+        kind: 'manual-intervention-lock',
+        transactionId: requireUuid(mirRefIn.transactionId),
+        ownerNonce: requireUuid(mirRefIn.ownerNonce),
+        sha256: requireSha256(mirRefIn.sha256),
+      };
+
+      if (store.recoveryClaim === null) coded(CODE_RECOVERY_CLAIM_STALLED);
+      const claim = store.recoveryClaim;
+      if (
+        claim.ref.claimId !== recoveryClaimRef.claimId
+        || claim.ref.transactionId !== recoveryClaimRef.transactionId
+        || claim.ref.ownerNonce !== recoveryClaimRef.ownerNonce
+        || claim.ref.sha256 !== recoveryClaimRef.sha256
+      ) {
+        coded(CODE_RECOVERY_CLAIM_STALLED);
+      }
+      if (!lockRefMatches(store.manualInterventionLock, manualInterventionLockRef, 'manual-intervention-lock')) {
+        coded(CODE_RECOVERY_CLAIM_STALLED);
+      }
+      const claimMir = claim.record.manualInterventionLockRef;
+      if (
+        claimMir === null
+        || claimMir.kind !== manualInterventionLockRef.kind
+        || claimMir.transactionId !== manualInterventionLockRef.transactionId
+        || claimMir.ownerNonce !== manualInterventionLockRef.ownerNonce
+        || claimMir.sha256 !== manualInterventionLockRef.sha256
+      ) {
+        coded(CODE_RECOVERY_CLAIM_STALLED);
+      }
+
+      let status;
+      const current = store.transactionLock;
+      const currentRef = current === null ? null : {
+        kind: 'transaction-lock',
+        transactionId: current.transactionId,
+        ownerNonce: current.ownerNonce,
+        sha256: lockSha256(current),
+      };
+      const freshRef = claim.record.freshTransactionLockRef;
+      const oldRef = claim.record.expectedTransactionLockRef;
+      if (
+        currentRef !== null
+        && freshRef !== null
+        && currentRef.transactionId === freshRef.transactionId
+        && currentRef.ownerNonce === freshRef.ownerNonce
+        && currentRef.sha256 === freshRef.sha256
+      ) {
+        status = 'fresh-published';
+      } else if (
+        oldRef !== null
+        && currentRef !== null
+        && currentRef.transactionId === oldRef.transactionId
+        && currentRef.ownerNonce === oldRef.ownerNonce
+        && currentRef.sha256 === oldRef.sha256
+      ) {
+        status = 'old-intact';
+      } else if (current === null) {
+        status = 'transaction-lock-absent';
+      } else {
+        coded(CODE_RECOVERY_CLAIM_STALLED);
+      }
+
+      store.recoveryClaim = null;
+      recordSimpleEvent('claim-resolve');
+      return deepFreeze({ status });
+    },
+
+    async releaseManualInterventionLock(ref) {
+      if (!lockRefMatches(store.manualInterventionLock, ref, 'manual-intervention-lock')) {
+        invalid();
+      }
+      const transactionId = store.manualInterventionLock.transactionId;
+      const latest = latestJournalEntry(transactionId);
+      if (latest === null) invalid();
+      if (latest.state !== 'recovered' && latest.state !== 'blocked') invalid();
+      const receipt = store.receipts.get(transactionId);
+      if (!receipt) invalid();
+      assertReceiptAlignedWithTerminal(receipt.projection, receipt.sha256, latest);
+      recordSimpleEvent('mir-lock-release');
+      store.manualInterventionLock = null;
+      return true;
+    },
+
   });
 
   // Task 6B.0：第九依赖 processIdentityReader（exact current/observe）。
-  // 默认 fake current 返回固定 available 身份；observe 固定 unavailable（Task 3 不调用）。
+  // 默认 fake current 返回固定 available 身份；observe 由 Task 5 arm 队列驱动。
   const processIdentityReader = Object.freeze({
     async current() {
       processIdentityCurrentCount += 1;
@@ -1312,11 +1719,28 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         processStartIdentity: { available: true, value: FAKE_PROCESS_START_VALUE },
       });
     },
-    async observe() {
-      return deepFreeze({ status: 'unavailable' });
+    async observe(_record) {
+      // Channel selects owner vs claim-owner observation counters/events.
+      if (observeChannel === 'claim') {
+        claimOwnerObserveCount += 1;
+        const status = claimOwnerObserveQueue.length > 0
+          ? claimOwnerObserveQueue.shift()
+          : 'unavailable';
+        if (claimOwnerObserveCount === 1) recordSimpleEvent('claim-owner-observe-1');
+        else if (claimOwnerObserveCount === 2) recordSimpleEvent('claim-owner-observe-2');
+        return deepFreeze({ status });
+      }
+      ownerObserveCount += 1;
+      const status = ownerObserveQueue.length > 0
+        ? ownerObserveQueue.shift()
+        : 'unavailable';
+      if (ownerObserveCount === 1) recordSimpleEvent('owner-observe-1');
+      else if (ownerObserveCount === 2) recordSimpleEvent('owner-observe-2');
+      return deepFreeze({ status });
     },
   });
 
+  // 单一 FULL 依赖袋：metadataStore 暴露完整 COORDINATOR_METADATA_METHODS 表面。
   const dependencies = Object.freeze({
     metadataStore,
     hostInspector,
@@ -1545,12 +1969,105 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     maybeCaptureCrash('host-mutation', semanticMutationAction(fallbackAction));
   }
 
+  /**
+   * Task 5 test-only：闭合 recovery claim record + 计算 ref（seed / race-arm 共用）。
+   * 含 production 等价 cross-binding 验证；不写入 store；不进入 dependencies/factoryContract。
+   */
+  function materializeRecoveryClaim(claimRecordInput) {
+    const fields = readExactObject(claimRecordInput, [
+      'schemaVersion', 'kind', 'claimId', 'transactionId', 'ownerPid', 'ownerNonce',
+      'bootSessionIdentity', 'processStartIdentity',
+      'expectedTransactionLockRef', 'manualInterventionLockRef', 'freshTransactionLockRef',
+    ]);
+    if (fields.schemaVersion !== 1) invalid();
+    if (fields.kind !== 'recovery-claim-lock') invalid();
+    const claimId = requireUuid(fields.claimId);
+    const transactionId = requireUuid(fields.transactionId);
+    const ownerNonce = requireUuid(fields.ownerNonce);
+    if (claimId === transactionId || claimId === ownerNonce || transactionId === ownerNonce) {
+      invalid();
+    }
+    if (!Number.isSafeInteger(fields.ownerPid) || fields.ownerPid <= 0) invalid();
+    let expectedTransactionLockRef = null;
+    if (fields.expectedTransactionLockRef !== null) {
+      const er = readExactObject(fields.expectedTransactionLockRef, [
+        'kind', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (er.kind !== 'transaction-lock') invalid();
+      expectedTransactionLockRef = deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: requireUuid(er.transactionId),
+        ownerNonce: requireUuid(er.ownerNonce),
+        sha256: requireSha256(er.sha256),
+      });
+    }
+    const mir = readExactObject(fields.manualInterventionLockRef, [
+      'kind', 'transactionId', 'ownerNonce', 'sha256',
+    ]);
+    if (mir.kind !== 'manual-intervention-lock') invalid();
+    const manualInterventionLockRef = deepFreeze({
+      kind: 'manual-intervention-lock',
+      transactionId: requireUuid(mir.transactionId),
+      ownerNonce: requireUuid(mir.ownerNonce),
+      sha256: requireSha256(mir.sha256),
+    });
+    const fr = readExactObject(fields.freshTransactionLockRef, [
+      'kind', 'transactionId', 'ownerNonce', 'sha256',
+    ]);
+    if (fr.kind !== 'transaction-lock') invalid();
+    const freshTransactionLockRef = deepFreeze({
+      kind: 'transaction-lock',
+      transactionId: requireUuid(fr.transactionId),
+      ownerNonce: requireUuid(fr.ownerNonce),
+      sha256: requireSha256(fr.sha256),
+    });
+    // Mirror production validateRecoveryClaimRecord cross-binding：
+    // expected/MIR/fresh transactionId 与 claim.transactionId 绑定；
+    // fresh.ownerNonce 与 claim.ownerNonce 绑定。缺任一 → INVALID。
+    if (
+      expectedTransactionLockRef !== null
+      && expectedTransactionLockRef.transactionId !== transactionId
+    ) {
+      invalid();
+    }
+    if (manualInterventionLockRef.transactionId !== transactionId) invalid();
+    if (freshTransactionLockRef.transactionId !== transactionId) invalid();
+    if (freshTransactionLockRef.ownerNonce !== ownerNonce) invalid();
+    const boot = readExactObject(fields.bootSessionIdentity, ['available', 'value']);
+    const pstart = readExactObject(fields.processStartIdentity, ['available', 'value']);
+    const claimRecord = deepFreeze({
+      schemaVersion: 1,
+      kind: 'recovery-claim-lock',
+      claimId,
+      transactionId,
+      ownerPid: fields.ownerPid,
+      ownerNonce,
+      bootSessionIdentity: { available: boot.available, value: boot.value },
+      processStartIdentity: { available: pstart.available, value: pstart.value },
+      expectedTransactionLockRef,
+      manualInterventionLockRef,
+      freshTransactionLockRef,
+    });
+    const claimSha = sha256Hex(Buffer.from(JSON.stringify(claimRecord), 'utf8'));
+    const ref = deepFreeze({
+      kind: 'recovery-claim-lock',
+      claimId,
+      transactionId,
+      ownerNonce,
+      sha256: claimSha,
+    });
+    return deepFreeze({ ref, record: claimRecord });
+  }
+
   const harness = {
     dependencies() {
       return dependencies;
     },
 
-    /** Task 4/6B.0 工厂契约：精确九 key 与精确 method（含 processIdentityReader）。 */
+    /**
+     * 工厂契约：精确九 key；methods.metadataStore = 单一 FULL 表面
+     * （与生产 DEPENDENCY_METHODS / dependencies() 对齐）。
+     */
     factoryContract() {
       return deepFreeze({
         keys: [
@@ -1559,14 +2076,7 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
           'processIdentityReader',
         ],
         methods: {
-          metadataStore: [
-            'readJournalHeads', 'readJournal', 'appendJournal',
-            'writeCandidate', 'readCandidate',
-            'writeAnchor', 'readAnchor',
-            'acquireTransactionLock', 'verifyTransactionLock', 'releaseTransactionLock',
-            'acquireManualInterventionLock', 'verifyManualInterventionLock',
-            'publishReceipt', 'readReceipt', 'classifyReceipt',
-          ],
+          metadataStore: [...COORDINATOR_METADATA_METHODS],
           hostInspector: ['inspect', 'read', 'launchctlHostFacts'],
           profileRenderer: ['render', 'revalidate'],
           plistValidator: ['validate'],
@@ -1838,6 +2348,45 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       });
     },
 
+    /**
+     * Task 6 test-only 只读：投影 reverse-plan step 形状的当前 live {file, job}。
+     * 与 frozen reversePlan[].expectedPre / expectedPost 精确同形，供 safe-disabled /
+     * pending-action 用 deepEqual 证明「live 已是 expectedPost」或「仍匹配 expectedPre」，
+     * 不得仅靠 hostMode 命名。
+     */
+    liveReversePlanStepState(role) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`liveReversePlanStepState unknown role: ${String(role)}`);
+      }
+      const complete = completeFileIdentity(role);
+      const file = complete === null
+        ? { state: 'absent' }
+        : {
+          state: 'present',
+          identity: {
+            rootId: complete.rootId,
+            basename: complete.basename,
+            type: complete.type,
+            ownerUid: complete.ownerUid,
+            device: complete.device,
+            inode: complete.inode,
+            sha256: complete.sha256,
+          },
+          sha256: complete.sha256,
+        };
+      const loaded = role === 'manifest' ? false : state.loaded[role] === true;
+      const job = loaded
+        ? {
+          state: 'loaded',
+          identitySha256: state.jobIdentity[role],
+        }
+        : {
+          state: 'stopped',
+          identitySha256: null,
+        };
+      return deepFreeze({ file, job });
+    },
+
     sentinels() {
       return deepFreeze({
         ...counters,
@@ -2085,6 +2634,15 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       exactReceiptRaceTransactionId = null;
       processIdentityCurrentCount = 0;
       lockAcquisitionHistory.length = 0;
+      recoveryAcquisitionHistory.length = 0;
+      ownerObserveQueue.length = 0;
+      claimOwnerObserveQueue.length = 0;
+      observeChannel = 'owner';
+      ownerObserveCount = 0;
+      claimOwnerObserveCount = 0;
+      postLockSnapshotArmed = false;
+      raceRecoveryClaimArm = null;
+      recoveryClaimObservationHistory.length = 0;
       for (const key of Object.keys(counters)) counters[key] = 0;
       state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
       state.lastRenderedRuntimeArtifacts = null;
@@ -2095,10 +2653,862 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       return deepFreeze(structuredClone(lockAcquisitionHistory));
     },
 
+    /**
+     * 只读：成功 recovery-lock acquire 观测历史（detached deep-frozen 副本）。
+     * exact entries：{claimId,transactionId,ownerNonce}；无 capability/authority/brand。
+     */
+    recoveryAcquisitionsForTest() {
+      return deepFreeze(structuredClone(recoveryAcquisitionHistory));
+    },
+
     /** 只读：默认 fake processIdentityReader.current 调用计数。 */
     processIdentityCurrentCountForTest() {
       return processIdentityCurrentCount;
     },
+
+    /**
+     * Task 5 test-only：记录 authority-consumed（必须是第一可观察事件）。
+     * 不进入 dependencies/factoryContract/snapshot；仅 trace。
+     *
+     * 仅允许由严格 clock.now sentinel 在已证明 capability 二次 consume 为
+     * acceptance-gate-denied 之后调用；禁止测试在调用 coordinator 前无条件预置。
+     */
+    recordAuthorityConsumedForTest() {
+      recordSimpleEvent('authority-consumed');
+      return true;
+    },
+
+    /**
+     * Task 5 test-only：arm owner observe 状态序列（连续两次 dead 等）。
+     * 切换 observe channel 为 owner。
+     */
+    armOwnerObserveStatuses(statuses) {
+      if (!Array.isArray(statuses) || statuses.length === 0) {
+        throw harnessError('owner observe statuses must be a non-empty array');
+      }
+      for (const status of statuses) {
+        if (!OBSERVE_STATUSES.has(status)) {
+          throw harnessError(`unknown observe status: ${String(status)}`);
+        }
+      }
+      ownerObserveQueue.length = 0;
+      ownerObserveQueue.push(...statuses);
+      ownerObserveCount = 0;
+      observeChannel = 'owner';
+      return true;
+    },
+
+    /**
+     * Task 5 test-only：arm claim-owner observe 状态序列。
+     * 切换 observe channel 为 claim。
+     */
+    armClaimOwnerObserveStatuses(statuses) {
+      if (!Array.isArray(statuses) || statuses.length === 0) {
+        throw harnessError('claim-owner observe statuses must be a non-empty array');
+      }
+      for (const status of statuses) {
+        if (!OBSERVE_STATUSES.has(status)) {
+          throw harnessError(`unknown observe status: ${String(status)}`);
+        }
+      }
+      claimOwnerObserveQueue.length = 0;
+      claimOwnerObserveQueue.push(...statuses);
+      claimOwnerObserveCount = 0;
+      observeChannel = 'claim';
+      return true;
+    },
+
+    /** Task 5 test-only：下一次成功 recovery-lock-acquire 后追加 post-lock-snapshot 事件。 */
+    armPostLockSnapshotEvent() {
+      postLockSnapshotArmed = true;
+      return true;
+    },
+
+    /**
+     * Task 5 test-only：seed 精确 MIR lock（detached deep-frozen record）。
+     * 不触发 host/launchctl；不记 lock acquisition history（seed ≠ acquire）。
+     */
+    seedManualInterventionLock(record) {
+      const projection = validateLockRecord(record);
+      store.manualInterventionLock = projection;
+      return deepFreeze({
+        kind: 'manual-intervention-lock',
+        transactionId: projection.transactionId,
+        ownerNonce: projection.ownerNonce,
+        sha256: lockSha256(projection),
+      });
+    },
+
+    /**
+     * Task 5 test-only：把指定 transaction 的 latest MIR head 改成另一合法 non-MIR
+     * checkpoint（controller-publish-intent），供 journal-head drift 矩阵。
+     * 保持 sequence/previousEntrySha256/operation；仅 state/payload 漂移。
+     */
+    driftMirJournalHeadForTest(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      let index = -1;
+      for (const [cursor, entry] of store.journal.entries()) {
+        if (entry.transactionId === transactionId) index = cursor;
+      }
+      if (index === -1) throw harnessError('cannot drift missing MIR journal');
+      const latest = store.journal[index];
+      if (latest.state !== 'manual-intervention-required') {
+        throw harnessError('drift requires latest MIR head');
+      }
+      const drifted = {
+        schemaVersion: latest.schemaVersion,
+        transactionId: latest.transactionId,
+        sequence: latest.sequence,
+        previousEntrySha256: latest.previousEntrySha256,
+        entrySha256: '0'.repeat(64),
+        operation: latest.operation,
+        state: 'controller-publish-intent',
+        at: latest.at,
+        payload: {
+          hostMutationCount: latest.payload.hostMutationCount,
+          role: 'controller',
+        },
+      };
+      drifted.entrySha256 = computeJournalEntrySha256(drifted);
+      store.journal[index] = validateJournalEntryShape(drifted);
+      return deepFreeze(structuredClone(store.journal[index]));
+    },
+
+    /**
+     * Task 5 test-only：seed 可达 MIR journal head + anchor（无 host mutation）。
+     * head = sequence 0 / state manual-intervention-required / exact {hostMutationCount}。
+     * 供 mint genuine capability 与 coordinator drift 检查绑定 exact refs。
+     */
+    seedMirHeadAndAnchor(input) {
+      const fields = readExactObject(input, ['transactionId', 'anchorId']);
+      const transactionId = requireUuid(fields.transactionId);
+      const anchorId = requireUuid(fields.anchorId);
+      if (store.journal.some((entry) => entry.transactionId === transactionId)) {
+        throw harnessError('MIR journal transactionId already exists');
+      }
+      if (store.anchors.has(anchorId)) {
+        throw harnessError('MIR anchorId already exists');
+      }
+      const entry = {
+        schemaVersion: 1,
+        transactionId,
+        sequence: 0,
+        previousEntrySha256: null,
+        operation: 'install',
+        state: 'manual-intervention-required',
+        at: nowIso(),
+        payload: { hostMutationCount: 0 },
+      };
+      entry.entrySha256 = computeJournalEntrySha256(entry);
+      const projection = validateJournalEntryShape(entry);
+      store.journal.push(deepFreeze({
+        ...projection,
+        payload: deepFreeze({ ...projection.payload }),
+      }));
+      const sourceCommit = '0'.repeat(40);
+      const seedAnchor = validateLaunchAgentAnchor({
+        schemaVersion: 1,
+        anchorId,
+        parentAnchorId: null,
+        transactionId,
+        sourceCommit,
+        purpose: 'first-install',
+        rollbackFromManifestSha256: null,
+        restoreManifestSha256: null,
+        controller: { priorState: 'absent' },
+        scheduler: { priorState: 'absent' },
+        manifest: { priorState: 'absent' },
+        loaded: { controller: false, scheduler: false },
+        createdAt: nowIso(),
+      });
+      store.anchors.set(anchorId, deepFreeze(structuredClone(seedAnchor)));
+      return deepFreeze({
+        transactionId,
+        anchorId,
+        entrySha256: projection.entrySha256,
+        journalHead: structuredClone(projection),
+        anchor: structuredClone(seedAnchor),
+      });
+    },
+
+    /**
+     * Task 6 test-only：seed contracts-valid pure-closeout MIR transaction prefix。
+     * 默认 prepared → compensating(frozen reversePlan) → MIR；可选已存在 exact
+     * recovered/blocked terminal + matching receipt（cleanup-only 矩阵）。
+     * hostMode 只配置 in-memory fake host，不计入 hostMutationCount / publisher /
+     * bootstrap / bootout。fixture 一律经真实 contracts 校验后 detached deep-freeze。
+     *
+     * hostMode:
+     * - recovered-checkpoint：live 等于合法 recovered 终态（owned 目标已移除且 unloaded）
+     * - restored-checkpoint：anchor prior-bytes + host exact 恢复目标（present+loaded），
+     *   供 recovered receipt roles 应为 restored 的 pure-closeout 矩阵
+     * - safe-disabled：both jobs unloaded，owned 目标仍 present；frozen reversePlan 为
+     *   stop-only，seed 后每个 step 的 live 与 expectedPost 同形（可用
+     *   liveReversePlanStepState deepEqual 证明无 pending host action）
+     * - pending-action：仍有待执行 frozen reverse action；seed 后至少一个 step 的
+     *   live 匹配 expectedPre（非全部 expectedPost）
+     * - unmatched-checkpoint：host 字节/身份与 reverse plan evidence 漂移
+     */
+    seedValidMirTransactionPrefix(input) {
+      if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+        throw harnessError('seedValidMirTransactionPrefix input must be a plain object');
+      }
+      const allowedKeys = new Set([
+        'transactionId',
+        'anchorId',
+        'hostMode',
+        'terminal',
+        'sourceCommit',
+        'operation',
+      ]);
+      for (const key of Reflect.ownKeys(input)) {
+        if (typeof key !== 'string' || !allowedKeys.has(key)) {
+          throw harnessError(`seedValidMirTransactionPrefix unknown key: ${String(key)}`);
+        }
+      }
+      const transactionId = requireUuid(input.transactionId);
+      const anchorId = requireUuid(input.anchorId);
+      const hostMode = input.hostMode ?? 'pending-action';
+      const terminal = input.terminal ?? null;
+      const sourceCommit = input.sourceCommit ?? '0'.repeat(40);
+      const operation = input.operation ?? 'install';
+      if (
+        hostMode !== 'recovered-checkpoint'
+        && hostMode !== 'restored-checkpoint'
+        && hostMode !== 'safe-disabled'
+        && hostMode !== 'pending-action'
+        && hostMode !== 'unmatched-checkpoint'
+      ) {
+        throw harnessError(`seedValidMirTransactionPrefix unknown hostMode: ${String(hostMode)}`);
+      }
+      if (terminal !== null && terminal !== 'recovered' && terminal !== 'blocked') {
+        throw harnessError(`seedValidMirTransactionPrefix unknown terminal: ${String(terminal)}`);
+      }
+      if (typeof sourceCommit !== 'string' || !COMMIT_RE.test(sourceCommit)) {
+        throw harnessError('seedValidMirTransactionPrefix sourceCommit must be 40 lowercase hex');
+      }
+      if (operation !== 'install' && operation !== 'managed-upgrade' && operation !== 'stop'
+        && operation !== 'rollback' && operation !== 'uninstall' && operation !== 'recover') {
+        throw harnessError(`seedValidMirTransactionPrefix unknown operation: ${String(operation)}`);
+      }
+      if (store.journal.some((entry) => entry.transactionId === transactionId)) {
+        throw harnessError('MIR journal transactionId already exists');
+      }
+      if (store.anchors.has(anchorId)) {
+        throw harnessError('MIR anchorId already exists');
+      }
+
+      const profiles = makeProfiles(300, {}, state.runtimeArtifacts);
+      // reverse-plan evidence 需要真实 in-memory file identity；seed 后按 hostMode 再调 host。
+      placeFile('controller', profiles.controller.plistBytes);
+      placeFile('scheduler', profiles.scheduler.plistBytes);
+      const controllerIdentity = completeFileIdentity('controller');
+      const schedulerIdentity = completeFileIdentity('scheduler');
+      if (controllerIdentity === null || schedulerIdentity === null) {
+        throw harnessError('seedValidMirTransactionPrefix failed to materialize file identities');
+      }
+
+      function presentFile(identity) {
+        return {
+          state: 'present',
+          identity: {
+            rootId: identity.rootId,
+            basename: identity.basename,
+            type: identity.type,
+            ownerUid: identity.ownerUid,
+            device: identity.device,
+            inode: identity.inode,
+            sha256: identity.sha256,
+          },
+          sha256: identity.sha256,
+        };
+      }
+      function absentFile() {
+        return { state: 'absent' };
+      }
+      function jobLoaded(identity) {
+        return { state: 'loaded', identitySha256: identity.sha256 };
+      }
+      function jobStopped() {
+        return { state: 'stopped', identitySha256: null };
+      }
+
+      let reversePlan;
+      if (hostMode === 'safe-disabled') {
+        // both jobs stop only：owned 目标仍 present，jobs unloaded = exact safe-disabled。
+        reversePlan = [
+          {
+            index: 0,
+            action: 'stop-scheduler',
+            role: 'scheduler',
+            expectedPre: { file: presentFile(schedulerIdentity), job: jobLoaded(schedulerIdentity) },
+            expectedPost: { file: presentFile(schedulerIdentity), job: jobStopped() },
+            evidence: {
+              kind: 'candidate',
+              transactionId,
+              role: 'scheduler',
+              sha256: schedulerIdentity.sha256,
+            },
+          },
+          {
+            index: 1,
+            action: 'stop-controller',
+            role: 'controller',
+            expectedPre: { file: presentFile(controllerIdentity), job: jobLoaded(controllerIdentity) },
+            expectedPost: { file: presentFile(controllerIdentity), job: jobStopped() },
+            evidence: {
+              kind: 'candidate',
+              transactionId,
+              role: 'controller',
+              sha256: controllerIdentity.sha256,
+            },
+          },
+        ];
+      } else {
+        // recovered / pending / unmatched：install reverse 到 controller 已移除。
+        reversePlan = [
+          {
+            index: 0,
+            action: 'stop-controller',
+            role: 'controller',
+            expectedPre: { file: presentFile(controllerIdentity), job: jobLoaded(controllerIdentity) },
+            expectedPost: { file: presentFile(controllerIdentity), job: jobStopped() },
+            evidence: {
+              kind: 'candidate',
+              transactionId,
+              role: 'controller',
+              sha256: controllerIdentity.sha256,
+            },
+          },
+          {
+            index: 1,
+            action: 'remove-controller',
+            role: 'controller',
+            expectedPre: { file: presentFile(controllerIdentity), job: jobStopped() },
+            expectedPost: { file: absentFile(), job: jobStopped() },
+            evidence: {
+              kind: 'candidate',
+              transactionId,
+              role: 'controller',
+              sha256: controllerIdentity.sha256,
+            },
+          },
+        ];
+      }
+      // reversePlan evidence (kind:candidate) 必须预置进 fake metadata candidates map，
+      // 与 writeCandidate/readCandidate 相同 key/record 形状；否则安全实现调用
+      // metadataStore.readCandidate 会被伪 fixture 阻断。仅 seed reversePlan 实际引用的
+      // role；exact bytes+sha256 与 evidence 对齐；不计入 counters / adapter / host mutation。
+      const stagedEvidenceKeys = new Set();
+      for (const step of reversePlan) {
+        const evidence = step.evidence;
+        if (!evidence || evidence.kind !== 'candidate') continue;
+        const key = `${evidence.transactionId}:${evidence.role}`;
+        if (stagedEvidenceKeys.has(key)) {
+          const existing = candidates.get(key);
+          if (!existing || existing.sha256 !== evidence.sha256) {
+            throw harnessError('seedValidMirTransactionPrefix candidate evidence conflict');
+          }
+          continue;
+        }
+        stagedEvidenceKeys.add(key);
+        let sourceBytes = null;
+        if (evidence.role === 'controller') {
+          sourceBytes = profiles.controller.plistBytes;
+        } else if (evidence.role === 'scheduler') {
+          sourceBytes = profiles.scheduler.plistBytes;
+        } else {
+          throw harnessError(
+            `seedValidMirTransactionPrefix unsupported candidate role: ${String(evidence.role)}`,
+          );
+        }
+        const bytes = Buffer.from(sourceBytes);
+        const digest = sha256Hex(bytes);
+        if (digest !== evidence.sha256) {
+          throw harnessError('seedValidMirTransactionPrefix candidate evidence sha256 mismatch');
+        }
+        if (evidence.transactionId !== transactionId) {
+          throw harnessError('seedValidMirTransactionPrefix candidate transactionId mismatch');
+        }
+        if (candidates.has(key)) {
+          throw harnessError('seedValidMirTransactionPrefix candidate already present');
+        }
+        candidates.set(key, {
+          bytes,
+          sha256: digest,
+          role: evidence.role,
+          transactionId: evidence.transactionId,
+        });
+      }
+      const reversePlanSha256 = sha256Hex(Buffer.from(JSON.stringify(reversePlan), 'utf8'));
+      const hostMutationCount = reversePlan.length;
+      const at = nowIso();
+
+      const rawEntries = [
+        {
+          schemaVersion: 1,
+          transactionId,
+          sequence: 0,
+          previousEntrySha256: null,
+          operation,
+          state: 'prepared',
+          at,
+          payload: { hostMutationCount: 0 },
+          entrySha256: '0'.repeat(64),
+        },
+        {
+          schemaVersion: 1,
+          transactionId,
+          sequence: 1,
+          previousEntrySha256: null,
+          operation,
+          state: 'compensating',
+          at,
+          payload: {
+            hostMutationCount,
+            reversePlan: structuredClone(reversePlan),
+            reversePlanSha256,
+          },
+          entrySha256: '0'.repeat(64),
+        },
+        {
+          schemaVersion: 1,
+          transactionId,
+          sequence: 2,
+          previousEntrySha256: null,
+          operation,
+          state: 'manual-intervention-required',
+          at,
+          payload: { hostMutationCount },
+          entrySha256: '0'.repeat(64),
+        },
+      ];
+      let previousEntrySha256 = null;
+      for (const [index, entry] of rawEntries.entries()) {
+        entry.sequence = index;
+        entry.previousEntrySha256 = previousEntrySha256;
+        entry.entrySha256 = computeJournalEntrySha256(entry);
+        previousEntrySha256 = entry.entrySha256;
+      }
+      // 真实 contracts 校验：prefix 必须闭合（含 reverse plan / hash）。
+      const prefixProjection = validateLaunchAgentTransactionPrefix({
+        entries: structuredClone(rawEntries),
+      });
+      const mirEntry = prefixProjection.entries[2];
+      let receiptProjection = null;
+      let receiptSha = null;
+      if (terminal !== null) {
+        if (terminal === 'recovered') {
+          receiptProjection = validateLaunchAgentReceipt({
+            schemaVersion: 1,
+            operation,
+            state: 'recovered',
+            success: false,
+            sourceCommit,
+            transactionId,
+            anchorId,
+            completedAt: at,
+            roles: {
+              controller: {
+                label: LABELS.controller,
+                outcome: 'removed',
+                changed: true,
+              },
+              scheduler: {
+                label: LABELS.scheduler,
+                outcome: 'removed',
+                changed: true,
+              },
+            },
+            hostMutationCount,
+            outcome: 'recovered',
+          });
+        } else {
+          receiptProjection = validateLaunchAgentReceipt({
+            schemaVersion: 1,
+            operation,
+            state: 'blocked',
+            success: false,
+            sourceCommit,
+            transactionId,
+            anchorId,
+            completedAt: at,
+            roles: {
+              controller: {
+                label: LABELS.controller,
+                outcome: 'unchanged',
+                changed: false,
+              },
+              scheduler: {
+                label: LABELS.scheduler,
+                outcome: 'unchanged',
+                changed: false,
+              },
+            },
+            hostMutationCount,
+            outcome: 'recovery-required',
+          });
+        }
+        receiptSha = sha256Hex(Buffer.from(JSON.stringify(receiptProjection), 'utf8'));
+        const terminalPayload = {
+          hostMutationCount,
+          receipt: structuredClone(receiptProjection),
+          receiptSha256: receiptSha,
+        };
+        if (terminal === 'blocked') {
+          terminalPayload.blockedByEntrySha256 = mirEntry.entrySha256;
+        }
+        const terminalEntry = {
+          schemaVersion: 1,
+          transactionId,
+          sequence: 3,
+          previousEntrySha256: mirEntry.entrySha256,
+          operation,
+          state: terminal,
+          at,
+          payload: terminalPayload,
+          entrySha256: '0'.repeat(64),
+        };
+        terminalEntry.entrySha256 = computeJournalEntrySha256(terminalEntry);
+        rawEntries.push(terminalEntry);
+        const closeout = validateLaunchAgentTransactionCloseout({
+          entries: structuredClone(rawEntries),
+          receipt: structuredClone(receiptProjection),
+        });
+        receiptProjection = closeout.receipt;
+      } else {
+        // 再次确认 open MIR prefix 仍合法（防御 terminal 分支污染）。
+        validateLaunchAgentTransactionPrefix({ entries: structuredClone(rawEntries) });
+      }
+
+      for (const entry of rawEntries) {
+        const projection = validateJournalEntryShape(entry);
+        store.journal.push(deepFreeze({
+          ...projection,
+          payload: deepFreeze(structuredClone(projection.payload)),
+        }));
+      }
+      if (receiptProjection !== null && receiptSha !== null) {
+        store.receipts.set(transactionId, {
+          projection: deepFreeze(structuredClone(receiptProjection)),
+          sha256: receiptSha,
+        });
+      }
+
+      // restored-checkpoint：anchor prior-bytes 绑定当前 file identity；其余 hostMode 为 absent。
+      const usePriorBytesAnchor = hostMode === 'restored-checkpoint';
+      const seedAnchor = validateLaunchAgentAnchor({
+        schemaVersion: 1,
+        anchorId,
+        parentAnchorId: null,
+        transactionId,
+        sourceCommit,
+        purpose: usePriorBytesAnchor ? 'managed-upgrade' : 'first-install',
+        rollbackFromManifestSha256: null,
+        restoreManifestSha256: null,
+        controller: usePriorBytesAnchor
+          ? anchorEntryFor('controller')
+          : { priorState: 'absent' },
+        scheduler: usePriorBytesAnchor
+          ? anchorEntryFor('scheduler')
+          : { priorState: 'absent' },
+        manifest: { priorState: 'absent' },
+        loaded: usePriorBytesAnchor
+          ? { controller: true, scheduler: true }
+          : { controller: false, scheduler: false },
+        createdAt: at,
+      });
+      store.anchors.set(anchorId, deepFreeze(structuredClone(seedAnchor)));
+
+      // hostMode：仅合成 fake host；不触发 publisher/bootstrap/bootout 计数。
+      if (hostMode === 'recovered-checkpoint') {
+        removeFile('controller');
+        removeFile('scheduler');
+        state.loaded.controller = false;
+        state.loaded.scheduler = false;
+        state.jobIdentity.controller = null;
+        state.jobIdentity.scheduler = null;
+        state.foreignJob.controller = false;
+        state.foreignJob.scheduler = false;
+      } else if (hostMode === 'restored-checkpoint') {
+        // prior-bytes exact restored：owned 目标 present 且 jobs loaded 匹配 anchor。
+        state.loaded.controller = true;
+        state.loaded.scheduler = true;
+        state.jobIdentity.controller = computeJobIdentity('controller');
+        state.jobIdentity.scheduler = computeJobIdentity('scheduler');
+        state.foreignJob.controller = false;
+        state.foreignJob.scheduler = false;
+      } else if (hostMode === 'safe-disabled') {
+        // owned targets 仍 present；jobs exact unloaded。
+        state.loaded.controller = false;
+        state.loaded.scheduler = false;
+        state.jobIdentity.controller = null;
+        state.jobIdentity.scheduler = null;
+        state.foreignJob.controller = false;
+        state.foreignJob.scheduler = false;
+      } else if (hostMode === 'pending-action') {
+        state.loaded.controller = true;
+        state.loaded.scheduler = true;
+        state.jobIdentity.controller = computeJobIdentity('controller');
+        state.jobIdentity.scheduler = computeJobIdentity('scheduler');
+        state.foreignJob.controller = false;
+        state.foreignJob.scheduler = false;
+      } else {
+        // unmatched-checkpoint：evidence hash 漂移。
+        placeFile(
+          'controller',
+          Buffer.concat([profiles.controller.plistBytes, Buffer.from('\n# unmatched', 'utf8')]),
+        );
+        state.loaded.controller = true;
+        state.loaded.scheduler = false;
+        state.jobIdentity.controller = computeJobIdentity('controller');
+        state.jobIdentity.scheduler = null;
+        state.foreignJob.controller = false;
+        state.foreignJob.scheduler = false;
+      }
+      state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
+
+      const journalHead = latestJournalEntry(transactionId);
+      return deepFreeze({
+        transactionId,
+        anchorId,
+        sourceCommit,
+        operation,
+        hostMode,
+        terminal,
+        hostMutationCount,
+        reversePlanSha256,
+        reversePlan: structuredClone(reversePlan),
+        mirEntrySha256: mirEntry.entrySha256,
+        mirHead: structuredClone(mirEntry),
+        journalHead: journalHead === null ? null : structuredClone(journalHead),
+        journalStates: store.journal
+          .filter((entry) => entry.transactionId === transactionId)
+          .map((entry) => entry.state),
+        receipt: receiptProjection === null ? null : structuredClone(receiptProjection),
+        receiptSha256: receiptSha,
+        controllerSha256: controllerIdentity.sha256,
+        schedulerSha256: schedulerIdentity.sha256,
+        controllerBytes: Buffer.from(profiles.controller.plistBytes),
+        schedulerBytes: Buffer.from(profiles.scheduler.plistBytes),
+        anchor: structuredClone(seedAnchor),
+      });
+    },
+
+    /**
+     * Task 6 test-only：无 hostMutation 计数地放置/覆盖 host 文件字节。
+     * 仅合成 in-memory fake host，不经 publisher/bootstrap/bootout。
+     */
+    placeHostBytesForTest(role, bytes) {
+      if (role !== 'controller' && role !== 'scheduler' && role !== 'manifest') {
+        throw harnessError(`unknown placeHostBytes role: ${String(role)}`);
+      }
+      if (!Buffer.isBuffer(bytes) && typeof bytes !== 'string') {
+        throw harnessError('placeHostBytesForTest bytes must be Buffer or string');
+      }
+      placeFile(role, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, 'utf8'));
+      return true;
+    },
+
+    /**
+     * Task 6 test-only：破坏含 compensating+reversePlan 的 transaction prefix。
+     * 将 MIR head 的 hostMutationCount 降到 strictly less than compensating，使
+     * validateLaunchAgentTransactionPrefix 因 hostMutationCount 非单调失败；同时
+     * 重算 MIR entrySha256，保持单条 journal schema + previous 链接对
+     * readAuthorizedMirJournal 仍合法。不触 host / counters / MIR state。
+     */
+    breakCompensatingPrefixMonotonicityForTest(transactionIdInput) {
+      const transactionId = requireUuid(transactionIdInput);
+      let compensatingIndex = -1;
+      let mirIndex = -1;
+      for (const [cursor, entry] of store.journal.entries()) {
+        if (entry.transactionId !== transactionId) continue;
+        if (entry.state === 'compensating') compensatingIndex = cursor;
+        if (entry.state === 'manual-intervention-required') mirIndex = cursor;
+      }
+      if (compensatingIndex === -1) {
+        throw harnessError('cannot break prefix without compensating entry');
+      }
+      if (mirIndex === -1) {
+        throw harnessError('cannot break prefix without MIR head');
+      }
+      const compensating = store.journal[compensatingIndex];
+      if (
+        !Object.hasOwn(compensating.payload, 'reversePlan')
+        || !Object.hasOwn(compensating.payload, 'reversePlanSha256')
+      ) {
+        throw harnessError('compensating entry lacks reversePlan fields');
+      }
+      const mir = store.journal[mirIndex];
+      const priorCount = compensating.payload.hostMutationCount;
+      if (typeof priorCount !== 'number' || priorCount < 1) {
+        throw harnessError('compensating hostMutationCount must be positive to break monotonicity');
+      }
+      if (mir.payload.hostMutationCount < priorCount) {
+        throw harnessError('prefix monotonicity already broken');
+      }
+      const rewritten = {
+        schemaVersion: mir.schemaVersion,
+        transactionId: mir.transactionId,
+        sequence: mir.sequence,
+        previousEntrySha256: mir.previousEntrySha256,
+        entrySha256: '0'.repeat(64),
+        operation: mir.operation,
+        state: mir.state,
+        at: mir.at,
+        payload: {
+          hostMutationCount: priorCount - 1,
+        },
+      };
+      if (Object.hasOwn(mir.payload, 'recoveryContext')) {
+        rewritten.payload.recoveryContext = structuredClone(mir.payload.recoveryContext);
+      }
+      rewritten.entrySha256 = computeJournalEntrySha256(rewritten);
+      store.journal[mirIndex] = validateJournalEntryShape(rewritten);
+      // 防御：prefix 必须因此失败；单条 journal 仍合法。
+      let prefixStillValid = true;
+      try {
+        validateLaunchAgentTransactionPrefix({
+          entries: store.journal
+            .filter((entry) => entry.transactionId === transactionId)
+            .map((entry) => structuredClone(entry)),
+        });
+      } catch {
+        prefixStillValid = false;
+      }
+      if (prefixStillValid) {
+        throw harnessError('expected broken prefix after hostMutationCount decrease');
+      }
+      return deepFreeze({
+        transactionId,
+        compensatingHostMutationCount: priorCount,
+        mirHostMutationCount: priorCount - 1,
+        mirEntrySha256: rewritten.entrySha256,
+      });
+    },
+
+    /**
+     * Task 5 test-only：seed 精确 transaction lock。
+     */
+    seedTransactionLock(record) {
+      const projection = validateLockRecord(record);
+      store.transactionLock = projection;
+      return deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: projection.transactionId,
+        ownerNonce: projection.ownerNonce,
+        sha256: lockSha256(projection),
+      });
+    },
+
+    /**
+     * Task 5 test-only：seed 已存在 manual-repair attestation（no-clobber 冲突矩阵）。
+     * 不触发 attestation-* trace 事件；与 production write 路径分离。
+     */
+    seedManualRepairAttestation(record) {
+      const projection = validateLaunchAgentManualRepairAttestation(record);
+      const id = projection.manualRepairConfirmationId;
+      if (store.attestations.has(id)) {
+        throw harnessError('attestation already seeded for confirmationId');
+      }
+      const frozen = deepFreeze(structuredClone(projection));
+      store.attestations.set(id, frozen);
+      return deepFreeze(structuredClone(frozen));
+    },
+
+
+    /**
+     * Task 5 test-only：seed residual recovery claim（闭合 record + 计算 ref）。
+     */
+    seedRecoveryClaim(claimRecordInput) {
+      const materialized = materializeRecoveryClaim(claimRecordInput);
+      store.recoveryClaim = {
+        record: materialized.record,
+        ref: materialized.ref,
+      };
+      return deepFreeze({
+        ref: deepFreeze(structuredClone(materialized.ref)),
+        record: deepFreeze(structuredClone(materialized.record)),
+      });
+    },
+
+    /**
+     * Task 5 test-only：arm 下一次 acquire 原子 claim 检查点的 winner claim。
+     * 验证/冻结规则与 seedRecoveryClaim 完全同一路径；不写入 store（此前 observation 见 absent）。
+     * 仅在 acquire 已验证 input/MIR/expected 之后、检查 recoveryClaim 之前一次性注入。
+     * 不进入 dependencies/factoryContract/snapshot。
+     */
+    raceRecoveryClaimOnNextAcquire(claimRecordInput) {
+      if (raceRecoveryClaimArm !== null) {
+        throw harnessError('race recovery claim already armed');
+      }
+      if (store.recoveryClaim !== null) {
+        throw harnessError('cannot arm race recovery claim while residual claim present');
+      }
+      const materialized = materializeRecoveryClaim(claimRecordInput);
+      raceRecoveryClaimArm = {
+        record: materialized.record,
+        ref: materialized.ref,
+      };
+      return deepFreeze({
+        ref: deepFreeze(structuredClone(materialized.ref)),
+        record: deepFreeze(structuredClone(materialized.record)),
+      });
+    },
+
+    /**
+     * Task 5 test-only 只读：readRecoveryClaimObservation 历史（detached）。
+     * 每条 { present: boolean }；证明 acquire 前 initial observation 见 absent。
+     */
+    recoveryClaimObservationsForTest() {
+      return deepFreeze(structuredClone(recoveryClaimObservationHistory));
+    },
+
+    /** Task 5 只读：attestation 是否存在（detached boolean）。 */
+    hasManualRepairAttestation(confirmationId) {
+      return store.attestations.has(requireUuid(confirmationId));
+    },
+
+    /** Task 5 只读：attestation 投影或 null（detached deep-frozen 副本）。 */
+    manualRepairAttestationForTest(confirmationId) {
+      const stored = store.attestations.get(requireUuid(confirmationId));
+      return stored === undefined ? null : deepFreeze(structuredClone(stored));
+    },
+
+    /** Task 5 只读：recovery claim 是否存在。 */
+    hasRecoveryClaim() {
+      return store.recoveryClaim !== null;
+    },
+
+    /** Task 5 只读：recovery claim ref 或 null。 */
+    recoveryClaimRefForTest() {
+      return store.recoveryClaim === null
+        ? null
+        : deepFreeze(structuredClone(store.recoveryClaim.ref));
+    },
+
+    /** Task 5 只读：当前 transaction lock ref 或 null。 */
+    transactionLockRefForTest() {
+      if (store.transactionLock === null) return null;
+      return deepFreeze({
+        kind: 'transaction-lock',
+        transactionId: store.transactionLock.transactionId,
+        ownerNonce: store.transactionLock.ownerNonce,
+        sha256: lockSha256(store.transactionLock),
+      });
+    },
+
+    /** Task 5 只读：当前 MIR lock ref 或 null。 */
+    manualInterventionLockRefForTest() {
+      if (store.manualInterventionLock === null) return null;
+      return deepFreeze({
+        kind: 'manual-intervention-lock',
+        transactionId: store.manualInterventionLock.transactionId,
+        ownerNonce: store.manualInterventionLock.ownerNonce,
+        sha256: lockSha256(store.manualInterventionLock),
+      });
+    },
+
 
     failNext(eventName) {
       if (!FAILABLE_EVENT_SET.has(eventName)) {

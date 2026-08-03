@@ -31,6 +31,7 @@ if (contractsExists) {
     validateLaunchAgentConfirmationRecord,
     validateLaunchAgentConsumedConfirmation,
     validateLaunchAgentCapabilityProjection,
+    validateLaunchAgentManualRepairAttestation,
   } = await import(contractsUrl);
 
   const INSTALLATION_ID = '018f0f95-3d3a-7f01-8c6a-2a6f98765432';
@@ -79,6 +80,7 @@ if (contractsExists) {
     LAUNCHCTL_DISABLED: 'launchctl-disabled',
     ACCEPTANCE_GATE_DENIED: 'acceptance-gate-denied',
     CONFIRMATION_CONSUMED: 'confirmation-consumed',
+    RECOVERY_CLAIM_STALLED: 'recovery-claim-stalled',
   };
 
   const VALID_MANIFEST = {
@@ -518,6 +520,23 @@ if (contractsExists) {
     anchorId: ANCHOR_ID,
     repairDeclarationSha256: '0'.repeat(64),
     authorizedAt: '2026-07-28T00:03:30.000Z',
+  };
+
+  /**
+   * Closed manual-repair attestation projection (exact keys, fixed insertion order).
+   * Independent of production helpers; used only by Task 6B.1 attestation RED.
+   */
+  const VALID_MANUAL_REPAIR_ATTESTATION = {
+    schemaVersion: 1,
+    kind: 'launchagent-manual-repair-attestation',
+    manualRepairConfirmationId: MANUAL_REPAIR_CONFIRMATION_ID,
+    manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
+    mirTransactionId: TRANSACTION_ID,
+    mirLockIdentitySha256: '8'.repeat(64),
+    anchorId: ANCHOR_ID,
+    repairDeclarationSha256: '0'.repeat(64),
+    authorizedAt: '2026-07-28T00:03:30.000Z',
+    attestedAt: '2026-07-28T00:04:00.000Z',
   };
 
   function clone(value) {
@@ -1085,6 +1104,281 @@ if (contractsExists) {
       ]);
       assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
     });
+
+    /**
+     * Pure MIR closeout prefix: prepared → compensating → MIR → terminal.
+     * Reuses VALID_RECEIPT key set (receiptProjection); mutates one field at a time.
+     * blockedBy: 'mir' binds blockedByEntrySha256 to verified MIR entrySha256.
+     */
+    function buildMirPureCloseoutPrefix({
+      terminalState,
+      hostMutationCount = 4,
+      embedReceipt = true,
+      blockedBy = 'mir',
+      hostMutationCountTerminal,
+      operation = 'install',
+      receiptOutcome,
+    }) {
+      const termCount = hostMutationCountTerminal ?? hostMutationCount;
+      const mirPrefix = linkJournalEntries([
+        checkpointJournal('prepared', { hostMutationCount: 0 }, operation),
+        checkpointJournal('compensating', {
+          hostMutationCount,
+          reversePlan: clone(VALID_REVERSE_PLAN),
+          reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+        }, operation),
+        checkpointJournal(
+          'manual-intervention-required',
+          { hostMutationCount },
+          operation,
+        ),
+      ]);
+      const mirEntry = mirPrefix[2];
+
+      const receipt = {
+        ...clone(VALID_RECEIPT),
+        operation,
+        state: terminalState,
+        success: false,
+        hostMutationCount: termCount,
+        outcome: receiptOutcome ?? (
+          terminalState === 'recovered' ? 'stop-incomplete' : 'label-in-use'
+        ),
+      };
+      const receiptSha256 = createHash('sha256')
+        .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+        .digest('hex');
+
+      const payload = { hostMutationCount: termCount };
+      if (embedReceipt) payload.receipt = receipt;
+      payload.receiptSha256 = receiptSha256;
+
+      if (terminalState === 'blocked') {
+        if (blockedBy === 'mir') {
+          payload.blockedByEntrySha256 = mirEntry.entrySha256;
+        } else if (blockedBy === 'null') {
+          payload.blockedByEntrySha256 = null;
+        } else if (blockedBy === 'other') {
+          payload.blockedByEntrySha256 = 'a'.repeat(64);
+        } else if (blockedBy === 'missing') {
+          // omit blockedByEntrySha256
+        } else {
+          payload.blockedByEntrySha256 = blockedBy;
+        }
+      }
+
+      const terminal = checkpointJournal(terminalState, payload, operation);
+      return {
+        entries: linkJournalEntries([...mirPrefix, terminal]),
+        mirEntrySha256: mirEntry.entrySha256,
+        receipt,
+      };
+    }
+
+    test('transaction prefix accepts pure MIR -> recovered manual repair attestation closeout with embedded receipt', () => {
+      // Production bug: missing direct MIR → recovered pure closeout with embedded receipt
+      // and unchanged non-zero hostMutationCount.
+      const { entries } = buildMirPureCloseoutPrefix({
+        terminalState: 'recovered',
+        embedReceipt: true,
+      });
+      assertProjection(validateLaunchAgentTransactionPrefix, { entries });
+    });
+
+    test('transaction prefix accepts pure MIR -> blocked manual repair attestation closeout with blockedByEntrySha256', () => {
+      // Production bug: missing direct MIR → blocked pure closeout that binds
+      // blockedByEntrySha256 to the already-verified prior MIR entrySha256.
+      const { entries, mirEntrySha256 } = buildMirPureCloseoutPrefix({
+        terminalState: 'blocked',
+        embedReceipt: true,
+        blockedBy: 'mir',
+      });
+      assert.equal(
+        entries.at(-1).payload.blockedByEntrySha256,
+        mirEntrySha256,
+        'blocked closeout fixture must bind blockedByEntrySha256 to MIR entrySha256',
+      );
+      assertProjection(validateLaunchAgentTransactionPrefix, { entries });
+    });
+
+    test('transaction prefix rejects hash-only manual repair attestation MIR pure closeout without embedded receipt', async (t) => {
+      // Production bug: accepting receiptSha256-only terminal payload for MIR pure closeout.
+      await t.test('MIR -> recovered hash-only', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'recovered',
+          embedReceipt: false,
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+      await t.test('MIR -> blocked hash-only', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'blocked',
+          embedReceipt: false,
+          blockedBy: 'mir',
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+    });
+
+    test('transaction prefix rejects manual repair attestation MIR pure closeout hostMutationCount changes', async (t) => {
+      // Production bug: allowing hostMutationCount to change across MIR pure closeout.
+      await t.test('MIR -> recovered count increase', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'recovered',
+          hostMutationCount: 4,
+          hostMutationCountTerminal: 5,
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+      await t.test('MIR -> blocked count increase', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'blocked',
+          hostMutationCount: 4,
+          hostMutationCountTerminal: 5,
+          blockedBy: 'mir',
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+    });
+
+    test('transaction prefix rejects manual repair attestation MIR -> blocked with missing or mismatched blockedByEntrySha256', async (t) => {
+      // Production bug: blocked closeout without exact prior MIR entrySha256 binding.
+      await t.test('missing blockedByEntrySha256', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'blocked',
+          blockedBy: 'missing',
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+      await t.test('null blockedByEntrySha256', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'blocked',
+          blockedBy: 'null',
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+      await t.test('mismatched blockedByEntrySha256', () => {
+        const { entries } = buildMirPureCloseoutPrefix({
+          terminalState: 'blocked',
+          blockedBy: 'other',
+        });
+        assertInvalid(validateLaunchAgentTransactionPrefix, { entries });
+      });
+    });
+
+    test('transaction prefix rejects manual repair attestation committed no-change and every other direct MIR transition', async (t) => {
+      // Production bug: any direct MIR transition other than recovered/blocked pure closeout.
+      await t.test('MIR -> committed', () => {
+        const mirPrefix = linkJournalEntries([
+          checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+          checkpointJournal('compensating', {
+            hostMutationCount: 4,
+            reversePlan: clone(VALID_REVERSE_PLAN),
+            reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+          }, 'install'),
+          checkpointJournal(
+            'manual-intervention-required',
+            { hostMutationCount: 4 },
+            'install',
+          ),
+        ]);
+        const receipt = {
+          ...clone(VALID_RECEIPT),
+          state: 'committed',
+          success: true,
+          hostMutationCount: 4,
+          outcome: 'completed',
+        };
+        const receiptSha256 = createHash('sha256')
+          .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+          .digest('hex');
+        const terminal = checkpointJournal('committed', {
+          hostMutationCount: 4,
+          receipt,
+          receiptSha256,
+        }, 'install');
+        assertInvalid(
+          validateLaunchAgentTransactionPrefix,
+          { entries: linkJournalEntries([...mirPrefix, terminal]) },
+        );
+      });
+      await t.test('MIR -> no-change', () => {
+        const mirPrefix = linkJournalEntries([
+          checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+          checkpointJournal('compensating', {
+            hostMutationCount: 4,
+            reversePlan: clone(VALID_REVERSE_PLAN),
+            reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+          }, 'install'),
+          checkpointJournal(
+            'manual-intervention-required',
+            { hostMutationCount: 4 },
+            'install',
+          ),
+        ]);
+        // no-change requires hostMutationCount 0 at receipt schema; still illegal as MIR transition.
+        const receipt = {
+          ...clone(VALID_RECEIPT),
+          state: 'no-change',
+          success: true,
+          hostMutationCount: 0,
+          outcome: 'no-change',
+        };
+        const receiptSha256 = createHash('sha256')
+          .update(Buffer.from(JSON.stringify(receipt), 'utf8'))
+          .digest('hex');
+        const terminal = checkpointJournal('no-change', {
+          hostMutationCount: 0,
+          receipt,
+          receiptSha256,
+        }, 'install');
+        assertInvalid(
+          validateLaunchAgentTransactionPrefix,
+          { entries: linkJournalEntries([...mirPrefix, terminal]) },
+        );
+      });
+      for (const illegalState of [
+        'prepared',
+        'anchored',
+        'controller-loaded',
+        'compensating',
+        'manual-intervention-required',
+      ]) {
+        await t.test(`MIR -> ${illegalState}`, () => {
+          const mirPrefix = linkJournalEntries([
+            checkpointJournal('prepared', { hostMutationCount: 0 }, 'install'),
+            checkpointJournal('compensating', {
+              hostMutationCount: 4,
+              reversePlan: clone(VALID_REVERSE_PLAN),
+              reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+            }, 'install'),
+            checkpointJournal(
+              'manual-intervention-required',
+              { hostMutationCount: 4 },
+              'install',
+            ),
+          ]);
+          let payload;
+          if (illegalState === 'compensating') {
+            payload = {
+              hostMutationCount: 4,
+              reversePlan: clone(VALID_REVERSE_PLAN),
+              reversePlanSha256: VALID_REVERSE_PLAN_SHA256,
+            };
+          } else if (illegalState === 'prepared' || illegalState === 'manual-intervention-required'
+            || illegalState === 'anchored' || illegalState === 'controller-loaded') {
+            payload = { hostMutationCount: 4 };
+          } else {
+            payload = { hostMutationCount: 4 };
+          }
+          const next = checkpointJournal(illegalState, payload, 'install');
+          assertInvalid(
+            validateLaunchAgentTransactionPrefix,
+            { entries: linkJournalEntries([...mirPrefix, next]) },
+          );
+        });
+      }
+    });
   }
 
   test('journal validator rejects broken chain and free-form state', async (t) => {
@@ -1548,6 +1842,7 @@ if (contractsExists) {
       VALID_MANUAL_CONSUMED_CONFIRMATION,
       VALID_CAPABILITY_PROJECTION,
       VALID_MANUAL_CAPABILITY_PROJECTION,
+      VALID_MANUAL_REPAIR_ATTESTATION,
     ];
 
     function scan(value, trail = []) {
@@ -1567,4 +1862,255 @@ if (contractsExists) {
       scan(fixture, [index === 0 ? 'manifest' : 'fixture-' + index]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Task 6B.1 Task 1 RED: manual repair attestation contract + codes + MIR closeout
+  // (names intentionally contain "manual repair attestation" for focused runs)
+  // ---------------------------------------------------------------------------
+
+  test('manual repair attestation validator export is required from contracts.js', () => {
+    // Production bug: validateLaunchAgentManualRepairAttestation is not exported.
+    assert.equal(
+      typeof validateLaunchAgentManualRepairAttestation,
+      'function',
+      'expected validateLaunchAgentManualRepairAttestation to be exported from contracts.js',
+    );
+  });
+
+  test('lifecycle codes include RECOVERY_CLAIM_STALLED for manual repair attestation recovery path', () => {
+    // Production bug: LAUNCHAGENT_LIFECYCLE_CODES lacks RECOVERY_CLAIM_STALLED.
+    // Preserves TRANSACTION_IN_PROGRESS and every prior code via EXPECTED_CODES deepEqual.
+    assert.deepEqual(LAUNCHAGENT_LIFECYCLE_CODES, EXPECTED_CODES);
+    assert.equal(
+      LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_CLAIM_STALLED,
+      'recovery-claim-stalled',
+    );
+    assert.equal(
+      LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS,
+      'transaction-in-progress',
+      'existing transaction-in-progress semantics must remain exact',
+    );
+  });
+
+  if (typeof validateLaunchAgentManualRepairAttestation === 'function') {
+    test('manual repair attestation accepts exact frozen closed projection keys', () => {
+      // Production bug: missing closed attestation projection / wrong key set.
+      const expectedKeys = [
+        'schemaVersion',
+        'kind',
+        'manualRepairConfirmationId',
+        'manualRepairRequestId',
+        'mirTransactionId',
+        'mirLockIdentitySha256',
+        'anchorId',
+        'repairDeclarationSha256',
+        'authorizedAt',
+        'attestedAt',
+      ];
+      assert.deepEqual(
+        Object.keys(VALID_MANUAL_REPAIR_ATTESTATION),
+        expectedKeys,
+        'fixture must declare exact attestation keys in canonical insertion order',
+      );
+      assert.equal(VALID_MANUAL_REPAIR_ATTESTATION.schemaVersion, 1);
+      assert.equal(
+        VALID_MANUAL_REPAIR_ATTESTATION.kind,
+        'launchagent-manual-repair-attestation',
+      );
+      const projected = assertProjection(
+        validateLaunchAgentManualRepairAttestation,
+        VALID_MANUAL_REPAIR_ATTESTATION,
+      );
+      assert.deepEqual(Object.keys(projected), expectedKeys);
+    });
+
+    test('manual repair attestation accepts attestedAt equal to authorizedAt', () => {
+      // Production bug: rejecting legal attestedAt === authorizedAt (only earlier is illegal).
+      assertProjection(
+        validateLaunchAgentManualRepairAttestation,
+        {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          authorizedAt: '2026-07-28T00:03:30.000Z',
+          attestedAt: '2026-07-28T00:03:30.000Z',
+        },
+      );
+    });
+
+    test('manual repair attestation rejects extra missing accessor symbol keys and Proxy hostile inputs without secret leakage', async (t) => {
+      // Production bug: open schema / accessor invocation / secret leakage on hostile inputs.
+      const SECRET = 'sentinel-manual-repair-attestation-secret-MUST-NOT-LEAK';
+
+      function assertInvalidNoLeak(value) {
+        assert.throws(
+          () => validateLaunchAgentManualRepairAttestation(value),
+          (error) => {
+            assert.ok(error instanceof LaunchAgentLifecycleError);
+            assert.equal(error.code, 'launchagent-lifecycle-invalid');
+            assert.equal(error.message, 'launchagent-lifecycle-invalid');
+            assert.equal(
+              String(error.message).includes(SECRET),
+              false,
+              'validator rejection must not leak sentinel secret in message',
+            );
+            assert.equal(
+              String(error.code).includes(SECRET),
+              false,
+              'validator rejection must not leak sentinel secret in code',
+            );
+            for (const text of collectThrownStrings(error)) {
+              assert.equal(
+                text.includes(SECRET),
+                false,
+                'validator rejection must not leak sentinel secret anywhere on error',
+              );
+            }
+            return true;
+          },
+        );
+      }
+
+      function collectThrownStrings(error) {
+        const out = [];
+        if (typeof error.message === 'string') out.push(error.message);
+        if (typeof error.code === 'string') out.push(error.code);
+        if (typeof error.name === 'string') out.push(error.name);
+        return out;
+      }
+
+      await assertRejectsCases(t, validateLaunchAgentManualRepairAttestation, [
+        ...commonClosedSchemaCases(VALID_MANUAL_REPAIR_ATTESTATION),
+        ...dangerousFieldCases(VALID_MANUAL_REPAIR_ATTESTATION),
+      ]);
+
+      await t.test('missing manualRepairConfirmationId', () => {
+        const value = clone(VALID_MANUAL_REPAIR_ATTESTATION);
+        delete value.manualRepairConfirmationId;
+        assertInvalid(validateLaunchAgentManualRepairAttestation, value);
+      });
+      await t.test('missing attestedAt', () => {
+        const value = clone(VALID_MANUAL_REPAIR_ATTESTATION);
+        delete value.attestedAt;
+        assertInvalid(validateLaunchAgentManualRepairAttestation, value);
+      });
+      await t.test('extra key', () => {
+        assertInvalid(
+          validateLaunchAgentManualRepairAttestation,
+          withOwnData(VALID_MANUAL_REPAIR_ATTESTATION, 'unexpected', true),
+        );
+      });
+      await t.test('symbol key', () => {
+        assertInvalid(
+          validateLaunchAgentManualRepairAttestation,
+          withSymbol(VALID_MANUAL_REPAIR_ATTESTATION),
+        );
+      });
+
+      await t.test('hostile accessor on unexpected key is not executed', () => {
+        let reads = 0;
+        const hostile = withAccessor(VALID_MANUAL_REPAIR_ATTESTATION, 'hostile', () => {
+          reads += 1;
+          throw new Error(SECRET);
+        });
+        assertInvalidNoLeak(hostile);
+        assert.equal(reads, 0, 'unexpected accessor must not be executed');
+      });
+
+      await t.test('hostile accessor replacing required data key is not executed', () => {
+        const candidate = clone(VALID_MANUAL_REPAIR_ATTESTATION);
+        let reads = 0;
+        Object.defineProperty(candidate, 'repairDeclarationSha256', {
+          configurable: true,
+          enumerable: true,
+          get() {
+            reads += 1;
+            return SECRET;
+          },
+        });
+        assertInvalidNoLeak(candidate);
+        assert.equal(reads, 0, 'required-key accessor must not be executed');
+      });
+
+      await t.test('throwing Proxy ownKeys normalizes without leak', () => {
+        const throwingProxy = new Proxy(clone(VALID_MANUAL_REPAIR_ATTESTATION), {
+          ownKeys() {
+            throw new Error(SECRET);
+          },
+        });
+        assertInvalidNoLeak(throwingProxy);
+      });
+
+      await t.test('deceptive Proxy omitting a required key is rejected', () => {
+        const deceptiveProxy = new Proxy(clone(VALID_MANUAL_REPAIR_ATTESTATION), {
+          ownKeys(target) {
+            return Reflect.ownKeys(target).filter((key) => key !== 'attestedAt');
+          },
+          getOwnPropertyDescriptor(target, key) {
+            if (key === 'attestedAt') return undefined;
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+        });
+        assertInvalidNoLeak(deceptiveProxy);
+      });
+    });
+
+    test('manual repair attestation rejects invalid UUID hash time wrong kind equal IDs and earlier attestedAt', async (t) => {
+      // Production bug: missing field validators / ordering / distinct identity rules.
+      await assertRejectsCases(t, validateLaunchAgentManualRepairAttestation, [
+        ['invalid confirmation UUID', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          manualRepairConfirmationId: 'invalid',
+        }],
+        ['invalid request UUID', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          manualRepairRequestId: 'invalid',
+        }],
+        ['invalid mir transaction UUID', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          mirTransactionId: 'invalid',
+        }],
+        ['invalid anchor UUID', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          anchorId: 'invalid',
+        }],
+        ['invalid mir lock identity hash', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          mirLockIdentitySha256: 'G'.repeat(64),
+        }],
+        ['invalid repair declaration hash', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          repairDeclarationSha256: 'G'.repeat(64),
+        }],
+        ['invalid authorizedAt UTC', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          authorizedAt: '2026-07-28T00:03:30Z',
+        }],
+        ['invalid attestedAt UTC', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          attestedAt: '2026-07-28T00:04:00Z',
+        }],
+        ['wrong kind', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          kind: 'manual-repair-attestation',
+        }],
+        ['cross-use capability kind', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          kind: 'launchagent-manual-repair',
+        }],
+        ['equal request and confirmation IDs', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          manualRepairConfirmationId: MANUAL_REPAIR_REQUEST_ID,
+          manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
+        }],
+        ['attestedAt strictly earlier than authorizedAt', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          authorizedAt: '2026-07-28T00:04:00.000Z',
+          attestedAt: '2026-07-28T00:03:30.000Z',
+        }],
+        ['schemaVersion not 1', {
+          ...clone(VALID_MANUAL_REPAIR_ATTESTATION),
+          schemaVersion: 2,
+        }],
+      ]);
+    });
+  }
 }
