@@ -27,6 +27,7 @@ const DEPENDENCY_METHODS = Object.freeze({
   launchctlRunner: Object.freeze(['run']),
   healthChecker: Object.freeze(['check']),
   clock: Object.freeze(['now', 'newId']),
+  processIdentityReader: Object.freeze(['current', 'observe']),
 });
 
 const TERMINAL_STATES = new Set(['committed', 'recovered', 'no-change', 'blocked']);
@@ -133,6 +134,37 @@ function requireSha256(value) {
 function requireCommit(value) {
   if (typeof value !== 'string' || !COMMIT_PATTERN.test(value)) invalid();
   return value;
+}
+
+/**
+ * processIdentityReader.current() 闭合投影：descriptor-first exact plain data。
+ * 外层仅 bootSessionIdentity/processStartIdentity；内层仅 available/value，
+ * 且 available 必须 true、value 为拒绝 / \\ NUL CR/LF 的非空 string。
+ * 无 unavailable 回落；畸形/accessor/错误原型一律 INVALID。
+ */
+function validateCurrentIdentity(value) {
+  const fields = readExactObject(value, ['bootSessionIdentity', 'processStartIdentity']);
+  return {
+    bootSessionIdentity: validateAvailableIdentity(fields.bootSessionIdentity),
+    processStartIdentity: validateAvailableIdentity(fields.processStartIdentity),
+  };
+}
+
+function validateAvailableIdentity(value) {
+  const fields = readExactObject(value, ['available', 'value']);
+  if (fields.available !== true) invalid();
+  if (typeof fields.value !== 'string' || fields.value.length === 0) invalid();
+  const identity = fields.value;
+  if (
+    identity.includes('/')
+    || identity.includes('\\')
+    || identity.includes('\0')
+    || identity.includes('\r')
+    || identity.includes('\n')
+  ) {
+    invalid();
+  }
+  return { available: true, value: identity };
 }
 
 function validateDependencies(value) {
@@ -364,14 +396,21 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     return { snapshot, blocker: null };
   }
 
-  function createLockRecord(transactionId, ownerNonce) {
+  async function createLockRecord(transactionId, ownerNonce) {
+    let identity;
+    try {
+      identity = validateCurrentIdentity(await deps.processIdentityReader.current());
+    } catch (error) {
+      if (error instanceof LaunchAgentLifecycleError) throw error;
+      invalid();
+    }
     return {
       schemaVersion: 1,
       transactionId,
       ownerPid: process.pid,
       ownerNonce,
-      bootSessionIdentity: { available: false, value: null },
-      processStartIdentity: { available: false, value: null },
+      bootSessionIdentity: identity.bootSessionIdentity,
+      processStartIdentity: identity.processStartIdentity,
     };
   }
 
@@ -397,7 +436,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     const transactionId = requireUuid(deps.clock.newId());
     const ownerNonce = requireUuid(deps.clock.newId());
     const lockRef = await deps.metadataStore.acquireTransactionLock(
-      createLockRecord(transactionId, ownerNonce),
+      await createLockRecord(transactionId, ownerNonce),
     );
     const verified = await deps.metadataStore.verifyTransactionLock(lockRef);
     if (verified !== true) invalid();
@@ -533,7 +572,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     await appendJournal(context, 'manual-intervention-required');
     const manualNonce = requireUuid(deps.clock.newId());
     const mirLockRef = await deps.metadataStore.acquireManualInterventionLock(
-      createLockRecord(context.transactionId, manualNonce),
+      await createLockRecord(context.transactionId, manualNonce),
     );
     const verified = await deps.metadataStore.verifyManualInterventionLock(mirLockRef);
     if (verified !== true) invalid();
@@ -2680,7 +2719,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   async function acquireRecoveryLock(transactionId) {
     const ownerNonce = requireUuid(deps.clock.newId());
     const lockRef = await deps.metadataStore.acquireTransactionLock(
-      createLockRecord(transactionId, ownerNonce),
+      await createLockRecord(transactionId, ownerNonce),
     );
     const verified = await deps.metadataStore.verifyTransactionLock(lockRef);
     if (verified !== true) invalid();
@@ -2938,7 +2977,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     await appendJournal(context, 'manual-intervention-required');
     const manualNonce = requireUuid(deps.clock.newId());
     const mirLockRef = await deps.metadataStore.acquireManualInterventionLock(
-      createLockRecord(context.transactionId, manualNonce),
+      await createLockRecord(context.transactionId, manualNonce),
     );
     const verified = await deps.metadataStore.verifyManualInterventionLock(mirLockRef);
     if (verified !== true) invalid();

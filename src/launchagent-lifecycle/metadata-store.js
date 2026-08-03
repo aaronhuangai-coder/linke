@@ -46,8 +46,11 @@ const ROLE_LEAVES = Object.freeze({
 
 const TRANSACTION_LOCK_LEAF = 'transaction.lock';
 const MANUAL_INTERVENTION_LOCK_LEAF = 'manual-intervention.lock';
+const RECOVERY_CLAIM_LEAF = 'recovery-claim.lock';
 const TRANSACTION_LOCK_KIND = 'transaction-lock';
 const MANUAL_INTERVENTION_LOCK_KIND = 'manual-intervention-lock';
+const RECOVERY_CLAIM_LOCK_KIND = 'recovery-claim-lock';
+const RECOVERY_CLAIM_ARTIFACT = 'recovery-claim-lock';
 const JOURNAL_LEAF = 'transaction-journal.json';
 const JOURNAL_ARTIFACT = 'journal';
 const RECEIPT_ARTIFACT = 'receipt';
@@ -221,6 +224,143 @@ function validateLockRecord(value) {
 
 function serializeLockRecord(projection) {
   const bytes = Buffer.from(JSON.stringify(projection), 'utf8');
+  if (bytes.byteLength > LOCK_MAX_BYTES) invalid();
+  return bytes;
+}
+
+/** 校验 lock ref 闭合投影：kind/transactionId/ownerNonce/sha256；UUID 两两不同。 */
+function validateLockRefShape(value, expectedKind) {
+  const fields = readExactObject(value, ['kind', 'transactionId', 'ownerNonce', 'sha256']);
+  if (fields.kind !== expectedKind) invalid();
+  const transactionId = requireUuid(fields.transactionId);
+  const ownerNonce = requireUuid(fields.ownerNonce);
+  if (transactionId === ownerNonce) invalid();
+  return {
+    kind: expectedKind,
+    transactionId,
+    ownerNonce,
+    sha256: requireSha256(fields.sha256),
+  };
+}
+
+function lockRefsEqual(left, right) {
+  return (
+    left !== null
+    && right !== null
+    && left.kind === right.kind
+    && left.transactionId === right.transactionId
+    && left.ownerNonce === right.ownerNonce
+    && left.sha256 === right.sha256
+  );
+}
+
+/**
+ * 校验并投影 recovery-claim 记录。
+ * 固定键序 schema；claimId/transactionId/ownerNonce 两两不同；
+ * expectedTransactionLockRef 为 null 或精确 transaction-lock ref；
+ * nested refs 与 identity 均为封闭投影。
+ */
+function validateRecoveryClaimRecord(value) {
+  const fields = readExactObject(value, [
+    'schemaVersion',
+    'kind',
+    'claimId',
+    'transactionId',
+    'ownerPid',
+    'ownerNonce',
+    'bootSessionIdentity',
+    'processStartIdentity',
+    'expectedTransactionLockRef',
+    'manualInterventionLockRef',
+    'freshTransactionLockRef',
+  ]);
+  if (fields.schemaVersion !== 1) invalid();
+  if (fields.kind !== RECOVERY_CLAIM_LOCK_KIND) invalid();
+  const claimId = requireUuid(fields.claimId);
+  const transactionId = requireUuid(fields.transactionId);
+  const ownerNonce = requireUuid(fields.ownerNonce);
+  if (claimId === transactionId || claimId === ownerNonce || transactionId === ownerNonce) {
+    invalid();
+  }
+  let expectedTransactionLockRef = null;
+  if (fields.expectedTransactionLockRef !== null) {
+    expectedTransactionLockRef = validateLockRefShape(
+      fields.expectedTransactionLockRef,
+      TRANSACTION_LOCK_KIND,
+    );
+  }
+  const manualInterventionLockRef = validateLockRefShape(
+    fields.manualInterventionLockRef,
+    MANUAL_INTERVENTION_LOCK_KIND,
+  );
+  const freshTransactionLockRef = validateLockRefShape(
+    fields.freshTransactionLockRef,
+    TRANSACTION_LOCK_KIND,
+  );
+  // Nested refs must bind to claim/fresh transactionId (cross-tx pair cannot authorize claim).
+  if (
+    expectedTransactionLockRef !== null
+    && expectedTransactionLockRef.transactionId !== transactionId
+  ) {
+    invalid();
+  }
+  if (manualInterventionLockRef.transactionId !== transactionId) invalid();
+  if (freshTransactionLockRef.transactionId !== transactionId) invalid();
+  if (freshTransactionLockRef.ownerNonce !== ownerNonce) invalid();
+  return {
+    schemaVersion: 1,
+    kind: RECOVERY_CLAIM_LOCK_KIND,
+    claimId,
+    transactionId,
+    ownerPid: requirePositiveSafeInteger(fields.ownerPid),
+    ownerNonce,
+    bootSessionIdentity: validateSessionIdentity(fields.bootSessionIdentity),
+    processStartIdentity: validateSessionIdentity(fields.processStartIdentity),
+    expectedTransactionLockRef,
+    manualInterventionLockRef,
+    freshTransactionLockRef,
+  };
+}
+
+/** 以固定键序序列化 recovery-claim 投影（含嵌套 ref 精确键序）。 */
+function serializeRecoveryClaim(projection) {
+  const plain = {
+    schemaVersion: projection.schemaVersion,
+    kind: projection.kind,
+    claimId: projection.claimId,
+    transactionId: projection.transactionId,
+    ownerPid: projection.ownerPid,
+    ownerNonce: projection.ownerNonce,
+    bootSessionIdentity: {
+      available: projection.bootSessionIdentity.available,
+      value: projection.bootSessionIdentity.value,
+    },
+    processStartIdentity: {
+      available: projection.processStartIdentity.available,
+      value: projection.processStartIdentity.value,
+    },
+    expectedTransactionLockRef: projection.expectedTransactionLockRef === null
+      ? null
+      : {
+        kind: projection.expectedTransactionLockRef.kind,
+        transactionId: projection.expectedTransactionLockRef.transactionId,
+        ownerNonce: projection.expectedTransactionLockRef.ownerNonce,
+        sha256: projection.expectedTransactionLockRef.sha256,
+      },
+    manualInterventionLockRef: {
+      kind: projection.manualInterventionLockRef.kind,
+      transactionId: projection.manualInterventionLockRef.transactionId,
+      ownerNonce: projection.manualInterventionLockRef.ownerNonce,
+      sha256: projection.manualInterventionLockRef.sha256,
+    },
+    freshTransactionLockRef: {
+      kind: projection.freshTransactionLockRef.kind,
+      transactionId: projection.freshTransactionLockRef.transactionId,
+      ownerNonce: projection.freshTransactionLockRef.ownerNonce,
+      sha256: projection.freshTransactionLockRef.sha256,
+    },
+  };
+  const bytes = Buffer.from(JSON.stringify(plain), 'utf8');
   if (bytes.byteLength > LOCK_MAX_BYTES) invalid();
   return bytes;
 }
@@ -1082,6 +1222,289 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     });
   }
 
+  /**
+   * 只读打开 owned leaf：精确 ENOENT → null；否则校验 0600/uid/regular/非 symlink/
+   * max size，返回 detached Buffer。不写、不修复。
+   */
+  async function readOptionalOwnedLeafBytes(leafName, maxBytes) {
+    const targetPath = join(metadataRoot, leafName);
+    let readHandle;
+    try {
+      readHandle = await fs.open(targetPath, flags.read);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return null;
+      invalid();
+    }
+    try {
+      const st = await readHandle.stat();
+      if (st.isSymbolicLink() || !st.isFile()) invalid();
+      if ((st.mode & 0o777) !== FILE_MODE) invalid();
+      if (st.uid !== uid) invalid();
+      if (st.size > maxBytes) invalid();
+      const onDisk = await readHandle.readFile();
+      if (!Buffer.isBuffer(onDisk) || onDisk.byteLength !== st.size) invalid();
+      if (onDisk.byteLength > maxBytes) invalid();
+      return Buffer.from(onDisk);
+    } catch (error) {
+      if (error instanceof LaunchAgentLifecycleError) throw error;
+      invalid();
+    } finally {
+      try {
+        await readHandle.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * 内部：读取 transaction.lock 观察载荷；ENOENT→null；canonical 字节对齐。
+   * 返回未 deepFreeze 的 { ref, record } 供 acquisition 比较，或 null。
+   */
+  async function loadTransactionLockObservationPayload() {
+    const bytes = await readOptionalOwnedLeafBytes(TRANSACTION_LOCK_LEAF, LOCK_MAX_BYTES);
+    if (bytes === null) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      invalid();
+    }
+    const record = validateLockRecord(parsed);
+    const expectedBytes = serializeLockRecord(record);
+    if (Buffer.compare(bytes, expectedBytes) !== 0) invalid();
+    return {
+      record,
+      ref: {
+        kind: TRANSACTION_LOCK_KIND,
+        transactionId: record.transactionId,
+        ownerNonce: record.ownerNonce,
+        sha256: sha256Hex(bytes),
+      },
+    };
+  }
+
+  /**
+   * 内部：读取 recovery-claim.lock 观察载荷；ENOENT→null；canonical 字节对齐。
+   */
+  async function loadRecoveryClaimObservationPayload() {
+    const bytes = await readOptionalOwnedLeafBytes(RECOVERY_CLAIM_LEAF, LOCK_MAX_BYTES);
+    if (bytes === null) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      invalid();
+    }
+    const record = validateRecoveryClaimRecord(parsed);
+    const expectedBytes = serializeRecoveryClaim(record);
+    if (Buffer.compare(bytes, expectedBytes) !== 0) invalid();
+    return {
+      record,
+      ref: {
+        kind: RECOVERY_CLAIM_LOCK_KIND,
+        claimId: record.claimId,
+        transactionId: record.transactionId,
+        ownerNonce: record.ownerNonce,
+        sha256: sha256Hex(bytes),
+      },
+    };
+  }
+
+  /** 只读 transaction.lock 观察：null 或深冻结 detached observation。 */
+  async function readTransactionLockObservation() {
+    return withLifecycleErrors(async () => {
+      await assertBoundRootLayout();
+      const payload = await loadTransactionLockObservationPayload();
+      if (payload === null) return null;
+      return deepFreeze({
+        kind: 'transaction-lock-observation',
+        ref: payload.ref,
+        record: payload.record,
+      });
+    });
+  }
+
+  /** 只读 recovery-claim.lock 观察：null 或深冻结 detached observation。 */
+  async function readRecoveryClaimObservation() {
+    return withLifecycleErrors(async () => {
+      await assertBoundRootLayout();
+      const payload = await loadRecoveryClaimObservationPayload();
+      if (payload === null) return null;
+      return deepFreeze({
+        kind: 'recovery-claim-observation',
+        ref: payload.ref,
+        record: payload.record,
+      });
+    });
+  }
+
+  /**
+   * MIR 专用恢复锁获取：先 durable O_EXCL 固定 recovery-claim.lock，
+   * 再 revalidate → 删除 old transaction ref → O_EXCL 发布 fresh transaction.lock →
+   * 精确释放 claim。普通 acquireTransactionLock 语义不变且继续拒绝 MIR。
+   * claim 发布成功后禁止 catch/finally 清理 claim；后期错误保留精确 claim。
+   */
+  async function acquireRecoveryLockForManualRepair(input) {
+    return withLifecycleErrors(async () => {
+      await assertBoundRootLayout();
+
+      // 1. mutation 前闭合全部输入；fresh ref 由 store 从 record 计算，调用方不可伪造。
+      const fields = readExactObject(input, [
+        'record',
+        'claimId',
+        'expectedTransactionLockRef',
+        'manualInterventionLockRef',
+      ]);
+      const freshRecord = validateLockRecord(fields.record);
+      const claimId = requireUuid(fields.claimId);
+      if (
+        claimId === freshRecord.transactionId
+        || claimId === freshRecord.ownerNonce
+      ) {
+        invalid();
+      }
+
+      let expectedTransactionLockRef = null;
+      if (fields.expectedTransactionLockRef !== null) {
+        expectedTransactionLockRef = validateLockRefShape(
+          fields.expectedTransactionLockRef,
+          TRANSACTION_LOCK_KIND,
+        );
+      }
+      const manualInterventionLockRef = validateLockRefShape(
+        fields.manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+      );
+
+      const freshBytes = serializeLockRecord(freshRecord);
+      const freshSha = sha256Hex(freshBytes);
+      const freshTransactionLockRef = {
+        kind: TRANSACTION_LOCK_KIND,
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+        sha256: freshSha,
+      };
+
+      const claimProjection = {
+        schemaVersion: 1,
+        kind: RECOVERY_CLAIM_LOCK_KIND,
+        claimId,
+        transactionId: freshRecord.transactionId,
+        ownerPid: freshRecord.ownerPid,
+        ownerNonce: freshRecord.ownerNonce,
+        bootSessionIdentity: freshRecord.bootSessionIdentity,
+        processStartIdentity: freshRecord.processStartIdentity,
+        expectedTransactionLockRef,
+        manualInterventionLockRef,
+        freshTransactionLockRef,
+      };
+      // 再经 validator 闭合（保证与只读观察路径同一投影/序列化契约）
+      const claimRecord = validateRecoveryClaimRecord(claimProjection);
+      const claimBytes = serializeRecoveryClaim(claimRecord);
+      const claimSha = sha256Hex(claimBytes);
+      const claimPath = join(metadataRoot, RECOVERY_CLAIM_LEAF);
+
+      // 2. 验证精确 MIR（mutation 前）
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+
+      // 3–4. 读取并校验当前 transaction.lock，与 expected ref 或精确缺失对齐
+      const currentBefore = await loadTransactionLockObservationPayload();
+      if (expectedTransactionLockRef === null) {
+        if (currentBefore !== null) invalid();
+      } else if (
+        currentBefore === null
+        || !lockRefsEqual(currentBefore.ref, expectedTransactionLockRef)
+      ) {
+        invalid();
+      }
+
+      // 5. durable O_EXCL claim；竞争失败者 → transaction-in-progress，零 transaction 变更
+      await durableWriteLeaf(
+        claimPath,
+        metadataRoot,
+        claimBytes,
+        claimSha,
+        RECOVERY_CLAIM_ARTIFACT,
+        LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS,
+      );
+
+      // claim 已 durable：此后任何错误必须保留精确 claim（无 catch/finally 清理）
+
+      // 6. 重新验证 own claim、MIR、当前 transaction ref/精确缺失
+      await verifyLeafFile(claimPath, claimBytes, claimSha);
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+
+      const currentAfterClaim = await loadTransactionLockObservationPayload();
+      if (expectedTransactionLockRef === null) {
+        if (currentAfterClaim !== null) {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS);
+        }
+      } else if (
+        currentAfterClaim === null
+        || !lockRefsEqual(currentAfterClaim.ref, expectedTransactionLockRef)
+      ) {
+        // 后期漂移：保留 claim 与已发布 winner，映射为 transaction-in-progress
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS);
+      }
+
+      // 7. 若有旧锁：再次验证 old ref → unlink → fsync metadataRoot
+      if (expectedTransactionLockRef !== null) {
+        await verifyLockRefAgainstLeaf(
+          expectedTransactionLockRef,
+          TRANSACTION_LOCK_KIND,
+          TRANSACTION_LOCK_LEAF,
+        );
+        await unlinkOwnedLeaf(TRANSACTION_LOCK_LEAF);
+        await fsyncMetadataRoot();
+      }
+
+      // 8. durable O_EXCL 发布 fresh transaction.lock；禁止覆盖/内部重试
+      await durableWriteLeaf(
+        join(metadataRoot, TRANSACTION_LOCK_LEAF),
+        metadataRoot,
+        freshBytes,
+        freshSha,
+        'transaction-lock',
+        LAUNCHAGENT_LIFECYCLE_CODES.TRANSACTION_IN_PROGRESS,
+      );
+
+      // 9. 再验证 fresh ref、MIR、own claim
+      await verifyLockRefAgainstLeaf(
+        freshTransactionLockRef,
+        TRANSACTION_LOCK_KIND,
+        TRANSACTION_LOCK_LEAF,
+      );
+      await verifyLockRefAgainstLeaf(
+        manualInterventionLockRef,
+        MANUAL_INTERVENTION_LOCK_KIND,
+        MANUAL_INTERVENTION_LOCK_LEAF,
+      );
+      await verifyLeafFile(claimPath, claimBytes, claimSha);
+
+      // 10. 精确删除 own claim → fsync root → 验证 claim 缺失
+      await unlinkOwnedLeaf(RECOVERY_CLAIM_LEAF);
+      await fsyncMetadataRoot();
+      if (await leafExists(RECOVERY_CLAIM_LEAF)) invalid();
+
+      // 11. 返回深冻结 fresh transaction-lock ref
+      return deepFreeze({
+        kind: TRANSACTION_LOCK_KIND,
+        transactionId: freshRecord.transactionId,
+        ownerNonce: freshRecord.ownerNonce,
+        sha256: freshSha,
+      });
+    });
+  }
+
   async function acquireTransactionLock(input) {
     return withLifecycleErrors(async () => {
       await assertBoundRootLayout();
@@ -1472,6 +1895,9 @@ function createStore(metadataRoot, fs, onDurabilityEvent) {
     acquireManualInterventionLock,
     verifyManualInterventionLock,
     releaseManualInterventionLock,
+    readTransactionLockObservation,
+    readRecoveryClaimObservation,
+    acquireRecoveryLockForManualRepair,
     appendJournal,
     readJournal,
     readJournalHeads,

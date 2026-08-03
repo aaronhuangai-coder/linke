@@ -95,6 +95,9 @@ const LOCK_KEYS = Object.freeze([
   'schemaVersion', 'transactionId', 'ownerPid', 'ownerNonce',
   'bootSessionIdentity', 'processStartIdentity',
 ]);
+/** Task 6B.0 默认 fake process identity 固定字面（仅测试观测，不进 crash image）。 */
+const FAKE_BOOT_SESSION_VALUE = 'fake-boot-session-v1';
+const FAKE_PROCESS_START_VALUE = 'fake-process-start-v1';
 function harnessError(message) {
   return new Error(`launchagent-harness:${message}`);
 }
@@ -336,6 +339,9 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   let crashImage = null;
   let crashImageTaken = false;
   const crashOccurrences = new Map();
+  // Task 6B.0 process-identity 观测：不写入 crash image；resetObservations 复位。
+  let processIdentityCurrentCount = 0;
+  const lockAcquisitionHistory = [];
 
   // crash image 只恢复 durable allowlist；hooks/失败注入/trace/计数保持新 harness 默认。
   if (revivedImage !== null) {
@@ -1124,6 +1130,24 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       if (store.manualInterventionLock !== null) coded(CODE_MIR);
       if (store.transactionLock !== null) coded(CODE_TX);
       store.transactionLock = projection;
+      // 仅成功 acquisition 记入观测历史（失败路径不记录）。
+      lockAcquisitionHistory.push(deepFreeze({
+        kind: 'transaction-lock',
+        record: deepFreeze({
+          schemaVersion: projection.schemaVersion,
+          transactionId: projection.transactionId,
+          ownerPid: projection.ownerPid,
+          ownerNonce: projection.ownerNonce,
+          bootSessionIdentity: {
+            available: projection.bootSessionIdentity.available,
+            value: projection.bootSessionIdentity.value,
+          },
+          processStartIdentity: {
+            available: projection.processStartIdentity.available,
+            value: projection.processStartIdentity.value,
+          },
+        }),
+      }));
       return deepFreeze({
         kind: 'transaction-lock',
         transactionId: projection.transactionId,
@@ -1181,6 +1205,23 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       if (store.transactionLock.ownerNonce === projection.ownerNonce) invalid();
       if (store.manualInterventionLock !== null) coded(CODE_MIR);
       store.manualInterventionLock = projection;
+      lockAcquisitionHistory.push(deepFreeze({
+        kind: 'manual-intervention-lock',
+        record: deepFreeze({
+          schemaVersion: projection.schemaVersion,
+          transactionId: projection.transactionId,
+          ownerPid: projection.ownerPid,
+          ownerNonce: projection.ownerNonce,
+          bootSessionIdentity: {
+            available: projection.bootSessionIdentity.available,
+            value: projection.bootSessionIdentity.value,
+          },
+          processStartIdentity: {
+            available: projection.processStartIdentity.available,
+            value: projection.processStartIdentity.value,
+          },
+        }),
+      }));
       return deepFreeze({
         kind: 'manual-intervention-lock',
         transactionId: projection.transactionId,
@@ -1261,6 +1302,21 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     },
   });
 
+  // Task 6B.0：第九依赖 processIdentityReader（exact current/observe）。
+  // 默认 fake current 返回固定 available 身份；observe 固定 unavailable（Task 3 不调用）。
+  const processIdentityReader = Object.freeze({
+    async current() {
+      processIdentityCurrentCount += 1;
+      return deepFreeze({
+        bootSessionIdentity: { available: true, value: FAKE_BOOT_SESSION_VALUE },
+        processStartIdentity: { available: true, value: FAKE_PROCESS_START_VALUE },
+      });
+    },
+    async observe() {
+      return deepFreeze({ status: 'unavailable' });
+    },
+  });
+
   const dependencies = Object.freeze({
     metadataStore,
     hostInspector,
@@ -1270,6 +1326,7 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     launchctlRunner,
     healthChecker,
     clock,
+    processIdentityReader,
   });
 
   function hostMutationCount() {
@@ -1493,12 +1550,13 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       return dependencies;
     },
 
-    /** Task 4 工厂契约：精确 key 与精确 method（不含 Task 5 mir-lock-release）。 */
+    /** Task 4/6B.0 工厂契约：精确九 key 与精确 method（含 processIdentityReader）。 */
     factoryContract() {
       return deepFreeze({
         keys: [
           'metadataStore', 'hostInspector', 'profileRenderer', 'plistValidator',
           'atomicPublisher', 'launchctlRunner', 'healthChecker', 'clock',
+          'processIdentityReader',
         ],
         methods: {
           metadataStore: [
@@ -1516,6 +1574,7 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
           launchctlRunner: ['run'],
           healthChecker: ['check'],
           clock: ['now', 'newId'],
+          processIdentityReader: ['current', 'observe'],
         },
       });
     },
@@ -2024,9 +2083,21 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       compensationHooks.length = 0;
       revalidateMarks.length = 0;
       exactReceiptRaceTransactionId = null;
+      processIdentityCurrentCount = 0;
+      lockAcquisitionHistory.length = 0;
       for (const key of Object.keys(counters)) counters[key] = 0;
       state.printPhase = { controller: 'inspect', scheduler: 'inspect' };
       state.lastRenderedRuntimeArtifacts = null;
+    },
+
+    /** 只读：成功 lock acquisition 观测历史（detached deep-frozen 副本）。 */
+    lockAcquisitionsForTest() {
+      return deepFreeze(structuredClone(lockAcquisitionHistory));
+    },
+
+    /** 只读：默认 fake processIdentityReader.current 调用计数。 */
+    processIdentityCurrentCountForTest() {
+      return processIdentityCurrentCount;
     },
 
     failNext(eventName) {
