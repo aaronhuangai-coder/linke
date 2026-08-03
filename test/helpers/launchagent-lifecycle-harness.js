@@ -60,6 +60,45 @@ const COMPENSATION_ACTION_SET = new Set([
 ]);
 const COMPENSATION_PHASE_SET = new Set(['intent', 'completed']);
 const COMPENSATION_STATE_PATTERN = /^compensate-([a-z-]+)-(intent|completed)$/;
+/**
+ * Task 1B frozen-chain 拒绝矩阵：闭合 enumerated mutation 词汇（恰 14 个名字）。
+ * mutateFrozenChainForTest 只接受这些名字；不提供 generic callback mutator，
+ * 不进 dependencies/factoryContract/crash-image durable allowlist。
+ */
+const FROZEN_CHAIN_MUTATIONS = Object.freeze(new Set([
+  // Stratum A：persisted compensating envelope（acquire 前于 journal 加载层被拒）
+  'reverse-plan-hash-field-drift',
+  'reverse-plan-order-corruption',
+  'reverse-plan-action-corruption',
+  'reverse-plan-index-corruption',
+  // Stratum B 链文法（逐条合法、hash-linked、head MIR；整链 prefix 被拒）
+  'second-compensating-entry',
+  'duplicate-intent',
+  'completed-without-intent',
+  'open-intent-then-later-intent',
+  'duplicate-completed',
+  'second-mir-marker',
+  'terminal-before-plan-completion',
+  // Stratum B evidence/live 单侧漂移（链不动，只漂移比较的一侧）
+  'candidate-evidence-mismatch',
+  'anchor-evidence-mismatch',
+  'non-current-live-union-mismatch',
+]));
+const FROZEN_CHAIN_ENVELOPE_MUTATIONS = Object.freeze(new Set([
+  'reverse-plan-hash-field-drift',
+  'reverse-plan-order-corruption',
+  'reverse-plan-action-corruption',
+  'reverse-plan-index-corruption',
+]));
+const FROZEN_CHAIN_GRAMMAR_MUTATIONS = Object.freeze(new Set([
+  'second-compensating-entry',
+  'duplicate-intent',
+  'completed-without-intent',
+  'open-intent-then-later-intent',
+  'duplicate-completed',
+  'second-mir-marker',
+  'terminal-before-plan-completion',
+]));
 const FAILABLE_EVENT_SET = new Set([
   'publish-controller', 'publish-scheduler', 'publish-manifest',
   'remove-controller', 'remove-scheduler', 'remove-manifest',
@@ -266,7 +305,8 @@ function makeProfiles(
 
 // ---- Task 5A.2 crash image：module-private brand、闭合 selector 词汇与字节编解码 ----
 const CRASH_IMAGE_BRAND = new WeakSet();
-const CRASH_SELECTOR_KINDS = new Set(['journal-state', 'host-mutation']);
+// Task 6B.2 Task 4A：闭合 event selector，精确捕获 durable cut（仅 harness test API）。
+const CRASH_SELECTOR_KINDS = new Set(['journal-state', 'host-mutation', 'event']);
 const CRASH_HOST_ACTIONS = new Set([
   'publish-controller', 'publish-scheduler', 'publish-manifest',
   'bootout-controller', 'bootout-scheduler',
@@ -274,6 +314,17 @@ const CRASH_HOST_ACTIONS = new Set([
   'remove-controller', 'remove-scheduler', 'remove-manifest',
   'restore-controller', 'restore-scheduler', 'restore-manifest',
   'load-controller', 'load-scheduler', 'stop-controller', 'stop-scheduler',
+]);
+/** Task 4A 闭合 event 名（恰 8 个）；未知名 fail-closed。 */
+const CRASH_EVENT_NAMES = new Set([
+  'attestation-verify',
+  'recovery-claim-durable-old-intact',
+  'old-transaction-lock-removed',
+  'fresh-transaction-lock-published',
+  'recovery-lock-acquire',
+  'receipt-published',
+  'recovery-transaction-lock-released',
+  'mir-lock-released',
 ]);
 
 function validatePositiveOccurrence(value) {
@@ -375,6 +426,10 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   const revalidateMarks = [];
   let clockIndex = 0;
   let idIndex = 0;
+  // Task 6B.2 clock 观测：仅经 clock dependency surface 的 now/newId 调用计数；
+  // 不写入 crash image；不进 dependencies/factoryContract；resetObservations 复位。
+  let clockNowCount = 0;
+  let clockNewIdCount = 0;
   let inodeIndex = 0;
   let nextAnchorOverride = null;
   // Task 5 Step 2：唯一 pending exact receipt race id；不写入 crash image，
@@ -920,8 +975,12 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   });
 
   const clock = Object.freeze({
-    now() { return nowIso(); },
+    now() {
+      clockNowCount += 1;
+      return nowIso();
+    },
     newId() {
+      clockNewIdCount += 1;
       return queuedClockIds.length > 0 ? queuedClockIds.shift() : nextUuid();
     },
   });
@@ -1244,8 +1303,9 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         }
         const latest = latestJournalEntry(store.transactionLock.transactionId);
         if (latest === null || latest.state !== 'manual-intervention-required') invalid();
-        recordSimpleEvent('mir-transaction-lock-release');
+        // MIR handoff 旧 tx release：不触发 recovery-transaction-lock-released。
         store.transactionLock = null;
+        recordSimpleEvent('mir-transaction-lock-release');
         return true;
       }
       if (!lockRefMatches(store.transactionLock, ref, 'transaction-lock')) invalid();
@@ -1255,8 +1315,10 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       const receipt = store.receipts.get(transactionId);
       if (!receipt) invalid();
       assertReceiptAlignedWithTerminal(receipt.projection, receipt.sha256, latest);
-      recordSimpleEvent('lock-release');
+      // 普通 terminal release：durable null 后捕获，先于 observation hook/trace。
       store.transactionLock = null;
+      maybeCaptureCrash('event', 'recovery-transaction-lock-released');
+      recordSimpleEvent('lock-release');
       return true;
     },
 
@@ -1324,9 +1386,11 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         });
       }
       if (store.receipts.has(projection.transactionId)) invalid();
+      // durable receipt 写入完成后捕获；不得复用 mutation 前的 trace 时机。
+      store.receipts.set(projection.transactionId, { projection, sha256: receiptSha });
+      maybeCaptureCrash('event', 'receipt-published');
       counters.receipt += 1;
       recordSimpleEvent('receipt');
-      store.receipts.set(projection.transactionId, { projection, sha256: receiptSha });
       return deepFreeze({
         kind: 'receipt',
         transactionId: projection.transactionId,
@@ -1375,7 +1439,9 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       recordSimpleEvent('attestation-file-sync');
       recordSimpleEvent('attestation-directory-sync');
       const frozen = deepFreeze(structuredClone(projection));
+      // durable attestation 写入完成后捕获，先于 verify observation/trace。
       store.attestations.set(manualRepairConfirmationId, frozen);
+      maybeCaptureCrash('event', 'attestation-verify');
       recordSimpleEvent('attestation-verify');
       return deepFreeze({
         kind: 'manual-repair-attestation',
@@ -1527,13 +1593,17 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         sha256: claimSha,
       });
 
+      // claim durable 完成且旧 tx 仍 intact 时捕获。
       store.recoveryClaim = { record: claimRecord, ref: claimRef };
+      maybeCaptureCrash('event', 'recovery-claim-durable-old-intact');
 
       if (expectedTransactionLockRef !== null) {
         if (!lockRefMatches(store.transactionLock, expectedTransactionLockRef, 'transaction-lock')) {
           coded(CODE_TX);
         }
+        // 仅 expected old tx 非空且成功清 null 后捕获。
         store.transactionLock = null;
+        maybeCaptureCrash('event', 'old-transaction-lock-removed');
       }
 
       if (store.transactionLock !== null) {
@@ -1547,12 +1617,16 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         bootSessionIdentity: { ...freshRecord.bootSessionIdentity },
         processStartIdentity: { ...freshRecord.processStartIdentity },
       };
+      // fresh tx durable 且 claim 仍 present 时捕获；先于 history/observation。
+      maybeCaptureCrash('event', 'fresh-transaction-lock-published');
       lockAcquisitionHistory.push(deepFreeze({
         kind: 'transaction-lock',
         record: deepFreeze(structuredClone(store.transactionLock)),
       }));
 
+      // claim 删除后、fresh tx 已 durable 时捕获 recovery-lock-acquire。
       store.recoveryClaim = null;
+      maybeCaptureCrash('event', 'recovery-lock-acquire');
       // Claim 已精确删除：detached history 仍可证明 coordinator 传入的 claimId/tx/nonce。
       recoveryAcquisitionHistory.push(deepFreeze({
         claimId,
@@ -1702,8 +1776,10 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       const receipt = store.receipts.get(transactionId);
       if (!receipt) invalid();
       assertReceiptAlignedWithTerminal(receipt.projection, receipt.sha256, latest);
-      recordSimpleEvent('mir-lock-release');
+      // MIR durable 释放后捕获，先于 observation hook/trace。
       store.manualInterventionLock = null;
+      maybeCaptureCrash('event', 'mir-lock-released');
+      recordSimpleEvent('mir-lock-release');
       return true;
     },
 
@@ -1853,6 +1929,10 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   }
 
   // ---- Task 5A.2 crash image：只序列化 durable allowlist，禁止 hooks/函数/Buffer 泄露 ----
+  // Task 4A：schemaVersion 保持 1（现有测试只通过 branded capture→revive 闭环，
+  // 无一断言 image.schemaVersion；升 2 无收益）。新增 Task 5 durable 字段
+  // attestations / recoveryClaim 写入同一 v1 image；restore 经 validator/hash/binding 重算，
+  // 禁止盲信 image 字节。
   function captureDurableState() {
     const image = deepFreeze({
       schemaVersion: 1,
@@ -1875,6 +1955,17 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       receipts: [...store.receipts.entries()].map(([key, value]) => [key, structuredClone(value)]),
       transactionLock: structuredClone(store.transactionLock),
       manualInterventionLock: structuredClone(store.manualInterventionLock),
+      // Task 5 durable：attestation Map + 单例 recovery claim（record+ref 或 null）。
+      attestations: [...store.attestations.entries()].map(([key, value]) => [
+        key,
+        structuredClone(value),
+      ]),
+      recoveryClaim: store.recoveryClaim === null
+        ? null
+        : {
+          record: structuredClone(store.recoveryClaim.record),
+          ref: structuredClone(store.recoveryClaim.ref),
+        },
       host: {
         loaded: structuredClone(state.loaded),
         jobIdentity: structuredClone(state.jobIdentity),
@@ -1932,6 +2023,50 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     store.manualInterventionLock = image.manualInterventionLock === null
       ? null
       : validateLockRecord(structuredClone(image.manualInterventionLock));
+    // Task 5 durable restore：validator + key binding；不得盲信 image。
+    if (!Array.isArray(image.attestations)) {
+      throw harnessError('crash image attestations must be an array');
+    }
+    for (const item of image.attestations) {
+      if (!Array.isArray(item) || item.length !== 2) {
+        throw harnessError('crash image attestation entry must be [key, value]');
+      }
+      const [key, value] = item;
+      const projection = validateLaunchAgentManualRepairAttestation(structuredClone(value));
+      if (projection.manualRepairConfirmationId !== key) {
+        throw harnessError('crash image attestation key binding mismatch');
+      }
+      store.attestations.set(key, deepFreeze(projection));
+    }
+    if (image.recoveryClaim === null) {
+      store.recoveryClaim = null;
+    } else if (
+      typeof image.recoveryClaim !== 'object'
+      || Object.getPrototypeOf(image.recoveryClaim) !== Object.prototype
+    ) {
+      throw harnessError('crash image recoveryClaim must be null or plain object');
+    } else {
+      const claimFields = readExactObject(image.recoveryClaim, ['record', 'ref']);
+      // 复用 materializeRecoveryClaim：canonical hash + cross-binding 与 seed/race 同源。
+      // 函数声明在同作用域稍后定义，依赖 JS hoist；restore 仍做 exact ref 对齐。
+      const materialized = materializeRecoveryClaim(structuredClone(claimFields.record));
+      const refIn = readExactObject(claimFields.ref, [
+        'kind', 'claimId', 'transactionId', 'ownerNonce', 'sha256',
+      ]);
+      if (
+        refIn.kind !== materialized.ref.kind
+        || refIn.claimId !== materialized.ref.claimId
+        || refIn.transactionId !== materialized.ref.transactionId
+        || refIn.ownerNonce !== materialized.ref.ownerNonce
+        || refIn.sha256 !== materialized.ref.sha256
+      ) {
+        throw harnessError('crash image recoveryClaim ref/hash mismatch');
+      }
+      store.recoveryClaim = {
+        record: materialized.record,
+        ref: materialized.ref,
+      };
+    }
     Object.assign(state.loaded, image.host.loaded);
     Object.assign(state.jobIdentity, image.host.jobIdentity);
     Object.assign(state.foreignJob, image.host.foreignJob);
@@ -1946,7 +2081,11 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
 
   function maybeCaptureCrash(kind, value) {
     if (crashSelector === null || crashImage !== null || crashSelector.kind !== kind) return;
-    const selected = kind === 'journal-state' ? crashSelector.state : crashSelector.action;
+    const selected = kind === 'journal-state'
+      ? crashSelector.state
+      : kind === 'host-mutation'
+        ? crashSelector.action
+        : crashSelector.event;
     if (selected !== value) return;
     const key = `${kind}:${value}`;
     const occurrence = (crashOccurrences.get(key) ?? 0) + 1;
@@ -2153,12 +2292,12 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         throw harnessError('unknown crash selector kind');
       }
       const kind = kindDescriptor.value;
-      const fields = readExactObject(
-        selector,
-        kind === 'journal-state'
-          ? ['kind', 'state', 'occurrence']
-          : ['kind', 'action', 'occurrence'],
-      );
+      const expectedKeys = kind === 'journal-state'
+        ? ['kind', 'state', 'occurrence']
+        : kind === 'host-mutation'
+          ? ['kind', 'action', 'occurrence']
+          : ['kind', 'event', 'occurrence'];
+      const fields = readExactObject(selector, expectedKeys);
       validatePositiveOccurrence(fields.occurrence);
       if (kind === 'journal-state') {
         if (typeof fields.state !== 'string' || fields.state.length === 0) {
@@ -2169,13 +2308,23 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
           state: fields.state,
           occurrence: fields.occurrence,
         });
-      } else {
+      } else if (kind === 'host-mutation') {
         if (!CRASH_HOST_ACTIONS.has(fields.action)) {
           throw harnessError('unknown crash host action');
         }
         crashSelector = deepFreeze({
           kind,
           action: fields.action,
+          occurrence: fields.occurrence,
+        });
+      } else {
+        // kind === 'event'：闭合八名；未知 event / 额外字段已由 readExactObject fail-closed。
+        if (!CRASH_EVENT_NAMES.has(fields.event)) {
+          throw harnessError('unknown crash event name');
+        }
+        crashSelector = deepFreeze({
+          kind,
+          event: fields.event,
           occurrence: fields.occurrence,
         });
       }
@@ -2633,6 +2782,8 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       revalidateMarks.length = 0;
       exactReceiptRaceTransactionId = null;
       processIdentityCurrentCount = 0;
+      clockNowCount = 0;
+      clockNewIdCount = 0;
       lockAcquisitionHistory.length = 0;
       recoveryAcquisitionHistory.length = 0;
       ownerObserveQueue.length = 0;
@@ -2664,6 +2815,15 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     /** 只读：默认 fake processIdentityReader.current 调用计数。 */
     processIdentityCurrentCountForTest() {
       return processIdentityCurrentCount;
+    },
+
+    /**
+     * 只读：clock dependency surface 的 now/newId 调用计数（deep-frozen exact）。
+     * 证明 attestation/completion-receipt clock 消费次数与 claimId/freshOwnerNonce
+     * newId 消费次数；resetObservations 复位。
+     */
+    clockCallCountsForTest() {
+      return deepFreeze({ now: clockNowCount, newId: clockNewIdCount });
     },
 
     /**
@@ -3385,6 +3545,329 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         mirHostMutationCount: priorCount - 1,
         mirEntrySha256: rewritten.entrySha256,
       });
+    },
+
+    /**
+     * Task 1B test-only：frozen-chain 拒绝矩阵的闭合 enumerated mutation seam。
+     * 只接受 FROZEN_CHAIN_MUTATIONS 恰 14 个名字；无 generic callback mutator；
+     * 不进 dependencies/factoryContract/crash-image durable allowlist/production exports。
+     *
+     * sourceJournal 必须是真实 coordinator persisted 链（逐条 validate + 与 store 链
+     * entrySha256 逐条对齐 = 真实来源证明）；clone/relink 只重算 entry envelope 的
+     * sequence/previousEntrySha256/entrySha256 与 plan hash-binding，绝不从常量合成
+     * 第二个 plan，也不把 malformed 数据伪装成 production-generated。
+     *
+     * Stratum A（envelope 行）：重绑 plan hash 或漂移 hash 字段后重算 envelope，
+     * 恰好留下 compensating 一条不过 validateJournalEntryShape，head 仍 MIR。
+     * Stratum B 链文法行：全 entry 逐条合法 + link 自洽 + head MIR，但整链必须过
+     * 不了 validateLaunchAgentTransactionPrefix。Stratum B evidence/live 行：链
+     * 完全不动且 prefix 仍合法，只漂移 candidate bytes / anchor.loaded / live 文件
+     * 三处比较的一侧。所有前置/后置断言失败一律 harnessError（= setup failure，
+     * 区别于 route rejection）。
+     */
+    mutateFrozenChainForTest(input) {
+      const fields = readExactObject(input, ['transactionId', 'mutation', 'sourceJournal']);
+      const transactionId = requireUuid(fields.transactionId);
+      const mutation = fields.mutation;
+      if (!FROZEN_CHAIN_MUTATIONS.has(mutation)) {
+        throw harnessError(`unknown frozen chain mutation: ${String(mutation)}`);
+      }
+      if (!Array.isArray(fields.sourceJournal) || fields.sourceJournal.length === 0) {
+        throw harnessError('frozen chain mutation requires the real persisted source journal');
+      }
+      const sourceEntries = fields.sourceJournal.map((entry) => {
+        try {
+          return validateJournalEntryShape(structuredClone(entry));
+        } catch {
+          throw harnessError('source journal entries must be individually valid');
+        }
+      });
+      for (const entry of sourceEntries) {
+        if (entry.transactionId !== transactionId) {
+          throw harnessError('source journal transactionId mismatch');
+        }
+      }
+
+      const txEntries = store.journal.filter((entry) => entry.transactionId === transactionId);
+      if (txEntries.length === 0) {
+        throw harnessError('frozen chain mutation requires a persisted transaction journal');
+      }
+      if (txEntries.length !== sourceEntries.length + 1) {
+        throw harnessError('store chain must extend the source journal by exactly the MIR entry');
+      }
+      for (const [index, entry] of sourceEntries.entries()) {
+        if (entry.entrySha256 !== txEntries[index].entrySha256) {
+          throw harnessError('store chain must hash-match the real persisted source journal');
+        }
+      }
+      const head = txEntries[txEntries.length - 1];
+      if (head.state !== 'manual-intervention-required') {
+        throw harnessError('frozen chain mutation requires an MIR head');
+      }
+      if (txEntries.filter((entry) => entry.state === 'compensating').length !== 1) {
+        throw harnessError('frozen chain mutation requires exactly one compensating entry');
+      }
+      const prefixOf = (entries) => validateLaunchAgentTransactionPrefix({
+        entries: entries.map((entry) => structuredClone(entry)),
+      });
+      // 基线链（含 MIR head）必须整链合法，否则是 fixture 构造失败而非目标拒绝层。
+      try {
+        prefixOf(txEntries);
+      } catch {
+        throw harnessError('frozen chain mutation requires a prefix-valid persisted base chain');
+      }
+
+      const clones = txEntries.map((entry) => structuredClone(entry));
+      const mirIndex = clones.length - 1;
+      const compensatingIndex = clones.findIndex((entry) => entry.state === 'compensating');
+      const payload = clones[compensatingIndex].payload;
+      const plan = payload.reversePlan;
+      const isCompensate = (entry) => COMPENSATION_STATE_PATTERN.test(entry.state);
+      const rebindPlanHash = () => {
+        payload.reversePlanSha256 = sha256Hex(Buffer.from(JSON.stringify(plan), 'utf8'));
+      };
+      const relink = () => {
+        let previousEntrySha256 = null;
+        for (const [index, entry] of clones.entries()) {
+          entry.sequence = index;
+          entry.previousEntrySha256 = previousEntrySha256;
+          entry.entrySha256 = computeJournalEntrySha256(entry);
+          previousEntrySha256 = entry.entrySha256;
+        }
+      };
+      let role = null;
+
+      if (mutation === 'reverse-plan-hash-field-drift') {
+        // 只漂移 persisted hash 字段本身（plan 不动），隔离 hash-binding 校验层。
+        const original = payload.reversePlanSha256;
+        payload.reversePlanSha256 = original.startsWith('0')
+          ? `1${original.slice(1)}`
+          : `0${original.slice(1)}`;
+        if (payload.reversePlanSha256 === sha256Hex(Buffer.from(JSON.stringify(plan), 'utf8'))) {
+          throw harnessError('hash-field drift must break the persisted binding');
+        }
+        relink();
+      } else if (mutation === 'reverse-plan-order-corruption') {
+        if (plan.length < 2) throw harnessError('order corruption requires a two-step plan');
+        [plan[0], plan[1]] = [plan[1], plan[0]];
+        rebindPlanHash();
+        relink();
+      } else if (mutation === 'reverse-plan-action-corruption') {
+        if (plan.length < 2) throw harnessError('action corruption requires a two-step plan');
+        [plan[0].action, plan[1].action] = [plan[1].action, plan[0].action];
+        rebindPlanHash();
+        relink();
+      } else if (mutation === 'reverse-plan-index-corruption') {
+        plan[0].index += 1;
+        rebindPlanHash();
+        relink();
+      } else if (mutation === 'second-compensating-entry') {
+        clones.splice(mirIndex, 0, structuredClone(clones[compensatingIndex]));
+        relink();
+      } else if (mutation === 'duplicate-intent') {
+        const open = clones[mirIndex - 1];
+        if (!isCompensate(open) || !open.state.endsWith('-intent')) {
+          throw harnessError('duplicate-intent requires an open intent before the MIR head');
+        }
+        clones.splice(mirIndex, 0, structuredClone(open));
+        relink();
+      } else if (mutation === 'completed-without-intent') {
+        const completedIndex = clones.findIndex((entry) => (
+          isCompensate(entry) && entry.state.endsWith('-completed')
+        ));
+        if (completedIndex === -1) {
+          throw harnessError('completed-without-intent requires a real persisted completed entry');
+        }
+        clones.splice(compensatingIndex + 1, 0, structuredClone(clones[completedIndex]));
+        relink();
+      } else if (mutation === 'open-intent-then-later-intent') {
+        const open = clones[mirIndex - 1];
+        if (!isCompensate(open) || !open.state.endsWith('-intent')) {
+          throw harnessError('later-intent mutation requires an open intent before the MIR head');
+        }
+        const nextStep = plan[open.payload.planIndex + 1];
+        if (nextStep === undefined) {
+          throw harnessError('later-intent mutation requires a later frozen step');
+        }
+        // clone 真实 open intent，仅按 persisted plan 的下一步改写 planIndex/action/state。
+        const later = structuredClone(open);
+        later.state = `compensate-${nextStep.action}-intent`;
+        later.payload.planIndex = nextStep.index;
+        later.payload.action = nextStep.action;
+        clones.splice(mirIndex, 0, later);
+        relink();
+      } else if (mutation === 'duplicate-completed') {
+        const completedIndex = clones.findIndex((entry) => (
+          isCompensate(entry) && entry.state.endsWith('-completed')
+        ));
+        if (completedIndex === -1) {
+          throw harnessError('duplicate-completed requires a real persisted completed entry');
+        }
+        clones.splice(mirIndex, 0, structuredClone(clones[completedIndex]));
+        relink();
+      } else if (mutation === 'second-mir-marker') {
+        clones.push(structuredClone(clones[mirIndex]));
+        relink();
+      } else if (mutation === 'terminal-before-plan-completion') {
+        if (clones.some(isCompensate)) {
+          throw harnessError('terminal-before-completion requires zero persisted compensate entries');
+        }
+        const terminal = structuredClone(clones[mirIndex]);
+        terminal.state = 'recovered';
+        terminal.payload = {
+          hostMutationCount: terminal.payload.hostMutationCount,
+          receiptSha256: clones[compensatingIndex].entrySha256,
+        };
+        clones.splice(mirIndex, 0, terminal);
+        relink();
+      } else if (mutation === 'candidate-evidence-mismatch') {
+        const step = plan.find((candidate) => candidate.evidence.kind === 'candidate');
+        if (step === undefined) {
+          throw harnessError('candidate evidence drift requires a candidate-evidence step');
+        }
+        role = step.role;
+        const key = `${transactionId}:${role}`;
+        const staged = candidates.get(key);
+        if (staged === undefined) {
+          throw harnessError('candidate evidence drift requires a staged candidate');
+        }
+        if (staged.sha256 !== step.evidence.sha256) {
+          throw harnessError('staged candidate must match the frozen evidence before drift');
+        }
+        const drifted = Buffer.concat([
+          staged.bytes,
+          Buffer.from('\n# frozen-candidate-evidence-drift', 'utf8'),
+        ]);
+        if (sha256Hex(drifted) === step.evidence.sha256) {
+          throw harnessError('candidate evidence drift must change the candidate bytes hash');
+        }
+        // 只漂移比较的一侧（candidate bytes）；stored sha256 字段保持与 evidence 一致。
+        candidates.set(key, {
+          bytes: drifted,
+          sha256: staged.sha256,
+          role: staged.role,
+          transactionId: staged.transactionId,
+        });
+      } else if (mutation === 'anchor-evidence-mismatch') {
+        const step = plan.find((candidate) => (
+          candidate.evidence.kind === 'anchor' && candidate.role !== 'manifest'
+        ));
+        if (step === undefined) {
+          throw harnessError('anchor evidence drift requires a non-manifest anchor-evidence step');
+        }
+        role = step.role;
+        const stored = store.anchors.get(step.evidence.anchorId);
+        if (stored === undefined) {
+          throw harnessError('anchor evidence drift requires a persisted anchor');
+        }
+        if (stored.loaded[role] !== step.evidence.loaded) {
+          throw harnessError('anchor loaded must match the frozen evidence before drift');
+        }
+        const drifted = structuredClone(stored);
+        drifted.loaded[role] = !drifted.loaded[role];
+        let projection = null;
+        try {
+          projection = validateLaunchAgentAnchor(drifted);
+        } catch {
+          throw harnessError('anchor evidence drift must stay individually schema-valid');
+        }
+        store.anchors.set(step.evidence.anchorId, deepFreeze(structuredClone(projection)));
+      } else if (mutation === 'non-current-live-union-mismatch') {
+        // 选最后一个 expectedPost.file=absent 且当前 file 已 absent 的 step（非 current
+        // step），放入 candidate bytes + drift 后缀，live identity 落在 frozen union 外。
+        let step = null;
+        for (const candidate of [...plan].reverse()) {
+          if (
+            candidate.expectedPost.file.state === 'absent'
+            && currentFileIdentity(candidate.role) === null
+          ) {
+            step = candidate;
+            break;
+          }
+        }
+        if (step === null) {
+          throw harnessError('live union drift requires a non-current absent-target step');
+        }
+        role = step.role;
+        const key = `${transactionId}:${role}`;
+        const staged = candidates.get(key);
+        if (staged === undefined) {
+          throw harnessError('live union drift requires a staged candidate for the role');
+        }
+        const unionShas = new Set();
+        for (const candidate of plan) {
+          if (candidate.role !== role) continue;
+          for (const expected of [candidate.expectedPre, candidate.expectedPost]) {
+            if (expected.file.state === 'present') unionShas.add(expected.file.sha256);
+          }
+        }
+        const drifted = Buffer.concat([
+          staged.bytes,
+          Buffer.from('\n# frozen-live-union-drift', 'utf8'),
+        ]);
+        if (unionShas.has(sha256Hex(drifted))) {
+          throw harnessError('live union drift must land outside the frozen union boundary');
+        }
+        placeFile(role, drifted);
+      }
+
+      // 后置断言（失败 = setup failure）：head 始终 MIR；Stratum A 恰好 compensating
+      // 一条不过单条校验；B 链行全合法但 prefix 必败；evidence/live 行 prefix 仍合法。
+      if (clones[clones.length - 1].state !== 'manual-intervention-required') {
+        throw harnessError('frozen chain mutation must keep the MIR head');
+      }
+      if (FROZEN_CHAIN_ENVELOPE_MUTATIONS.has(mutation)) {
+        let invalidCount = 0;
+        for (const [index, entry] of clones.entries()) {
+          try {
+            validateJournalEntryShape(entry);
+          } catch {
+            invalidCount += 1;
+            if (index !== compensatingIndex) {
+              throw harnessError('only the persisted compensating entry may fail validation');
+            }
+          }
+        }
+        if (invalidCount !== 1) {
+          throw harnessError('envelope mutation must break exactly the compensating entry');
+        }
+      } else if (FROZEN_CHAIN_GRAMMAR_MUTATIONS.has(mutation)) {
+        for (const entry of clones) {
+          try {
+            validateJournalEntryShape(entry);
+          } catch {
+            throw harnessError(`${mutation} must keep every entry individually valid`);
+          }
+        }
+        let prefixValid = true;
+        try {
+          prefixOf(clones);
+        } catch {
+          prefixValid = false;
+        }
+        if (prefixValid) {
+          throw harnessError(`${mutation} must break the frozen-chain prefix`);
+        }
+      } else {
+        try {
+          prefixOf(clones);
+        } catch {
+          throw harnessError('evidence/live mutation must keep the frozen chain prefix-valid');
+        }
+      }
+
+      const startIndex = store.journal.findIndex((entry) => entry.transactionId === transactionId);
+      store.journal.splice(
+        startIndex,
+        txEntries.length,
+        ...clones.map((entry) => deepFreeze(entry)),
+      );
+      return deepFreeze({ mutation, transactionId, role });
+    },
+
+    /** Task 1B 只读：闭合 mutation 词汇（排序副本），供矩阵 coverage 精确对齐。 */
+    frozenChainMutationNamesForTest() {
+      return deepFreeze([...FROZEN_CHAIN_MUTATIONS].sort());
     },
 
     /**

@@ -9,6 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 
 import {
@@ -18,7 +19,10 @@ import {
   validateLaunchAgentCapabilityProjection,
   validateLaunchAgentConfirmationRecord,
   validateLaunchAgentConsumedConfirmation,
+  validateLaunchAgentJournal,
   validateLaunchAgentManualRepairAttestation,
+  validateLaunchAgentReceipt,
+  validateLaunchAgentTransactionPrefix,
 } from '../src/launchagent-lifecycle/contracts.js';
 import {
   assertAndConsumeLaunchAgentManualRepairAuthority,
@@ -3077,4 +3081,2104 @@ test('MIR-only terminal cleanup recovered host drift with tx absent retains MIR'
   assert.equal(harness.hasManualRepairAttestation(seeded.confirmationId), true);
   assertPublisherHostUnchanged(harness, hostBefore);
   await assertCapabilityReplayDenied(seeded.capability);
+});
+
+// ---------------------------------------------------------------------------
+// V1.46 Task 6B.2 Task 1A RED — frozen manual compensation crash-position matrix.
+//
+// Fixture 真实性：每个 case 先运行真实 coordinator（install / managed-upgrade +
+// before-commit revalidation failure），由生产自身 persist contracts-valid
+// compensating.payload.reversePlan + reversePlanSha256；crash image 在
+// intent-before / intent-persisted-pre / mutation-post 三个崩溃点捕获；
+// MIR journal 经真实 metadataStore surface（appendJournal + MIR release）从该
+// persisted result 成形，MIR lock 经 harness seed seam 放置。禁止手写 reverse plan。
+//
+// 每个有效崩溃位 case 表达未来 frozen-plan resume 语义（当前 production 不实现 →
+// 全部 RED）：绝大多数位点在 authorized manual path 上 classify 为 not-pure →
+// abort 自己 recovery lock → 拒绝 recovery-required；唯一例外是 install 末位 action
+// remove-controller 的 after-action-post 位——production 走 pure-closeout 直接追加
+// recovered，遗漏 current completed pair 闭合，由 exact journal-pair assertion
+// 形成该位点的独立 RED。unknown live-state guard 必须 fail closed，
+// 只允许公共 authority 前导（attestation clock + own recovery lock acquire/abort），
+// 不得有 compensation host mutation / original-transaction journal / receipt 变化。
+// malformed-chain 拒绝矩阵属于 Task 1B，不在本块。
+// ---------------------------------------------------------------------------
+
+const FROZEN_COMMIT_PRIOR = 'a'.repeat(40);
+const FROZEN_COMMIT_NEXT = 'b'.repeat(40);
+const TS_FROZEN_MIR = '2026-08-02T13:00:00.000Z';
+
+/** 生产 buildReversePlan 的已知 plan 顺序；fixture 会再用 persisted plan 精确核对。 */
+const FROZEN_PLAN_ACTION_ORDER = Object.freeze({
+  install: Object.freeze([
+    'stop-scheduler',
+    'stop-controller',
+    'remove-manifest',
+    'remove-scheduler',
+    'remove-controller',
+  ]),
+  'managed-upgrade': Object.freeze([
+    'stop-scheduler',
+    'stop-controller',
+    'restore-manifest',
+    'restore-scheduler',
+    'restore-controller',
+    'load-controller',
+    'load-scheduler',
+  ]),
+});
+
+/** 每个 reachable action 选定的来源 operation（stop-* 两 plan 可达，取 managed-upgrade）。 */
+const FROZEN_CASE_OPERATION = Object.freeze({
+  'stop-scheduler': 'managed-upgrade',
+  'stop-controller': 'managed-upgrade',
+  'remove-manifest': 'install',
+  'remove-scheduler': 'install',
+  'remove-controller': 'install',
+  'restore-manifest': 'managed-upgrade',
+  'restore-scheduler': 'managed-upgrade',
+  'restore-controller': 'managed-upgrade',
+  'load-controller': 'managed-upgrade',
+  'load-scheduler': 'managed-upgrade',
+});
+
+const FROZEN_CRASH_POSITIONS = Object.freeze([
+  'before-intent',
+  'after-intent-pre',
+  'after-action-post',
+]);
+
+const FROZEN_COMPENSATION_CASES = Object.freeze(
+  Object.entries(FROZEN_CASE_OPERATION).flatMap(([action, operation]) => (
+    FROZEN_CRASH_POSITIONS.map((position) => Object.freeze({ action, operation, position }))
+  )),
+);
+
+const FROZEN_UNKNOWN_ROW = Object.freeze({
+  action: 'restore-controller',
+  operation: 'managed-upgrade',
+  position: 'after-intent-pre',
+});
+
+function frozenInstallInput() {
+  return {
+    sourceCommit: FROZEN_COMMIT_PRIOR,
+    scheduleSeconds: 300,
+    controllerEnvironment: {},
+  };
+}
+
+function frozenUpgradeInput() {
+  return {
+    sourceCommit: FROZEN_COMMIT_NEXT,
+    scheduleSeconds: 600,
+    controllerEnvironment: { PORT: '9090' },
+  };
+}
+
+function frozenCaseIds(n) {
+  const pad4 = String(n).padStart(4, '0');
+  const pad12 = String(n).padStart(12, '0');
+  return Object.freeze({
+    claimId: `6b2a${pad4}-aaaa-4aaa-8aaa-${pad12}`,
+    freshOwnerNonce: `6b2b${pad4}-bbbb-4bbb-8bbb-${pad12}`,
+    confirmationId: `6b2c${pad4}-eeee-4eee-8eee-${pad12}`,
+    requestId: `6b2d${pad4}-dddd-4ddd-8ddd-${pad12}`,
+    mirNonce: `6b2e${pad4}-eeee-4eee-8eee-${pad12}`,
+  });
+}
+
+/** 与生产 journalEntrySha256 同一 canonical subset；仅用于成形 MIR entry。 */
+function frozenJournalEntrySha256(entry) {
+  return createHash('sha256').update(Buffer.from(JSON.stringify({
+    schemaVersion: entry.schemaVersion,
+    transactionId: entry.transactionId,
+    sequence: entry.sequence,
+    previousEntrySha256: entry.previousEntrySha256,
+    operation: entry.operation,
+    state: entry.state,
+    at: entry.at,
+    payload: entry.payload,
+  }), 'utf8')).digest('hex');
+}
+
+function countFrozenEvent(trace, name) {
+  return trace.filter((event) => event === name).length;
+}
+
+const FROZEN_ACTION_VERB = Object.freeze({
+  stop: 'bootout',
+  remove: 'remove',
+  restore: 'publish',
+  load: 'bootstrap',
+});
+
+function frozenVerbFor(action) {
+  const verb = FROZEN_ACTION_VERB[action.split('-')[0]];
+  if (verb === undefined) throw new Error(`unsupported frozen action: ${action}`);
+  return verb;
+}
+
+/** 当前 compensation action 的宿主 side-effect trace event（不直接统计 semantic 名）。 */
+function frozenHostEventFor(action) {
+  return `${frozenVerbFor(action)}-${action.split('-')[1]}`;
+}
+
+/** 与生产 restoredBefore 同规则：role 在 position 之前是否已被 restore（inode 放宽）。 */
+function frozenRestoredBefore(plan, role, position) {
+  return plan.some((step) => (
+    step.role === role && step.action.startsWith('restore-') && step.index < position
+  ));
+}
+
+/**
+ * 崩溃位 live state 必须精确等于 frozen step 的 expectedPre/expectedPost
+ * （inodeExact 规则与生产 matchExpectedLive 一致：restored-before 的 role 只比对
+ * device/sha256/bytes + job，其余逐字段 deepEqual）。
+ */
+function assertFrozenLiveMatches(harness, plan, step, which) {
+  const expected = step[which];
+  const inodeExact = !frozenRestoredBefore(
+    plan,
+    step.role,
+    which === 'expectedPost' ? step.index + 1 : step.index,
+  );
+  const live = harness.liveReversePlanStepState(step.role);
+  if (expected.file.state === 'absent') {
+    assert.equal(live.file.state, 'absent', `${step.action}/${which}: live file must be absent`);
+  } else {
+    assert.equal(live.file.state, 'present', `${step.action}/${which}: live file must be present`);
+    assert.equal(live.file.sha256, expected.file.sha256, `${step.action}/${which}: live sha256`);
+    assert.equal(
+      harness.sha256(harness.fileBytes(step.role)),
+      expected.file.sha256,
+      `${step.action}/${which}: live bytes sha256`,
+    );
+    if (inodeExact) {
+      assert.deepEqual(
+        live.file,
+        expected.file,
+        `${step.action}/${which}: live file identity must be exact`,
+      );
+    } else {
+      assert.equal(live.file.identity.device, expected.file.identity.device);
+      assert.equal(
+        typeof live.file.identity.inode,
+        'string',
+        `${step.action}/${which}: restored file carries a fresh inode`,
+      );
+    }
+  }
+  assert.deepEqual(live.job, expected.job, `${step.action}/${which}: live job must be exact`);
+}
+
+function frozenCrashSelector(row, planIndex, planOrder) {
+  if (row.position === 'before-intent') {
+    return {
+      kind: 'journal-state',
+      state: planIndex === 0
+        ? 'compensating'
+        : `compensate-${planOrder[planIndex - 1]}-completed`,
+      occurrence: 1,
+    };
+  }
+  if (row.position === 'after-intent-pre') {
+    return { kind: 'journal-state', state: `compensate-${row.action}-intent`, occurrence: 1 };
+  }
+  if (row.position === 'after-action-post') {
+    return { kind: 'host-mutation', action: row.action, occurrence: 1 };
+  }
+  throw new Error(`unsupported frozen crash position: ${row.position}`);
+}
+
+/** 运行真实 coordinator 到 recovered，读取生产自身 persisted 的 frozen plan actions。 */
+async function persistedFrozenPlanActions(operation) {
+  const harness = createLaunchAgentLifecycleHarness();
+  if (operation === 'managed-upgrade') {
+    harness.seedInstalled({
+      sourceCommit: FROZEN_COMMIT_PRIOR,
+      loaded: { controller: true, scheduler: true },
+    });
+    harness.resetObservations();
+  }
+  harness.failNextRevalidation('before-commit');
+  const coordinator = createLaunchAgentLifecycleCoordinator(harness.dependencies());
+  const receipt = validateLaunchAgentReceipt(operation === 'managed-upgrade'
+    ? await coordinator.managedUpgrade(frozenUpgradeInput())
+    : await coordinator.install(frozenInstallInput()));
+  assert.equal(receipt.state, 'recovered', 'uninterrupted run must close recovered');
+  const frozen = harness.journalEntries(receipt.transactionId)
+    .find((entry) => entry.state === 'compensating');
+  assert.ok(frozen, 'real coordinator must persist its own compensating entry');
+  assert.ok(Array.isArray(frozen.payload.reversePlan) && frozen.payload.reversePlan.length > 0);
+  assert.equal(
+    frozen.payload.reversePlanSha256,
+    harness.sha256(Buffer.from(JSON.stringify(frozen.payload.reversePlan), 'utf8')),
+    'persisted plan must be hash-bound',
+  );
+  return frozen.payload.reversePlan.map((step) => step.action);
+}
+
+/**
+ * 单个崩溃位 fixture：真实 coordinator persist frozen plan → crash image → revive →
+ * 经真实 metadataStore surface 追加 MIR entry（writer lock 取自 image）→ seed MIR lock →
+ * MIR release 原 tx → mint genuine capability（transactionLockRef:null）→ arm/queue。
+ * 返回驱动 recoverAfterManualRepair 所需的全部 exact 观测锚点。
+ */
+async function buildFrozenCompensationFixture(row, caseNumber) {
+  const planOrder = FROZEN_PLAN_ACTION_ORDER[row.operation];
+  const planIndex = planOrder.indexOf(row.action);
+  assert.ok(planIndex !== -1, `${row.action}: unknown plan action`);
+
+  // 1) 真实 coordinator 运行到自身 persist compensating plan；crash capture 于崩溃位。
+  const runHarness = createLaunchAgentLifecycleHarness();
+  if (row.operation === 'managed-upgrade') {
+    runHarness.seedInstalled({
+      sourceCommit: FROZEN_COMMIT_PRIOR,
+      loaded: { controller: true, scheduler: true },
+    });
+    runHarness.resetObservations();
+  } else if (row.operation !== 'install') {
+    throw new Error(`unsupported frozen fixture operation: ${row.operation}`);
+  }
+  runHarness.failNextRevalidation('before-commit');
+  runHarness.armCrashCapture(frozenCrashSelector(row, planIndex, planOrder));
+  const runCoordinator = createLaunchAgentLifecycleCoordinator(runHarness.dependencies());
+  const runReceipt = validateLaunchAgentReceipt(row.operation === 'managed-upgrade'
+    ? await runCoordinator.managedUpgrade(frozenUpgradeInput())
+    : await runCoordinator.install(frozenInstallInput()));
+  assert.equal(runReceipt.state, 'recovered', 'fixture: uninterrupted run must close recovered');
+  const transactionId = runReceipt.transactionId;
+  const image = runHarness.takeCrashImage();
+
+  // 2) 从 persisted result 成形 crash image；step 一律从 persisted plan 派生并核对。
+  const harness = createLaunchAgentLifecycleHarness({ crashImage: image });
+  const crashEntries = harness.journalEntries(transactionId);
+  const frozen = crashEntries.find((entry) => entry.state === 'compensating');
+  assert.ok(frozen, 'fixture: persisted compensating entry must exist');
+  assert.ok(Array.isArray(frozen.payload.reversePlan) && frozen.payload.reversePlan.length > 0);
+  const frozenHash = frozen.payload.reversePlanSha256;
+  assert.equal(
+    frozenHash,
+    harness.sha256(Buffer.from(JSON.stringify(frozen.payload.reversePlan), 'utf8')),
+    'fixture: persisted reversePlan must match persisted reversePlanSha256',
+  );
+  assert.deepEqual(
+    frozen.payload.reversePlan.map((step) => step.action),
+    planOrder,
+    'fixture: persisted plan action order must equal the production plan order',
+  );
+  const plan = frozen.payload.reversePlan;
+  const step = plan.find((candidate) => candidate.action === row.action);
+  assert.ok(step, `${row.action}: persisted plan must contain the exact selected step`);
+  assert.deepEqual(plan[step.index], step, `${row.action}: plan[index] must be the exact step`);
+  assert.equal(step.index, planIndex, `${row.action}: persisted plan index`);
+
+  // 3) 崩溃位形状与 live state 证明（fixture validity，先于任何 recovery 驱动）。
+  const crashHead = crashEntries.at(-1);
+  if (row.position === 'before-intent') {
+    assert.equal(
+      crashHead.state,
+      planIndex === 0 ? 'compensating' : `compensate-${planOrder[planIndex - 1]}-completed`,
+      `${row.action}/before-intent: crash head must be the prior completed step`,
+    );
+    assertFrozenLiveMatches(harness, plan, step, 'expectedPre');
+  } else if (row.position === 'after-intent-pre') {
+    assert.equal(crashHead.state, `compensate-${row.action}-intent`);
+    assert.equal(crashHead.payload.action, row.action);
+    assert.equal(crashHead.payload.planIndex, step.index);
+    assert.equal(crashHead.payload.reversePlanSha256, frozenHash);
+    assertFrozenLiveMatches(harness, plan, step, 'expectedPre');
+  } else {
+    assert.equal(crashHead.state, `compensate-${row.action}-intent`);
+    assert.equal(crashHead.payload.action, row.action);
+    assert.equal(crashHead.payload.planIndex, step.index);
+    assert.equal(crashHead.payload.reversePlanSha256, frozenHash);
+    assertFrozenLiveMatches(harness, plan, step, 'expectedPost');
+    assert.equal(
+      crashEntries.some((entry) => entry.state === `compensate-${row.action}-completed`),
+      false,
+      `${row.action}/after-action-post: current completed entry must be absent`,
+    );
+  }
+
+  // 4) MIR journal 成形：经真实 appendJournal（writer = image tx lock），hmc 镜像
+  // 生产 enterManualIntervention 记账（post 位 mutation 已计入 context）。
+  const imageTxLockRef = {
+    kind: 'transaction-lock',
+    transactionId: image.transactionLock.transactionId,
+    ownerNonce: image.transactionLock.ownerNonce,
+    sha256: harness.sha256(Buffer.from(JSON.stringify(image.transactionLock), 'utf8')),
+  };
+  const mirEntry = {
+    schemaVersion: 1,
+    transactionId,
+    sequence: crashHead.sequence + 1,
+    previousEntrySha256: crashHead.entrySha256,
+    operation: row.operation,
+    state: 'manual-intervention-required',
+    at: TS_FROZEN_MIR,
+    payload: {
+      hostMutationCount: crashHead.payload.hostMutationCount
+        + (row.position === 'after-action-post' ? 1 : 0),
+    },
+  };
+  mirEntry.entrySha256 = frozenJournalEntrySha256(mirEntry);
+  validateLaunchAgentJournal(mirEntry);
+  await harness.dependencies().metadataStore.appendJournal({
+    entry: mirEntry,
+    expectedPrior: {
+      transactionId,
+      sequence: crashHead.sequence,
+      entrySha256: crashHead.entrySha256,
+    },
+    writerLockRef: imageTxLockRef,
+  });
+  assert.deepEqual(
+    harness.journalStates(transactionId),
+    [...crashEntries.map((entry) => entry.state), 'manual-intervention-required'],
+    'fixture: MIR must follow the crash-position entries',
+  );
+
+  // 5) MIR lock + MIR release 原 tx（生产 MIR handoff 的 durable 终态）。
+  const ids = frozenCaseIds(caseNumber);
+  const mirRef = harness.seedManualInterventionLock(lockRecord(transactionId, ids.mirNonce));
+  await harness.dependencies().metadataStore.releaseTransactionLock(imageTxLockRef, {
+    manualInterventionLockRef: mirRef,
+  });
+  assert.deepEqual(
+    harness.lockState(),
+    { transactionLock: false, manualInterventionLock: true },
+    'fixture: MIR handoff must leave MIR held and tx absent',
+  );
+
+  // 6) public authorize 铸造 genuine capability；tx 已 absent → 绑定 null。
+  const anchor = harness.anchorsWritten().find((candidate) => (
+    candidate.transactionId === transactionId
+  ));
+  assert.ok(anchor, 'fixture: operation anchor must be persisted');
+  const { capability, confirmationId } = await mintGenuineCapability({
+    mirTransactionId: transactionId,
+    mirLockRef: mirRef,
+    transactionLockRef: null,
+    anchorId: anchor.anchorId,
+    confirmationId: ids.confirmationId,
+    manualRepairRequestId: ids.requestId,
+  });
+
+  harness.resetObservations();
+  harness.armPostLockSnapshotEvent();
+  harness.queueClockIds([ids.claimId, ids.freshOwnerNonce]);
+  const hostBefore = harness.sentinels();
+  const clockBefore = harness.clockCallCountsForTest();
+
+  return {
+    row,
+    harness,
+    capability,
+    confirmationId,
+    transactionId,
+    anchorId: anchor.anchorId,
+    plan,
+    step,
+    frozenHash,
+    crashEntries,
+    mirEntry,
+    mirRef,
+    runReceipt,
+    ids,
+    hostBefore,
+    clockBefore,
+  };
+}
+
+/** 未来 frozen-plan resume 语义（当前 production 不实现 → 全部 RED）。 */
+async function assertFrozenResumeResult(fixture, result) {
+  const {
+    row,
+    harness,
+    transactionId,
+    anchorId,
+    plan,
+    step,
+    frozenHash,
+    crashEntries,
+    mirEntry,
+    runReceipt,
+    ids,
+    hostBefore,
+    clockBefore,
+  } = fixture;
+
+  // recovered receipt 身份与记账：与不间断 recovered run 完全同一 transaction/anchor/
+  // sourceCommit/hostMutationCount（mutation 是物理事件，resume 不得重复或遗漏计数）。
+  assert.equal(result.state, 'recovered');
+  assert.equal(result.success, false);
+  assert.equal(result.outcome, 'recovered');
+  assert.equal(result.operation, row.operation);
+  assert.equal(result.transactionId, transactionId);
+  assert.equal(result.sourceCommit, runReceipt.sourceCommit);
+  assert.equal(result.anchorId, anchorId);
+  assert.equal(
+    result.hostMutationCount,
+    runReceipt.hostMutationCount,
+    'resume must account exactly the mutations of the uninterrupted recovered run',
+  );
+  const expectedRoleOutcome = row.operation === 'install' ? 'removed' : 'restored';
+  assert.equal(result.roles.controller.outcome, expectedRoleOutcome);
+  assert.equal(result.roles.scheduler.outcome, expectedRoleOutcome);
+  assert.equal(result.roles.controller.changed, true);
+  assert.equal(result.roles.scheduler.changed, true);
+  assert.equal(typeof result.completedAt, 'string');
+
+  // original-transaction journal + MIR entry 逐字节保留；resume 只向后追加。
+  const entries = harness.journalEntries(transactionId);
+  const preservedPrefix = [...crashEntries, mirEntry];
+  assert.deepEqual(
+    entries.slice(0, preservedPrefix.length),
+    preservedPrefix,
+    'original crash-position entries and the MIR entry must be preserved exact',
+  );
+  const appended = entries.slice(preservedPrefix.length);
+  const expectedAppendedStates = [];
+  if (row.position !== 'before-intent') {
+    // intent 已持久化：只补 current completed（pre 位恰好执行一次；post 位只补账不重放）。
+    expectedAppendedStates.push(`compensate-${step.action}-completed`);
+  }
+  for (const remaining of plan.slice(row.position === 'before-intent' ? step.index : step.index + 1)) {
+    expectedAppendedStates.push(`compensate-${remaining.action}-intent`);
+    expectedAppendedStates.push(`compensate-${remaining.action}-completed`);
+  }
+  expectedAppendedStates.push('recovered');
+  assert.deepEqual(
+    appended.map((entry) => entry.state),
+    expectedAppendedStates,
+    'resume must append current completed then the remaining frozen pairs in plan order',
+  );
+
+  // frozen plan 连续性：全 journal 仅一个 compensating、一个 plan hash；追加 intent 全部
+  // 绑定 frozen hash 与 planIndex。
+  const compensatingEntries = entries.filter((entry) => entry.state === 'compensating');
+  assert.equal(compensatingEntries.length, 1, 'must not append a second compensating entry');
+  assert.equal(compensatingEntries[0].payload.reversePlanSha256, frozenHash);
+  for (const intent of appended.filter((entry) => entry.state.endsWith('-intent'))) {
+    const intentStep = plan[intent.payload.planIndex];
+    assert.ok(intentStep, 'appended intent must reference a frozen plan index');
+    assert.equal(intent.state, `compensate-${intentStep.action}-intent`);
+    assert.equal(intent.payload.action, intentStep.action);
+    assert.equal(intent.payload.reversePlanSha256, frozenHash);
+  }
+
+  // terminal + receipt：append 一次、publish 一次、embedded 与持久化逐字节一致。
+  const terminal = entries.at(-1);
+  assert.equal(terminal.state, 'recovered');
+  assert.ok(Object.hasOwn(terminal.payload, 'receipt'), 'terminal must embed the receipt');
+  assert.deepEqual(terminal.payload.receipt, result);
+  assert.equal(
+    terminal.payload.receiptSha256,
+    harness.sha256(Buffer.from(JSON.stringify(terminal.payload.receipt), 'utf8')),
+  );
+  assert.deepEqual(
+    harness.receiptFor(transactionId),
+    result,
+    'must publish exactly the returned recovered receipt',
+  );
+  assert.equal(
+    countFrozenEvent(harness.trace(), 'receipt'),
+    1,
+    'must publish the receipt exactly once',
+  );
+
+  // host 收敛到 anchor 恢复目标：install → owned 目标全移除且 unloaded；
+  // managed-upgrade → prior bytes 精确恢复且 jobs loaded 绑定文件 sha。
+  const snap = harness.hostSnapshot();
+  if (row.operation === 'install') {
+    assert.equal(snap.controller, null, 'install resume must remove controller');
+    assert.equal(snap.scheduler, null, 'install resume must remove scheduler');
+    assert.equal(snap.manifest, null, 'install resume must remove manifest');
+    assert.deepEqual(snap.loaded, { controller: false, scheduler: false });
+    assert.deepEqual(snap.jobIdentity, { controller: null, scheduler: null });
+  } else {
+    const anchor = harness.anchorFor(anchorId);
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      assert.ok(snap[role] !== null, `${role} must be restored`);
+      assert.equal(snap[role].sha256, anchor[role].sha256, `${role} must equal anchor prior bytes`);
+      assert.equal(harness.sha256(harness.fileBytes(role)), anchor[role].sha256);
+    }
+    assert.deepEqual(snap.loaded, { controller: true, scheduler: true });
+    assert.equal(snap.jobIdentity.controller, snap.controller.sha256);
+    assert.equal(snap.jobIdentity.scheduler, snap.scheduler.sha256);
+  }
+
+  // host side effect 显式 before/after：当前 action 在 pre 位恰好执行一次、post 位绝不
+  // 重放；每个剩余 frozen step 恰好执行一次（publisher/remove/bootstrap/bootout 分计数）。
+  const trace = harness.trace();
+  assert.equal(
+    countFrozenEvent(trace, frozenHostEventFor(row.action)),
+    row.position === 'after-action-post' ? 0 : 1,
+    `${row.action}/${row.position}: current side effect must run once pre, never replay post`,
+  );
+  const executedSteps = plan.slice(
+    row.position === 'after-action-post' ? step.index + 1 : step.index,
+  );
+  const expectedVerbCounts = { publish: 0, remove: 0, bootstrap: 0, bootout: 0 };
+  for (const executed of executedSteps) expectedVerbCounts[frozenVerbFor(executed.action)] += 1;
+  const sentinels = harness.sentinels();
+  assert.equal(sentinels.publish, hostBefore.publish + expectedVerbCounts.publish, 'publish count');
+  assert.equal(sentinels.remove, hostBefore.remove + expectedVerbCounts.remove, 'remove count');
+  assert.equal(
+    sentinels.bootstrap,
+    hostBefore.bootstrap + expectedVerbCounts.bootstrap,
+    'bootstrap count',
+  );
+  assert.equal(sentinels.bootout, hostBefore.bootout + expectedVerbCounts.bootout, 'bootout count');
+  assert.equal(sentinels.realLaunchctlCalls, 0);
+
+  // authority/attestation/recovery-lock 流 + 终态后有序释锁 + replay denial。
+  assert.equal(trace[0], 'authority-consumed');
+  assert.ok(trace.includes('attestation-file-sync'));
+  assert.ok(trace.includes('attestation-directory-sync'));
+  assert.ok(trace.includes('attestation-verify'));
+  assert.ok(trace.includes('recovery-lock-acquire'));
+  assert.ok(trace.includes('post-lock-snapshot'));
+  assertOrderedTxThenMirRelease(trace);
+  const locks = harness.lockState();
+  assert.equal(locks.transactionLock, false, 'recovery tx lock must be released');
+  assert.equal(locks.manualInterventionLock, false, 'MIR lock must be released after recovered');
+  assert.deepEqual(harness.recoveryAcquisitionsForTest(), [{
+    claimId: ids.claimId,
+    transactionId,
+    ownerNonce: ids.freshOwnerNonce,
+  }]);
+  assert.equal(harness.hasRecoveryClaim(), false);
+  const attestation = harness.manualRepairAttestationForTest(fixture.confirmationId);
+  assert.ok(attestation, 'attestation must be durable');
+  assert.equal(
+    attestation.mirTransactionId,
+    transactionId,
+    'attestation must bind the exact MIR transaction',
+  );
+  assert.equal(
+    attestation.manualRepairConfirmationId,
+    fixture.confirmationId,
+    'attestation must bind the exact confirmation',
+  );
+  assert.equal(typeof attestation.attestedAt, 'string');
+  assert.ok(attestation.attestedAt <= result.completedAt, 'attestation clock precedes receipt clock');
+
+  // clock 显式 before/after：now delta = expectedAppendedStates.length + 2
+  //（每次 appendJournal 为 entry.at 消耗 1 次 now，全部追加 entry 含 terminal
+  // recovered 已由 expectedAppendedStates 精确列出；+2 = attestation attestedAt +
+  // receipt completedAt）；newId delta = 2（claimId + freshOwnerNonce）。任何额外
+  // clock/id 消费都会打破该 exact delta。
+  const clockAfter = harness.clockCallCountsForTest();
+  assert.deepEqual(clockBefore, { now: 0, newId: 0 }, 'clock counts zeroed before drive');
+  assert.equal(
+    clockAfter.now - clockBefore.now,
+    expectedAppendedStates.length + 2,
+    'exactly one clock per appended journal entry plus attestation and receipt completedAt',
+  );
+  assert.equal(clockAfter.newId - clockBefore.newId, 2, 'exactly claimId + freshOwnerNonce');
+
+  await assertCapabilityReplayDenied(fixture.capability);
+}
+
+test('frozen manual compensation action union is exactly the ten production-reachable actions', async () => {
+  const requiredUnion = [
+    'stop-scheduler',
+    'stop-controller',
+    'remove-manifest',
+    'remove-scheduler',
+    'remove-controller',
+    'restore-manifest',
+    'restore-scheduler',
+    'restore-controller',
+    'load-controller',
+    'load-scheduler',
+  ].sort();
+
+  // union 来自真实 coordinator 各自 persisted 的 compensating plan（非手写常量自证）。
+  const installActions = await persistedFrozenPlanActions('install');
+  const upgradeActions = await persistedFrozenPlanActions('managed-upgrade');
+  assert.deepEqual(installActions, FROZEN_PLAN_ACTION_ORDER.install);
+  assert.deepEqual(upgradeActions, FROZEN_PLAN_ACTION_ORDER['managed-upgrade']);
+  assert.deepEqual([...new Set([...installActions, ...upgradeActions])].sort(), requiredUnion);
+
+  // RED 矩阵恰好覆盖每个 reachable action × 三个崩溃位，无缺失无多余。
+  assert.deepEqual(
+    [...new Set(FROZEN_COMPENSATION_CASES.map((row) => row.action))].sort(),
+    requiredUnion,
+  );
+  for (const action of requiredUnion) {
+    assert.deepEqual(
+      FROZEN_COMPENSATION_CASES.filter((row) => row.action === action)
+        .map((row) => row.position)
+        .sort(),
+      ['after-action-post', 'after-intent-pre', 'before-intent'],
+      `${action}: matrix must cover exactly the three crash positions`,
+    );
+  }
+});
+
+for (const [caseIndex, row] of FROZEN_COMPENSATION_CASES.entries()) {
+  test(`frozen manual compensation ${row.action} ${row.position} resumes the frozen plan through the authorized manual path`, async () => {
+    const fixture = await buildFrozenCompensationFixture(row, caseIndex + 1);
+    const coordinator = createFullCoordinatorWithAuthoritySentinel(
+      fixture.harness,
+      fixture.capability,
+    );
+
+    // Production bug: recoverAfterManualRepair does not resume the frozen plan through
+    // the authorized manual path. 绝大多数位点 classify 为 not-pure → abort own
+    // recovery lock → 拒绝 recovery-required；唯一例外是 install 末位
+    // remove-controller/after-action-post：走 pure-closeout 直接追加 recovered，
+    // 遗漏 current completed pair 闭合，由 exact journal-pair assertion 形成该位点的
+    // 独立 RED。
+    const result = await coordinator.recoverAfterManualRepair(fixture.capability);
+
+    await assertFrozenResumeResult(fixture, result);
+  });
+}
+
+test('frozen manual compensation unknown live state fails closed without mutation and aborts only its own recovery lock', async () => {
+  const fixture = await buildFrozenCompensationFixture(FROZEN_UNKNOWN_ROW, 31);
+  const { harness, transactionId } = fixture;
+
+  // fixture 已证明 live 原本精确等于 current step expectedPre；随后把当前 step role 的
+  // job probe 置为 unknown → live 不再匹配任一 expected boundary。
+  harness.setProbeMode(fixture.step.role, 'unknown');
+
+  const entriesBefore = harness.journalEntries(transactionId);
+  const mirRefBefore = harness.manualInterventionLockRefForTest();
+  assert.deepEqual(mirRefBefore, fixture.mirRef, 'fixture: MIR ref exact before drive');
+  assert.equal(harness.receiptFor(transactionId), null, 'fixture: no receipt before drive');
+  const hostBefore = harness.sentinels();
+  const clockBefore = harness.clockCallCountsForTest();
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, fixture.capability);
+
+  await assert.rejects(
+    () => coordinator.recoverAfterManualRepair(fixture.capability),
+    (error) => {
+      assertLifecycleCode(error, LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      return true;
+    },
+  );
+
+  // 公共 authority 前导必须精确发生：attestation（clock 消费）+ own recovery lock
+  // acquire（claimId/freshOwnerNonce 两个 queued id）；probe 必须真实被咨询。
+  const trace = harness.trace();
+  assert.equal(trace[0], 'authority-consumed');
+  assert.ok(trace.includes('attestation-file-sync'));
+  assert.ok(trace.includes('attestation-directory-sync'));
+  assert.ok(trace.includes('attestation-verify'));
+  assert.ok(trace.includes('recovery-lock-acquire'));
+  assert.ok(trace.includes('post-lock-snapshot'));
+  assert.ok(
+    trace.includes(`inspect-job-${fixture.step.role}`),
+    'unknown live probe must actually be consulted',
+  );
+
+  // 不得有 compensation host mutation / journal mutation / receipt / 终态释锁事件。
+  assert.deepEqual(harness.compensationEvents(), [], 'no compensation journal events');
+  assert.equal(trace.includes('receipt'), false, 'no receipt publish');
+  assert.equal(trace.includes('lock-release'), false, 'no terminal tx release');
+  assert.equal(trace.includes('mir-lock-release'), false, 'no MIR release');
+  assert.equal(trace.includes('claim-resolve'), false, 'no claim resolve');
+  assertPublisherHostUnchanged(harness, hostBefore);
+  assert.equal(
+    harness.sentinels().receipt,
+    hostBefore.receipt,
+    'no receipt-store call/mutation may occur',
+  );
+
+  // clock 显式 before/after：恰好 now=1（attestation attestedAt）且 newId=2
+  //（claimId + freshOwnerNonce）——直接证明没有额外 completion/receipt clock 或 id。
+  const clockAfter = harness.clockCallCountsForTest();
+  assert.deepEqual(clockBefore, { now: 0, newId: 0 }, 'clock counts zeroed before drive');
+  assert.equal(clockAfter.now - clockBefore.now, 1, 'exactly the attestation clock value');
+  assert.equal(clockAfter.newId - clockBefore.newId, 2, 'exactly claimId + freshOwnerNonce');
+
+  // original-transaction journal entries/states 与 receipt presence 完全不变。
+  assert.deepEqual(harness.journalEntries(transactionId), entriesBefore);
+  assert.deepEqual(
+    harness.journalStates(transactionId),
+    entriesBefore.map((entry) => entry.state),
+  );
+  assert.equal(harness.receiptFor(transactionId), null, 'no receipt may appear');
+
+  // own recovery transaction lock 已 acquire 又必须被 abort（释放）；MIR lock/ref 精确保留。
+  assert.deepEqual(harness.recoveryAcquisitionsForTest(), [{
+    claimId: fixture.ids.claimId,
+    transactionId,
+    ownerNonce: fixture.ids.freshOwnerNonce,
+  }]);
+  assert.equal(harness.lockAcquisitionsForTest().length, 1, 'exactly one own lock acquisition');
+  assert.equal(
+    harness.lockState().transactionLock,
+    false,
+    'own recovery lock must be aborted (released)',
+  );
+  assert.equal(harness.lockState().manualInterventionLock, true, 'MIR lock must be retained');
+  assert.deepEqual(harness.manualInterventionLockRefForTest(), mirRefBefore, 'MIR ref retained exact');
+
+  // attestation 已消费且 durable；capability 已烧毁；replay denied。
+  const attestation = harness.manualRepairAttestationForTest(fixture.confirmationId);
+  assert.ok(attestation, 'attestation must be consumed and durable');
+  assert.equal(attestation.mirTransactionId, transactionId);
+  assert.equal(typeof attestation.attestedAt, 'string');
+  assert.equal(harness.hasRecoveryClaim(), false);
+  await assertCapabilityReplayDenied(fixture.capability);
+});
+
+// ---------------------------------------------------------------------------
+// Task 6B.2 Task 1B — frozen-chain 拒绝矩阵（Stratum A envelope / Stratum B semantic）。
+// 每行从真实 coordinator persisted frozen fixture 出发（复用 Task 1A builder：
+// run → crash image → revive → MIR append → MIR lock → genuine capability），
+// 经 harness 闭合 enumerated seam mutateFrozenChainForTest 施加恰一种 durable
+// corruption，再驱动公共 coordinator.recoverAfterManualRepair。
+//
+// Stratum A（acquire 前 envelope 拒绝）：被污染的 persisted entry 过不了
+// validateLaunchAgentJournal / hash-link 加载层，route 在任一 acquisition 之前
+// 拒绝；今天 deny-all 行为已强制 → guard PASS，绝不强造 RED。
+// Stratum B（acquire 后 semantic 拒绝）：entry 逐条合法、hash-linked、head MIR、
+// 可过 6B.1 pre-lock snapshot，但整链文法 / frozen evidence / live union 违例；
+// 当前 production abort 自己的 recovery tx lock（class B），未来 approved target
+// 是 fail-closed class C retain both locks —— 该 lock-state 差异是唯一合法 RED 点。
+// 不绑定 parser 内部错误码/消息；setup/mutator throw 一律是 fixture 失败而非 RED。
+// ---------------------------------------------------------------------------
+
+const FROZEN_REJECTION_CASES = Object.freeze([
+  // —— Stratum A：persisted compensating envelope（4 行，今天 guard PASS）——
+  Object.freeze({
+    caseNumber: 41,
+    mutation: 'reverse-plan-hash-field-drift',
+    stratum: 'A',
+    chainGrammar: false,
+    title: 'a drifted persisted reverse-plan hash field',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 42,
+    mutation: 'reverse-plan-order-corruption',
+    stratum: 'A',
+    chainGrammar: false,
+    title: 'a reordered persisted reverse plan',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 43,
+    mutation: 'reverse-plan-action-corruption',
+    stratum: 'A',
+    chainGrammar: false,
+    title: 'a corrupted persisted reverse-plan action',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 44,
+    mutation: 'reverse-plan-index-corruption',
+    stratum: 'A',
+    chainGrammar: false,
+    title: 'a corrupted persisted reverse-plan index',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  // —— Stratum B 链文法（7 行，今天 RED 于 retain-both-locks 边界）——
+  Object.freeze({
+    caseNumber: 45,
+    mutation: 'second-compensating-entry',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a second compensating entry',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 46,
+    mutation: 'duplicate-intent',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a duplicate intent entry',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'after-intent-pre',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 47,
+    mutation: 'completed-without-intent',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a completed entry without its intent',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-controller',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 48,
+    mutation: 'open-intent-then-later-intent',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'an open intent followed by a later intent',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'after-intent-pre',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 49,
+    mutation: 'duplicate-completed',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a duplicate completed entry',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-controller',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 50,
+    mutation: 'second-mir-marker',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a second manual-intervention-required marker',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 51,
+    mutation: 'terminal-before-plan-completion',
+    stratum: 'B',
+    chainGrammar: true,
+    title: 'a terminal entry before frozen plan completion',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  // —— Stratum B evidence/live 单侧漂移（3 行，链不动）——
+  Object.freeze({
+    caseNumber: 52,
+    mutation: 'candidate-evidence-mismatch',
+    stratum: 'B',
+    chainGrammar: false,
+    title: 'candidate evidence drift',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 53,
+    mutation: 'anchor-evidence-mismatch',
+    stratum: 'B',
+    chainGrammar: false,
+    title: 'anchor evidence drift',
+    baseRow: Object.freeze({
+      operation: 'managed-upgrade',
+      action: 'stop-scheduler',
+      position: 'before-intent',
+    }),
+  }),
+  Object.freeze({
+    caseNumber: 54,
+    mutation: 'non-current-live-union-mismatch',
+    stratum: 'B',
+    chainGrammar: false,
+    title: 'a non-current live union mismatch',
+    baseRow: Object.freeze({
+      operation: 'install',
+      action: 'remove-controller',
+      position: 'before-intent',
+    }),
+  }),
+]);
+
+function frozenRejectionTestName(row) {
+  return row.stratum === 'A'
+    ? `frozen manual compensation rejects ${row.title} before recovery lock acquisition`
+    : `frozen manual compensation rejects ${row.title} retaining both locks after acquisition`;
+}
+
+/**
+ * Task 1B fixture：Task 1A 真实 persisted frozen fixture + 恰一种 seam corruption +
+ * per-stratum fixture proof（A：恰好一条 entry 不过 validateLaunchAgentJournal 且
+ * envelope 自洽、head MIR；B 链行：逐条合法 + sequence/link 自洽 + prefix 必败；
+ * B evidence/live 行：prefix 仍合法 + 单侧漂移证明）。proof 的只读 I/O 不属 route
+ * 观测：之后重新 resetObservations + armPostLockSnapshotEvent（queued clock ids
+ * 不属 reset 范围而保留），再捕获 route 前锚点。
+ */
+async function buildFrozenRejectionFixture(row) {
+  const fixture = await buildFrozenCompensationFixture(row.baseRow, row.caseNumber);
+  const { harness, transactionId } = fixture;
+
+  const mutationResult = harness.mutateFrozenChainForTest({
+    transactionId,
+    mutation: row.mutation,
+    sourceJournal: fixture.crashEntries,
+  });
+  assert.equal(mutationResult.mutation, row.mutation);
+  assert.equal(mutationResult.transactionId, transactionId);
+
+  const entries = harness.journalEntries(transactionId);
+  if (row.stratum === 'A') {
+    let invalidCount = 0;
+    for (const entry of entries) {
+      assert.equal(
+        frozenJournalEntrySha256(entry),
+        entry.entrySha256,
+        `${row.mutation}: entry envelope hash must stay self-consistent`,
+      );
+      try {
+        validateLaunchAgentJournal(entry);
+      } catch {
+        invalidCount += 1;
+      }
+    }
+    assert.equal(
+      invalidCount,
+      1,
+      `${row.mutation}: exactly the persisted compensating entry must fail validation`,
+    );
+    assert.equal(entries.at(-1).state, 'manual-intervention-required', 'head must stay MIR');
+  } else if (row.chainGrammar) {
+    let previousEntrySha256 = null;
+    for (const [index, entry] of entries.entries()) {
+      validateLaunchAgentJournal(entry);
+      assert.equal(
+        frozenJournalEntrySha256(entry),
+        entry.entrySha256,
+        `${row.mutation}: every entry must stay individually valid`,
+      );
+      assert.equal(entry.sequence, index, `${row.mutation}: sequence must stay linked`);
+      assert.equal(
+        entry.previousEntrySha256,
+        previousEntrySha256,
+        `${row.mutation}: previous hash must stay linked`,
+      );
+      previousEntrySha256 = entry.entrySha256;
+    }
+    assert.equal(entries.at(-1).state, 'manual-intervention-required', 'head must stay MIR');
+    assert.throws(
+      () => validateLaunchAgentTransactionPrefix({ entries }),
+      (error) => error instanceof LaunchAgentLifecycleError,
+      `${row.mutation}: mutated chain must fail the frozen-chain prefix`,
+    );
+  } else {
+    // evidence/live 行：链完全未动，prefix 必须仍然合法；只证明比较的一侧漂移。
+    validateLaunchAgentTransactionPrefix({ entries });
+    if (row.mutation === 'candidate-evidence-mismatch') {
+      const step = fixture.plan.find((candidate) => (
+        candidate.evidence.kind === 'candidate' && candidate.role === mutationResult.role
+      ));
+      assert.ok(step, 'fixture: candidate-evidence step must exist');
+      const bytes = await harness.dependencies().metadataStore.readCandidate({
+        kind: 'candidate',
+        transactionId,
+        role: step.role,
+        sha256: step.evidence.sha256,
+      });
+      assert.notEqual(
+        harness.sha256(bytes),
+        step.evidence.sha256,
+        'fixture: candidate bytes must drift from the frozen evidence hash',
+      );
+    } else if (row.mutation === 'anchor-evidence-mismatch') {
+      const step = fixture.plan.find((candidate) => (
+        candidate.evidence.kind === 'anchor' && candidate.role === mutationResult.role
+      ));
+      assert.ok(step, 'fixture: anchor-evidence step must exist');
+      assert.equal(step.evidence.anchorId, fixture.anchorId);
+      const anchor = harness.anchorFor(fixture.anchorId);
+      assert.notEqual(
+        anchor.loaded[step.role],
+        step.evidence.loaded,
+        'fixture: anchor loaded must drift from the frozen evidence',
+      );
+    } else if (row.mutation === 'non-current-live-union-mismatch') {
+      const role = mutationResult.role;
+      const live = harness.liveReversePlanStepState(role);
+      assert.equal(live.file.state, 'present', 'fixture: drifted role file must be present');
+      const unionShas = new Set();
+      for (const candidate of fixture.plan) {
+        if (candidate.role !== role) continue;
+        for (const expected of [candidate.expectedPre, candidate.expectedPost]) {
+          if (expected.file.state === 'present') unionShas.add(expected.file.sha256);
+        }
+      }
+      assert.ok(
+        !unionShas.has(live.file.sha256),
+        'fixture: live identity must land outside the frozen union boundary',
+      );
+      // non-current 语义：current step 一侧绝不漂移。
+      assertFrozenLiveMatches(harness, fixture.plan, fixture.step, 'expectedPre');
+    } else {
+      throw new Error(`unsupported non-chain rejection mutation: ${row.mutation}`);
+    }
+  }
+
+  harness.resetObservations();
+  harness.armPostLockSnapshotEvent();
+  const entriesBefore = harness.journalEntries(transactionId);
+  const statesBefore = harness.journalStates(transactionId);
+  const mirRefBefore = harness.manualInterventionLockRefForTest();
+  assert.deepEqual(mirRefBefore, fixture.mirRef, 'fixture: MIR ref exact before drive');
+  assert.equal(harness.receiptFor(transactionId), null, 'fixture: no receipt before drive');
+  const hostBefore = harness.sentinels();
+  const clockBefore = harness.clockCallCountsForTest();
+  return {
+    ...fixture,
+    mutationResult,
+    entriesBefore,
+    statesBefore,
+    mirRefBefore,
+    hostBefore,
+    clockBefore,
+  };
+}
+
+/** Stratum A/B 共享 route 后不变量：authority/attestation 前导 + 零 forbidden mutation。 */
+function assertFrozenRejectionCommonInvariants(fixture) {
+  const { harness, transactionId } = fixture;
+  const trace = harness.trace();
+  assert.equal(trace[0], 'authority-consumed', 'capability consume must be the first event');
+  assert.ok(trace.includes('attestation-file-sync'), 'attestation write must be durable');
+  assert.ok(trace.includes('attestation-directory-sync'), 'attestation fsync must be durable');
+  assert.ok(trace.includes('attestation-verify'), 'attestation read-back must occur');
+  for (const forbidden of [
+    'receipt',
+    'lock-release',
+    'mir-lock-release',
+    'mir-transaction-lock-release',
+    'claim-resolve',
+  ]) {
+    assert.equal(trace.includes(forbidden), false, `forbidden event must not appear: ${forbidden}`);
+  }
+  assert.deepEqual(harness.compensationEvents(), [], 'no compensation journal events');
+  assertPublisherHostUnchanged(harness, fixture.hostBefore);
+  assert.equal(
+    harness.sentinels().receipt,
+    fixture.hostBefore.receipt,
+    'no receipt-store call/mutation may occur',
+  );
+  assert.deepEqual(fixture.clockBefore, { now: 0, newId: 0 }, 'clock counts zeroed before drive');
+  assert.deepEqual(harness.journalEntries(transactionId), fixture.entriesBefore);
+  assert.deepEqual(harness.journalStates(transactionId), fixture.statesBefore);
+  assert.equal(harness.receiptFor(transactionId), null, 'no receipt may appear');
+  assert.equal(harness.lockState().manualInterventionLock, true, 'MIR lock must be retained');
+  assert.deepEqual(
+    harness.manualInterventionLockRefForTest(),
+    fixture.mirRefBefore,
+    'MIR ref retained exact',
+  );
+  const attestation = harness.manualRepairAttestationForTest(fixture.confirmationId);
+  assert.ok(attestation, 'attestation must be consumed and durable');
+  assert.equal(attestation.mirTransactionId, transactionId);
+  assert.equal(attestation.manualRepairConfirmationId, fixture.confirmationId);
+  assert.equal(typeof attestation.attestedAt, 'string');
+  assert.equal(harness.hasRecoveryClaim(), false);
+  return trace;
+}
+
+/**
+ * Stratum A：公共 route 在任一 acquisition 之前拒绝（不绑定 parser 内部 code）。
+ * clock delta 恰 {now:1, newId:0}；无任何 own tx/recovery lock acquisition。
+ */
+async function assertFrozenStratumARejection(fixture) {
+  const { harness } = fixture;
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, fixture.capability);
+  await assert.rejects(
+    () => coordinator.recoverAfterManualRepair(fixture.capability),
+    (error) => {
+      assert.ok(error instanceof LaunchAgentLifecycleError, 'rejection must be a lifecycle error');
+      return true;
+    },
+  );
+  const trace = assertFrozenRejectionCommonInvariants(fixture);
+  assertNoAcquireOrPostLock(trace);
+  const clockAfter = harness.clockCallCountsForTest();
+  assert.equal(clockAfter.now - fixture.clockBefore.now, 1, 'exactly the attestation clock');
+  assert.equal(clockAfter.newId - fixture.clockBefore.newId, 0, 'no acquisition id may be consumed');
+  assert.deepEqual(harness.lockAcquisitionsForTest(), [], 'no own tx lock acquisition');
+  assert.deepEqual(harness.recoveryAcquisitionsForTest(), [], 'no recovery lock acquisition');
+  assert.equal(harness.lockState().transactionLock, false, 'no own recovery tx lock may exist');
+  await assertCapabilityReplayDenied(fixture.capability);
+}
+
+/**
+ * Stratum B：公共 route 完成 authority 前导 + 恰两个 newId + 一次 own recovery
+ * acquisition 后拒绝（RECOVERY_REQUIRED = 当前 class B 与未来 class C 的公共 route
+ * code；不绑定 parser 内部 code）。唯一预期 RED 点在最后：未来 target retain both
+ * locks，当前 production abort 自己的 recovery tx lock。
+ */
+async function assertFrozenStratumBRejection(fixture) {
+  const { harness, transactionId } = fixture;
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, fixture.capability);
+  await assert.rejects(
+    () => coordinator.recoverAfterManualRepair(fixture.capability),
+    (error) => {
+      assertLifecycleCode(error, LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      return true;
+    },
+  );
+  const trace = assertFrozenRejectionCommonInvariants(fixture);
+  assert.ok(trace.includes('recovery-lock-acquire'), 'own recovery lock acquisition must occur');
+  assert.ok(trace.includes('post-lock-snapshot'), 'post-lock snapshot must occur');
+  const clockAfter = harness.clockCallCountsForTest();
+  assert.equal(clockAfter.now - fixture.clockBefore.now, 1, 'exactly the attestation clock');
+  assert.equal(
+    clockAfter.newId - fixture.clockBefore.newId,
+    2,
+    'exactly claimId + freshOwnerNonce',
+  );
+  assert.deepEqual(harness.recoveryAcquisitionsForTest(), [{
+    claimId: fixture.ids.claimId,
+    transactionId,
+    ownerNonce: fixture.ids.freshOwnerNonce,
+  }]);
+  assert.equal(harness.lockAcquisitionsForTest().length, 1, 'exactly one own lock acquisition');
+  await assertCapabilityReplayDenied(fixture.capability);
+
+  // —— 唯一预期 RED 点（未来 class C fail-closed target：retain both locks 且不追加
+  // journal/receipt、不变 host、烧毁 authority）。当前 production class B abort
+  // 自己的 recovery tx lock → 以下断言今天失败；此外不得有任何其它失败。 ——
+  assert.equal(
+    harness.lockState().transactionLock,
+    true,
+    'future malformed-chain target must retain the acquired recovery tx lock',
+  );
+  const retained = harness.transactionLockRefForTest();
+  assert.equal(retained.transactionId, transactionId, 'retained lock must bind the MIR transaction');
+  assert.equal(
+    retained.ownerNonce,
+    fixture.ids.freshOwnerNonce,
+    'retained lock must bind the fresh owner nonce',
+  );
+}
+
+for (const row of FROZEN_REJECTION_CASES) {
+  test(frozenRejectionTestName(row), async () => {
+    const fixture = await buildFrozenRejectionFixture(row);
+    if (row.stratum === 'A') {
+      await assertFrozenStratumARejection(fixture);
+    } else {
+      await assertFrozenStratumBRejection(fixture);
+    }
+  });
+}
+
+test('frozen manual compensation rejection matrix covers the required durable corruptions exactly once', () => {
+  // 表与 harness 闭合 enumerated 词汇精确一致：无缺失、无多余、无 generic mutator。
+  const harnessNames = createLaunchAgentLifecycleHarness().frozenChainMutationNamesForTest();
+  assert.deepEqual(
+    FROZEN_REJECTION_CASES.map((row) => row.mutation).sort(),
+    harnessNames,
+  );
+
+  // 每个要求的 durable corruption 恰好一次；caseNumber 41–54 唯一连续。
+  assert.equal(FROZEN_REJECTION_CASES.length, 14);
+  assert.deepEqual(
+    FROZEN_REJECTION_CASES.map((row) => row.caseNumber),
+    [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54],
+  );
+  assert.equal(
+    new Set(FROZEN_REJECTION_CASES.map((row) => row.mutation)).size,
+    FROZEN_REJECTION_CASES.length,
+    'each mutation must appear exactly once',
+  );
+
+  // 分层：恰好 4 行 Stratum A envelope；10 行 Stratum B，其中 7 行链文法。
+  const stratumA = FROZEN_REJECTION_CASES.filter((row) => row.stratum === 'A');
+  const stratumB = FROZEN_REJECTION_CASES.filter((row) => row.stratum === 'B');
+  assert.equal(stratumA.length, 4, 'exactly the four envelope corruptions are Stratum A');
+  assert.equal(stratumB.length, 10, 'the remaining ten corruptions are Stratum B');
+  assert.equal(
+    stratumB.filter((row) => row.chainGrammar).length,
+    7,
+    'exactly the seven chain-grammar corruptions',
+  );
+  assert.ok(stratumA.every((row) => row.chainGrammar === false));
+
+  // 每行 baseRow 必须是真实可达 plan action × 受支持 crash position；
+  // 测试名必须带冻结前缀。
+  for (const row of FROZEN_REJECTION_CASES) {
+    assert.ok(
+      FROZEN_PLAN_ACTION_ORDER[row.baseRow.operation].includes(row.baseRow.action),
+      `${row.mutation}: base action must be plan-reachable`,
+    );
+    assert.ok(
+      FROZEN_CRASH_POSITIONS.includes(row.baseRow.position),
+      `${row.mutation}: base position must be supported`,
+    );
+    assert.ok(
+      frozenRejectionTestName(row).startsWith('frozen manual compensation'),
+      `${row.mutation}: test name must carry the frozen prefix`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 6B.2 Task 4B — 11 窗口 fresh-restart（manual repair crash window）。
+// 生产可达 frozen fixture：install / stop-scheduler / before-intent。
+// 首轮预置 residual old transaction lock + owner dead×2，经真实 acquire 覆盖
+// old-intact → old-removed → fresh-published → claim-cleared；crash capture 不中止
+// 首轮，完成后 takeCrashImage → 丢弃 live → branded fresh revive + 新授权驱动。
+// 禁止私有 capability 伪造 / helper 直接终态 / 直接改 receipt·locks。
+// ---------------------------------------------------------------------------
+
+const CRASH_WINDOW_BASE_ROW = Object.freeze({
+  operation: 'install',
+  action: 'stop-scheduler',
+  position: 'before-intent',
+});
+
+/** crash image 顶层 durable allowlist；只查 own keys/types，不 dump 整图。 */
+const CRASH_IMAGE_TOP_KEYS = Object.freeze([
+  'schemaVersion',
+  'files',
+  'candidates',
+  'journal',
+  'anchors',
+  'receipts',
+  'transactionLock',
+  'manualInterventionLock',
+  'attestations',
+  'recoveryClaim',
+  'host',
+  'sequence',
+]);
+
+const CRASH_WINDOW_CASES = Object.freeze([
+  Object.freeze({
+    name: 'attestation-verify',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'attestation-verify',
+      occurrence: 1,
+    }),
+    family: 'early',
+  }),
+  Object.freeze({
+    name: 'recovery-claim-durable-old-intact',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'recovery-claim-durable-old-intact',
+      occurrence: 1,
+    }),
+    family: 'claim',
+    resolveStatus: 'old-intact',
+  }),
+  Object.freeze({
+    name: 'old-transaction-lock-removed',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'old-transaction-lock-removed',
+      occurrence: 1,
+    }),
+    family: 'claim',
+    resolveStatus: 'transaction-lock-absent',
+  }),
+  Object.freeze({
+    name: 'fresh-transaction-lock-published',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'fresh-transaction-lock-published',
+      occurrence: 1,
+    }),
+    family: 'claim',
+    resolveStatus: 'fresh-published',
+  }),
+  Object.freeze({
+    name: 'recovery-lock-acquire',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'recovery-lock-acquire',
+      occurrence: 1,
+    }),
+    family: 'post-acquire',
+  }),
+  Object.freeze({
+    name: 'compensation-host-action',
+    selector: Object.freeze({
+      kind: 'host-mutation',
+      action: 'stop-scheduler',
+      occurrence: 1,
+    }),
+    family: 'compensation-host',
+  }),
+  Object.freeze({
+    name: 'compensation-completed',
+    selector: Object.freeze({
+      kind: 'journal-state',
+      state: 'compensate-stop-scheduler-completed',
+      occurrence: 1,
+    }),
+    family: 'compensation-completed',
+  }),
+  Object.freeze({
+    name: 'terminal-journal',
+    selector: Object.freeze({
+      kind: 'journal-state',
+      state: 'recovered',
+      occurrence: 1,
+    }),
+    family: 'closeout-terminal',
+  }),
+  Object.freeze({
+    name: 'receipt-published',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'receipt-published',
+      occurrence: 1,
+    }),
+    family: 'closeout-receipt',
+  }),
+  Object.freeze({
+    name: 'recovery-transaction-lock-released',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'recovery-transaction-lock-released',
+      occurrence: 1,
+    }),
+    family: 'closeout-tx-release',
+  }),
+  Object.freeze({
+    name: 'mir-lock-released',
+    selector: Object.freeze({
+      kind: 'event',
+      event: 'mir-lock-released',
+      occurrence: 1,
+    }),
+    family: 'closeout-mir-release',
+  }),
+]);
+
+function crashWindowIds(caseNumber, round) {
+  const pad4 = String(caseNumber).padStart(4, '0');
+  const pad12 = String(caseNumber).padStart(12, '0');
+  const r = round === 1 ? '1' : round === 2 ? '2' : '3';
+  // 仅 0-9a-f；首段 8 hex，round/case 嵌入保证互不冲突。
+  return Object.freeze({
+    claimId: `c4b${r}${pad4}-aaaa-4aaa-8aaa-${pad12}`,
+    freshOwnerNonce: `f4b${r}${pad4}-bbbb-4bbb-8bbb-${pad12}`,
+    confirmationId: `a4b${r}${pad4}-eeee-4eee-8eee-${pad12}`,
+    requestId: `d4b${r}${pad4}-dddd-4ddd-8ddd-${pad12}`,
+    residualOldNonce: `e4b0${pad4}-ffff-4fff-8fff-${pad12}`,
+  });
+}
+
+function assertCrashImageSafeSurface(image, label) {
+  assert.ok(image !== null && typeof image === 'object', `${label}: image present`);
+  const ownKeys = Reflect.ownKeys(image);
+  assert.ok(ownKeys.every((key) => typeof key === 'string'), `${label}: keys are strings`);
+  assert.deepEqual(
+    [...ownKeys].sort(),
+    [...CRASH_IMAGE_TOP_KEYS].sort(),
+    `${label}: crash image own keys must equal durable allowlist`,
+  );
+  for (const forbidden of [
+    'capability',
+    'authority',
+    'brand',
+    'hooks',
+    'trace',
+    'env',
+    'secret',
+    'path',
+    'rawPath',
+    'failureInjection',
+    'process',
+  ]) {
+    assert.equal(Object.hasOwn(image, forbidden), false, `${label}: no ${forbidden}`);
+  }
+  for (const key of ownKeys) {
+    assert.notEqual(typeof image[key], 'function', `${label}: ${key} must not be function`);
+  }
+  assert.equal(image.schemaVersion, 1, `${label}: schemaVersion 1`);
+  assert.ok(Array.isArray(image.attestations), `${label}: attestations array`);
+  assert.ok(
+    image.recoveryClaim === null || typeof image.recoveryClaim === 'object',
+    `${label}: recoveryClaim null|object`,
+  );
+}
+
+/**
+ * 首轮：frozen MIR fixture + residual old tx + owner dead×2 + arm crash selector。
+ * 真实 recoverAfterManualRepair 跑完全程；capture 不中止；返回 image 与 exact 锚点。
+ */
+async function buildCrashWindowCapturedRun(row, caseNumber) {
+  const base = await buildFrozenCompensationFixture(CRASH_WINDOW_BASE_ROW, caseNumber);
+  const {
+    harness,
+    transactionId,
+    mirRef,
+    anchorId,
+    plan,
+    step,
+    frozenHash,
+    crashEntries,
+    mirEntry,
+    runReceipt,
+    ids: fixtureIds,
+  } = base;
+
+  // residual old nonce 独立；claimId/freshOwnerNonce 复用 fixture 已 queue 的 ids
+  // （resetObservations 不清 clock 队列，禁止二次 queueClockIds）。
+  const residualIds = crashWindowIds(caseNumber, 1);
+  const residualOldRecord = lockRecord(transactionId, residualIds.residualOldNonce);
+  const residualOldRef = harness.seedTransactionLock(residualOldRecord);
+  assert.deepEqual(
+    harness.transactionLockRefForTest(),
+    residualOldRef,
+    'fixture: residual old transaction lock must be exact',
+  );
+  assert.deepEqual(
+    harness.lockState(),
+    { transactionLock: true, manualInterventionLock: true },
+    'fixture: residual old tx + MIR both present before first resume',
+  );
+
+  // 重新 mint：绑定 residual old（fixture 自带 null-bound capability 不使用）。
+  // confirmation/request 用本行独立 UUID，避免与 fixture 铸造冲突。
+  const { capability, confirmationId } = await mintGenuineCapability({
+    mirTransactionId: transactionId,
+    mirLockRef: mirRef,
+    transactionLockRef: residualOldRef,
+    anchorId,
+    confirmationId: residualIds.confirmationId,
+    manualRepairRequestId: residualIds.requestId,
+  });
+
+  // 保留 fixture 已 queue 的 claimId/freshOwnerNonce；只重装观测与 crash selector。
+  harness.resetObservations();
+  harness.armPostLockSnapshotEvent();
+  harness.armOwnerObserveStatuses(['dead', 'dead']);
+  harness.armCrashCapture(structuredClone(row.selector));
+  // clock 队列仍持有 fixtureIds（reset 不清队列）——不得再 queue。
+
+  const firstIds = Object.freeze({
+    claimId: fixtureIds.claimId,
+    freshOwnerNonce: fixtureIds.freshOwnerNonce,
+    confirmationId: residualIds.confirmationId,
+    requestId: residualIds.requestId,
+    residualOldNonce: residualIds.residualOldNonce,
+  });
+
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, capability);
+  const firstResult = validateLaunchAgentReceipt(
+    await coordinator.recoverAfterManualRepair(capability),
+  );
+  assert.equal(firstResult.state, 'recovered', 'fixture first resume must close recovered');
+  assert.equal(firstResult.success, false);
+  assert.equal(firstResult.outcome, 'recovered');
+  assert.equal(firstResult.transactionId, transactionId);
+  assert.deepEqual(
+    harness.lockState(),
+    { transactionLock: false, manualInterventionLock: false },
+    'fixture first resume must release both locks',
+  );
+  assert.equal(harness.hasRecoveryClaim(), false);
+  await assertCapabilityReplayDenied(capability);
+
+  const image = harness.takeCrashImage();
+  assertCrashImageSafeSurface(image, `${row.name}/captured`);
+
+  // 丢弃首轮 live harness：只携带 branded image 与 exact 锚点进入 revive。
+  return {
+    row,
+    caseNumber,
+    image,
+    firstConfirmationId: confirmationId,
+    firstCapability: capability,
+    firstIds,
+    residualOldRef,
+    mirRef,
+    transactionId,
+    anchorId,
+    plan,
+    step,
+    frozenHash,
+    crashEntries,
+    mirEntry,
+    runReceipt,
+    firstResult,
+  };
+}
+
+function mintFactsForRevived(captured, harness, ids) {
+  const observedTx = harness.transactionLockRefForTest();
+  return {
+    mirTransactionId: captured.transactionId,
+    // 即使 image 中 MIR 已 absent，capability 仍绑定崩溃前 exact MIR identity。
+    mirLockRef: captured.mirRef,
+    transactionLockRef: observedTx,
+    anchorId: captured.anchorId,
+    confirmationId: ids.confirmationId,
+    manualRepairRequestId: ids.requestId,
+  };
+}
+
+async function driveFreshAuthorization(harness, captured, ids, options = {}) {
+  const facts = mintFactsForRevived(captured, harness, ids);
+  if (Object.hasOwn(options, 'transactionLockRef')) {
+    facts.transactionLockRef = options.transactionLockRef;
+  }
+  const { capability, confirmationId } = await mintGenuineCapability(facts);
+  harness.resetObservations();
+
+  if (options.claimOwnerDead) {
+    harness.armClaimOwnerObserveStatuses(['dead', 'dead']);
+  } else if (options.ownerDead) {
+    harness.armOwnerObserveStatuses(['dead', 'dead']);
+  }
+  if (options.queueAcquireIds) {
+    harness.queueClockIds([ids.claimId, ids.freshOwnerNonce]);
+  }
+  if (options.armPostLock) {
+    harness.armPostLockSnapshotEvent();
+  }
+
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, capability);
+  const result = await coordinator.recoverAfterManualRepair(capability);
+  await assertCapabilityReplayDenied(capability);
+  return { result, capability, confirmationId, facts };
+}
+
+function countTraceName(trace, name) {
+  return trace.filter((event) => event === name).length;
+}
+
+/**
+ * 11 行通用终态：recovered receipt、单 terminal、单 receipt、双锁/claim absent、
+ * 无真实 launchctl、host exact、无第二 compensating/MIR。
+ */
+function assertCrashWindowFinalRecovered(harness, captured, result, options = {}) {
+  const { transactionId, anchorId, plan, frozenHash, crashEntries, mirEntry, runReceipt } = captured;
+  const expectedReceiptTrace = options.expectedReceiptTrace ?? 1;
+  const expectHostMutation = options.expectHostMutation === true;
+
+  assert.equal(result.state, 'recovered');
+  assert.equal(result.success, false);
+  assert.equal(result.outcome, 'recovered');
+  assert.equal(result.operation, 'install');
+  assert.equal(result.transactionId, transactionId);
+  assert.equal(result.anchorId, anchorId);
+  assert.equal(result.sourceCommit, runReceipt.sourceCommit);
+  assert.equal(
+    result.hostMutationCount,
+    runReceipt.hostMutationCount,
+    'hostMutationCount must match uninterrupted recovered run',
+  );
+  assert.equal(result.roles.controller.outcome, 'removed');
+  assert.equal(result.roles.scheduler.outcome, 'removed');
+  assert.equal(result.roles.controller.changed, true);
+  assert.equal(result.roles.scheduler.changed, true);
+
+  const entries = harness.journalEntries(transactionId);
+  const terminals = entries.filter((entry) => entry.state === 'recovered');
+  assert.equal(terminals.length, 1, 'exactly one recovered terminal');
+  const terminal = terminals[0];
+  assert.equal(entries.at(-1).state, 'recovered');
+  assert.ok(Object.hasOwn(terminal.payload, 'receipt'), 'terminal embeds receipt');
+  assert.deepEqual(terminal.payload.receipt, result);
+  assert.equal(
+    terminal.payload.receiptSha256,
+    harness.sha256(Buffer.from(JSON.stringify(terminal.payload.receipt), 'utf8')),
+  );
+  assert.deepEqual(harness.receiptFor(transactionId), result, 'exactly one matching receipt');
+
+  // original crash-position prefix + MIR 精确保留；不得第二 compensating / 第二 MIR。
+  const preservedPrefix = [...crashEntries, mirEntry];
+  assert.deepEqual(
+    entries.slice(0, preservedPrefix.length),
+    preservedPrefix,
+    'original crash-position entries and MIR must remain exact',
+  );
+  assert.equal(
+    entries.filter((entry) => entry.state === 'compensating').length,
+    1,
+    'no second compensating entry',
+  );
+  assert.equal(
+    entries.filter((entry) => entry.state === 'manual-intervention-required').length,
+    1,
+    'no second MIR entry',
+  );
+  const frozen = entries.find((entry) => entry.state === 'compensating');
+  assert.equal(frozen.payload.reversePlanSha256, frozenHash);
+  assert.deepEqual(
+    frozen.payload.reversePlan.map((item) => item.action),
+    plan.map((item) => item.action),
+  );
+  validateLaunchAgentTransactionPrefix({ entries });
+
+  assert.deepEqual(harness.lockState(), {
+    transactionLock: false,
+    manualInterventionLock: false,
+  });
+  assert.equal(harness.hasRecoveryClaim(), false);
+  assert.equal(harness.sentinels().realLaunchctlCalls, 0);
+
+  const snap = harness.hostSnapshot();
+  assert.equal(snap.controller, null);
+  assert.equal(snap.scheduler, null);
+  assert.equal(snap.manifest, null);
+  assert.deepEqual(snap.loaded, { controller: false, scheduler: false });
+  assert.deepEqual(snap.jobIdentity, { controller: null, scheduler: null });
+
+  const trace = harness.trace();
+  assert.equal(
+    countTraceName(trace, 'receipt'),
+    expectedReceiptTrace,
+    `receipt publish count on revived harness must be ${expectedReceiptTrace}`,
+  );
+  if (!expectHostMutation) {
+    assert.equal(harness.sentinels().hostMutationCount, 0, 'closeout must not host-mutate');
+    assert.equal(countTraceName(trace, 'bootout-scheduler'), 0);
+    assert.equal(countTraceName(trace, 'bootout-controller'), 0);
+    assert.equal(countTraceName(trace, 'remove-scheduler'), 0);
+    assert.equal(countTraceName(trace, 'remove-controller'), 0);
+    assert.equal(countTraceName(trace, 'remove-manifest'), 0);
+  }
+
+  // 不得绑定私有函数名；只验证契约终态。
+  void anchorId;
+}
+
+test('manual repair crash window selector contract rejects unknown event extra fields and non-positive occurrence', () => {
+  // 未知 event
+  {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.throws(
+      () => harness.armCrashCapture({
+        kind: 'event',
+        event: 'not-a-closed-event',
+        occurrence: 1,
+      }),
+      /unknown crash event name/,
+    );
+  }
+  // 额外字段
+  {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.throws(
+      () => harness.armCrashCapture({
+        kind: 'event',
+        event: 'attestation-verify',
+        occurrence: 1,
+        extra: true,
+      }),
+      /launchagent-lifecycle-invalid/,
+    );
+  }
+  // 非正 occurrence
+  for (const occurrence of [0, -1, 1.5, Number.NaN, '1']) {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.throws(
+      () => harness.armCrashCapture({
+        kind: 'event',
+        event: 'attestation-verify',
+        occurrence,
+      }),
+      /crash capture occurrence must be a positive integer/,
+    );
+  }
+  // 现有 journal-state / host-mutation 仍可用；event 合法名可用
+  {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.equal(
+      harness.armCrashCapture({ kind: 'journal-state', state: 'prepared', occurrence: 1 }),
+      true,
+    );
+  }
+  {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.equal(
+      harness.armCrashCapture({
+        kind: 'host-mutation',
+        action: 'stop-scheduler',
+        occurrence: 1,
+      }),
+      true,
+    );
+  }
+  {
+    const harness = createLaunchAgentLifecycleHarness();
+    assert.equal(
+      harness.armCrashCapture({
+        kind: 'event',
+        event: 'receipt-published',
+        occurrence: 1,
+      }),
+      true,
+    );
+  }
+});
+
+for (const [index, row] of CRASH_WINDOW_CASES.entries()) {
+  test(`manual repair crash window ${row.name} fresh-restarts through authorized recoverAfterManualRepair`, async () => {
+    const caseNumber = 201 + index;
+    const captured = await buildCrashWindowCapturedRun(row, caseNumber);
+    const harness = createLaunchAgentLifecycleHarness({ crashImage: captured.image });
+    assertCrashImageSafeSurface(captured.image, `${row.name}/revive`);
+
+    // 首轮 attestation 必须 durable 于 image；原能力已烧毁。
+    assert.equal(
+      harness.hasManualRepairAttestation(captured.firstConfirmationId),
+      true,
+      'first-round durable attestation must revive',
+    );
+    await assertCapabilityReplayDenied(captured.firstCapability);
+
+    if (row.family === 'claim') {
+      // —— claim 三行：第一次授权只 resolve；第二次才闭环 ——
+      assert.equal(harness.hasRecoveryClaim(), true, `${row.name}: residual claim present`);
+      const claimRefBefore = harness.recoveryClaimRefForTest();
+      assert.ok(claimRefBefore, 'residual claim ref exact');
+      const journalBefore = harness.journalEntries(captured.transactionId);
+      const hostBefore = harness.sentinels();
+      const ids1 = crashWindowIds(caseNumber, 2);
+
+      const first = await driveFreshAuthorization(harness, captured, ids1, {
+        claimOwnerDead: true,
+        // resolve 路径不 acquire：不 queue claim/fresh ids
+      });
+      assert.deepEqual(
+        first.result,
+        {
+          kind: 'manual-repair-recovery-claim-resolved',
+          status: row.resolveStatus,
+          mirTransactionId: captured.transactionId,
+          recoveryClaimRef: claimRefBefore,
+        },
+        `${row.name}: first auth must only resolve exact status`,
+      );
+      assert.equal(harness.hasRecoveryClaim(), false, 'claim cleared after resolve');
+      assert.deepEqual(
+        harness.journalEntries(captured.transactionId),
+        journalBefore,
+        'first auth must not append journal',
+      );
+      assert.equal(harness.receiptFor(captured.transactionId), null);
+      assert.equal(countTraceName(harness.trace(), 'recovery-lock-acquire'), 0);
+      assert.equal(countTraceName(harness.trace(), 'receipt'), 0);
+      assert.equal(harness.sentinels().hostMutationCount, hostBefore.hostMutationCount);
+      assert.equal(harness.sentinels().realLaunchctlCalls, 0);
+      assertNoAcquireOrPostLock(harness.trace());
+
+      // 第二授权：按 resolve 后实际 tx 绑定；tx present → owner dead；queue acquire ids。
+      const observedTx = harness.transactionLockRefForTest();
+      if (row.resolveStatus === 'old-intact') {
+        assert.ok(observedTx, 'old-intact leaves residual old tx');
+        assert.equal(observedTx.ownerNonce, captured.firstIds.residualOldNonce);
+      } else if (row.resolveStatus === 'transaction-lock-absent') {
+        assert.equal(observedTx, null);
+      } else {
+        assert.ok(observedTx, 'fresh-published leaves residual fresh tx');
+        assert.equal(observedTx.ownerNonce, captured.firstIds.freshOwnerNonce);
+      }
+      const ids2 = crashWindowIds(caseNumber, 3);
+      const second = await driveFreshAuthorization(harness, captured, ids2, {
+        transactionLockRef: observedTx,
+        ownerDead: observedTx !== null,
+        queueAcquireIds: true,
+        armPostLock: true,
+      });
+      const receipt = validateLaunchAgentReceipt(second.result);
+      assertCrashWindowFinalRecovered(harness, captured, receipt, {
+        expectedReceiptTrace: 1,
+        expectHostMutation: true,
+      });
+      return;
+    }
+
+    if (row.family === 'closeout-terminal'
+        || row.family === 'closeout-receipt'
+        || row.family === 'closeout-tx-release'
+        || row.family === 'closeout-mir-release') {
+      const states = harness.journalStates(captured.transactionId);
+      assert.equal(states.at(-1), 'recovered', `${row.name}: terminal already present`);
+      const terminalCountBefore = states.filter((state) => state === 'recovered').length;
+      assert.equal(terminalCountBefore, 1);
+      const receiptBefore = harness.receiptFor(captured.transactionId);
+      if (row.family === 'closeout-terminal') {
+        assert.equal(receiptBefore, null, 'terminal-journal image: receipt not yet durable');
+      } else {
+        assert.ok(receiptBefore, `${row.name}: receipt already durable`);
+      }
+      const locks = harness.lockState();
+      if (row.family === 'closeout-mir-release') {
+        assert.equal(locks.transactionLock, false);
+        assert.equal(locks.manualInterventionLock, false);
+      } else if (row.family === 'closeout-tx-release') {
+        assert.equal(locks.transactionLock, false);
+        assert.equal(locks.manualInterventionLock, true);
+      } else {
+        assert.equal(locks.transactionLock, true);
+        assert.equal(locks.manualInterventionLock, true);
+      }
+
+      const ids = crashWindowIds(caseNumber, 2);
+      const observedTx = harness.transactionLockRefForTest();
+      const driven = await driveFreshAuthorization(harness, captured, ids, {
+        transactionLockRef: observedTx,
+        // terminal cleanup：tx present 时 owner dead；不 acquire 新 claim ids
+        ownerDead: observedTx !== null,
+        queueAcquireIds: false,
+      });
+      const receipt = validateLaunchAgentReceipt(driven.result);
+      assertCrashWindowFinalRecovered(harness, captured, receipt, {
+        // terminal-journal 需从 embedded 补 exact receipt（1 次）；后三行不得 republish。
+        expectedReceiptTrace: row.family === 'closeout-terminal' ? 1 : 0,
+        expectHostMutation: false,
+      });
+      assert.equal(
+        harness.journalStates(captured.transactionId)
+          .filter((state) => state === 'recovered').length,
+        1,
+        'must not append a second terminal',
+      );
+      return;
+    }
+
+    // —— early / post-acquire / compensation*：单次 fresh auth 闭环 ——
+    const ids = crashWindowIds(caseNumber, 2);
+    const observedTx = harness.transactionLockRefForTest();
+    if (row.family === 'early') {
+      // attestation 后：claim absent，residual old 仍 intact
+      assert.equal(harness.hasRecoveryClaim(), false);
+      assert.ok(observedTx, 'early image retains residual old tx');
+      assert.equal(observedTx.ownerNonce, captured.firstIds.residualOldNonce);
+    } else if (row.family === 'post-acquire') {
+      assert.equal(harness.hasRecoveryClaim(), false);
+      assert.ok(observedTx, 'post-acquire image has fresh recovery tx');
+      assert.equal(observedTx.ownerNonce, captured.firstIds.freshOwnerNonce);
+    } else if (row.family === 'compensation-host') {
+      assert.equal(
+        harness.journalStates(captured.transactionId)
+          .includes('compensate-stop-scheduler-completed'),
+        false,
+        'host-action image: completed not yet journaled',
+      );
+    } else if (row.family === 'compensation-completed') {
+      assert.ok(
+        harness.journalStates(captured.transactionId)
+          .includes('compensate-stop-scheduler-completed'),
+        'completed image must include stop-scheduler completed',
+      );
+    }
+
+    const driven = await driveFreshAuthorization(harness, captured, ids, {
+      transactionLockRef: observedTx,
+      ownerDead: observedTx !== null,
+      queueAcquireIds: true,
+      armPostLock: true,
+    });
+    const receipt = validateLaunchAgentReceipt(driven.result);
+    assertCrashWindowFinalRecovered(harness, captured, receipt, {
+      expectedReceiptTrace: 1,
+      expectHostMutation: true,
+    });
+
+    if (row.family === 'compensation-host' || row.family === 'compensation-completed') {
+      // host-action / compensation-completed：stop-scheduler 已物理完成，不得重放；
+      // 从 captured step.index + 1 起每个 frozen step 的 host event 恰 1 次。
+      // 复用 frozenHostEventFor；不得以 journal includes recovered 代替动作计数。
+      const resumeTrace = harness.trace();
+      assert.equal(
+        countTraceName(resumeTrace, frozenHostEventFor(captured.step.action)),
+        0,
+        `${row.name}: stop-scheduler must not replay`,
+      );
+      for (const remaining of captured.plan.slice(captured.step.index + 1)) {
+        assert.equal(
+          countTraceName(resumeTrace, frozenHostEventFor(remaining.action)),
+          1,
+          `${row.name}: remaining step ${remaining.action} host event must run exactly once`,
+        );
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 6B.2 Task 4D P1 RED — both-absent 不得把无 MIR 历史的 ordinary recovered
+// compensation 误当 manual-repair 幂等成功。真实 coordinator install + before-commit
+// revalidation failure → ordinary recovered；不 seed MIR / terminal helper。
+// 以陈旧 closed-shape mirLockRef（不入 store）铸造 genuine capability；公共
+// recoverAfterManualRepair 必须 RECOVERY_REQUIRED。当前 production 错误返回
+// ordinary recovered receipt → 本测唯一有效 RED。
+// ---------------------------------------------------------------------------
+
+test('manual repair crash window both-absent rejects ordinary recovered transaction without MIR history', async () => {
+  // 1) fresh harness；真实 coordinator 普通 install → before-commit 失败进入
+  // ordinary frozen compensation 并成功 recovered；不得 helper 直接 seed terminal。
+  const harness = createLaunchAgentLifecycleHarness();
+  createCoordinatorOrRed(harness);
+  harness.failNextRevalidation('before-commit');
+  const runCoordinator = createFullCoordinator(harness);
+  const ordinaryReceipt = validateLaunchAgentReceipt(
+    await runCoordinator.install(frozenInstallInput()),
+  );
+  // ordinary before-commit revalidation failure：state=recovered、
+  // outcome=rollback-runtime-mismatch（非 manual pure-closeout 的 outcome=recovered）。
+  assert.equal(ordinaryReceipt.state, 'recovered', 'ordinary install must close recovered');
+  assert.equal(ordinaryReceipt.success, false);
+  assert.equal(
+    ordinaryReceipt.outcome,
+    'rollback-runtime-mismatch',
+    'ordinary revalidation failure must carry rollback-runtime-mismatch outcome',
+  );
+  const transactionId = ordinaryReceipt.transactionId;
+  const anchorId = ordinaryReceipt.anchorId;
+
+  // 2) journal 有 compensating + 完整 terminal/embedded/persisted receipt，
+  // 但 manual-intervention-required 数量为 0；两锁/claim absent；host 为 recovered。
+  const entriesBefore = harness.journalEntries(transactionId);
+  assert.ok(
+    entriesBefore.some((entry) => entry.state === 'compensating'),
+    'fixture: ordinary recovered must persist compensating',
+  );
+  assert.equal(
+    entriesBefore.filter((entry) => entry.state === 'manual-intervention-required').length,
+    0,
+    'fixture: ordinary recovered must have zero MIR history',
+  );
+  const terminals = entriesBefore.filter((entry) => entry.state === 'recovered');
+  assert.equal(terminals.length, 1, 'fixture: exactly one recovered terminal');
+  const terminal = terminals[0];
+  assert.equal(entriesBefore.at(-1).state, 'recovered');
+  assert.ok(Object.hasOwn(terminal.payload, 'receipt'), 'fixture: terminal embeds receipt');
+  assert.deepEqual(terminal.payload.receipt, ordinaryReceipt);
+  assert.equal(
+    terminal.payload.receiptSha256,
+    harness.sha256(Buffer.from(JSON.stringify(terminal.payload.receipt), 'utf8')),
+  );
+  const receiptBefore = harness.receiptFor(transactionId);
+  assert.deepEqual(receiptBefore, ordinaryReceipt, 'fixture: persisted receipt exact');
+  assert.deepEqual(harness.lockState(), {
+    transactionLock: false,
+    manualInterventionLock: false,
+  });
+  assert.equal(harness.hasRecoveryClaim(), false);
+  assert.equal(harness.manualInterventionLockRefForTest(), null);
+  assert.equal(harness.transactionLockRefForTest(), null);
+  const hostBefore = structuredClone(harness.hostSnapshot());
+  assert.equal(hostBefore.controller, null);
+  assert.equal(hostBefore.scheduler, null);
+  assert.equal(hostBefore.manifest, null);
+  assert.deepEqual(hostBefore.loaded, { controller: false, scheduler: false });
+  assert.deepEqual(hostBefore.jobIdentity, { controller: null, scheduler: null });
+  const anchor = harness.anchorsWritten().find((candidate) => (
+    candidate.transactionId === transactionId && candidate.anchorId === anchorId
+  ));
+  assert.ok(anchor, 'fixture: recovered anchor target must be present');
+  validateLaunchAgentTransactionPrefix({ entries: entriesBefore });
+
+  // 3) public mintGenuineCapability：mirTransactionId 绑定 ordinary tx；
+  // transactionLockRef null；anchorId 绑定 receipt；mirLockRef 为 closed valid
+  // shape 且 transactionId 绑定该 tx，但不向 store seed MIR（陈旧/历史 identity）。
+  // UUID/confirmation/request 独立。
+  const staleMirLockRef = Object.freeze({
+    kind: 'manual-intervention-lock',
+    transactionId,
+    ownerNonce: 'b4d00001-bbbb-4bbb-8bbb-0000000000b1',
+    sha256: 'd4d0'.repeat(16),
+  });
+  assert.equal(
+    harness.lockState().manualInterventionLock,
+    false,
+    'stale mirLockRef must not be seeded into store',
+  );
+  const { capability, confirmationId } = await mintGenuineCapability({
+    mirTransactionId: transactionId,
+    mirLockRef: staleMirLockRef,
+    transactionLockRef: null,
+    anchorId,
+    confirmationId: 'a4d00001-eeee-4eee-8eee-0000000000e1',
+    manualRepairRequestId: 'd4d00001-dddd-4ddd-8ddd-0000000000d1',
+  });
+
+  harness.resetObservations();
+  const hostSentinelsBefore = harness.sentinels();
+  const coordinator = createFullCoordinatorWithAuthoritySentinel(harness, capability);
+
+  // 4) 公共 recoverAfterManualRepair 必须 reject RECOVERY_REQUIRED。
+  // 当前 production 错误返回 ordinary recovered receipt → assert.rejects missing rejection（有效 RED）。
+  await assert.rejects(
+    () => coordinator.recoverAfterManualRepair(capability),
+    (error) => {
+      assertLifecycleCode(error, LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      return true;
+    },
+  );
+
+  // 5) rejection 后：journal/receipt/host exact unchanged；tx/MIR/claim 仍 absent；
+  // 无 acquire / owner observe / receipt publish / lock release / host mutation；
+  // 只允许 authority/attestation 前导；capability replay denied。
+  assert.deepEqual(
+    harness.journalEntries(transactionId),
+    entriesBefore,
+    'must not append/mutate ordinary recovered journal',
+  );
+  assert.deepEqual(
+    harness.receiptFor(transactionId),
+    receiptBefore,
+    'must not republish/replace ordinary recovered receipt',
+  );
+  assert.deepEqual(
+    harness.hostSnapshot(),
+    hostBefore,
+    'host must remain the ordinary recovered anchor target',
+  );
+  assert.deepEqual(harness.lockState(), {
+    transactionLock: false,
+    manualInterventionLock: false,
+  });
+  assert.equal(harness.hasRecoveryClaim(), false);
+  assert.equal(harness.transactionLockRefForTest(), null);
+  assert.equal(harness.manualInterventionLockRefForTest(), null);
+
+  const trace = harness.trace();
+  assert.equal(trace[0], 'authority-consumed', 'authority must lead');
+  assert.ok(trace.includes('attestation-verify'), 'attestation preamble required');
+  assert.equal(trace.includes('recovery-lock-acquire'), false, 'no acquire');
+  assert.equal(trace.includes('post-lock-snapshot'), false, 'no post-lock');
+  assert.equal(trace.includes('owner-observe-1'), false, 'no owner observe');
+  assert.equal(trace.includes('owner-observe-2'), false, 'no second owner observe');
+  assert.equal(countTraceName(trace, 'receipt'), 0, 'no receipt publish');
+  assert.equal(trace.includes('lock-release'), false, 'no tx lock release');
+  assert.equal(trace.includes('mir-lock-release'), false, 'no MIR lock release');
+  assert.deepEqual(harness.lockAcquisitionsForTest(), []);
+  assert.deepEqual(harness.recoveryAcquisitionsForTest(), []);
+  assertPublisherHostUnchanged(harness, hostSentinelsBefore);
+  assert.equal(harness.hasManualRepairAttestation(confirmationId), true);
+  await assertCapabilityReplayDenied(capability);
 });

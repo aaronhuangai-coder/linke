@@ -593,6 +593,158 @@ class FlowFailure extends Error {
 }
 
 /**
+ * Task 6B.2 Task 3 内部：authorized manual resume 在 open intent 上既非
+ * expectedPre 也非 expectedPost（含 probe unknown）时的闭合错误。
+ * 调用方在任何 durable append/mutation 之前映射为 class B abort own recovery lock；
+ * 不得泄漏为 raw TypeError / FlowFailure，也不得 enterManualIntervention。
+ */
+class ManualResumeCurrentMismatch extends Error {
+  constructor() {
+    super('manual-resume-current-mismatch');
+    this.manualResumeCurrentMismatch = true;
+  }
+}
+
+/**
+ * Task 6B.2 内部：人工修复路径的 frozen compensation 进度解析器。
+ * 单次扫描 frozen compensating 之后的持久化链；复用 frozen reversePlan/hash，
+ * 不调用 buildReversePlan，不导出。失败一律 throw（调用方映射 class C）。
+ *
+ * 成功返回 deep-frozen：
+ * { reversePlan, reversePlanSha256, nextIndex, awaitingCompletion, mirEntry }
+ */
+function classifyFrozenManualRepairProgress(entries, frozen) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+  if (frozen === null || typeof frozen !== 'object' || frozen.state !== 'compensating') {
+    throw new Error('frozen-manual-repair-progress');
+  }
+  if (
+    frozen.payload === null
+    || typeof frozen.payload !== 'object'
+    || !Object.hasOwn(frozen.payload, 'reversePlan')
+    || !Object.hasOwn(frozen.payload, 'reversePlanSha256')
+  ) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+
+  const reversePlan = frozen.payload.reversePlan;
+  const reversePlanSha256 = frozen.payload.reversePlanSha256;
+  if (!Array.isArray(reversePlan) || reversePlan.length === 0) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+  if (typeof reversePlanSha256 !== 'string' || !SHA256_PATTERN.test(reversePlanSha256)) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+
+  // 全链恰好一条 compensating，且即所供 frozen。
+  let frozenIndex = -1;
+  let compensatingCount = 0;
+  for (let index = 0; index < entries.length; index += 1) {
+    if (entries[index].state === 'compensating') {
+      compensatingCount += 1;
+      if (entries[index] === frozen || sameValue(entries[index], frozen)) {
+        frozenIndex = index;
+      }
+    }
+  }
+  if (compensatingCount !== 1 || frozenIndex === -1) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+
+  let nextIndex = 0;
+  let awaitingCompletion = false;
+  let mirEntry = null;
+  let mirCount = 0;
+  let priorHostMutationCount = frozen.payload.hostMutationCount;
+  if (typeof priorHostMutationCount !== 'number') {
+    throw new Error('frozen-manual-repair-progress');
+  }
+
+  for (const entry of entries.slice(frozenIndex + 1)) {
+    if (
+      entry.payload === null
+      || typeof entry.payload !== 'object'
+      || typeof entry.payload.hostMutationCount !== 'number'
+      || entry.payload.hostMutationCount < priorHostMutationCount
+    ) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    priorHostMutationCount = entry.payload.hostMutationCount;
+
+    if (entry.state === 'manual-intervention-required') {
+      mirCount += 1;
+      if (mirCount > 1) throw new Error('frozen-manual-repair-progress');
+      mirEntry = entry;
+      continue;
+    }
+    if (entry.state === 'compensating') {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    if (TERMINAL_STATES.has(entry.state)) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    if (!entry.state.startsWith('compensate-')) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+
+    const completed = entry.state.endsWith('-completed');
+    if (!completed && !entry.state.endsWith('-intent')) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    const step = reversePlan[nextIndex];
+    if (
+      step === undefined
+      || entry.state !== `compensate-${step.action}-${completed ? 'completed' : 'intent'}`
+    ) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    if (entry.payload.action !== step.action) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+    if (completed) {
+      if (!awaitingCompletion) throw new Error('frozen-manual-repair-progress');
+      awaitingCompletion = false;
+      nextIndex += 1;
+    } else {
+      if (awaitingCompletion) throw new Error('frozen-manual-repair-progress');
+      if (
+        entry.payload.planIndex !== step.index
+        || entry.payload.reversePlanSha256 !== reversePlanSha256
+      ) {
+        throw new Error('frozen-manual-repair-progress');
+      }
+      awaitingCompletion = true;
+    }
+  }
+
+  // 恰好一条 MIR。链尾可为 MIR 本身，或 MIR 之后的 frozen compensation
+  // intent|completed progress（Task 4C mid-resume reentry）；其它 tail fail closed。
+  if (mirCount !== 1 || mirEntry === null) {
+    throw new Error('frozen-manual-repair-progress');
+  }
+  const tail = entries[entries.length - 1];
+  if (tail !== mirEntry && !sameValue(tail, mirEntry)) {
+    if (
+      typeof tail.state !== 'string'
+      || !tail.state.startsWith('compensate-')
+      || (!tail.state.endsWith('-intent') && !tail.state.endsWith('-completed'))
+    ) {
+      throw new Error('frozen-manual-repair-progress');
+    }
+  }
+
+  return deepFreeze({
+    reversePlan,
+    reversePlanSha256,
+    nextIndex,
+    awaitingCompletion,
+    mirEntry,
+  });
+}
+
+/**
  * 创建 V1.46 用户级 LaunchAgent 事务协调器。
  * 所有宿主动作均经精确注入的窄适配器执行；本模块不直接访问文件系统或 launchctl。
  */
@@ -3534,47 +3686,149 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     };
   }
 
-  async function resumeFrozenCompensation(context, entries, head, frozen, snapshot, live) {
-    const reversePlan = frozen.payload.reversePlan;
-    const frozenHash = frozen.payload.reversePlanSha256;
-    // 冻结链形状校验：frozen 之后只能按 plan 顺序成对出现 intent/completed。
-    let nextIndex = 0;
-    let awaitingCompletion = false;
-    for (const entry of entries.slice(entries.indexOf(frozen) + 1)) {
-      if (!entry.state.startsWith('compensate-')) throw recoveryFault();
-      const completed = entry.state.endsWith('-completed');
-      if (!completed && !entry.state.endsWith('-intent')) throw recoveryFault();
-      const step = reversePlan[nextIndex];
-      if (step === undefined || entry.state !== `compensate-${step.action}-${completed ? 'completed' : 'intent'}`) {
+  /**
+   * 只读非 current role union boundary 校验（与 resumeFrozenCompensation inode 规则同一）。
+   * awaitingCompletion=true 时跳过 current frozen step 的 role（Task 3 负责 pre/post/unknown）；
+   * awaitingCompletion=false 时 nextIndex 处无 open intent，校验全部 role。
+   * 返回 true=全部匹配；false=任一非 current 不匹配或 probe 歧义。
+   * 不分类/不执行 current action；不突变 host/journal。
+   */
+  function nonCurrentRolesMatchResumeBoundary(
+    reversePlan,
+    nextIndex,
+    awaitingCompletion,
+    snapshot,
+    live,
+  ) {
+    const currentStep = awaitingCompletion === true ? reversePlan[nextIndex] : null;
+    if (awaitingCompletion === true && (currentStep === null || currentStep === undefined)) {
+      return false;
+    }
+    for (const role of ['controller', 'scheduler', 'manifest']) {
+      if (currentStep !== null && currentStep.role === role) continue;
+      const boundary = resumeBoundary(reversePlan, nextIndex, snapshot, role);
+      let matched;
+      try {
+        matched = matchExpectedLive(live, role, boundary.expected, boundary.inodeExact);
+      } catch {
+        return false;
+      }
+      if (matched !== true) return false;
+    }
+    return true;
+  }
+
+  /**
+   * frozen compensation resume 的 identities/loadedNew/stopped 水合：
+   * loadedNew 表示当前仍 loaded，stopped 表示当前已 unloaded；
+   * 与 expectedCompensationUnion 的生产簿记语义一致。
+   * ordinary recoverBusiness 与 authorized manual resume 共用，避免漂移。
+   *
+   * deferredJobRole：manual open-intent 的 current role 可将 job probe 严格性
+   * 延后到 matchExpectedLive（unknown → ManualResumeCurrentMismatch / class B）；
+   * 非 deferred role 与 probe ok 的 deferred role 仍 fail closed。
+   */
+  function hydrateFrozenCompensationLiveState(context, live, deferredJobRole = null) {
+    context.identities = { ...live.identities };
+    for (const role of ['controller', 'scheduler']) {
+      const job = live.jobs[role];
+      if (job.outcome !== 'ok') {
+        if (role === deferredJobRole) {
+          context.loadedNew[role] = false;
+          continue;
+        }
         throw recoveryFault();
       }
-      if (entry.payload.action !== step.action) throw recoveryFault();
-      if (completed) {
-        if (!awaitingCompletion) throw recoveryFault();
-        awaitingCompletion = false;
-        nextIndex += 1;
-      } else {
-        if (awaitingCompletion) throw recoveryFault();
-        if (
-          entry.payload.planIndex !== step.index
-          || entry.payload.reversePlanSha256 !== frozenHash
-        ) {
+      if (job.loaded) {
+        if (!live.present[role] || job.jobIdentitySha256 !== live.identities[role].sha256) {
           throw recoveryFault();
         }
-        awaitingCompletion = true;
+        context.loadedNew[role] = true;
+      } else {
+        if (job.jobIdentitySha256 !== null) throw recoveryFault();
+        context.loadedNew[role] = false;
+        context.stopped.add(role);
+      }
+    }
+  }
+
+  /**
+   * 续同一 frozen reversePlan/hash。
+   * options 闭合内部缝（ordinary 不传）：
+   * - mode:'manual' + parsedProgress：消费 Task 2 已校验进度，不把 MIR 当 ordinary
+   *   post-compensating 前缀再 parse；
+   * - incrementHostMutationCountOnPostMatch：ordinary 默认 true（head 为 pre-mutation
+   *   intent）；manual after-action-post 为 false（MIR HMC 已含物理 mutation）；
+   * - close(context)：manual recovered 双锁 closeout；ordinary 仍 closeRecovered；
+   * - onDurableProgress()：任一 host mutation / journal append 前通知（class B/C 分界）。
+   */
+  async function resumeFrozenCompensation(context, entries, head, frozen, snapshot, live, options) {
+    const manual = options !== null
+      && options !== undefined
+      && options.mode === 'manual'
+      && options.parsedProgress !== null
+      && options.parsedProgress !== undefined;
+    const noteDurableProgress = () => {
+      if (manual && typeof options.onDurableProgress === 'function') {
+        options.onDurableProgress();
+      }
+    };
+
+    let reversePlan;
+    let frozenHash;
+    let nextIndex;
+    let awaitingCompletion;
+    if (manual) {
+      // manual：已由 classifyFrozenManualRepairProgress 校验；不得再跑 ordinary
+      // post-compensating 解析（会把 MIR marker 当非法 compensate 前缀拒绝）。
+      reversePlan = options.parsedProgress.reversePlan;
+      frozenHash = options.parsedProgress.reversePlanSha256;
+      nextIndex = options.parsedProgress.nextIndex;
+      awaitingCompletion = options.parsedProgress.awaitingCompletion === true;
+    } else {
+      reversePlan = frozen.payload.reversePlan;
+      frozenHash = frozen.payload.reversePlanSha256;
+      // 冻结链形状校验：frozen 之后只能按 plan 顺序成对出现 intent/completed。
+      nextIndex = 0;
+      awaitingCompletion = false;
+      for (const entry of entries.slice(entries.indexOf(frozen) + 1)) {
+        if (!entry.state.startsWith('compensate-')) throw recoveryFault();
+        const completed = entry.state.endsWith('-completed');
+        if (!completed && !entry.state.endsWith('-intent')) throw recoveryFault();
+        const step = reversePlan[nextIndex];
+        if (step === undefined || entry.state !== `compensate-${step.action}-${completed ? 'completed' : 'intent'}`) {
+          throw recoveryFault();
+        }
+        if (entry.payload.action !== step.action) throw recoveryFault();
+        if (completed) {
+          if (!awaitingCompletion) throw recoveryFault();
+          awaitingCompletion = false;
+          nextIndex += 1;
+        } else {
+          if (awaitingCompletion) throw recoveryFault();
+          if (
+            entry.payload.planIndex !== step.index
+            || entry.payload.reversePlanSha256 !== frozenHash
+          ) {
+            throw recoveryFault();
+          }
+          awaitingCompletion = true;
+        }
       }
     }
 
     await verifyCompensationEvidence(context, reversePlan);
-    const currentStep = awaitingCompletion ? reversePlan[nextIndex] : null;
     // 任何 host mutation 前先验证全部 evidence 与非 current role 的 union boundary。
-    for (const role of ['controller', 'scheduler', 'manifest']) {
-      if (currentStep !== null && currentStep.role === role) continue;
-      const boundary = resumeBoundary(reversePlan, nextIndex, snapshot, role);
-      if (!matchExpectedLive(live, role, boundary.expected, boundary.inodeExact)) {
-        throw recoveryFault();
-      }
+    if (!nonCurrentRolesMatchResumeBoundary(
+      reversePlan,
+      nextIndex,
+      awaitingCompletion,
+      snapshot,
+      live,
+    )) {
+      throw recoveryFault();
     }
+    const currentStep = awaitingCompletion ? reversePlan[nextIndex] : null;
     const recoveryInput = {
       controllerEnvironment: snapshot.present.controller
         ? { PORT: String(controllerPortFromPlistBytes(snapshot.bytes.controller)) }
@@ -3582,33 +3836,53 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     };
     let startIndex = nextIndex;
     if (currentStep !== null) {
-      const matchesPre = matchExpectedLive(
-        live,
-        currentStep.role,
-        currentStep.expectedPre,
-        !restoredBefore(reversePlan, currentStep.role, currentStep.index),
-      );
-      const matchesPost = !matchesPre && matchExpectedLive(
-        live,
-        currentStep.role,
-        currentStep.expectedPost,
-        !restoredBefore(reversePlan, currentStep.role, currentStep.index + 1),
-      );
+      let matchesPre = false;
+      let matchesPost = false;
+      try {
+        matchesPre = matchExpectedLive(
+          live,
+          currentStep.role,
+          currentStep.expectedPre,
+          !restoredBefore(reversePlan, currentStep.role, currentStep.index),
+        );
+        matchesPost = !matchesPre && matchExpectedLive(
+          live,
+          currentStep.role,
+          currentStep.expectedPost,
+          !restoredBefore(reversePlan, currentStep.role, currentStep.index + 1),
+        );
+      } catch (error) {
+        // probe 歧义（unknown）在 manual 下与 neither-match 同属 current-role guard。
+        if (manual) throw new ManualResumeCurrentMismatch();
+        throw error;
+      }
       if (matchesPre) {
         // current intent live=expectedPre：同一 frozen step 恰好执行一次，只补 completed。
+        noteDurableProgress();
         await executeCompensationMutation(context, snapshot, live.facts, currentStep, recoveryInput);
       } else if (matchesPost) {
-        // live=expectedPost：mutation 已发生未落账，补记一次且绝不二次执行。
-        context.mutationCount += 1;
+        // live=expectedPost：mutation 已发生未落账，绝不二次执行。
+        // ordinary：head 为 pre-mutation intent → HMC += 1 补记；
+        // manual after-action-post：MIR 已记 crashHead+1 → 不得再 +1。
+        const incrementOnPost = !manual
+          || options.incrementHostMutationCountOnPostMatch === true;
+        if (incrementOnPost) {
+          context.mutationCount += 1;
+        }
+        noteDurableProgress();
+      } else if (manual) {
+        throw new ManualResumeCurrentMismatch();
       } else {
         throw recoveryFault();
       }
+      noteDurableProgress();
       await appendJournal(context, `compensate-${currentStep.action}-completed`, {
         action: currentStep.action,
       });
       startIndex = nextIndex + 1;
     }
     for (let index = startIndex; index < reversePlan.length; index += 1) {
+      noteDurableProgress();
       await compensationAction(
         context,
         snapshot,
@@ -3620,6 +3894,10 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       );
     }
     await verifyRecoveryTarget(context, snapshot);
+    if (manual && typeof options.close === 'function') {
+      noteDurableProgress();
+      return options.close(context);
+    }
     return closeRecovered(context, receiptRoles(
       {
         outcome: context.operation === 'install' ? 'removed' : 'restored',
@@ -3639,25 +3917,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     const snapshot = snapshotFromAnchor(context.anchor, live.facts);
     const frozen = entries.find((entry) => entry.state === 'compensating');
     if (frozen !== undefined) {
-      // compensation resume：identities/loaded/stopped 先按 live 水合（loadedNew/
-      // stopped 与 expectedCompensationUnion 的生产簿记语义一致：loadedNew 表示
-      // 当前仍 loaded，stopped 表示当前已 unloaded），再由 boundary 逐 role 核验；
-      // 只续同一 frozen plan/hash。
-      context.identities = { ...live.identities };
-      for (const role of ['controller', 'scheduler']) {
-        const job = live.jobs[role];
-        if (job.outcome !== 'ok') throw recoveryFault();
-        if (job.loaded) {
-          if (!live.present[role] || job.jobIdentitySha256 !== live.identities[role].sha256) {
-            throw recoveryFault();
-          }
-          context.loadedNew[role] = true;
-        } else {
-          if (job.jobIdentitySha256 !== null) throw recoveryFault();
-          context.loadedNew[role] = false;
-          context.stopped.add(role);
-        }
-      }
+      // compensation resume：identities/loaded/stopped 先按 live 水合，再由 boundary
+      // 逐 role 核验；只续同一 frozen plan/hash。
+      hydrateFrozenCompensationLiveState(context, live);
       return resumeFrozenCompensation(context, entries, head, frozen, snapshot, live);
     }
     if (head.state.startsWith('compensate-')) throw recoveryFault();
@@ -3711,9 +3973,16 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   }
 
   /**
-   * 读取并校验授权 MIR 事务的完整 journal 链；最新 head 必须 exact MIR。
-   * 同时保留可精确比较的完整 global heads snapshot（kind + journalSha256 + projected heads）：
-   * 任意 global head 增删改或 journalSha256 漂移均与 pre-lock 不等。
+   * 读取并校验授权 manual-repair 事务的完整 journal 链。
+   * head 允许：
+   *   (i) exact MIR marker（Task 5/6B.1 经典路径）；
+   *   (ii) 唯一 MIR 之后的 frozen compensation intent|completed progress（Task 4C）。
+   * 返回：
+   *   head     — 当前 durable chain tail（phase/global 比对用）
+   *   mirEntry — 唯一授权 MIR marker（progress 绑定用）
+   *   postMirProgress — head 已越过 MIR 时为 true（class C，禁止 class-B abort）
+   * 任意其它 nonterminal / 第二 MIR / terminal head 仍 fail closed
+   * （terminal 走既有 early existing-terminal 分支）。
    */
   async function readAuthorizedMirJournal(mirTransactionId) {
     const headsSnapshot = await deps.metadataStore.readJournalHeads();
@@ -3736,12 +4005,11 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       }
     }
     if (authorizedHead === null) invalid();
-    if (authorizedHead.state !== 'manual-intervention-required') invalid();
     if (authorizedHead.transactionId !== mirTransactionId) invalid();
 
     const rawEntries = await deps.metadataStore.readJournal({ transactionId: mirTransactionId });
     if (!Array.isArray(rawEntries) || rawEntries.length === 0) invalid();
-    const entries = [];
+    const monoidEntries = [];
     let previousEntrySha256 = null;
     for (let index = 0; index < rawEntries.length; index += 1) {
       const entry = validateLaunchAgentJournal(rawEntries[index]);
@@ -3749,23 +4017,87 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       if (entry.sequence !== index) invalid();
       if (entry.previousEntrySha256 !== previousEntrySha256) invalid();
       if (entry.entrySha256 !== journalEntrySha256(entry)) invalid();
-      entries.push(entry);
+      monoidEntries.push(entry);
       previousEntrySha256 = entry.entrySha256;
     }
-    const latest = entries[entries.length - 1];
-    if (latest.state !== 'manual-intervention-required') invalid();
+    const latest = monoidEntries[monoidEntries.length - 1];
     if (!sameValue(latest, authorizedHead)) invalid();
+
     // 完整 global snapshot：供 pre/post-lock exact equality（含 journalSha256 与全部 heads）。
     const snapshot = {
       kind: 'journal-heads',
       journalSha256: headFields.journalSha256,
       heads: projectedHeads,
     };
+
+    // (i) 经典 MIR-head 路径。
+    // 不在此处强制唯一 MIR：第二 MIR 等链文法 corrupt 留给锁后
+    // classifyFrozenManualRepairProgress → class C RECOVERY_REQUIRED（Task 1B
+    // Stratum B：acquire 后保留两锁）。过早 invalid 会跳过 acquisition 回归。
+    if (latest.state === 'manual-intervention-required') {
+      return {
+        snapshot,
+        journalSha256: headFields.journalSha256,
+        head: authorizedHead,
+        mirEntry: authorizedHead,
+        entries: monoidEntries,
+        postMirProgress: false,
+      };
+    }
+
+    // (ii) post-MIR frozen compensation progress head（intent|completed only）
+    if (
+      typeof latest.state !== 'string'
+      || !latest.state.startsWith('compensate-')
+      || (!latest.state.endsWith('-intent') && !latest.state.endsWith('-completed'))
+    ) {
+      invalid();
+    }
+
+    const mirEntries = monoidEntries
+      .filter((entry) => entry.state === 'manual-intervention-required');
+    if (mirEntries.length !== 1) invalid();
+    const mirEntry = mirEntries[0];
+
+    const frozen = monoidEntries.find((entry) => entry.state === 'compensating');
+    if (
+      frozen === undefined
+      || frozen.payload === null
+      || typeof frozen.payload !== 'object'
+      || !Object.hasOwn(frozen.payload, 'reversePlan')
+      || !Object.hasOwn(frozen.payload, 'reversePlanSha256')
+      || !Array.isArray(frozen.payload.reversePlan)
+      || frozen.payload.reversePlan.length === 0
+    ) {
+      invalid();
+    }
+    // non-MIR head 必须有可验证 durable recovery context
+    if (lastRecoveryContext(monoidEntries) === null) invalid();
+
+    let prefixEntries;
+    try {
+      prefixEntries = validateLaunchAgentTransactionPrefix({
+        entries: monoidEntries,
+      }).entries;
+    } catch {
+      invalid();
+    }
+    let progress;
+    try {
+      progress = classifyFrozenManualRepairProgress(prefixEntries, frozen);
+    } catch {
+      invalid();
+    }
+    if (!sameValue(progress.mirEntry, mirEntry)) invalid();
+    if (!sameValue(prefixEntries[prefixEntries.length - 1], latest)) invalid();
+
     return {
       snapshot,
       journalSha256: headFields.journalSha256,
       head: authorizedHead,
-      entries,
+      mirEntry,
+      entries: prefixEntries,
+      postMirProgress: true,
     };
   }
 
@@ -4005,7 +4337,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   /**
    * class-B abort 前：先 exact phase（global heads/MIR/anchor/tx/claim）。
    * phase 失败（含 foreign drift=class C）→ 保留两锁并 RECOVERY_REQUIRED；
-   * phase 精确匹配 → 仅 abort 自己 recovery tx，再 RECOVERY_REQUIRED。
+   * phase 精确匹配且 latest 仍为 MIR → 仅 abort 自己 recovery tx，再 RECOVERY_REQUIRED。
+   * post-MIR frozen progress（latest 已是 intent|completed）：class C 保留两锁，
+   * 绝不调用 abortRecoveryLockForManualRepair（expectedMirHead 仅适用于 MIR-head）。
    */
   async function abortOwnRecoveryLockAsClassBOrRetain({
     mirTransactionId,
@@ -4026,14 +4360,21 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       expectedAuthorizedHead: preJournal.head,
       expectedAuthorizedEntries: preJournal.entries,
     });
-    await deps.metadataStore.abortRecoveryLockForManualRepair({
-      transactionLockRef: acquiredLockRef,
-      manualInterventionLockRef: mirLockRef,
-      expectedMirHead: {
-        transactionId: mirTransactionId,
-        entrySha256: preJournal.head.entrySha256,
-      },
-    });
+    // expectedMirHead 要求 store latest 仍为 MIR；post-MIR progress 禁止 abort。
+    if (
+      preJournal.postMirProgress !== true
+      && preJournal.head.state === 'manual-intervention-required'
+    ) {
+      const mirMarker = preJournal.mirEntry ?? preJournal.head;
+      await deps.metadataStore.abortRecoveryLockForManualRepair({
+        transactionLockRef: acquiredLockRef,
+        manualInterventionLockRef: mirLockRef,
+        expectedMirHead: {
+          transactionId: mirTransactionId,
+          entrySha256: mirMarker.entrySha256,
+        },
+      });
+    }
     coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
   }
 
@@ -4188,23 +4529,37 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   }
 
   /**
-   * class A：已存在 exact recovered/blocked terminal + embedded matching receipt +
-   * persisted matching receipt。读取完整 valid prefix + 冻结 reversePlan/evidence/anchor，
-   * readCandidate exact + inspectCurrentState 再证 host：
-   * - recovered：live exact anchor recovered checkpoint
-   * - blocked：再证 safe-disabled / no pending / full 三 role final union
-   * 释放前重验 global terminal snapshot、anchor、host、tx/MIR；失败保留剩余锁。
-   *
-   * transactionLockRef 可空：
-   * - non-null：双锁路径，tx exact 后 tx→MIR 有序释放
-   * - null：§6.6 MIR-only，tx 必须仍 absent，仅 release MIR
+   * existing-terminal class A cleanup / both-absent 幂等返回。
+   * mode 闭合枚举（互斥）：
+   *   'dual-lock'    — tx exact non-null + MIR exact；valid 直接释放；missing 可补 publish 一次
+   *   'mir-only'     — tx absent + MIR exact；仅 valid receipt；只释 MIR
+   *   'both-absent'  — tx/MIR 均 absent；仅 valid receipt；零 release/publish/append
+   * 绝不追加第二 terminal，不 mint 新 receipt/completedAt，不 clock.newId。
    */
   async function cleanupExistingExactTerminal({
     mirTransactionId,
     mirLockRef,
     mirRecord,
     transactionLockRef,
+    mode,
   }) {
+    // 闭合 mode 校验：未知/缺省/参数矛盾一律 fail closed。
+    if (mode !== 'dual-lock' && mode !== 'mir-only' && mode !== 'both-absent') {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    if (mode === 'dual-lock') {
+      if (transactionLockRef === null || mirLockRef === null || mirRecord === null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+    } else if (mode === 'mir-only') {
+      if (transactionLockRef !== null || mirLockRef === null || mirRecord === null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+    } else if (transactionLockRef !== null || mirLockRef !== null || mirRecord !== null) {
+      // both-absent：三 ref 必须全 null
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+
     const rawEntries = await deps.metadataStore.readJournal({ transactionId: mirTransactionId });
     if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
@@ -4213,6 +4568,17 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     try {
       entries = validateLaunchAgentTransactionPrefix({ entries: rawEntries }).entries;
     } catch {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    // Task 4E closure：三个 manual cleanup mode 统一要求恰好 1 条 MIR。
+    // prefix SM 已保证 MIR→terminal pure closeout 或 MIR 后 frozen 完成→recovered；
+    // 不在此复制第二套 transition state machine。须在 receipt publish / host
+    // mutation / lock release 之前 fail closed（含 ordinary recovered 无 MIR）。
+    let mirEntryCount = 0;
+    for (const entry of entries) {
+      if (entry.state === 'manual-intervention-required') mirEntryCount += 1;
+    }
+    if (mirEntryCount !== 1) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
     const head = entries[entries.length - 1];
@@ -4234,19 +4600,37 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
 
     const classification = await classifyExistingReceipt(mirTransactionId);
-    if (
-      classification.status !== 'valid'
-      || !receiptMatchesTerminal(head, classification.receipt)
-      || !sameValue(classification.receipt, embedded)
-    ) {
+    if (classification.status === 'invalid') {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
 
+    let settledReceipt = null;
+    if (classification.status === 'valid') {
+      if (
+        !receiptMatchesTerminal(head, classification.receipt)
+        || !sameValue(classification.receipt, embedded)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      settledReceipt = classification.receipt;
+    } else if (classification.status === 'missing') {
+      // missing 仅 dual-lock 允许补 publish；mir-only / both-absent 禁止发布。
+      if (mode !== 'dual-lock' || transactionLockRef === null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      settledReceipt = null;
+    } else {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+
+    // 恢复 frozen reversePlan / evidence / anchor；只读 re-prove host disposition。
+    // missing：用 embedded 作为 closeout 收据源（尚未 persisted）。
+    const receiptForProof = settledReceipt ?? embedded;
     let closeout;
     try {
       closeout = validateLaunchAgentTransactionCloseout({
         entries,
-        receipt: classification.receipt,
+        receipt: receiptForProof,
       });
     } catch {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
@@ -4255,7 +4639,6 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
 
-    // 恢复 frozen reversePlan / evidence / anchor；只读 re-prove host disposition。
     const frozen = entries.find((entry) => entry.state === 'compensating');
     if (
       frozen === undefined
@@ -4307,7 +4690,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
 
-    // 释放前重验：global terminal snapshot、receipt、anchor、host、tx/MIR。
+    // 释放/返回前重验：global terminal snapshot、anchor、host、锁状态。
     const terminalGlobal = await readGlobalJournalHeadsSnapshot();
     const authorizedHead = terminalGlobal.heads.find(
       (entry) => entry.transactionId === mirTransactionId,
@@ -4323,12 +4706,6 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     const reEntries = await readProjectedTransactionEntries(mirTransactionId);
     const reHead = reEntries[reEntries.length - 1];
     if (!sameValue(reHead, head)) {
-      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
-    }
-    const reReceipt = validateLaunchAgentReceipt(
-      await deps.metadataStore.readReceipt(mirTransactionId),
-    );
-    if (!sameValue(reReceipt, closeout.receipt)) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
 
@@ -4358,28 +4735,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     const txStill = projectTransactionLockObservation(
       await deps.metadataStore.readTransactionLockObservation(),
     );
-    if (transactionLockRef === null) {
-      // §6.6 MIR-only：tx 必须仍 absent；出现 residual tx → fail closed 保留 MIR。
-      if (txStill !== null) {
-        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
-      }
-    } else if (
-      txStill === null
-      || !lockRefsExactEqual(txStill.ref, transactionLockRef)
-    ) {
-      // 双锁路径：tx 必须仍 exact 匹配 authority residual ref。
-      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
-    }
     const mirStill = projectManualInterventionLockObservation(
       await deps.metadataStore.readManualInterventionLockObservation(),
     );
-    if (
-      mirStill === null
-      || !lockRefsExactEqual(mirStill.ref, mirLockRef)
-      || !sameValue(mirStill.record, mirRecord)
-    ) {
-      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
-    }
     const claimStill = projectRecoveryClaimObservation(
       await deps.metadataStore.readRecoveryClaimObservation(),
     );
@@ -4387,12 +4745,114 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
     }
 
-    if (transactionLockRef === null) {
-      await releaseTerminalMirOnly(mirLockRef, mirRecord);
-    } else {
+    if (mode === 'dual-lock') {
+      if (
+        txStill === null
+        || !lockRefsExactEqual(txStill.ref, transactionLockRef)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (
+        mirStill === null
+        || !lockRefsExactEqual(mirStill.ref, mirLockRef)
+        || !sameValue(mirStill.record, mirRecord)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+
+      // Task 4C：receipt missing → 在 dual-lock 全 proof 之后，用 exact tx 补 publish 一次。
+      if (settledReceipt === null) {
+        try {
+          await deps.metadataStore.publishReceipt({
+            receipt: embedded,
+            lockRef: transactionLockRef,
+          });
+        } catch {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+        }
+        const afterPublish = await classifyExistingReceipt(mirTransactionId);
+        if (
+          afterPublish.status !== 'valid'
+          || !receiptMatchesTerminal(head, afterPublish.receipt)
+          || !sameValue(afterPublish.receipt, embedded)
+        ) {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+        }
+        settledReceipt = afterPublish.receipt;
+        try {
+          const reCloseout = validateLaunchAgentTransactionCloseout({
+            entries,
+            receipt: settledReceipt,
+          });
+          if (!sameValue(reCloseout.receipt, embedded)) {
+            coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+          }
+        } catch {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+        }
+      } else {
+        const reReceipt = validateLaunchAgentReceipt(
+          await deps.metadataStore.readReceipt(mirTransactionId),
+        );
+        if (!sameValue(reReceipt, closeout.receipt)) {
+          coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+        }
+      }
+
       await releaseTerminalLocksOrdered(transactionLockRef, mirLockRef, mirRecord);
+      return settledReceipt;
     }
-    return closeout.receipt;
+
+    if (mode === 'mir-only') {
+      if (txStill !== null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (
+        mirStill === null
+        || !lockRefsExactEqual(mirStill.ref, mirLockRef)
+        || !sameValue(mirStill.record, mirRecord)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (settledReceipt === null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const reReceipt = validateLaunchAgentReceipt(
+        await deps.metadataStore.readReceipt(mirTransactionId),
+      );
+      if (!sameValue(reReceipt, closeout.receipt)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      await releaseTerminalMirOnly(mirLockRef, mirRecord);
+      return settledReceipt;
+    }
+
+    // both-absent：tx/MIR/claim 全 absent；零 release/publish/append/host/observe。
+    if (txStill !== null || mirStill !== null) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    if (settledReceipt === null) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    const reReceipt = validateLaunchAgentReceipt(
+      await deps.metadataStore.readReceipt(mirTransactionId),
+    );
+    if (!sameValue(reReceipt, closeout.receipt)) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    const txFinal = projectTransactionLockObservation(
+      await deps.metadataStore.readTransactionLockObservation(),
+    );
+    const mirFinal = projectManualInterventionLockObservation(
+      await deps.metadataStore.readManualInterventionLockObservation(),
+    );
+    const claimFinal = projectRecoveryClaimObservation(
+      await deps.metadataStore.readRecoveryClaimObservation(),
+    );
+    if (txFinal !== null || mirFinal !== null || claimFinal !== null) {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+    return settledReceipt;
   }
 
   /**
@@ -4544,13 +5004,421 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
   }
 
   /**
+   * Task 6B.2 Task 3 内部：校验 authorized manual resume 终态链。
+   * preJournal 可含 MIR 后已有的合法 frozen progress（MIR 不必为 tail）；本函数
+   * 只验证：hash 已由 readProjected 保证；preJournal 前缀精确保留；本次新增
+   * 后缀按 progressAtStart 完成剩余 frozen plan；恰好一个 recovered terminal。
+   * 不调用 classifyFrozenManualRepairProgress / validateLaunchAgentTransactionCloseout
+   * 作为第二套 transition state machine。
+   */
+  function verifyManualFrozenResumeTerminalChain(entries, preJournalEntries, progressAtStart) {
+    if (!Array.isArray(entries) || entries.length <= preJournalEntries.length) {
+      return false;
+    }
+    if (!sameValue(entries.slice(0, preJournalEntries.length), preJournalEntries)) {
+      return false;
+    }
+    // preJournal 前缀中恰一条 MIR（可能不是链尾：Task 4C post-MIR progress）。
+    let mirCount = 0;
+    for (const entry of preJournalEntries) {
+      if (entry.state === 'manual-intervention-required') mirCount += 1;
+    }
+    if (mirCount !== 1) return false;
+    const terminal = entries[entries.length - 1];
+    if (terminal.state !== 'recovered') return false;
+
+    // 只校验本次 resume 新追加的后缀；已存在 post-MIR progress 由 progressAtStart 承接。
+    const reversePlan = progressAtStart.reversePlan;
+    const reversePlanSha256 = progressAtStart.reversePlanSha256;
+    let nextIndex = progressAtStart.nextIndex;
+    let awaitingCompletion = progressAtStart.awaitingCompletion === true;
+    const preTail = preJournalEntries[preJournalEntries.length - 1];
+    let priorHmc = preTail?.payload?.hostMutationCount;
+    if (typeof priorHmc !== 'number') return false;
+
+    for (let index = preJournalEntries.length; index < entries.length - 1; index += 1) {
+      const entry = entries[index];
+      if (
+        entry.payload === null
+        || typeof entry.payload !== 'object'
+        || typeof entry.payload.hostMutationCount !== 'number'
+        || entry.payload.hostMutationCount < priorHmc
+      ) {
+        return false;
+      }
+      priorHmc = entry.payload.hostMutationCount;
+      if (!entry.state.startsWith('compensate-')) return false;
+      const completed = entry.state.endsWith('-completed');
+      if (!completed && !entry.state.endsWith('-intent')) return false;
+      const step = reversePlan[nextIndex];
+      if (
+        step === undefined
+        || entry.state !== `compensate-${step.action}-${completed ? 'completed' : 'intent'}`
+      ) {
+        return false;
+      }
+      if (entry.payload.action !== step.action) return false;
+      if (completed) {
+        if (!awaitingCompletion) return false;
+        awaitingCompletion = false;
+        nextIndex += 1;
+      } else {
+        if (awaitingCompletion) return false;
+        if (
+          entry.payload.planIndex !== step.index
+          || entry.payload.reversePlanSha256 !== reversePlanSha256
+        ) {
+          return false;
+        }
+        awaitingCompletion = true;
+      }
+    }
+    if (awaitingCompletion || nextIndex !== reversePlan.length) return false;
+    if (
+      typeof terminal.payload.hostMutationCount !== 'number'
+      || terminal.payload.hostMutationCount < priorHmc
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Task 6B.2 Task 3：manual recovered closeout。
+   * 追加恰好一条 embedded recovered terminal + 发布恰好一张匹配 receipt；
+   * 校验前缀/后缀/receipt/global heads/anchor/claim/双锁；tx→MIR 有序释放。
+   * 失败一律 RECOVERY_REQUIRED 并保留剩余锁（无 generalized finally）。
+   */
+  async function closeManualFrozenResume({
+    context,
+    mirLockRef,
+    mirRecord,
+    preJournal,
+    preAnchor,
+    progressAtStart,
+    snapshot,
+  }) {
+    const roles = recoveredReceiptRolesFromAnchor(preAnchor);
+    const receipt = validateLaunchAgentReceipt({
+      schemaVersion: 1,
+      operation: context.operation,
+      state: 'recovered',
+      success: false,
+      sourceCommit: context.sourceCommit,
+      transactionId: context.transactionId,
+      anchorId: context.anchorId,
+      completedAt: deps.clock.now(),
+      roles,
+      hostMutationCount: context.mutationCount,
+      outcome: 'recovered',
+    });
+    const receiptSha256 = sha256Hex(Buffer.from(JSON.stringify(receipt), 'utf8'));
+    await appendJournal(context, 'recovered', { receipt, receiptSha256 });
+    await deps.metadataStore.publishReceipt({
+      receipt,
+      lockRef: context.lockRef,
+    });
+
+    let persisted;
+    try {
+      const entries = await readProjectedTransactionEntries(context.transactionId);
+      if (!verifyManualFrozenResumeTerminalChain(
+        entries,
+        preJournal.entries,
+        progressAtStart,
+      )) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const terminal = entries[entries.length - 1];
+      if (!Object.hasOwn(terminal.payload, 'receipt')) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      persisted = validateLaunchAgentReceipt(
+        await deps.metadataStore.readReceipt(context.transactionId),
+      );
+      if (!receiptMatchesTerminal(terminal, persisted)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (!sameValue(persisted, receipt)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (!sameValue(terminal.payload.receipt, persisted)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (terminal.payload.receiptSha256 !== receiptSha256) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+
+      const terminalGlobal = await readGlobalJournalHeadsSnapshot();
+      const authorized = terminalGlobal.heads.find(
+        (head) => head.transactionId === context.transactionId,
+      );
+      if (authorized === undefined || !sameValue(authorized, terminal)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const preOthers = preJournal.snapshot.heads.filter(
+        (head) => head.transactionId !== context.transactionId,
+      );
+      const terminalOthers = terminalGlobal.heads.filter(
+        (head) => head.transactionId !== context.transactionId,
+      );
+      if (!sameValue(terminalOthers, preOthers)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (terminalGlobal.heads.length !== preOthers.length + 1) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const stableGlobal = await readGlobalJournalHeadsSnapshot();
+      if (!sameValue(stableGlobal, terminalGlobal)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+
+      const reAnchor = validateLaunchAgentAnchor(
+        await deps.metadataStore.readAnchor(preAnchor.anchorId),
+      );
+      if (!sameValue(reAnchor, preAnchor)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      if (
+        reAnchor.transactionId !== context.transactionId
+        || reAnchor.sourceCommit !== context.sourceCommit
+        || reAnchor.anchorId !== context.anchorId
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+
+      // 生产 recovery 终态 oracle：exact prior bytes/hash + context identity +
+      // manifest/active anchor + job load/identity + health；允许 restore 后的
+      // 合法 fresh inode。不得用 classifyPureCloseoutDisposition（inodeExact
+      // recovered 分支会误拒 managed-upgrade restore）。
+      await verifyRecoveryTarget(context, snapshot);
+
+      const claim = projectRecoveryClaimObservation(
+        await deps.metadataStore.readRecoveryClaimObservation(),
+      );
+      if (claim !== null) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const tx = projectTransactionLockObservation(
+        await deps.metadataStore.readTransactionLockObservation(),
+      );
+      if (tx === null || !lockRefsExactEqual(tx.ref, context.lockRef)) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+      const mir = projectManualInterventionLockObservation(
+        await deps.metadataStore.readManualInterventionLockObservation(),
+      );
+      if (
+        mir === null
+        || !lockRefsExactEqual(mir.ref, mirLockRef)
+        || !sameValue(mir.record, mirRecord)
+      ) {
+        coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+      }
+    } catch (error) {
+      if (
+        error instanceof LaunchAgentLifecycleError
+        && error.code === LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED
+      ) {
+        throw error;
+      }
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    }
+
+    await releaseTerminalLocksOrdered(context.lockRef, mirLockRef, mirRecord);
+    return persisted;
+  }
+
+  /**
+   * Task 6B.2 Task 3：在已校验 frozen progress / evidence / phase / live 之后，
+   * 仅当 durable recovery context 存在且与授权事务/anchor 一致时，走 authorized
+   * manual frozen resume。无 durable context 由调用方 failNotPure（class B）。
+   * current-role unknown/neither → class B abort own lock（无 journal/host 变化）；
+   * 任一类 durable 进度之后失败 → 保留两锁 RECOVERY_REQUIRED；
+   * 绝不 enterManualIntervention，不泄漏 FlowFailure。
+   */
+  async function resumeFrozenManualAfterLock({
+    mirTransactionId,
+    acquiredLockRef,
+    mirLockRef,
+    mirRecord,
+    preJournal,
+    preAnchor,
+    entries,
+    frozen,
+    progress,
+    live,
+  }) {
+    let durableProgress = false;
+    const postMirProgress = preJournal.postMirProgress === true;
+    const failClassCRetainLocks = () => {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    };
+    const failNotPure = async () => {
+      // post-MIR progress 已是 durable class C：失败保留两锁，禁止 class-B abort。
+      if (postMirProgress) {
+        failClassCRetainLocks();
+      }
+      await abortOwnRecoveryLockAsClassBOrRetain({
+        mirTransactionId,
+        acquiredLockRef,
+        mirLockRef,
+        mirRecord,
+        preJournal,
+        preAnchor,
+      });
+    };
+
+    try {
+      let durable;
+      try {
+        assertRecoveryContextHistory(entries);
+        durable = lastRecoveryContext(entries);
+      } catch {
+        failClassCRetainLocks();
+      }
+      if (durable === null || durable === undefined) {
+        await failNotPure();
+      }
+      if (
+        durable.sourceCommit !== preAnchor.sourceCommit
+        || durable.anchorRef === null
+        || typeof durable.anchorRef !== 'object'
+        || durable.anchorRef.anchorId !== preAnchor.anchorId
+        || durable.anchorRef.sha256 !== sha256Hex(Buffer.from(JSON.stringify(preAnchor), 'utf8'))
+      ) {
+        failClassCRetainLocks();
+      }
+
+      // mirEntry = 授权 MIR marker；currentHead = durable chain tail（可能已是 intent|completed）。
+      const mirMarker = preJournal.mirEntry ?? preJournal.head;
+      const currentHead = preJournal.head;
+      if (mirMarker.state !== 'manual-intervention-required') {
+        failClassCRetainLocks();
+      }
+      if (!sameValue(progress.mirEntry, mirMarker)) {
+        failClassCRetainLocks();
+      }
+      const context = baseRecoveryContext(mirMarker, entries, durable, acquiredLockRef);
+      // 从当前 chain tail 继续追加：mutationCount/lastEntry 绑定 current head，非强制 MIR。
+      context.lastEntry = currentHead;
+      context.mutationCount = currentHead.payload.hostMutationCount;
+      context.facts = live.facts;
+      // manual recovery 复用已授权 recovery-lock 的 fresh ownerNonce 作为独立
+      // restoration-candidate 命名空间，保持 authority 预算恰好两个 newId
+      //（claimId + freshOwnerNonce）；禁止再 clock.newId，也禁止复用 mirTransactionId
+      //（会与 forward candidate key 碰撞）。ordinary baseRecoveryContext 仍自分配。
+      context.restorationCandidateTransactionId = requireUuid(acquiredLockRef.ownerNonce);
+      if (
+        context.operation !== mirMarker.operation
+        || context.transactionId !== mirTransactionId
+      ) {
+        failClassCRetainLocks();
+      }
+
+      try {
+        await hydrateRecoveryEvidence(context);
+      } catch {
+        failClassCRetainLocks();
+      }
+      // hydrate 后 anchor 必须与授权 preAnchor 精确一致。
+      if (!sameValue(context.anchor, preAnchor)) {
+        failClassCRetainLocks();
+      }
+
+      let snapshot;
+      try {
+        snapshot = snapshotFromAnchor(context.anchor, live.facts);
+        // open intent 的 current role：probe unknown 留给 matchExpectedLive → class B。
+        const deferredJobRole = progress.awaitingCompletion === true
+          && progress.reversePlan[progress.nextIndex] !== undefined
+          ? progress.reversePlan[progress.nextIndex].role
+          : null;
+        hydrateFrozenCompensationLiveState(context, live, deferredJobRole);
+      } catch {
+        failClassCRetainLocks();
+      }
+
+      // append/action 前再 exact phase（expected head = 当前 chain tail）。
+      await enforceExactManualRepairPhase({
+        mirTransactionId,
+        transactionLockRef: acquiredLockRef,
+        mirLockRef,
+        mirRecord,
+        expectedAnchor: preAnchor,
+        expectedGlobalSnapshot: preJournal.snapshot,
+        expectedAuthorizedHead: currentHead,
+        expectedAuthorizedEntries: preJournal.entries,
+      });
+
+      return await resumeFrozenCompensation(
+        context,
+        entries,
+        currentHead,
+        frozen,
+        snapshot,
+        live,
+        {
+          mode: 'manual',
+          parsedProgress: progress,
+          // HMC 补记规则（互斥）：
+          // - current head 为 open intent：intent 记的是 pre-mutation HMC，post-match
+          //   必须 +1 补记物理 mutation（Task 4C host-action reentry）。
+          // - current head 为 MIR（Task 3 after-action-post）：MIR.HMC 已含物理
+          //   mutation，不得再 +1。
+          incrementHostMutationCountOnPostMatch:
+            typeof currentHead.state === 'string'
+            && currentHead.state.endsWith('-intent'),
+          onDurableProgress: () => {
+            durableProgress = true;
+          },
+          close: (closeContext) => closeManualFrozenResume({
+            context: closeContext,
+            mirLockRef,
+            mirRecord,
+            preJournal,
+            preAnchor,
+            progressAtStart: progress,
+            snapshot,
+          }),
+        },
+      );
+    } catch (error) {
+      if (
+        error instanceof LaunchAgentLifecycleError
+        && error.code === LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED
+      ) {
+        throw error;
+      }
+      if (
+        error instanceof ManualResumeCurrentMismatch
+        || (error !== null && typeof error === 'object' && error.manualResumeCurrentMismatch === true)
+      ) {
+        if (durableProgress || postMirProgress) {
+          failClassCRetainLocks();
+        }
+        await failNotPure();
+      }
+      if (error instanceof FlowFailure) {
+        // evidence / non-current / precondition / host：Task 1B 语义保留两锁。
+        // durable 进度之后同属 closed lifecycle recovery error。
+        failClassCRetainLocks();
+      }
+      // 不得泄漏 TypeError 等 raw 错误。
+      failClassCRetainLocks();
+    }
+  }
+
+  /**
    * 锁后 pure closeout：完整链过 validateLaunchAgentTransactionPrefix；
-   * reversePlan hash/evidence 冻结校验；live 只读 inspect/print。
+   * Task 6B.2 frozen manual progress 解析 + reversePlan evidence + 非 current
+   * live union boundary；live 只读 inspect/print。
    * pure classify / append / class-B abort 前均走 exact phase guard。
    * 可 pure close → recovered|blocked 收据；
-   * 有 frozen plan 但不可 pure → class B/C 后 RECOVERY_REQUIRED；
+   * 合法 chain/evidence/non-current 但不可 pure → class B abort 后 RECOVERY_REQUIRED；
+   * chain/prefix/parser/evidence/non-current 失败且有 compensating reversePlan
+   * → class C 直接 RECOVERY_REQUIRED 并保留两锁；
    * 合法无 compensating → 返回 null（Task5 locked）。
-   * prefix 失败且 preJournal 已有 compensating/reversePlan → fail closed（非 locked）。
    */
   async function attemptPureCloseoutAfterLock({
     mirTransactionId,
@@ -4560,11 +5428,28 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     preJournal,
     preAnchor,
   }) {
-    const mirHead = preJournal.head;
-    const mirHeadEntrySha256 = mirHead.entrySha256;
-    const hostMutationCount = mirHead.payload.hostMutationCount;
+    // head = 当前 chain tail；mirMarker = 唯一授权 MIR（可能不等于 head）。
+    const currentHead = preJournal.head;
+    const mirMarker = preJournal.mirEntry ?? (
+      currentHead.state === 'manual-intervention-required' ? currentHead : null
+    );
+    const postMirProgress = preJournal.postMirProgress === true
+      || (
+        mirMarker !== null
+        && currentHead.state !== 'manual-intervention-required'
+      );
+    const hostMutationCount = currentHead.payload.hostMutationCount;
+
+    // class C：有可识别 compensating reversePlan 时链/前缀/解析失败 → 保留两锁。
+    const failClassCRetainLocks = () => {
+      coded(LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED);
+    };
 
     const failNotPure = async () => {
+      // post-MIR progress：durable class C，禁止 class-B abort。
+      if (postMirProgress) {
+        failClassCRetainLocks();
+      }
       await abortOwnRecoveryLockAsClassBOrRetain({
         mirTransactionId,
         acquiredLockRef,
@@ -4582,28 +5467,41 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       });
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
         if (preJournalHasCompensatingReversePlan(preJournal)) {
-          await failNotPure();
+          failClassCRetainLocks();
         }
         return null;
       }
       entries = validateLaunchAgentTransactionPrefix({ entries: rawEntries }).entries;
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof LaunchAgentLifecycleError
+        && error.code === LAUNCHAGENT_LIFECYCLE_CODES.RECOVERY_REQUIRED
+      ) {
+        throw error;
+      }
       // prefix 失败：已 validated preJournal.entries 若含 compensating/reversePlan
-      // → fail closed（B/C）；仅合法无 compensating 链才返回 Task5 locked。
+      // → class C 保留两锁；仅合法无 compensating 链才返回 Task5 locked。
       if (preJournalHasCompensatingReversePlan(preJournal)) {
-        await failNotPure();
+        failClassCRetainLocks();
       }
       return null;
     }
-    if (!sameValue(entries[entries.length - 1], mirHead)) {
+    // 当前 chain tail 必须与 preJournal.head exact。
+    if (!sameValue(entries[entries.length - 1], currentHead)) {
       if (preJournalHasCompensatingReversePlan(preJournal)) {
-        await failNotPure();
+        failClassCRetainLocks();
       }
       return null;
     }
-    if (entries[entries.length - 1].state !== 'manual-intervention-required') {
+    // head 必须是 MIR 或 post-MIR frozen compensation progress（其它 fail closed）。
+    const tailState = entries[entries.length - 1].state;
+    const tailIsMir = tailState === 'manual-intervention-required';
+    const tailIsPostMirProgress = typeof tailState === 'string'
+      && tailState.startsWith('compensate-')
+      && (tailState.endsWith('-intent') || tailState.endsWith('-completed'));
+    if (!tailIsMir && !tailIsPostMirProgress) {
       if (preJournalHasCompensatingReversePlan(preJournal)) {
-        await failNotPure();
+        failClassCRetainLocks();
       }
       return null;
     }
@@ -4614,12 +5512,38 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       !Object.hasOwn(frozen.payload, 'reversePlan')
       || !Object.hasOwn(frozen.payload, 'reversePlanSha256')
     ) {
+      if (preJournalHasCompensatingReversePlan(preJournal)) {
+        failClassCRetainLocks();
+      }
       return null;
     }
 
     const reversePlan = frozen.payload.reversePlan;
     const reversePlanSha256 = frozen.payload.reversePlanSha256;
-    if (!Array.isArray(reversePlan) || reversePlan.length === 0) return null;
+    if (!Array.isArray(reversePlan) || reversePlan.length === 0) {
+      if (preJournalHasCompensatingReversePlan(preJournal)) {
+        failClassCRetainLocks();
+      }
+      return null;
+    }
+
+    // Task 6B.2：frozen progress 解析（单 MIR + 可选 post-MIR intent/completed）。
+    let progress;
+    try {
+      progress = classifyFrozenManualRepairProgress(entries, frozen);
+    } catch {
+      failClassCRetainLocks();
+    }
+    // progress.mirEntry 绑定唯一 MIR marker（不必等于当前 tail）。
+    if (mirMarker === null || !sameValue(progress.mirEntry, mirMarker)) {
+      failClassCRetainLocks();
+    }
+    if (progress.mirEntry.transactionId !== mirTransactionId) {
+      failClassCRetainLocks();
+    }
+    if (!sameValue(entries[entries.length - 1], currentHead)) {
+      failClassCRetainLocks();
+    }
 
     // anchor exact（与授权/锁前快照一致）。
     let anchor;
@@ -4633,11 +5557,16 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     if (!sameValue(anchor, preAnchor)) await failNotPure();
     if (anchor.transactionId !== mirTransactionId) await failNotPure();
 
-    if (!(await verifyFrozenReversePlanEvidence(reversePlan, reversePlanSha256, anchor))) {
-      await failNotPure();
+    // 有效 parser 之后：candidate/anchor evidence 不匹配 → class C 保留两锁。
+    if (!(await verifyFrozenReversePlanEvidence(
+      progress.reversePlan,
+      progress.reversePlanSha256,
+      anchor,
+    ))) {
+      failClassCRetainLocks();
     }
 
-    // pure classify 前：exact phase（含完整 global heads）。
+    // pure classify 前：exact phase（含完整 global heads；expected = 当前 tail）。
     await enforceExactManualRepairPhase({
       mirTransactionId,
       transactionLockRef: acquiredLockRef,
@@ -4645,7 +5574,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       mirRecord,
       expectedAnchor: preAnchor,
       expectedGlobalSnapshot: preJournal.snapshot,
-      expectedAuthorizedHead: preJournal.head,
+      expectedAuthorizedHead: currentHead,
       expectedAuthorizedEntries: preJournal.entries,
     });
 
@@ -4665,13 +5594,62 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       mirRecord,
       expectedAnchor: preAnchor,
       expectedGlobalSnapshot: preJournal.snapshot,
-      expectedAuthorizedHead: preJournal.head,
+      expectedAuthorizedHead: currentHead,
       expectedAuthorizedEntries: preJournal.entries,
     });
 
+    // pure-closeout 分类：recovered|blocked 仍走 6B.1 terminal 路径，但若存在
+    // durable recovery context 且 frozen plan 尚未 journal 闭合，则不得 skip 剩余
+    // intent/completed 对（Task 3 remove-controller/after-action-post 等）。
     const disposition = classifyPureCloseoutDisposition(reversePlan, live, anchor);
-    if (disposition !== 'recovered' && disposition !== 'blocked') {
-      await failNotPure();
+    const durableForResume = lastRecoveryContext(entries);
+    const hasDurableRecoveryContext = durableForResume !== null;
+    const progressIncomplete = progress.awaitingCompletion === true
+      || progress.nextIndex < progress.reversePlan.length;
+    const canPureClose = (disposition === 'recovered' || disposition === 'blocked')
+      && !(hasDurableRecoveryContext && progressIncomplete);
+
+    if (!canPureClose) {
+      // 非 current union：progressBegun（Task 2）或 genuine durable context 的
+      // nextIndex===0 !awaitingCompletion residual（Task 3）均 class C 保留两锁。
+      // 无 durable 的 synthetic 6B.1（pending/unmatched/unexpected-manifest）仍
+      // 仅 progressBegun 时检查，否则 class B abort own recovery lock。
+      // post-MIR progress 一律 class C。
+      const progressBegun = progress.awaitingCompletion === true || progress.nextIndex > 0;
+      if (progressBegun || hasDurableRecoveryContext || postMirProgress) {
+        let snapshot;
+        try {
+          snapshot = snapshotFromAnchor(anchor, live.facts);
+        } catch {
+          failClassCRetainLocks();
+        }
+        if (!nonCurrentRolesMatchResumeBoundary(
+          progress.reversePlan,
+          progress.nextIndex,
+          progress.awaitingCompletion,
+          snapshot,
+          live,
+        )) {
+          failClassCRetainLocks();
+        }
+      }
+      if (!hasDurableRecoveryContext && !postMirProgress) {
+        // 合法 chain/evidence/non-current 但不可 pure 且无 durable recovery
+        // context → class B abort own recovery lock（6B.1 兼容）。
+        await failNotPure();
+      }
+      return resumeFrozenManualAfterLock({
+        mirTransactionId,
+        acquiredLockRef,
+        mirLockRef,
+        mirRecord,
+        preJournal,
+        preAnchor,
+        entries,
+        frozen,
+        progress,
+        live,
+      });
     }
 
     // append 前再次 exact phase。
@@ -4682,17 +5660,17 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       mirRecord,
       expectedAnchor: preAnchor,
       expectedGlobalSnapshot: preJournal.snapshot,
-      expectedAuthorizedHead: preJournal.head,
+      expectedAuthorizedHead: currentHead,
       expectedAuthorizedEntries: preJournal.entries,
     });
 
     const context = {
-      operation: mirHead.operation,
+      operation: mirMarker.operation,
       sourceCommit: anchor.sourceCommit,
       rendered: null,
       transactionId: mirTransactionId,
       lockRef: acquiredLockRef,
-      lastEntry: mirHead,
+      lastEntry: currentHead,
       mutationCount: hostMutationCount,
       anchorId: anchor.anchorId,
       anchor,
@@ -4736,7 +5714,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
         { outcome: 'unchanged', changed: false },
         { outcome: 'unchanged', changed: false },
       ),
-      blockedByEntrySha256: mirHeadEntrySha256,
+      blockedByEntrySha256: mirMarker.entrySha256,
     });
   }
 
@@ -4870,14 +5848,28 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     const mirObservation = projectManualInterventionLockObservation(
       await deps.metadataStore.readManualInterventionLockObservation(),
     );
-    if (mirObservation === null) invalid();
+    const preTxObservation = projectTransactionLockObservation(
+      await deps.metadataStore.readTransactionLockObservation(),
+    );
+
+    // Task 4C：MIR absent → 仅 both-absent 幂等路径（terminal+valid receipt 完整）。
+    // 不得把“无 MIR”一般化为成功。
+    if (mirObservation === null) {
+      if (expectedTransactionLockRef !== null) invalid();
+      if (preTxObservation !== null) invalid();
+      return cleanupExistingExactTerminal({
+        mirTransactionId,
+        mirLockRef: null,
+        mirRecord: null,
+        transactionLockRef: null,
+        mode: 'both-absent',
+      });
+    }
+
     if (!lockRefsExactEqual(mirObservation.ref, mirLockRef)) invalid();
     if (mirObservation.record.transactionId !== mirTransactionId) invalid();
     if (mirObservation.ref.sha256 !== authority.projection.mirLockIdentitySha256) invalid();
 
-    const preTxObservation = projectTransactionLockObservation(
-      await deps.metadataStore.readTransactionLockObservation(),
-    );
     if (expectedTransactionLockRef === null) {
       if (preTxObservation !== null) invalid();
     } else {
@@ -4887,7 +5879,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
 
     // 4a) 已存在 recovered|blocked terminal：class A cleanup-only。
-    // 必须在 acquire 之前识别；双 dead 后不 acquire/append/republish。
+    // 必须在 acquire 之前识别；双 dead 后不 acquire/append/republish（missing 可补 publish）。
     {
       const headsSnapshot = await deps.metadataStore.readJournalHeads();
       const headFields = readExactObject(headsSnapshot, ['kind', 'journalSha256', 'heads']);
@@ -4905,10 +5897,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       if (authorizedHead === null) invalid();
 
       if (PURE_CLOSEOUT_EXISTING_TERMINALS.has(authorizedHead.state)) {
-        // class A 两种合法路径（ref 与 preTx 观测已在上方 fail-closed 对齐）：
-        // (i) expectedTransactionLockRef exact 非空 + preTx exact → 双 dead 后 tx→MIR 有序清理
-        // (ii) expectedTransactionLockRef===null + preTx===null → §6.6 MIR-only，无 owner observe
-        // 禁止新 acquisition / append / republish；host 漂移保留 MIR。
+        // class A 路径（ref 与 preTx 观测已在上方 fail-closed 对齐）：
+        // (i) dual-lock：expected tx 非空 + preTx exact → 双 dead 后 cleanup
+        // (ii) mir-only：expected tx null + preTx null → 无 owner observe
         if (
           expectedTransactionLockRef !== null
           && preTxObservation !== null
@@ -4929,6 +5920,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
             mirLockRef,
             mirRecord: mirObservation.record,
             transactionLockRef: expectedTransactionLockRef,
+            mode: 'dual-lock',
           });
         }
 
@@ -4936,12 +5928,12 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
           expectedTransactionLockRef === null
           && preTxObservation === null
         ) {
-          // §6.6 MIR-only：绝不 owner observe / acquire；同一完整 terminal proof 后只释 MIR。
           return cleanupExistingExactTerminal({
             mirTransactionId,
             mirLockRef,
             mirRecord: mirObservation.record,
             transactionLockRef: null,
+            mode: 'mir-only',
           });
         }
 
@@ -5074,10 +6066,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     }
 
     if (postMismatch) {
-      // Task 5 / §6.4 class B：仅当 MIR ref/record + MIR chain + 完整 global snapshot
+      // Task 5 / §6.4 class B：仅当 MIR-head + MIR ref/record + chain + global snapshot
       // 均与 pre-lock 相同才 abort 自己的 recovery tx lock（anchor-only drift）。
-      // class C：global journal head/journalSha256 漂移 → snapshot 不等 → 保留锁。
-      // 无法证明匹配终态+收据 → 不走 class A pure-closeout。
+      // post-MIR progress / class C journal 漂移：保留两锁。
       let canAbortOwnLock = false;
       try {
         const mirStill = projectManualInterventionLockObservation(
@@ -5085,7 +6076,9 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
         );
         const journalStill = await readAuthorizedMirJournal(mirTransactionId);
         if (
-          mirStill !== null
+          preJournal.postMirProgress !== true
+          && preJournal.head.state === 'manual-intervention-required'
+          && mirStill !== null
           && lockRefsExactEqual(mirStill.ref, mirLockRef)
           && sameValue(mirStill.record, mirObservation.record)
           && sameValue(journalStill.snapshot, preJournal.snapshot)
@@ -5100,12 +6093,13 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
       }
 
       if (canAbortOwnLock) {
+        const mirMarker = preJournal.mirEntry ?? preJournal.head;
         await deps.metadataStore.abortRecoveryLockForManualRepair({
           transactionLockRef: acquiredLockRef,
           manualInterventionLockRef: mirLockRef,
           expectedMirHead: {
             transactionId: mirTransactionId,
-            entrySha256: preJournal.head.entrySha256,
+            entrySha256: mirMarker.entrySha256,
           },
         });
       }
@@ -5127,6 +6121,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
     if (pureReceipt !== null) return pureReceipt;
 
     // 深冻结内部 locked context：不含 capability / private brand / confirmation 私密对象。
+    const mirMarkerForLocked = preJournal.mirEntry ?? preJournal.head;
     return deepFreeze({
       kind: 'manual-repair-recovery-locked',
       mirTransactionId,
@@ -5140,7 +6135,7 @@ export function createLaunchAgentLifecycleCoordinator(dependencies) {
         sha256: mirLockRef.sha256,
       },
       anchorId: authority.projection.anchorId,
-      mirHeadEntrySha256: preJournal.head.entrySha256,
+      mirHeadEntrySha256: mirMarkerForLocked.entrySha256,
       repairDeclarationSha256: authority.projection.repairDeclarationSha256,
       manualRepairRequestId: authority.projection.manualRepairRequestId,
     });
