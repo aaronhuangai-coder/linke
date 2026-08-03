@@ -120,6 +120,16 @@ function readTag(value, key) {
   return descriptor.value;
 }
 
+/** 可选 data 标签：缺省 → undefined；accessor/非 data 描述符 → fail closed，不执行 getter。 */
+function readOptionalDataTag(value, key) {
+  if (value === null || typeof value !== 'object') invalid();
+  if (Object.getPrototypeOf(value) !== Object.prototype) invalid();
+  if (!Object.hasOwn(value, key)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalid();
+  return descriptor.value;
+}
+
 function requireLiteral(value, expected) {
   if (value !== expected) invalid();
   return value;
@@ -1318,9 +1328,9 @@ function acceptanceRequestProjection(value) {
     'schemaVersion',
     'kind',
     'manualRepairRequestId',
-    'transactionId',
-    'mirLockSha256',
-    'anchorSha256',
+    'mirTransactionId',
+    'mirLockIdentitySha256',
+    'anchorId',
     'repairDeclarationSha256',
     'executeRequested',
     'manualRepairConfirmed',
@@ -1330,9 +1340,9 @@ function acceptanceRequestProjection(value) {
     schemaVersion: requireLiteral(fields.schemaVersion, 1),
     kind: requireLiteral(fields.kind, 'manual-repair-request'),
     manualRepairRequestId: requireUuid(fields.manualRepairRequestId),
-    transactionId: requireUuid(fields.transactionId),
-    mirLockSha256: requireSha256(fields.mirLockSha256),
-    anchorSha256: requireSha256(fields.anchorSha256),
+    mirTransactionId: requireUuid(fields.mirTransactionId),
+    mirLockIdentitySha256: requireSha256(fields.mirLockIdentitySha256),
+    anchorId: requireUuid(fields.anchorId),
     repairDeclarationSha256: requireSha256(fields.repairDeclarationSha256),
     executeRequested: requireLiteral(fields.executeRequested, false),
     manualRepairConfirmed: requireLiteral(fields.manualRepairConfirmed, false),
@@ -1389,7 +1399,7 @@ export function validateLaunchAgentConfirmationRecord(value) {
   return project(confirmationProjection, value);
 }
 
-function consumedConfirmationProjection(value) {
+function existingConsumedConfirmationProjection(value) {
   const fields = readExactObject(value, [
     'schemaVersion',
     'confirmationId',
@@ -1411,12 +1421,40 @@ function consumedConfirmationProjection(value) {
   };
 }
 
+function consumedConfirmationProjection(value) {
+  const kind = readOptionalDataTag(value, 'kind');
+  if (kind === undefined) return existingConsumedConfirmationProjection(value);
+  if (kind !== 'manual-repair-consumed-confirmation') invalid();
+  const fields = readExactObject(value, [
+    'schemaVersion',
+    'kind',
+    'confirmationId',
+    'manualRepairRequestId',
+    'mirTransactionId',
+    'mirLockIdentitySha256',
+    'anchorId',
+    'repairDeclarationSha256',
+    'consumedAt',
+  ]);
+  return {
+    schemaVersion: requireLiteral(fields.schemaVersion, 1),
+    kind: requireLiteral(fields.kind, 'manual-repair-consumed-confirmation'),
+    confirmationId: requireUuid(fields.confirmationId),
+    manualRepairRequestId: requireUuid(fields.manualRepairRequestId),
+    mirTransactionId: requireUuid(fields.mirTransactionId),
+    mirLockIdentitySha256: requireSha256(fields.mirLockIdentitySha256),
+    anchorId: requireUuid(fields.anchorId),
+    repairDeclarationSha256: requireSha256(fields.repairDeclarationSha256),
+    consumedAt: requireUtc(fields.consumedAt),
+  };
+}
+
 /** 校验并投影持久化的一次性确认消费记录。 */
 export function validateLaunchAgentConsumedConfirmation(value) {
   return project(consumedConfirmationProjection, value);
 }
 
-function capabilityProjection(value) {
+function existingCapabilityProjection(value) {
   const fields = readExactObject(value, [
     'schemaVersion',
     'acceptanceId',
@@ -1434,6 +1472,32 @@ function capabilityProjection(value) {
     sourceCommit: requireCommit(fields.sourceCommit),
     runtimeArtifactsSha256: requireSha256(fields.runtimeArtifactsSha256),
     issuedAt: requireUtc(fields.issuedAt),
+  };
+}
+
+function capabilityProjection(value) {
+  const kind = readOptionalDataTag(value, 'kind');
+  if (kind === undefined) return existingCapabilityProjection(value);
+  if (kind !== 'launchagent-manual-repair') invalid();
+  const fields = readExactObject(value, [
+    'schemaVersion',
+    'kind',
+    'manualRepairRequestId',
+    'mirTransactionId',
+    'mirLockIdentitySha256',
+    'anchorId',
+    'repairDeclarationSha256',
+    'authorizedAt',
+  ]);
+  return {
+    schemaVersion: requireLiteral(fields.schemaVersion, 1),
+    kind: requireLiteral(fields.kind, 'launchagent-manual-repair'),
+    manualRepairRequestId: requireUuid(fields.manualRepairRequestId),
+    mirTransactionId: requireUuid(fields.mirTransactionId),
+    mirLockIdentitySha256: requireSha256(fields.mirLockIdentitySha256),
+    anchorId: requireUuid(fields.anchorId),
+    repairDeclarationSha256: requireSha256(fields.repairDeclarationSha256),
+    authorizedAt: requireUtc(fields.authorizedAt),
   };
 }
 

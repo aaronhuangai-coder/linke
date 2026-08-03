@@ -460,9 +460,9 @@ if (contractsExists) {
     schemaVersion: 1,
     kind: 'manual-repair-request',
     manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
-    transactionId: TRANSACTION_ID,
-    mirLockSha256: '8'.repeat(64),
-    anchorSha256: '9'.repeat(64),
+    mirTransactionId: TRANSACTION_ID,
+    mirLockIdentitySha256: '8'.repeat(64),
+    anchorId: ANCHOR_ID,
     repairDeclarationSha256: '0'.repeat(64),
     executeRequested: false,
     manualRepairConfirmed: false,
@@ -487,6 +487,18 @@ if (contractsExists) {
     consumedAt: '2026-07-28T00:02:00.000Z',
   };
 
+  const VALID_MANUAL_CONSUMED_CONFIRMATION = {
+    schemaVersion: 1,
+    kind: 'manual-repair-consumed-confirmation',
+    confirmationId: MANUAL_REPAIR_CONFIRMATION_ID,
+    manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
+    mirTransactionId: TRANSACTION_ID,
+    mirLockIdentitySha256: '8'.repeat(64),
+    anchorId: ANCHOR_ID,
+    repairDeclarationSha256: '0'.repeat(64),
+    consumedAt: '2026-07-28T00:02:30.000Z',
+  };
+
   const VALID_CAPABILITY_PROJECTION = {
     schemaVersion: 1,
     acceptanceId: ACCEPTANCE_ID,
@@ -495,6 +507,17 @@ if (contractsExists) {
     sourceCommit: SOURCE_COMMIT,
     runtimeArtifactsSha256: '7'.repeat(64),
     issuedAt: '2026-07-28T00:03:00.000Z',
+  };
+
+  const VALID_MANUAL_CAPABILITY_PROJECTION = {
+    schemaVersion: 1,
+    kind: 'launchagent-manual-repair',
+    manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
+    mirTransactionId: TRANSACTION_ID,
+    mirLockIdentitySha256: '8'.repeat(64),
+    anchorId: ANCHOR_ID,
+    repairDeclarationSha256: '0'.repeat(64),
+    authorizedAt: '2026-07-28T00:03:30.000Z',
   };
 
   function clone(value) {
@@ -1191,7 +1214,17 @@ if (contractsExists) {
       VALID_MANUAL_REPAIR_CONFIRMATION,
     ],
     ['consumed confirmation', validateLaunchAgentConsumedConfirmation, VALID_CONSUMED_CONFIRMATION],
+    [
+      'manual consumed confirmation',
+      validateLaunchAgentConsumedConfirmation,
+      VALID_MANUAL_CONSUMED_CONFIRMATION,
+    ],
     ['capability projection', validateLaunchAgentCapabilityProjection, VALID_CAPABILITY_PROJECTION],
+    [
+      'manual capability projection',
+      validateLaunchAgentCapabilityProjection,
+      VALID_MANUAL_CAPABILITY_PROJECTION,
+    ],
   ];
 
   test('acceptance and capability validators return detached frozen projections', async (t) => {
@@ -1240,13 +1273,59 @@ if (contractsExists) {
         ...clone(VALID_MANUAL_REPAIR_REQUEST),
         manualRepairConfirmed: true,
       }],
-      ['invalid MIR lock hash', {
+      ['invalid MIR lock identity hash', {
         ...clone(VALID_MANUAL_REPAIR_REQUEST),
-        mirLockSha256: 'G'.repeat(64),
+        mirLockIdentitySha256: 'G'.repeat(64),
       }],
       ['invalid repair declaration hash', {
         ...clone(VALID_MANUAL_REPAIR_REQUEST),
         repairDeclarationSha256: 'G'.repeat(64),
+      }],
+      ['invalid mir transaction UUID', {
+        ...clone(VALID_MANUAL_REPAIR_REQUEST),
+        mirTransactionId: 'invalid',
+      }],
+      ['invalid anchor UUID', {
+        ...clone(VALID_MANUAL_REPAIR_REQUEST),
+        anchorId: 'invalid',
+      }],
+      ['invalid prepared UTC', {
+        ...clone(VALID_MANUAL_REPAIR_REQUEST),
+        preparedAt: '2026-07-28T00:00:00Z',
+      }],
+      ['wrong manual request kind', {
+        ...clone(VALID_MANUAL_REPAIR_REQUEST),
+        kind: 'manual-repair',
+      }],
+      ['old alias transactionId', (() => {
+        const value = clone(VALID_MANUAL_REPAIR_REQUEST);
+        delete value.mirTransactionId;
+        value.transactionId = TRANSACTION_ID;
+        return value;
+      })()],
+      ['old alias mirLockSha256', (() => {
+        const value = clone(VALID_MANUAL_REPAIR_REQUEST);
+        delete value.mirLockIdentitySha256;
+        value.mirLockSha256 = '8'.repeat(64);
+        return value;
+      })()],
+      ['old alias anchorSha256', (() => {
+        const value = clone(VALID_MANUAL_REPAIR_REQUEST);
+        delete value.anchorId;
+        value.anchorSha256 = '9'.repeat(64);
+        return value;
+      })()],
+      ['full old request field names', {
+        schemaVersion: 1,
+        kind: 'manual-repair-request',
+        manualRepairRequestId: MANUAL_REPAIR_REQUEST_ID,
+        transactionId: TRANSACTION_ID,
+        mirLockSha256: '8'.repeat(64),
+        anchorSha256: '9'.repeat(64),
+        repairDeclarationSha256: '0'.repeat(64),
+        executeRequested: false,
+        manualRepairConfirmed: false,
+        preparedAt: AT,
       }],
     ];
     await assertRejectsCases(t, validateLaunchAgentAcceptanceRequest, manualRepairCases);
@@ -1299,6 +1378,60 @@ if (contractsExists) {
     ]);
   });
 
+  test('manual consumed confirmation freezes the canonical binding schema', async (t) => {
+    assertProjection(validateLaunchAgentConsumedConfirmation, VALID_MANUAL_CONSUMED_CONFIRMATION);
+    await assertRejectsCases(t, validateLaunchAgentConsumedConfirmation, [
+      ['manual invalid confirmation UUID', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        confirmationId: 'invalid',
+      }],
+      ['manual invalid request UUID', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        manualRepairRequestId: 'invalid',
+      }],
+      ['manual invalid mir transaction UUID', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        mirTransactionId: 'invalid',
+      }],
+      ['manual invalid mir lock identity hash', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        mirLockIdentitySha256: 'G'.repeat(64),
+      }],
+      ['manual invalid anchor UUID', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        anchorId: 'invalid',
+      }],
+      ['manual invalid repair declaration hash', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        repairDeclarationSha256: 'G'.repeat(64),
+      }],
+      ['manual invalid consumed UTC', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        consumedAt: '2026-07-28T00:02:30Z',
+      }],
+      ['manual wrong kind', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        kind: 'manual-repair-confirmation',
+      }],
+      ['manual extra key', withOwnData(VALID_MANUAL_CONSUMED_CONFIRMATION, 'unexpected', true)],
+      ['cross-use acceptance fields with manual consumed kind', {
+        ...clone(VALID_CONSUMED_CONFIRMATION),
+        kind: 'manual-repair-consumed-confirmation',
+      }],
+      ['cross-use manual consumed fields without kind', (() => {
+        const value = clone(VALID_MANUAL_CONSUMED_CONFIRMATION);
+        delete value.kind;
+        return value;
+      })()],
+      ['cross-use capability kind on consumed confirmation', {
+        ...clone(VALID_MANUAL_CONSUMED_CONFIRMATION),
+        kind: 'launchagent-manual-repair',
+      }],
+      ['cross-use acceptance capability on consumed validator', clone(VALID_CAPABILITY_PROJECTION)],
+      ['cross-use manual capability on consumed validator', clone(VALID_MANUAL_CAPABILITY_PROJECTION)],
+    ]);
+  });
+
   test('capability projection cannot serialize a private authority brand', async (t) => {
     const forbiddenKeys = [
       'brand',
@@ -1325,6 +1458,81 @@ if (contractsExists) {
     });
   });
 
+  test('manual capability projection freezes the public manual-repair summary', async (t) => {
+    assertProjection(validateLaunchAgentCapabilityProjection, VALID_MANUAL_CAPABILITY_PROJECTION);
+    assert.equal(
+      Object.hasOwn(VALID_MANUAL_CAPABILITY_PROJECTION, 'confirmationId'),
+      false,
+      'manual capability projection fixture must not include confirmationId',
+    );
+    const forbiddenKeys = [
+      'brand',
+      'privateBrand',
+      'capability',
+      'token',
+      'secret',
+      'constructor',
+      'prototype',
+      'confirmationId',
+    ];
+    for (const key of forbiddenKeys) {
+      await t.test(key, () => {
+        assertInvalid(
+          validateLaunchAgentCapabilityProjection,
+          withOwnData(VALID_MANUAL_CAPABILITY_PROJECTION, key, key === 'confirmationId'
+            ? MANUAL_REPAIR_CONFIRMATION_ID
+            : 'forbidden'),
+        );
+      });
+    }
+    await assertRejectsCases(t, validateLaunchAgentCapabilityProjection, [
+      ['manual invalid request UUID', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        manualRepairRequestId: 'invalid',
+      }],
+      ['manual invalid mir transaction UUID', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        mirTransactionId: 'invalid',
+      }],
+      ['manual invalid mir lock identity hash', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        mirLockIdentitySha256: 'G'.repeat(64),
+      }],
+      ['manual invalid anchor UUID', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        anchorId: 'invalid',
+      }],
+      ['manual invalid repair declaration hash', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        repairDeclarationSha256: 'G'.repeat(64),
+      }],
+      ['manual invalid authorized UTC', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        authorizedAt: '2026-07-28T00:03:30Z',
+      }],
+      ['manual wrong kind', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        kind: 'manual-repair-capability',
+      }],
+      ['manual extra key', withOwnData(VALID_MANUAL_CAPABILITY_PROJECTION, 'unexpected', true)],
+      ['cross-use acceptance fields with manual capability kind', {
+        ...clone(VALID_CAPABILITY_PROJECTION),
+        kind: 'launchagent-manual-repair',
+      }],
+      ['cross-use manual capability fields without kind', (() => {
+        const value = clone(VALID_MANUAL_CAPABILITY_PROJECTION);
+        delete value.kind;
+        return value;
+      })()],
+      ['cross-use consumed kind on capability projection', {
+        ...clone(VALID_MANUAL_CAPABILITY_PROJECTION),
+        kind: 'manual-repair-consumed-confirmation',
+      }],
+      ['cross-use acceptance consumed on capability validator', clone(VALID_CONSUMED_CONFIRMATION)],
+      ['cross-use manual consumed on capability validator', clone(VALID_MANUAL_CONSUMED_CONFIRMATION)],
+    ]);
+  });
+
   test('accepted public projections contain no secret or raw-host field names', () => {
     const forbidden = /token|password|secret|apiKey|authorization|environment|argv|stdout|stderr|path/i;
     const fixtures = [
@@ -1337,7 +1545,9 @@ if (contractsExists) {
       VALID_CONFIRMATION,
       VALID_MANUAL_REPAIR_CONFIRMATION,
       VALID_CONSUMED_CONFIRMATION,
+      VALID_MANUAL_CONSUMED_CONFIRMATION,
       VALID_CAPABILITY_PROJECTION,
+      VALID_MANUAL_CAPABILITY_PROJECTION,
     ];
 
     function scan(value, trail = []) {

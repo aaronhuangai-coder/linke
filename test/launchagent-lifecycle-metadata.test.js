@@ -534,6 +534,47 @@ function isConfirmationConsumedError(error) {
 }
 
 /**
+ * Exact valid manual-repair consumed-confirmation plain object (closed projection keys).
+ * Distinct from the acceptance branch: tagged kind + manual repair binding fields.
+ */
+function buildManualConsumedConfirmation(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    kind: 'manual-repair-consumed-confirmation',
+    confirmationId: CONFIRMATION_ID,
+    manualRepairRequestId: ACCEPTANCE_ID,
+    mirTransactionId: TX_ID,
+    mirLockIdentitySha256: RUNTIME_ARTIFACTS_SHA256,
+    anchorId: ANCHOR_ID,
+    repairDeclarationSha256: RECEIPT_SHA256,
+    consumedAt: CONSUMED_AT,
+    ...overrides,
+  };
+}
+
+/**
+ * Test-side independent UTF-8 JSON bytes for a manual consumed-confirmation projection
+ * (fixed key order matching validateLaunchAgentConsumedConfirmation manual branch).
+ */
+function manualConsumedConfirmationBytes(record) {
+  return Buffer.from(JSON.stringify({
+    schemaVersion: record.schemaVersion,
+    kind: record.kind,
+    confirmationId: record.confirmationId,
+    manualRepairRequestId: record.manualRepairRequestId,
+    mirTransactionId: record.mirTransactionId,
+    mirLockIdentitySha256: record.mirLockIdentitySha256,
+    anchorId: record.anchorId,
+    repairDeclarationSha256: record.repairDeclarationSha256,
+    consumedAt: record.consumedAt,
+  }), 'utf8');
+}
+
+function manualConsumedConfirmationSha(record) {
+  return sha256Hex(manualConsumedConfirmationBytes(record));
+}
+
+/**
  * Terminal-tx setup: initialize → acquire tx lock → prepared seq0 →
  * terminal seq1 with payload.receiptSha256 of exact receipt bytes.
  * Does not encode business transition validity beyond the Task2 chain.
@@ -3935,6 +3976,289 @@ test('Y consumeConfirmation durability triple closed frozen ordering and failure
   );
   for (const event of otherEvents) {
     assertClosedDurabilityEvent(event, 'confirmation');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 6A Task 2: durable storage of manual-repair consumed-confirmation branch
+// (test-first evidence; generic consumeConfirmation/readConsumedConfirmation).
+// ---------------------------------------------------------------------------
+
+test('manual consumed confirmation roundtrip mode ref and frozen projection', async (t) => {
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+  const store = createLaunchAgentMetadataStore({ metadataRoot });
+
+  assert.equal(
+    typeof store.consumeConfirmation,
+    'function',
+    'store.consumeConfirmation must be a function',
+  );
+  assert.equal(
+    typeof store.readConsumedConfirmation,
+    'function',
+    'store.readConsumedConfirmation must be a function',
+  );
+
+  const record = buildManualConsumedConfirmation();
+  const expectedBytes = manualConsumedConfirmationBytes(record);
+  const expectedSha = manualConsumedConfirmationSha(record);
+  assert.ok(
+    expectedBytes.byteLength <= CONFIRMATION_MAX_BYTES,
+    'fixture manual consumed-confirmation must stay within 256KiB',
+  );
+  assert.deepEqual(
+    validateLaunchAgentConsumedConfirmation(record),
+    record,
+    'buildManualConsumedConfirmation default must pass validateLaunchAgentConsumedConfirmation',
+  );
+  assert.equal(record.kind, 'manual-repair-consumed-confirmation');
+
+  await store.initialize();
+
+  const confDirStat = await lstat(join(metadataRoot, 'confirmations'));
+  assert.equal(confDirStat.isDirectory(), true, 'confirmations mid-dir must exist after initialize');
+  assert.equal(confDirStat.mode & 0o777, 0o700, 'confirmations mid-dir must be mode 0700');
+
+  const consumed = await store.consumeConfirmation(record);
+  assert.deepEqual(consumed, {
+    kind: 'consumed-confirmation',
+    confirmationId: CONFIRMATION_ID,
+    sha256: expectedSha,
+  });
+  assert.equal(isDeeplyFrozen(consumed), true, 'consumeConfirmation result must be deeply frozen');
+  assertNoAbsolutePaths(consumed, 'consumeConfirmation result');
+  assert.deepEqual(
+    Reflect.ownKeys(consumed).filter((k) => typeof k === 'string').sort(),
+    ['confirmationId', 'kind', 'sha256'].sort(),
+    'consumeConfirmation result must be closed to kind/confirmationId/sha256',
+  );
+
+  const leafPath = confirmationLeafPath(metadataRoot, CONFIRMATION_ID);
+  const leafStat = await lstat(leafPath);
+  assert.equal(leafStat.isFile(), true, 'manual consumed-confirmation must be a regular file');
+  assert.equal(leafStat.isSymbolicLink(), false, 'manual consumed-confirmation must not be a symlink');
+  assert.equal(leafStat.mode & 0o777, 0o600, 'manual consumed-confirmation leaf must be mode 0600');
+  assert.equal(leafStat.uid, process.getuid(), 'manual consumed-confirmation leaf owner must be current uid');
+  assert.equal(
+    leafStat.size,
+    expectedBytes.byteLength,
+    'manual consumed-confirmation on-disk size must match exact UTF-8 bytes',
+  );
+
+  const onDisk = await readFile(leafPath);
+  assert.equal(
+    Buffer.compare(onDisk, expectedBytes),
+    0,
+    'manual consumed-confirmation on-disk bytes must equal independent JSON.stringify projection',
+  );
+  assert.equal(sha256Hex(onDisk), expectedSha);
+
+  const readBack = await store.readConsumedConfirmation(CONFIRMATION_ID);
+  assert.deepEqual(
+    readBack,
+    record,
+    'readConsumedConfirmation must return frozen closed manual projection',
+  );
+  assert.equal(isDeeplyFrozen(readBack), true, 'readConsumedConfirmation projection must be deeply frozen');
+  assertNoAbsolutePaths(readBack, 'readConsumedConfirmation result');
+  assert.deepEqual(validateLaunchAgentConsumedConfirmation(readBack), readBack);
+});
+
+test('manual consumed confirmation two-store concurrent consume + replay no-clobber is confirmation-consumed', async (t) => {
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+  const metadataRoot = await makeTempMetadataRoot(t);
+
+  const storeA = createLaunchAgentMetadataStore({ metadataRoot });
+  const storeB = createLaunchAgentMetadataStore({ metadataRoot });
+  await storeA.initialize();
+  await storeB.initialize();
+
+  const record = buildManualConsumedConfirmation();
+  const expectedBytes = manualConsumedConfirmationBytes(record);
+  const expectedSha = manualConsumedConfirmationSha(record);
+
+  const settled = await Promise.allSettled([
+    storeA.consumeConfirmation(record),
+    storeB.consumeConfirmation(record),
+  ]);
+
+  const fulfilled = settled.filter((entry) => entry.status === 'fulfilled');
+  const rejected = settled.filter((entry) => entry.status === 'rejected');
+  assert.equal(fulfilled.length, 1, 'exactly one concurrent manual consume must fulfill');
+  assert.equal(rejected.length, 1, 'exactly one concurrent manual consume must reject');
+  assert.equal(
+    isConfirmationConsumedError(rejected[0].reason),
+    true,
+    'loser must throw LaunchAgentLifecycleError code/message confirmation-consumed (not INVALID/EEXIST leak)',
+  );
+
+  const winner = fulfilled[0].value;
+  assert.deepEqual(winner, {
+    kind: 'consumed-confirmation',
+    confirmationId: CONFIRMATION_ID,
+    sha256: expectedSha,
+  });
+  assert.equal(isDeeplyFrozen(winner), true);
+  assertNoAbsolutePaths(winner, 'concurrent manual consume winner ref');
+
+  const leafPath = confirmationLeafPath(metadataRoot, CONFIRMATION_ID);
+  const originalBytes = await readFile(leafPath);
+  assert.equal(Buffer.compare(originalBytes, expectedBytes), 0);
+  const originalStat = await lstat(leafPath);
+  assert.equal(originalStat.mode & 0o777, 0o600);
+  const originalMode = originalStat.mode;
+  const originalSha = sha256Hex(originalBytes);
+
+  // Replay identical bytes through the other store must confirmation-consumed and preserve leaf.
+  await assert.rejects(
+    () => storeB.consumeConfirmation(record),
+    isConfirmationConsumedError,
+    'replay of same manual record must reject with confirmation-consumed',
+  );
+  await assert.rejects(
+    () => storeA.consumeConfirmation(record),
+    isConfirmationConsumedError,
+    'winner-store manual replay must also reject with confirmation-consumed',
+  );
+
+  // Replay with a different valid manual binding for the same confirmationId must still no-clobber.
+  const rebound = buildManualConsumedConfirmation({
+    manualRepairRequestId: ACCEPTANCE_ID_B,
+    mirTransactionId: TX_ID_B,
+    consumedAt: '2024-01-15T12:00:01.000Z',
+    mirLockIdentitySha256: RECEIPT_SHA256,
+    repairDeclarationSha256:
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  });
+  assert.equal(rebound.confirmationId, CONFIRMATION_ID);
+  assert.notEqual(manualConsumedConfirmationSha(rebound), expectedSha);
+  assert.deepEqual(
+    validateLaunchAgentConsumedConfirmation(rebound),
+    rebound,
+    'rebound manual fixture must still pass closed validator',
+  );
+  await assert.rejects(
+    () => storeA.consumeConfirmation(rebound),
+    isConfirmationConsumedError,
+    'replay with different valid manual binding for same confirmationId must be confirmation-consumed',
+  );
+
+  const afterReplay = await readFile(leafPath);
+  assert.equal(
+    Buffer.compare(afterReplay, originalBytes),
+    0,
+    'manual replay/no-clobber must leave original confirmation bytes exact',
+  );
+  assert.equal(sha256Hex(afterReplay), originalSha);
+  const afterStat = await lstat(leafPath);
+  assert.equal(afterStat.mode, originalMode, 'manual replay must not alter confirmation mode');
+  assert.equal(afterStat.mode & 0o777, 0o600);
+});
+
+test('manual confirmation cross-branch same-ID no-clobber for both overwrite orderings', async (t) => {
+  const createLaunchAgentMetadataStore = requireFactory('createLaunchAgentMetadataStore');
+
+  // Ordering 1: acceptance first, then manual under the same confirmationId.
+  {
+    const metadataRoot = await makeTempMetadataRoot(t);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+
+    const acceptance = buildConsumedConfirmation();
+    const manual = buildManualConsumedConfirmation();
+    assert.equal(acceptance.confirmationId, manual.confirmationId);
+    assert.notEqual(
+      Buffer.compare(
+        consumedConfirmationBytes(acceptance),
+        manualConsumedConfirmationBytes(manual),
+      ),
+      0,
+      'precondition: acceptance and manual closed bytes must differ',
+    );
+
+    const acceptanceRef = await store.consumeConfirmation(acceptance);
+    const expectedBytes = consumedConfirmationBytes(acceptance);
+    const expectedSha = consumedConfirmationSha(acceptance);
+    assert.deepEqual(acceptanceRef, {
+      kind: 'consumed-confirmation',
+      confirmationId: CONFIRMATION_ID,
+      sha256: expectedSha,
+    });
+
+    const leafPath = confirmationLeafPath(metadataRoot, CONFIRMATION_ID);
+    const originalBytes = await readFile(leafPath);
+    assert.equal(Buffer.compare(originalBytes, expectedBytes), 0);
+    const originalStat = await lstat(leafPath);
+    assert.equal(originalStat.mode & 0o777, 0o600);
+    const originalMode = originalStat.mode;
+
+    await assert.rejects(
+      () => store.consumeConfirmation(manual),
+      isConfirmationConsumedError,
+      'manual after acceptance same confirmationId must reject confirmation-consumed',
+    );
+
+    const after = await readFile(leafPath);
+    assert.equal(
+      Buffer.compare(after, originalBytes),
+      0,
+      'loser manual must not clobber acceptance winner bytes',
+    );
+    assert.equal(sha256Hex(after), expectedSha);
+    const afterStat = await lstat(leafPath);
+    assert.equal(afterStat.mode, originalMode, 'loser manual must not alter winner mode');
+    assert.equal(afterStat.mode & 0o777, 0o600);
+
+    const readBack = await store.readConsumedConfirmation(CONFIRMATION_ID);
+    assert.deepEqual(readBack, acceptance, 'winner acceptance projection must remain readable');
+  }
+
+  // Ordering 2: manual first, then acceptance under the same confirmationId.
+  {
+    const metadataRoot = await makeTempMetadataRoot(t);
+    const store = createLaunchAgentMetadataStore({ metadataRoot });
+    await store.initialize();
+
+    const acceptance = buildConsumedConfirmation();
+    const manual = buildManualConsumedConfirmation();
+    assert.equal(acceptance.confirmationId, manual.confirmationId);
+
+    const manualRef = await store.consumeConfirmation(manual);
+    const expectedBytes = manualConsumedConfirmationBytes(manual);
+    const expectedSha = manualConsumedConfirmationSha(manual);
+    assert.deepEqual(manualRef, {
+      kind: 'consumed-confirmation',
+      confirmationId: CONFIRMATION_ID,
+      sha256: expectedSha,
+    });
+
+    const leafPath = confirmationLeafPath(metadataRoot, CONFIRMATION_ID);
+    const originalBytes = await readFile(leafPath);
+    assert.equal(Buffer.compare(originalBytes, expectedBytes), 0);
+    const originalStat = await lstat(leafPath);
+    assert.equal(originalStat.mode & 0o777, 0o600);
+    const originalMode = originalStat.mode;
+
+    await assert.rejects(
+      () => store.consumeConfirmation(acceptance),
+      isConfirmationConsumedError,
+      'acceptance after manual same confirmationId must reject confirmation-consumed',
+    );
+
+    const after = await readFile(leafPath);
+    assert.equal(
+      Buffer.compare(after, originalBytes),
+      0,
+      'loser acceptance must not clobber manual winner bytes',
+    );
+    assert.equal(sha256Hex(after), expectedSha);
+    const afterStat = await lstat(leafPath);
+    assert.equal(afterStat.mode, originalMode, 'loser acceptance must not alter winner mode');
+    assert.equal(afterStat.mode & 0o777, 0o600);
+
+    const readBack = await store.readConsumedConfirmation(CONFIRMATION_ID);
+    assert.deepEqual(readBack, manual, 'winner manual projection must remain readable');
   }
 });
 
