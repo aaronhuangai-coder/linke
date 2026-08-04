@@ -1,101 +1,189 @@
 /**
- * V1.46 management-auth-rotate Agent CLI bootstrap 接线 smoke：
- * - 真实 `node src/agent.js` 子进程可识别该命令：exit 1、stdout 为空、
- *   stderr 精确为固定错误，且无 MODULE_NOT_FOUND/stack/path/token；
- * - 最窄源码接线断言：真实 import 与 switch case 存在。
+ * V1.46 management-auth-rotate Agent CLI 正式公开边界。
+ * 仅验证参数/stdin 早失败和可安全制造的锁拒绝；不跑真实 Keychain 成功路径。
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { access, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const execFileAsync = promisify(execFile);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const REPO_ROOT = join(__dirname, '..');
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const AGENT_SRC = join(REPO_ROOT, 'src', 'agent.js');
+const ARGUMENTS_STDERR = 'Error: management-auth-rotate arguments are invalid\n';
+const STDIN_STDERR = 'Error: management-auth-rotate stdin is invalid\n';
+const REFUSED_STDERR = 'Error: management-auth-rotate refused\n';
+const TOKEN = `agent-rotation-token_${'T'.repeat(22)}`;
 
-/** 固定 stderr：顶层既有 catch 输出的唯一公开形状。 */
-const FIXED_STDERR = 'Error: management-auth-rotate-failed\n';
-
-/** 去掉颜色相关环境变量，保证输出可精确断言。 */
-function cleanEnv(extra = {}) {
-  const env = { ...process.env, ...extra };
-  delete env.FORCE_COLOR;
-  delete env.NO_COLOR;
-  return env;
-}
-
-/** 运行真实 agent 子进程，返回 { code, stdout, stderr }。 */
-async function runAgent(argv) {
+async function withTempRoot(prefix, fn) {
+  const root = resolve(await mkdtemp(join(tmpdir(), `linke-agent-mar-${prefix}-`)));
   try {
-    const result = await execFileAsync('node', [AGENT_SRC, ...argv], {
-      env: cleanEnv(),
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    return { code: 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
-  } catch (error) {
-    if (typeof error.code === 'number') {
-      return {
-        code: error.code,
-        stdout: error.stdout ?? '',
-        stderr: error.stderr ?? '',
-      };
-    }
-    throw error;
+    return await fn(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 }
 
-/** 断言一次运行的公开形状：exit1 / stdout 空 / stderr 精确固定且无泄漏。 */
-function assertFixedFailure(result) {
-  assert.equal(result.code, 1);
-  assert.equal(result.stdout, '', 'stdout 必须为空');
-  assert.equal(result.stderr, FIXED_STDERR, 'stderr 必须精确为固定错误');
-  assert.ok(!result.stderr.includes('MODULE_NOT_FOUND'), '不得出现模块缺失');
-  assert.ok(!result.stderr.includes('\n    at '), '不得出现 stack');
-  assert.ok(!result.stderr.includes(REPO_ROOT), '不得回显路径');
-  assert.ok(!result.stderr.includes('token'), '不得回显 token');
+function runAgent(argv, { input = '', keepStdinOpen = false, timeoutMs = 10_000 } = {}) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(process.execPath, [AGENT_SRC, ...argv], {
+      env: Object.create(null),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.stdin.on('error', () => {});
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectRun(new Error('agent subprocess timeout'));
+    }, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      rejectRun(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolveRun({ code, signal, stdout, stderr });
+    });
+    if (!keepStdinOpen) child.stdin.end(input);
+  });
 }
 
-describe('agent management-auth-rotate bootstrap 接线', () => {
-  it('真实子进程识别该命令并固定失败（裸命令）', async () => {
-    const result = await runAgent(['management-auth-rotate']);
-    assertFixedFailure(result);
+function assertPublicResult(result, { code, stderr, forbidden = [] }) {
+  assert.equal(result.code, code);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, stderr);
+  assert.equal(result.stderr.includes('MODULE_NOT_FOUND'), false);
+  assert.equal(result.stderr.includes('\n    at '), false);
+  assert.equal(result.stderr.includes(REPO_ROOT), false);
+  for (const value of forbidden) {
+    if (value) assert.equal(result.stderr.includes(String(value)), false);
+  }
+}
+
+async function assertAbsent(path) {
+  await assert.rejects(access(path), (error) => error?.code === 'ENOENT');
+}
+
+describe('management-auth-rotate Agent argv 早失败', () => {
+  it('裸命令在 stdin 保持打开时仍立即 arguments-invalid', async () => {
+    const result = await runAgent(['management-auth-rotate'], { keepStdinOpen: true });
+    assertPublicResult(result, { code: 1, stderr: ARGUMENTS_STDERR });
   });
 
-  it('真实子进程识别该命令并固定失败（完整未来 6-token surface）', async () => {
-    // 未来固定 surface：--data-dir <path> --scope read --token-stdin；
-    // skeleton 零 I/O：不得创建该路径，行为必须仍为固定失败。
-    const result = await runAgent([
-      'management-auth-rotate',
-      '--data-dir',
-      '/tmp/linke-bootstrap-placeholder',
-      '--scope',
-      'read',
-      '--token-stdin',
-    ]);
-    assertFixedFailure(result);
+  const argvBuilders = [
+    (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read'],
+    (dataDir) => ['management-auth-rotate', '--scope', 'read', '--data-dir', dataDir, '--token-stdin'],
+    (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--scope'],
+    (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token-stdin', 'extra'],
+    (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--new-token-stdin'],
+    (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token', TOKEN],
+  ];
+
+  for (const [index, buildArgv] of argvBuilders.entries()) {
+    it(`无效 argv 样本 ${index + 1} 固定 arguments-invalid 且不创建 dataDir`, async () => {
+      await withTempRoot(`argv-${index}`, async (root) => {
+        const dataDir = join(root, 'must-not-exist');
+        const result = await runAgent(buildArgv(dataDir), { input: `${TOKEN}\n` });
+        assertPublicResult(result, {
+          code: 1,
+          stderr: ARGUMENTS_STDERR,
+          forbidden: [TOKEN, dataDir],
+        });
+        await assertAbsent(dataDir);
+      });
+    });
+  }
+});
+
+describe('management-auth-rotate Agent stdin 早失败', () => {
+  const invalidInputs = [
+    '',
+    '\n',
+    'abc\n',
+    `${TOKEN}\n${TOKEN}\n`,
+    `${TOKEN}\n\n`,
+    `${'A'.repeat(42)}=\n`,
+    `${'A'.repeat(4096)}\n`,
+  ];
+
+  for (const [index, input] of invalidInputs.entries()) {
+    it(`无效 stdin 样本 ${index + 1} 固定 stdin-invalid 且不建锁目录`, async () => {
+      await withTempRoot(`stdin-${index}`, async (root) => {
+        const dataDir = join(root, 'must-not-exist');
+        const result = await runAgent([
+          'management-auth-rotate',
+          '--data-dir',
+          dataDir,
+          '--scope',
+          'read',
+          '--token-stdin',
+        ], { input });
+        assertPublicResult(result, {
+          code: 1,
+          stderr: STDIN_STDERR,
+          forbidden: [TOKEN, dataDir, input.replace(/[\r\n]/g, '')],
+        });
+        await assertAbsent(dataDir);
+      });
+    });
+  }
+});
+
+describe('management-auth-rotate Agent refusal 与源码接线', () => {
+  it('有效 token + 不可建锁 dataDir → exit 2 refused，不触真实 Keychain 读写', async () => {
+    await withTempRoot('refused', async (root) => {
+      const blocker = join(root, 'blocker');
+      await writeFile(blocker, 'synthetic', { mode: 0o600 });
+      const dataDir = join(blocker, 'child');
+      const result = await runAgent([
+        'management-auth-rotate',
+        '--data-dir',
+        dataDir,
+        '--scope',
+        'read',
+        '--token-stdin',
+      ], { input: `${TOKEN}\n` });
+      assertPublicResult(result, {
+        code: 2,
+        stderr: REFUSED_STDERR,
+        forbidden: [TOKEN, dataDir],
+      });
+    });
   });
 
-  it('最窄源码接线断言：真实 import 与 switch case', async () => {
+  it('真实 command、两类 refusal error 与固定文案均接入 management-auth-rotate case', async () => {
     const source = await readFile(AGENT_SRC, 'utf8');
-    assert.ok(
-      source.includes(
-        "import { runManagementAuthRotateCommand } from './management-auth-rotate-command.js';",
-      ),
-      'agent.js 必须真实 import runManagementAuthRotateCommand',
-    );
-    assert.ok(
-      source.includes("case 'management-auth-rotate':"),
-      'agent.js switch 必须包含 management-auth-rotate case',
-    );
-    assert.ok(
-      source.includes('await runManagementAuthRotateCommand(rawArgv)'),
-      'case 必须以 rawArgv 调用命令入口',
-    );
+    assert.ok(source.includes("from './management-auth-rotate-command.js'"));
+    assert.ok(source.includes('runManagementAuthRotateCommand'));
+    assert.ok(source.includes('ManagementAuthRotateCommandError'));
+    assert.ok(source.includes('ManagementAuthRotationError'));
+    assert.ok(source.includes('ManagementAuthRotationProcessLockError'));
+    assert.ok(source.includes("case 'management-auth-rotate':"));
+    assert.ok(source.includes('await runManagementAuthRotateCommand(rawArgv)'));
+    for (const phrase of [
+      'management-auth-rotate arguments are invalid',
+      'management-auth-rotate stdin is invalid',
+      'management-auth-rotate refused',
+      'management-auth-rotate failed',
+    ]) {
+      assert.ok(source.includes(phrase), `missing fixed phrase ${phrase}`);
+    }
+  });
+
+  it('usage 仅公开 data-dir/scope/token-stdin，不公开 new-token-stdin', async () => {
+    const source = await readFile(AGENT_SRC, 'utf8');
+    assert.ok(source.includes('--data-dir'));
+    assert.ok(source.includes('--scope'));
+    assert.ok(source.includes('--token-stdin'));
+    assert.equal(source.includes('--new-token-stdin'), false);
   });
 });

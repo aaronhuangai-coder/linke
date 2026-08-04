@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import {
   ManagementAuthRotationError,
   stageManagementAuthKeychainRotation,
+  validateManagementAuthRotationToken,
 } from '../src/management-auth-rotation.js';
 import { MANAGEMENT_AUTH_SCOPE_MAP } from '../src/management-auth-keychain.js';
 
@@ -935,5 +936,133 @@ describe('management-auth-rotation 并发串行证据（单进程 fake 排他队
     assert.equal(queue.maxActive(), 1, 'fake exclusive queue must serialize both critical sections');
     assert.equal(worldA.backing.get(writeIds.currentId), NEW_TOKEN);
     assert.equal(worldB.backing.get(readIds.currentId), NEW_TOKEN);
+  });
+});
+
+describe('validateManagementAuthRotationToken 纯函数行为（零 I/O）', () => {
+  it('合法 base64url 边界值 43/128 字符原样返回', () => {
+    const tokens = ['A'.repeat(43), 'B'.repeat(128)];
+    for (const token of tokens) {
+      assert.equal(validateManagementAuthRotationToken(token), token);
+    }
+  });
+
+  it('非法类型、长度或字符固定 invalid 且不回显输入', () => {
+    const invalidValues = [
+      undefined,
+      null,
+      42,
+      {},
+      'S'.repeat(42),
+      'L'.repeat(129),
+      `${'A'.repeat(42)}+`,
+      `${'A'.repeat(42)}/`,
+      `${'A'.repeat(42)}=`,
+      `${'A'.repeat(42)} `,
+      `${'A'.repeat(42)}\n`,
+      `${'A'.repeat(42)}\0`,
+    ];
+
+    for (const value of invalidValues) {
+      assert.throws(
+        () => validateManagementAuthRotationToken(value),
+        (error) => {
+          const secrets = typeof value === 'string' ? [value] : [];
+          assertFixedError(error, FIXED_INVALID, secrets);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('相同输入重复调用保持相同结果或固定错误分类', () => {
+    const valid = 'R'.repeat(43);
+    const invalid = 'R'.repeat(42);
+    for (let index = 0; index < 3; index += 1) {
+      assert.equal(validateManagementAuthRotationToken(valid), valid);
+      assert.throws(
+        () => validateManagementAuthRotationToken(invalid),
+        (error) => {
+          assertFixedError(error, FIXED_INVALID, [invalid]);
+          return true;
+        },
+      );
+    }
+  });
+});
+
+describe('management-auth-rotation 锁 wrapper 错误优先级', () => {
+  const { currentId, previousId } = rotationItemIds('write');
+
+  it('task invalid 后 wrapper 抛不同 release error → unavailable', async () => {
+    const releaseError = new Error('synthetic invalid-path release sentinel');
+    const world = createWorld({
+      backing: new Map([[currentId, OLD_TOKEN], [previousId, NEW_TOKEN]]),
+    });
+    const withExclusiveLock = async (task) => {
+      try {
+        return await task();
+      } catch {
+        throw releaseError;
+      }
+    };
+
+    await assert.rejects(
+      stageManagementAuthKeychainRotation(validInput(world, { withExclusiveLock })),
+      (error) => {
+        assertFixedError(error, FIXED_UNAVAILABLE, [...ALL_SECRET_STRINGS, releaseError.message]);
+        return true;
+      },
+    );
+    assert.deepEqual(setCalls(world.events), []);
+    assertNoDelete(world);
+  });
+
+  it('task recovery 后 wrapper 抛不同 release error → unavailable', async () => {
+    const releaseError = new Error('synthetic recovery-path release sentinel');
+    const world = createWorld({ backing: new Map([[currentId, NEW_TOKEN]]) });
+    const withExclusiveLock = async (task) => {
+      try {
+        return await task();
+      } catch {
+        throw releaseError;
+      }
+    };
+
+    await assert.rejects(
+      stageManagementAuthKeychainRotation(validInput(world, { withExclusiveLock })),
+      (error) => {
+        assertFixedError(error, FIXED_UNAVAILABLE, [...ALL_SECRET_STRINGS, releaseError.message]);
+        return true;
+      },
+    );
+    assert.deepEqual(setCalls(world.events), []);
+    assertNoDelete(world);
+  });
+
+  it('wrapper 原样重抛同一 task error 引用 → 保留 task 分类与引用', async () => {
+    const world = createWorld({
+      backing: new Map([[currentId, OLD_TOKEN], [previousId, NEW_TOKEN]]),
+    });
+    let taskError = null;
+    const withExclusiveLock = async (task) => {
+      try {
+        return await task();
+      } catch (error) {
+        taskError = error;
+        throw error;
+      }
+    };
+
+    await assert.rejects(
+      stageManagementAuthKeychainRotation(validInput(world, { withExclusiveLock })),
+      (error) => {
+        assert.equal(error, taskError);
+        assertFixedError(error, FIXED_INVALID, ALL_SECRET_STRINGS);
+        return true;
+      },
+    );
+    assert.deepEqual(setCalls(world.events), []);
+    assertNoDelete(world);
   });
 });

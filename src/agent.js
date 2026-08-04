@@ -39,7 +39,7 @@
  *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
  *   device-heartbeat    — authenticated device heartbeat (token from Keychain only)
  *   device-token-rotate — rotate device token (token from Keychain only)
- *   management-auth-rotate — rotate management auth Keychain token under cross-process lock (bootstrap: fixed refusal)
+ *   management-auth-rotate — rotate management auth Keychain token under cross-process lock
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000); device-* require HTTPS Agent URL
@@ -122,7 +122,12 @@ import {
   recoverAuditIntegrityRotation,
   rotateAuditIntegrityGeneration,
 } from './audit-integrity-rotation.js';
-import { runManagementAuthRotateCommand } from './management-auth-rotate-command.js';
+import {
+  ManagementAuthRotateCommandError,
+  runManagementAuthRotateCommand,
+} from './management-auth-rotate-command.js';
+import { ManagementAuthRotationError } from './management-auth-rotation.js';
+import { ManagementAuthRotationProcessLockError } from './management-auth-rotation-process-lock.js';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 
 const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
@@ -131,6 +136,11 @@ const AUDIT_INTEGRITY_MONITOR_ARGS_ERROR = 'audit-integrity-monitor arguments ar
 const AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR = 'audit-integrity-monitor failed';
 const AUDIT_INTEGRITY_ROTATE_COMMAND = 'audit-integrity-rotate';
 const AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND = 'audit-integrity-rotation-recover';
+const MANAGEMENT_AUTH_ROTATE_COMMAND = 'management-auth-rotate';
+const MANAGEMENT_AUTH_ROTATE_ARGUMENTS_ERROR = 'management-auth-rotate arguments are invalid';
+const MANAGEMENT_AUTH_ROTATE_STDIN_ERROR = 'management-auth-rotate stdin is invalid';
+const MANAGEMENT_AUTH_ROTATE_REFUSED_ERROR = 'management-auth-rotate refused';
+const MANAGEMENT_AUTH_ROTATE_EXECUTION_ERROR = 'management-auth-rotate failed';
 const AUDIT_INTEGRITY_ROTATE_ARGS_ERROR =
   'audit-integrity-rotate arguments are invalid';
 const AUDIT_INTEGRITY_ROTATE_REFUSED_ERROR = 'audit-integrity-rotate refused';
@@ -147,6 +157,7 @@ const AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS = new Set([
   AUDIT_INTEGRITY_MONITOR_COMMAND,
   AUDIT_INTEGRITY_ROTATE_COMMAND,
   AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND,
+  MANAGEMENT_AUTH_ROTATE_COMMAND,
 ]);
 const AUDIT_INTEGRITY_REFUSAL_CODES = new Set(
   Object.values(ERROR_CODES).filter(
@@ -1231,7 +1242,7 @@ Commands:
   device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
   device-heartbeat    Authenticated device heartbeat (device token from Keychain only)
   device-token-rotate Rotate device token (device token from Keychain only)
-  management-auth-rotate Rotate management auth Keychain token under cross-process lock (bootstrap: fixed refusal)
+  management-auth-rotate Rotate management auth Keychain token under cross-process lock
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000). device-* commands require an HTTPS Agent URL only
@@ -1258,8 +1269,8 @@ Options:
   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-enroll / device-heartbeat / device-token-rotate)
   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 fingerprint (64 hex, colons optional; independent channel)
   --enrollment-code-stdin Required for device-enroll: read one-time enrollment code from stdin (max 4096 bytes, single line). Enrollment codes and device tokens are never accepted as CLI arguments; tokens are stored and read only via Keychain
-  --scope <read|write>  Management auth scope to rotate (management-auth-rotate; reserved fixed flag, not yet accepted)
-  --token-stdin        Read the new management auth token from stdin (management-auth-rotate; reserved fixed flag; token from stdin only, never accepted as a CLI argument)
+  --scope <read|write>  Management auth scope to rotate (management-auth-rotate)
+  --token-stdin        Read the new management auth token from stdin (management-auth-rotate; token is never accepted as a CLI argument)
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
@@ -2419,10 +2430,27 @@ export async function main() {
       }
 
       case 'management-auth-rotate': {
-        // bootstrap 骨架：命令模块固定抛 management-auth-rotate-failed，
-        // 由顶层既有 catch 输出固定错误并 exit 1。
-        // 不传测试 deps、不读 env fake；不接真实 Keychain、lockf、launchctl。
-        await runManagementAuthRotateCommand(rawArgv);
+        try {
+          await runManagementAuthRotateCommand(rawArgv);
+        } catch (error) {
+          let message = MANAGEMENT_AUTH_ROTATE_EXECUTION_ERROR;
+          let exitCode = 1;
+          if (error instanceof ManagementAuthRotateCommandError) {
+            if (error.code === 'management-auth-rotate-arguments-invalid') {
+              message = MANAGEMENT_AUTH_ROTATE_ARGUMENTS_ERROR;
+            } else if (error.code === 'management-auth-rotate-stdin-invalid') {
+              message = MANAGEMENT_AUTH_ROTATE_STDIN_ERROR;
+            }
+          } else if (
+            error instanceof ManagementAuthRotationError
+            || error instanceof ManagementAuthRotationProcessLockError
+          ) {
+            message = MANAGEMENT_AUTH_ROTATE_REFUSED_ERROR;
+            exitCode = 2;
+          }
+          process.stderr.write(`Error: ${message}\n`);
+          process.exitCode = exitCode;
+        }
         break;
       }
 

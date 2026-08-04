@@ -327,7 +327,7 @@ export async function stageManagementAuthKeychainRotation(input) {
   } catch (error) {
     lockSettled = true;
     // task 自身已分类的失败原样抛出；锁后端失败固定 fail closed。
-    if (taskOutcome !== null && !taskOutcome.ok) {
+    if (taskOutcome !== null && !taskOutcome.ok && error === taskOutcome.error) {
       throw taskOutcome.error;
     }
     throw new ManagementAuthRotationError(ROTATION_UNAVAILABLE);
