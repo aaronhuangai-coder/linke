@@ -2458,6 +2458,30 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records the pure HTTPS alert delivery envelope without claiming transport delivery', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'pure HTTPS audit-integrity alert delivery envelope foundation',
+      'src/audit-integrity-alert-delivery.js',
+      'test/audit-integrity-alert-delivery.test.js',
+      'canonical HTTPS POST descriptor with stream-namespaced stable idempotency key',
+      'explicit canonical stream UUID namespaces idempotency keys across outbox streams',
+      'stream identity provisioning and persistence not delivered',
+      'at-least-once request semantics; not exactly-once evidence',
+      'request descriptor performs no network I/O and does not acknowledge outbox state',
+      'not remote notification delivery',
+      'not managed scheduler',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+    ]) {
+      assert.ok(item.evidence.includes(atom), `missing delivery envelope evidence atom: ${atom}`);
+    }
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];

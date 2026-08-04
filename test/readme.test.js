@@ -3372,4 +3372,24 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/Gold 仍 partial|Gold remains partial/i, 'Gold remains partial');
     assertReadmeContains(/security-auth/, 'security-auth partial reference');
   });
+
+  it('documents the pure alert delivery envelope and its no-transport ceiling', () => {
+    assertReadmeContains(/audit.*alert delivery envelope|告警.*投递.*信封/i,
+      'audit alert delivery envelope');
+    assertReadmeContains(/HTTPS POST descriptor|HTTPS POST 请求描述符/i,
+      'canonical HTTPS POST descriptor');
+    assertReadmeContains(/idempotency key|幂等键/i, 'stable idempotency key');
+    assertReadmeContains(/stream UUID/i, 'canonical stream UUID namespace');
+    assertReadmeContains(/stream identity provisioning\/persistence.*not delivered/i,
+      'stream identity provisioning remains undelivered');
+    assertReadmeContains(/at-least-once/i, 'at-least-once semantics');
+    assertReadmeContains(/not exactly-once|非 exactly-once/i, 'not exactly-once evidence');
+    assertReadmeContains(/no network I\/O|不执行网络 I\/O/i, 'no network I/O');
+    assertReadmeContains(/does not acknowledge outbox|不确认 outbox/i,
+      'does not acknowledge outbox state');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+    assertReadmeContains(/production-hardening.*partial/i,
+      'production-hardening remains partial');
+  });
 });
