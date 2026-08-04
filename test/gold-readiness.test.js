@@ -2547,6 +2547,47 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records durable local alert delivery claim/fencing foundation without transport overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'durable local audit-integrity alert delivery claim/fencing foundation',
+      'src/audit-integrity-alert-delivery-claim.js',
+      'test/audit-integrity-alert-delivery-claim.test.js',
+      'test/helpers/audit-integrity-alert-delivery-claim-contender.js',
+      'durable local claim state',
+      'exact FIFO-head claim capability/fencing',
+      'same-root cross-process exclusivity',
+      'hostile/stale capability refusal',
+      'live-owner lease handling',
+      'owner-death/PID-reuse/boot-mismatch recovery',
+      'completion and release fencing',
+      'no HTTPS transport executor',
+      'no automatic retry',
+      'no dead-letter handling',
+      'not managed scheduler',
+      'not remote notification delivery',
+      'not end-to-end production audit delivery',
+      'at-least-once delivery semantics; not exactly-once',
+      'not production-hardening ready',
+      'not Gold',
+    ]) {
+      assert.ok(item.evidence.includes(atom), `missing claim/fencing evidence atom: ${atom}`);
+    }
+    // Clause-local honesty: production-hardening ready must stay negated; status partial.
+    assertEvidenceProductionHardeningReadyNegated(
+      item.evidence,
+      'production-hardening claim/fencing evidence',
+    );
+    assertTextProductionHardeningReadyNegated(
+      item.nextStep,
+      'production-hardening claim/fencing nextStep',
+    );
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];

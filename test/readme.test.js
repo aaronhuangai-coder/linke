@@ -3438,4 +3438,63 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/not remote notification delivery/i,
       'not remote notification delivery');
   });
+
+  it('documents durable local alert delivery claim/fencing foundation and undelivered transport ceiling', () => {
+    // Delivered local claim/fencing foundation (Task 3) — must not be silent in docs.
+    assertReadmeContains(
+      /durable local (audit-integrity )?alert delivery claim\/fencing|durable local claim\/fencing foundation|本地.*claim\/fencing/i,
+      'durable local claim/fencing foundation',
+    );
+    assertReadmeContains(/src\/audit-integrity-alert-delivery-claim\.js/,
+      'claim coordinator module path');
+    assertReadmeContains(/test\/audit-integrity-alert-delivery-claim\.test\.js/,
+      'claim coordinator test path');
+    assertReadmeContains(/test\/helpers\/audit-integrity-alert-delivery-claim-contender\.js/,
+      'claim contender helper path');
+    assertReadmeContains(/claimAuditIntegrityAlertDelivery/,
+      'claim API');
+    assertReadmeContains(/completeAuditIntegrityAlertDelivery/,
+      'complete API');
+    assertReadmeContains(/releaseAuditIntegrityAlertDelivery/,
+      'release API');
+    assertReadmeContains(/durable local claim state|持久化.*claim state|本地.*claim state/i,
+      'durable local claim state');
+    assertReadmeContains(
+      /exact FIFO-head claim capability\/fencing|exact FIFO head claim capability\/fencing|FIFO-head claim capability\/fencing/i,
+      'exact FIFO-head claim capability/fencing',
+    );
+    assertReadmeContains(/same-root cross-process exclusivity|同 root.*跨进程.*排他/i,
+      'same-root cross-process exclusivity');
+    assertReadmeContains(/hostile\/stale capability (refusal|reject)|hostile.*stale capability|stale capability refusal/i,
+      'hostile/stale capability refusal');
+    assertReadmeContains(/live-owner lease|live owner lease/i,
+      'live-owner lease handling');
+    assertReadmeContains(
+      /owner-death\/PID-reuse\/boot-mismatch|owner-death.*PID-reuse.*boot-mismatch|owner death.*PID reuse.*boot mismatch/i,
+      'owner-death/PID-reuse/boot-mismatch recovery',
+    );
+    assertReadmeContains(/completion and release fencing|complete\/release fencing|completion.*release fencing/i,
+      'completion and release fencing');
+    // Explicit undelivered ceiling — distinguish claim/fencing from transport/Gold.
+    assertReadmeContains(
+      /no HTTPS transport executor|无 HTTPS transport executor|HTTPS transport executor.*(not delivered|absent|missing)|not.*HTTPS transport executor/i,
+      'no HTTPS transport executor',
+    );
+    assertReadmeContains(/no automatic retry|无 automatic retry|not automatic retry/i,
+      'no automatic retry');
+    assertReadmeContains(/no dead-letter|无 dead-letter|not dead-letter/i,
+      'no dead-letter handling');
+    assertReadmeContains(/not managed scheduler/i, 'not managed scheduler');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+    assertReadmeContains(/not end-to-end production audit delivery/i,
+      'not end-to-end production audit delivery');
+    assertReadmeContains(/at-least-once/i, 'at-least-once semantics');
+    assertReadmeContains(/not exactly-once|非 exactly-once/i, 'not exactly-once');
+    assertReadmeContains(/production-hardening.*(remains )?partial|production-hardening 仍 partial/i,
+      'production-hardening remains partial');
+    assertReadmeContains(/not production-hardening ready/i,
+      'not production-hardening ready');
+    assertReadmeContains(/not Gold|不得宣称.*Gold/i, 'not Gold');
+  });
 });
