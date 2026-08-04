@@ -106,6 +106,7 @@ describe('Agent hardening-status CLI', () => {
         full: false,
         read: true,
         write: true,
+        admin: false,
       });
       assert.strictEqual(body.hardening.rateLimitConfigured, true);
       assert.strictEqual(body.hardening.auditRetentionConfigured, true);

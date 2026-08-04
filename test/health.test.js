@@ -69,6 +69,7 @@ describe('Auth status response', () => {
           full: true,
           read: true,
           write: true,
+          admin: false,
         },
         previousTokenOverlapConfigured: {
           read: false,
@@ -126,6 +127,19 @@ describe('Auth status response', () => {
       }),
       { name: 'Error', message: 'previousWriteToken requires writeToken' },
     );
+  });
+
+  it('buildAuthStatusResponse reports admin scope when only adminToken is configured', () => {
+    const auth = buildAuthStatusResponse({ adminToken: 'admin-status-secret' });
+    assert.strictEqual(auth.auth.enabled, true);
+    assert.deepStrictEqual(auth.auth.configuredScopes, {
+      full: false,
+      read: false,
+      write: false,
+      admin: true,
+    });
+    assert.deepStrictEqual(auth.auth.previousTokenOverlapConfigured, { read: false, write: false });
+    assert.doesNotMatch(JSON.stringify(auth), /admin-status-secret/);
   });
 });
 
@@ -251,7 +265,7 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(body.status, 'ok');
       assert.strictEqual(body.service, 'linke');
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
-      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false });
+      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false, admin: false });
       assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
       assert.strictEqual(body.auth.enabled, false);
       assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
@@ -276,7 +290,7 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(res.status, 200);
       const body = await res.json();
       assert.strictEqual(body.auth.enabled, true);
-      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true });
+      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true, admin: false });
       assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
       assert.doesNotMatch(JSON.stringify(body), /read-status-token|write-status-token|Bearer/);
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
@@ -451,6 +465,7 @@ describe('Hardening status response', () => {
           full: false,
           read: false,
           write: false,
+          admin: false,
         },
         scopedTokensConfigured: false,
         rateLimitConfigured: false,
@@ -486,6 +501,7 @@ describe('Hardening status response', () => {
       full: true,
       read: true,
       write: true,
+      admin: false,
     });
     assert.strictEqual(body.hardening.authConfigured, true);
     assert.strictEqual(body.hardening.scopedTokensConfigured, true);
@@ -494,6 +510,19 @@ describe('Hardening status response', () => {
     assert.strictEqual(body.hardening.restoreRootConfigured, true);
     assert.doesNotMatch(serialized, /full-secret-token|read-secret-token|write-secret-token/);
     assert.ok(!serialized.includes(restoreRoot));
+  });
+
+  it('buildHardeningStatusResponse reports admin scope when only adminToken is configured', () => {
+    const hardening = buildHardeningStatusResponse({ adminToken: 'admin-hardening-secret' });
+    assert.strictEqual(hardening.hardening.authConfigured, true);
+    assert.strictEqual(hardening.hardening.scopedTokensConfigured, true);
+    assert.deepStrictEqual(hardening.hardening.configuredAuthScopes, {
+      full: false,
+      read: false,
+      write: false,
+      admin: true,
+    });
+    assert.doesNotMatch(JSON.stringify(hardening), /admin-hardening-secret/);
   });
 
   it('buildHardeningStatusResponse treats auditRetention maxEvents 0 as disabled', () => {
@@ -569,6 +598,7 @@ describe('GET /api/hardening-status', () => {
         full: false,
         read: true,
         write: true,
+        admin: false,
       });
       assert.strictEqual(body.hardening.scopedTokensConfigured, true);
       assert.strictEqual(body.hardening.rateLimitConfigured, true);

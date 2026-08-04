@@ -934,6 +934,20 @@ describe('Security — optional bearer token authentication', () => {
     );
   });
 
+  it('fails fast when adminToken is only whitespace', () => {
+    assert.throws(
+      () => createServer({ dataDir, adminToken: '   ' }),
+      /adminToken must be a non-empty string/,
+    );
+  });
+
+  it('fails fast when adminToken is not a string', () => {
+    assert.throws(
+      () => createServer({ dataDir, adminToken: 42 }),
+      /adminToken must be a string/,
+    );
+  });
+
   it('when no authToken is provided, existing unauthenticated localhost behavior remains allowed', async () => {
     const server = createServer({ dataDir });
     await new Promise((r) => server.listen(0, r));
@@ -1819,5 +1833,245 @@ describe('Security — loopback device administration routes', () => {
     assert.ok(API_WRITE_ROUTES.some((route) => route.method === 'POST' && route.path === '/api/device-enrollment-codes'));
     assert.ok(API_WRITE_ROUTES.some((route) => route.method === 'POST' && route.path === '/api/device-revoke'));
     assert.ok(!API_WRITE_ROUTES.some((route) => route.path === '/api/agent-listener-status'));
+  });
+
+  it('admin scope rejects current and previous write', async () => {
+    const ADMIN = 'admin-current';
+    const WRITE_CURRENT = 'write-current';
+    const WRITE_PREVIOUS = 'write-previous';
+    let issueCount = 0;
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => {
+        issueCount += 1;
+        return { deviceId: 'mac-alpha', code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async () => {
+        revokeCount += 1;
+        return { deviceId: 'mac-alpha', revoked: true };
+      },
+    });
+
+    await withServer({
+      adminToken: ADMIN,
+      writeToken: WRITE_CURRENT,
+      previousWriteToken: WRITE_PREVIOUS,
+      deviceAdministration,
+    }, async (port, dataDir) => {
+      const adminPaths = ['/api/device-enrollment-codes', '/api/device-revoke'];
+      for (const path of adminPaths) {
+        for (const token of [WRITE_CURRENT, WRITE_PREVIOUS]) {
+          const response = await postJson(port, path, { deviceId: 'mac-alpha' }, token);
+          assert.strictEqual(response.status, 403, `${path} token=${token}`);
+          assert.deepStrictEqual(await response.json(), { error: 'Forbidden' });
+        }
+      }
+
+      // 前置门早于请求体解析：previous write 携带畸形 JSON 时返回 403，而不是 400。
+      const malformed = await fetch(`http://127.0.0.1:${port}/api/device-enrollment-codes`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${WRITE_PREVIOUS}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{',
+      });
+      assert.strictEqual(malformed.status, 403);
+      assert.deepStrictEqual(await malformed.json(), { error: 'Forbidden' });
+
+      const events = await readAuditEvents(dataDir, { limit: 100 });
+      assert.strictEqual(
+        events.filter((event) => event.type === 'api.write.admission.started').length,
+        0,
+        'denied admin-route requests must not reach required write-admission audit',
+      );
+      const forbidden = events.filter((event) => event.type === 'auth.forbidden');
+      // 4 次合法请求体的写令牌拒绝，加 1 次畸形请求体的 previous-write 拒绝。
+      assert.ok(forbidden.length >= 5, `expected auth.forbidden for each denial, got ${forbidden.length}`);
+      for (const path of adminPaths) {
+        const pathForbidden = forbidden.filter((event) => event.path === path && event.statusCode === 403);
+        assert.ok(pathForbidden.length >= 2, `missing auth.forbidden denials for ${path}`);
+      }
+      assert.ok(
+        forbidden.some((event) => (
+          event.path === '/api/device-enrollment-codes'
+          && event.statusCode === 403
+        )),
+        'malformed previous-write denial must still emit auth.forbidden',
+      );
+
+      const serialized = JSON.stringify(events);
+      for (const secret of [ADMIN, WRITE_CURRENT, WRITE_PREVIOUS]) {
+        assert.ok(!serialized.includes(secret), `audit must not contain credential ${secret}`);
+        assertAuditEventsHaveNoSecrets(events, { syntheticToken: secret });
+      }
+    });
+
+    assert.strictEqual(issueCount, 0);
+    assert.strictEqual(revokeCount, 0);
+  });
+
+  it('keeps query-string administration variants as 404 when adminToken is configured', async () => {
+    // 管理权限前置门必须沿用精确 URL 语义；近似 URL 不应被提前改写为 403。
+    let issueCount = 0;
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async () => {
+        issueCount += 1;
+        return { deviceId: 'mac-alpha', code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async () => {
+        revokeCount += 1;
+        return { deviceId: 'mac-alpha', revoked: true };
+      },
+    });
+
+    await withServer({
+      adminToken: 'admin-exact-only',
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+      deviceAdministration,
+    }, async (port) => {
+      for (const token of ['write-current', 'write-previous']) {
+        const enroll = await postJson(
+          port,
+          '/api/device-enrollment-codes?x=1',
+          { deviceId: 'mac-alpha' },
+          token,
+        );
+        assert.strictEqual(enroll.status, 404, `enroll?x=1 token=${token}`);
+
+        const revoke = await postJson(
+          port,
+          '/api/device-revoke?x=1',
+          { deviceId: 'mac-alpha' },
+          token,
+        );
+        assert.strictEqual(revoke.status, 404, `revoke?x=1 token=${token}`);
+      }
+    });
+
+    assert.strictEqual(issueCount, 0);
+    assert.strictEqual(revokeCount, 0);
+  });
+
+  it('allows adminToken and authToken on both device administration routes when admin is configured', async () => {
+    let issueCount = 0;
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async (deviceId) => {
+        revokeCount += 1;
+        return { deviceId, revoked: true };
+      },
+    });
+
+    await withServer({
+      adminToken: 'admin-capable-token',
+      authToken: 'full-admin-token',
+      writeToken: 'write-only-token',
+      deviceAdministration,
+    }, async (port) => {
+      for (const token of ['admin-capable-token', 'full-admin-token']) {
+        const enroll = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(enroll.status, 201, `enroll token=${token}`);
+        const enrollBody = await enroll.json();
+        assert.strictEqual(enrollBody.enrollmentCode, SYNTHETIC_CODE);
+
+        const revoke = await postJson(port, '/api/device-revoke', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(revoke.status, 200, `revoke token=${token}`);
+        assert.deepStrictEqual(await revoke.json(), { deviceId: 'mac-alpha', revoked: true });
+      }
+    });
+
+    assert.strictEqual(issueCount, 2);
+    assert.strictEqual(revokeCount, 2);
+  });
+
+  it('allows adminToken for GET /api/devices and POST /api/heartbeat', async () => {
+    await withServer({
+      adminToken: 'admin-broad-token',
+      writeToken: 'write-only-token',
+    }, async (port) => {
+      const devices = await fetch(`http://127.0.0.1:${port}/api/devices`, {
+        headers: { Authorization: 'Bearer admin-broad-token' },
+      });
+      assert.strictEqual(devices.status, 200);
+      assert.ok(Array.isArray(await devices.json()));
+
+      const heartbeat = await fetch(`http://127.0.0.1:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-broad-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'admin-heartbeat-device', hostname: 'allowed' }),
+      });
+      assert.strictEqual(heartbeat.status, 200);
+      const body = await heartbeat.json();
+      assert.strictEqual(body.deviceId, 'admin-heartbeat-device');
+    });
+  });
+
+  it('keeps write and previous-write admin-route access when adminToken is absent', async () => {
+    let issueCount = 0;
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async (deviceId) => {
+        revokeCount += 1;
+        return { deviceId, revoked: true };
+      },
+    });
+
+    await withServer({
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+      deviceAdministration,
+    }, async (port) => {
+      for (const token of ['write-current', 'write-previous']) {
+        const enroll = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(enroll.status, 201, `enroll token=${token}`);
+        const revoke = await postJson(port, '/api/device-revoke', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(revoke.status, 200, `revoke token=${token}`);
+      }
+    });
+
+    assert.strictEqual(issueCount, 2);
+    assert.strictEqual(revokeCount, 2);
+  });
+
+  it('uses broadest scope when adminToken and writeToken share the same value', async () => {
+    let issueCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+    });
+
+    await withServer({
+      adminToken: 'shared-admin-write',
+      writeToken: 'shared-admin-write',
+      deviceAdministration,
+    }, async (port) => {
+      const enroll = await postJson(
+        port,
+        '/api/device-enrollment-codes',
+        { deviceId: 'mac-alpha' },
+        'shared-admin-write',
+      );
+      assert.strictEqual(enroll.status, 201);
+      const body = await enroll.json();
+      assert.strictEqual(body.enrollmentCode, SYNTHETIC_CODE);
+    });
+
+    assert.strictEqual(issueCount, 1);
   });
 });

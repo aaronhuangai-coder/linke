@@ -498,6 +498,29 @@ function normalizeWriteToken(writeToken) {
   return token;
 }
 
+function normalizeAdminToken(adminToken) {
+  if (adminToken === undefined || adminToken === null) return '';
+  if (typeof adminToken !== 'string') throw new Error('adminToken must be a string');
+  const token = adminToken.trim();
+  if (adminToken.length > 0 && !token) {
+    throw new Error('adminToken must be a non-empty string when provided');
+  }
+  return token;
+}
+
+/**
+ * 配置管理令牌后，需要 admin/full 权限的精确设备管理 POST 路由。
+ * 不修改 API_WRITE_ROUTES。
+ * 与 isExactApiRoute 保持相同的精确 URL 语义（路径匹配且无查询参数）。
+ * @param {string} method
+ * @param {URL} url
+ * @returns {boolean}
+ */
+function isDeviceAdministrationApiRoute(method, url) {
+  return isExactApiRoute(url, method, 'POST', '/api/device-enrollment-codes')
+    || isExactApiRoute(url, method, 'POST', '/api/device-revoke');
+}
+
 function authTokensMatch(actualToken, expectedToken) {
   const actual = Buffer.from(actualToken);
   const expected = Buffer.from(expectedToken);
@@ -594,19 +617,21 @@ export function buildAuthStatusResponse({
   previousReadToken,
   writeToken,
   previousWriteToken,
+  adminToken,
 } = {}) {
   const normAuth = normalizeAuthToken(authToken);
   const normRead = normalizeReadToken(readToken);
   const normPreviousRead = normalizeReadToken(previousReadToken);
   const normWrite = normalizeWriteToken(writeToken);
   const normPreviousWrite = normalizeWriteToken(previousWriteToken);
+  const normAdmin = normalizeAdminToken(adminToken);
   assertPreviousScopedTokensRequireCurrent({
     readToken: normRead,
     previousReadToken: normPreviousRead,
     writeToken: normWrite,
     previousWriteToken: normPreviousWrite,
   });
-  const enabled = Boolean(normAuth || normRead || normWrite);
+  const enabled = Boolean(normAuth || normRead || normWrite || normAdmin);
 
   return {
     status: 'ok',
@@ -618,6 +643,7 @@ export function buildAuthStatusResponse({
         full: Boolean(normAuth),
         read: Boolean(normRead),
         write: Boolean(normWrite),
+        admin: Boolean(normAdmin),
       },
       previousTokenOverlapConfigured: {
         read: Boolean(normPreviousRead),
@@ -663,6 +689,7 @@ export function buildHardeningStatusResponse({
   authToken,
   readToken,
   writeToken,
+  adminToken,
   restoreRoot,
   rateLimit,
   auditRetention,
@@ -670,7 +697,8 @@ export function buildHardeningStatusResponse({
   const normAuth = normalizeAuthToken(authToken);
   const normRead = normalizeReadToken(readToken);
   const normWrite = normalizeWriteToken(writeToken);
-  const authConfigured = Boolean(normAuth || normRead || normWrite);
+  const normAdmin = normalizeAdminToken(adminToken);
+  const authConfigured = Boolean(normAuth || normRead || normWrite || normAdmin);
   const auditRetentionConfigured = Boolean(Number.isInteger(auditRetention?.maxEvents) && auditRetention.maxEvents > 0);
 
   return {
@@ -683,8 +711,9 @@ export function buildHardeningStatusResponse({
         full: Boolean(normAuth),
         read: Boolean(normRead),
         write: Boolean(normWrite),
+        admin: Boolean(normAdmin),
       },
-      scopedTokensConfigured: Boolean(normRead || normWrite),
+      scopedTokensConfigured: Boolean(normRead || normWrite || normAdmin),
       rateLimitConfigured: Boolean(rateLimit),
       auditRetentionConfigured,
       restoreRootConfigured: Boolean(restoreRoot),
@@ -779,6 +808,7 @@ export function createServer({
   previousReadToken,
   writeToken,
   previousWriteToken,
+  adminToken,
   restoreRoot,
   rateLimit,
   auditRetention,
@@ -791,6 +821,7 @@ export function createServer({
   const expectedPreviousReadToken = normalizeReadToken(previousReadToken);
   const expectedWriteToken = normalizeWriteToken(writeToken);
   const expectedPreviousWriteToken = normalizeWriteToken(previousWriteToken);
+  const expectedAdminToken = normalizeAdminToken(adminToken);
   assertPreviousScopedTokensRequireCurrent({
     readToken: expectedReadToken,
     previousReadToken: expectedPreviousReadToken,
@@ -799,7 +830,7 @@ export function createServer({
   });
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
-  const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken);
+  const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken || expectedAdminToken);
   const hasDeviceAdministration = isDeviceAdministrationService(deviceAdministration);
   // Dual-gate: incomplete restoreService → management restore task paths stay 404.
   const resolvedRestoreService = resolveManagementRestoreService(restoreService);
@@ -827,16 +858,18 @@ export function createServer({
       }
 
       if (isApiPath(pathname)) {
-        const hasAuth = expectedAuthToken || expectedReadToken || expectedWriteToken;
+        const hasAuth = expectedAuthToken || expectedReadToken || expectedWriteToken || expectedAdminToken;
         if (hasAuth) {
           const header = req.headers.authorization;
           let authorized = false;
           let isWriteAllowed = false;
+          let isAdminAllowed = false;
 
           if (typeof header === 'string' && header.startsWith('Bearer ')) {
             const token = header.slice('Bearer '.length);
 
             const matchesAuth = expectedAuthToken && authTokensMatch(token, expectedAuthToken);
+            const matchesAdmin = expectedAdminToken && authTokensMatch(token, expectedAdminToken);
             const matchesWrite = expectedWriteToken && authTokensMatch(token, expectedWriteToken);
             const matchesPreviousWrite = expectedPreviousWriteToken
               && authTokensMatch(token, expectedPreviousWriteToken);
@@ -844,12 +877,20 @@ export function createServer({
             const matchesPreviousRead = expectedPreviousReadToken
               && authTokensMatch(token, expectedPreviousReadToken);
 
-            if (matchesAuth || matchesWrite || matchesPreviousWrite) {
+            // Full/admin 权限最宽：同时拥有写入与管理权限。
+            // 仅在未配置管理令牌时，写入凭证才保留管理权限。
+            if (matchesAuth || matchesAdmin) {
               authorized = true;
               isWriteAllowed = true;
+              isAdminAllowed = true;
+            } else if (matchesWrite || matchesPreviousWrite) {
+              authorized = true;
+              isWriteAllowed = true;
+              isAdminAllowed = !expectedAdminToken;
             } else if (matchesRead || matchesPreviousRead) {
               authorized = true;
               isWriteAllowed = false;
+              isAdminAllowed = false;
             }
           }
 
@@ -863,6 +904,19 @@ export function createServer({
               requestId,
             }, auditRetention);
             return sendError(res, 401, 'Unauthorized');
+          }
+
+          // 管理路由前置门：早于写权限检查、请求体解析和服务调用。
+          if (!isAdminAllowed && isDeviceAdministrationApiRoute(method, url)) {
+            await recordAudit(dataDir, {
+              type: 'auth.forbidden',
+              method,
+              path: pathname,
+              statusCode: 403,
+              outcome: 'forbidden',
+              requestId,
+            }, auditRetention);
+            return sendError(res, 403, 'Forbidden');
           }
 
           if (!isWriteAllowed) {
@@ -1138,6 +1192,7 @@ export function createServer({
           previousReadToken: expectedPreviousReadToken,
           writeToken: expectedWriteToken,
           previousWriteToken: expectedPreviousWriteToken,
+          adminToken: expectedAdminToken,
         }));
       }
 
@@ -1147,6 +1202,7 @@ export function createServer({
           authToken: expectedAuthToken,
           readToken: expectedReadToken,
           writeToken: expectedWriteToken,
+          adminToken: expectedAdminToken,
           restoreRoot: normalizedRestoreRoot,
           rateLimit: apiRateLimiter,
           auditRetention,
@@ -2114,6 +2170,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const previousReadToken = process.env.LINKE_PREVIOUS_READ_TOKEN;
   const writeToken = process.env.LINKE_WRITE_TOKEN;
   const previousWriteToken = process.env.LINKE_PREVIOUS_WRITE_TOKEN;
+  const adminToken = process.env.LINKE_ADMIN_TOKEN;
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
@@ -2126,6 +2183,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
     previousReadToken,
     writeToken,
     previousWriteToken,
+    adminToken,
     restoreRoot: normalizedRestoreRoot,
     rateLimit,
     auditRetention,
@@ -2136,7 +2194,7 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
     if (normalizedRestoreRoot) {
       console.log(`Restore root: ${normalizedRestoreRoot}`);
     }
-    if (authToken || readToken || writeToken) {
+    if (authToken || readToken || writeToken || adminToken) {
       console.log('API bearer token authentication: enabled');
     }
     if (rateLimit) {

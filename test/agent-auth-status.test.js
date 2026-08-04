@@ -60,7 +60,7 @@ describe('Agent auth-status CLI', () => {
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
       assert.deepStrictEqual(body.auth, {
         enabled: false,
-        configuredScopes: { full: false, read: false, write: false },
+        configuredScopes: { full: false, read: false, write: false, admin: false },
         previousTokenOverlapConfigured: { read: false, write: false },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
@@ -95,11 +95,46 @@ describe('Agent auth-status CLI', () => {
       assert.strictEqual(stderr, '');
       assert.deepStrictEqual(body.auth, {
         enabled: true,
-        configuredScopes: { full: false, read: true, write: true },
+        configuredScopes: { full: false, read: true, write: true, admin: false },
         previousTokenOverlapConfigured: { read: false, write: false },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
       assert.doesNotMatch(stdout, /auth-read-token|auth-write-token|Bearer/);
+      assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await close(server);
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('passes admin --token against admin-only server and reports admin scope without token material', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-agent-auth-admin-'));
+    const server = createServer({
+      dataDir,
+      adminToken: 'auth-admin-only-token',
+    });
+    const port = await listen(server);
+
+    try {
+      const { stdout, stderr } = await runAgent([
+        'auth-status',
+        '--server',
+        `http://127.0.0.1:${port}`,
+        '--token',
+        'auth-admin-only-token',
+      ]);
+      const body = JSON.parse(stdout);
+
+      assert.strictEqual(stderr, '');
+      assert.strictEqual(body.auth.enabled, true);
+      assert.deepStrictEqual(body.auth.configuredScopes, {
+        full: false,
+        read: false,
+        write: false,
+        admin: true,
+      });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.doesNotMatch(stdout, /auth-admin-only-token|Bearer/);
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {
       await close(server);
