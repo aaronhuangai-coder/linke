@@ -3424,4 +3424,18 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/not remote notification delivery/i,
       'not remote notification delivery');
   });
+
+  it('documents snapshot-only delivery preparation and stale descriptor boundary', () => {
+    assertReadmeContains(/prepareAuditIntegrityAlertDelivery/, 'delivery prepare composer');
+    assertReadmeContains(/empty outbox.*no stream identity|空 outbox.*不创建.*identity/i,
+      'empty outbox no identity');
+    assertReadmeContains(/not a claim|不是 claim/i, 'prepared descriptor is not a claim');
+    assertReadmeContains(/may become stale|可能.*stale/i, 'prepared descriptor may become stale');
+    assertReadmeContains(/revalidate.*same stream.*exact FIFO head|重新验证.*stream.*FIFO head/i,
+      'future transport revalidation');
+    assertReadmeContains(/no Agent\/API\/Web prepare wiring|无 Agent\/API\/Web.*prepare/i,
+      'no prepare wiring');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+  });
 });

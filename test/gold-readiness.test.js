@@ -2528,6 +2528,25 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records snapshot-only alert delivery preparation without claim overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    for (const atom of [
+      'snapshot-only audit-integrity alert delivery prepare composer',
+      'src/audit-integrity-alert-delivery-prepare.js',
+      'test/audit-integrity-alert-delivery-prepare.test.js',
+      'empty outbox creates no stream identity',
+      'nonempty read / ensure / re-read / pure request composition',
+      'prepared descriptor is not a claim and may become stale',
+      'future transport must revalidate the same stream and exact FIFO head',
+      'no Agent/API/Web prepare wiring',
+      'not remote notification delivery',
+    ]) assert.ok(item.evidence.includes(atom), `missing prepare evidence atom: ${atom}`);
+    assert.equal(item.status, 'partial');
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];
