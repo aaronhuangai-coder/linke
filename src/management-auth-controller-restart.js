@@ -202,7 +202,7 @@ async function restartInternal(input, dependencies) {
   } catch {
     invalid();
   }
-  if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isFinite(proofStartedAt)) invalid();
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !Number.isFinite(proofStartedAt)) invalid();
 
   let authority;
   try {

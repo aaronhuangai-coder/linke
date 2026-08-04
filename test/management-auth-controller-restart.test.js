@@ -217,6 +217,7 @@ describe('management-auth controller restart consume-before-mutation', () => {
       (receipt) => ({ value: input(receipt), deps: { ...createEffects().effects, extra: () => {} } }),
       (receipt) => ({ value: input(receipt), deps: { ...createEffects().effects, request: null } }),
       (receipt) => ({ value: input(receipt), deps: createEffects({ uid: -1 }).effects }),
+      (receipt) => ({ value: input(receipt), deps: createEffects({ uid: 0 }).effects }),
     ];
 
     for (const makeCase of invalidCases) {
