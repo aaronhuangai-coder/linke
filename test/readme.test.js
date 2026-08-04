@@ -3098,6 +3098,23 @@ describe('README — long-lived safety boundaries', () => {
     assertReadmeDoesNotContain(/Gold ready|production ready|real NAS remote backup ready|daemon installed|launchd installed|always-running|real installer implemented|production-ready supervisor|真实 NAS 备份已实现|生产可用/i, 'README should not claim production readiness');
   });
 
+  it('documents bounded local audit alert outbox and its delivery ceiling', () => {
+    assertReadmeContains(/audit.*alert outbox|告警.*outbox/i,
+      'bounded local audit alert outbox');
+    assertReadmeContains(/256[^\n]*(pending|待处理)|1 MiB[^\n]*(state|状态)/i,
+      'outbox capacity bounds');
+    assertReadmeContains(/FIFO[^\n]*(head|头部)[^\n]*(ack|确认)/i,
+      'FIFO exact-head acknowledgement');
+    assertReadmeContains(/no CLI\/API\/Web consumer wiring|尚无 CLI\/API\/Web/i,
+      'no outbox consumer wiring');
+    assertReadmeContains(/not remote notification delivery/i,
+      'no remote notification delivery');
+    assertReadmeContains(/not managed scheduler/i,
+      'no managed scheduler');
+    assertReadmeContains(/not production monitoring ready/i,
+      'not production monitoring ready');
+  });
+
   it('documents supervisor-install-dry-run Web panel safety boundaries', () => {
     assertReadmeContains(/supervisor-install-dry-run-panel|POST `?\/api\/supervisor-install-dry-run`?|buildSupervisorInstallDryRunViewModel/i, 'README should document supervisor install dry-run Web panel');
     assertReadmeContains(/不调用 launchctl[\s\S]*不读取进程列表[\s\S]*不安装[\s\S]*不启动/i, 'README should preserve supervisor install Web panel safety boundaries');
