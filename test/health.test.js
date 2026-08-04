@@ -70,6 +70,10 @@ describe('Auth status response', () => {
           read: true,
           write: true,
         },
+        previousTokenOverlapConfigured: {
+          read: false,
+          write: false,
+        },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       },
       safety: {
@@ -78,6 +82,50 @@ describe('Auth status response', () => {
       },
     });
     assert.doesNotMatch(JSON.stringify(body), /full-secret-token|read-secret-token|write-secret-token/);
+  });
+
+  it('buildAuthStatusResponse reports configured rotation overlap without returning token values', () => {
+    const body = buildAuthStatusResponse({
+      readToken: 'read-current-status-token',
+      previousReadToken: 'read-previous-status-token',
+      writeToken: 'write-current-status-token',
+      previousWriteToken: 'write-previous-status-token',
+    });
+
+    assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: true, write: true });
+    assert.strictEqual(body.safety.tokenValuesReturned, false);
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /read-current-status-token|read-previous-status-token|write-current-status-token|write-previous-status-token/,
+    );
+  });
+
+  it('buildAuthStatusResponse fails closed for previousReadToken without readToken', () => {
+    assert.throws(
+      () => buildAuthStatusResponse({ previousReadToken: 'read-previous-only' }),
+      { name: 'Error', message: 'previousReadToken requires readToken' },
+    );
+    assert.throws(
+      () => buildAuthStatusResponse({
+        previousReadToken: 'read-previous-only',
+        writeToken: 'write-current-only',
+      }),
+      { name: 'Error', message: 'previousReadToken requires readToken' },
+    );
+  });
+
+  it('buildAuthStatusResponse fails closed for previousWriteToken without writeToken', () => {
+    assert.throws(
+      () => buildAuthStatusResponse({ previousWriteToken: 'write-previous-only' }),
+      { name: 'Error', message: 'previousWriteToken requires writeToken' },
+    );
+    assert.throws(
+      () => buildAuthStatusResponse({
+        previousWriteToken: 'write-previous-only',
+        readToken: 'read-current-only',
+      }),
+      { name: 'Error', message: 'previousWriteToken requires writeToken' },
+    );
   });
 });
 
@@ -204,6 +252,7 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(body.service, 'linke');
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
       assert.strictEqual(body.auth.enabled, false);
       assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
@@ -228,7 +277,39 @@ describe('GET /api/auth-status', () => {
       const body = await res.json();
       assert.strictEqual(body.auth.enabled, true);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
       assert.doesNotMatch(JSON.stringify(body), /read-status-token|write-status-token|Bearer/);
+      assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports configured rotation overlap over HTTP without returning current or previous tokens', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-auth-status-rotation-'));
+    const server = createServer({
+      dataDir,
+      readToken: 'read-current-status-token',
+      previousReadToken: 'read-previous-status-token',
+      writeToken: 'write-current-status-token',
+      previousWriteToken: 'write-previous-status-token',
+    });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/auth-status`, {
+        headers: { Authorization: 'Bearer read-current-status-token' },
+      });
+      assert.strictEqual(res.status, 200);
+      const body = await res.json();
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: true, write: true });
+      assert.strictEqual(body.safety.tokenValuesReturned, false);
+      assert.doesNotMatch(
+        JSON.stringify(body),
+        /read-current-status-token|read-previous-status-token|write-current-status-token|write-previous-status-token/,
+      );
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {
       await new Promise((resolve) => server.close(resolve));

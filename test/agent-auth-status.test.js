@@ -58,9 +58,12 @@ describe('Agent auth-status CLI', () => {
       assert.strictEqual(body.status, 'ok');
       assert.strictEqual(body.service, 'linke');
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
-      assert.strictEqual(body.auth.enabled, false);
-      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false });
-      assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
+      assert.deepStrictEqual(body.auth, {
+        enabled: false,
+        configuredScopes: { full: false, read: false, write: false },
+        previousTokenOverlapConfigured: { read: false, write: false },
+        writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
+      });
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
       assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
       assert.deepStrictEqual(await readdir(dataDir), []);
@@ -90,9 +93,12 @@ describe('Agent auth-status CLI', () => {
       const body = JSON.parse(stdout);
 
       assert.strictEqual(stderr, '');
-      assert.strictEqual(body.auth.enabled, true);
-      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true });
-      assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
+      assert.deepStrictEqual(body.auth, {
+        enabled: true,
+        configuredScopes: { full: false, read: true, write: true },
+        previousTokenOverlapConfigured: { read: false, write: false },
+        writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
+      });
       assert.doesNotMatch(stdout, /auth-read-token|auth-write-token|Bearer/);
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {

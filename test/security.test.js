@@ -669,6 +669,138 @@ describe('Security — optional bearer token authentication', () => {
     }
   });
 
+  it('accepts previousReadToken for read-scope API requests', async () => {
+    const server = createServer({
+      dataDir,
+      readToken: 'read-current',
+      previousReadToken: 'read-previous',
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+    });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer read-previous',
+        },
+      });
+      assert.strictEqual(res.status, 200);
+      assert.ok(Array.isArray(await res.json()));
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects previousReadToken for write-scope requests without business side effects or token leaks', async () => {
+    const server = createServer({
+      dataDir,
+      readToken: 'read-current',
+      previousReadToken: 'read-previous',
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+    });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const beforeEntries = await readdir(dataDir);
+      const res = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer read-previous',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'rotation-read-blocked-device', hostname: 'blocked' }),
+      });
+
+      assert.strictEqual(res.status, 403);
+      assert.deepStrictEqual(await res.json(), { error: 'Forbidden' });
+      const afterEntries = await readdir(dataDir);
+      assert.deepStrictEqual(afterEntries.filter((entry) => entry !== 'audit'), beforeEntries.filter((entry) => entry !== 'audit'));
+      assert.strictEqual(await pathExists(join(dataDir, 'repo', 'devices', 'rotation-read-blocked-device')), false);
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.forbidden');
+      assert.strictEqual(events[0].path, '/api/heartbeat');
+      assert.strictEqual(events[0].statusCode, 403);
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'read-current' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'read-previous' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'write-current' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'write-previous' });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('accepts previousWriteToken for read-scope and write-scope API requests', async () => {
+    const server = createServer({
+      dataDir,
+      readToken: 'read-current',
+      previousReadToken: 'read-previous',
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+    });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const readRes = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer write-previous',
+        },
+      });
+      assert.strictEqual(readRes.status, 200);
+
+      const writeRes = await fetch(`http://localhost:${port}/api/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer write-previous',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ deviceId: 'rotation-write-device', hostname: 'allowed' }),
+      });
+      assert.strictEqual(writeRes.status, 200);
+      const body = await writeRes.json();
+      assert.strictEqual(body.deviceId, 'rotation-write-device');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('rejects an unknown token during rotation overlap without leaking any token to audit', async () => {
+    const server = createServer({
+      dataDir,
+      readToken: 'read-current',
+      previousReadToken: 'read-previous',
+      writeToken: 'write-current',
+      previousWriteToken: 'write-previous',
+    });
+    await new Promise((r) => server.listen(0, r));
+    const port = server.address().port;
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/devices`, {
+        headers: {
+          'Authorization': 'Bearer rotation-unknown',
+        },
+      });
+      assert.strictEqual(res.status, 401);
+      assert.deepStrictEqual(await res.json(), { error: 'Unauthorized' });
+      const events = await readAuditEvents(dataDir, { limit: 1 });
+      assert.strictEqual(events[0].type, 'auth.denied');
+      assert.strictEqual(events[0].path, '/api/devices');
+      assert.strictEqual(events[0].statusCode, 401);
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'read-current' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'read-previous' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'write-current' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'write-previous' });
+      assertAuditEventsHaveNoSecrets(events, { syntheticToken: 'rotation-unknown' });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
   it('keeps authToken as full-access compatibility token when scoped tokens are configured', async () => {
     const server = createServer({
       dataDir,
@@ -747,6 +879,58 @@ describe('Security — optional bearer token authentication', () => {
     assert.throws(
       () => createServer({ dataDir, writeToken: '   ' }),
       /writeToken must be a non-empty string/,
+    );
+  });
+
+  it('fails fast when a previous scoped token is only whitespace', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousReadToken: '   ' }),
+      /readToken must be a non-empty string/,
+    );
+    assert.throws(
+      () => createServer({ dataDir, previousWriteToken: '   ' }),
+      /writeToken must be a non-empty string/,
+    );
+  });
+
+  it('fails fast when a previous scoped token is not a string', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousReadToken: 42 }),
+      /readToken must be a string/,
+    );
+    assert.throws(
+      () => createServer({ dataDir, previousWriteToken: {} }),
+      /writeToken must be a string/,
+    );
+  });
+
+  it('fails closed when previousReadToken is configured without readToken', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousReadToken: 'read-previous-only' }),
+      { name: 'Error', message: 'previousReadToken requires readToken' },
+    );
+    assert.throws(
+      () => createServer({
+        dataDir,
+        previousReadToken: 'read-previous-only',
+        writeToken: 'write-current-only',
+      }),
+      { name: 'Error', message: 'previousReadToken requires readToken' },
+    );
+  });
+
+  it('fails closed when previousWriteToken is configured without writeToken', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousWriteToken: 'write-previous-only' }),
+      { name: 'Error', message: 'previousWriteToken requires writeToken' },
+    );
+    assert.throws(
+      () => createServer({
+        dataDir,
+        previousWriteToken: 'write-previous-only',
+        readToken: 'read-current-only',
+      }),
+      { name: 'Error', message: 'previousWriteToken requires writeToken' },
     );
   });
 

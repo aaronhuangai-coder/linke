@@ -505,6 +505,25 @@ function authTokensMatch(actualToken, expectedToken) {
   return timingSafeEqual(actual, expected);
 }
 
+/**
+ * Fail closed: previous scoped tokens are overlap-only credentials.
+ * They must never stand alone when the matching current token is absent
+ * (hasAuth ignores previous*, so previous-only would open unauthenticated localhost).
+ */
+function assertPreviousScopedTokensRequireCurrent({
+  readToken,
+  previousReadToken,
+  writeToken,
+  previousWriteToken,
+}) {
+  if (previousReadToken && !readToken) {
+    throw new Error('previousReadToken requires readToken');
+  }
+  if (previousWriteToken && !writeToken) {
+    throw new Error('previousWriteToken requires writeToken');
+  }
+}
+
 export function isAuthorizedRequest(req, authToken) {
   const expectedToken = normalizeAuthToken(authToken);
   if (!expectedToken) return true;
@@ -569,10 +588,24 @@ export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) 
   };
 }
 
-export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {}) {
+export function buildAuthStatusResponse({
+  authToken,
+  readToken,
+  previousReadToken,
+  writeToken,
+  previousWriteToken,
+} = {}) {
   const normAuth = normalizeAuthToken(authToken);
   const normRead = normalizeReadToken(readToken);
+  const normPreviousRead = normalizeReadToken(previousReadToken);
   const normWrite = normalizeWriteToken(writeToken);
+  const normPreviousWrite = normalizeWriteToken(previousWriteToken);
+  assertPreviousScopedTokensRequireCurrent({
+    readToken: normRead,
+    previousReadToken: normPreviousRead,
+    writeToken: normWrite,
+    previousWriteToken: normPreviousWrite,
+  });
   const enabled = Boolean(normAuth || normRead || normWrite);
 
   return {
@@ -585,6 +618,10 @@ export function buildAuthStatusResponse({ authToken, readToken, writeToken } = {
         full: Boolean(normAuth),
         read: Boolean(normRead),
         write: Boolean(normWrite),
+      },
+      previousTokenOverlapConfigured: {
+        read: Boolean(normPreviousRead),
+        write: Boolean(normPreviousWrite),
       },
       writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
     },
@@ -739,7 +776,9 @@ export function createServer({
   backupHooks,
   authToken,
   readToken,
+  previousReadToken,
   writeToken,
+  previousWriteToken,
   restoreRoot,
   rateLimit,
   auditRetention,
@@ -749,7 +788,15 @@ export function createServer({
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
   const expectedReadToken = normalizeReadToken(readToken);
+  const expectedPreviousReadToken = normalizeReadToken(previousReadToken);
   const expectedWriteToken = normalizeWriteToken(writeToken);
+  const expectedPreviousWriteToken = normalizeWriteToken(previousWriteToken);
+  assertPreviousScopedTokensRequireCurrent({
+    readToken: expectedReadToken,
+    previousReadToken: expectedPreviousReadToken,
+    writeToken: expectedWriteToken,
+    previousWriteToken: expectedPreviousWriteToken,
+  });
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
   const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken);
@@ -791,12 +838,16 @@ export function createServer({
 
             const matchesAuth = expectedAuthToken && authTokensMatch(token, expectedAuthToken);
             const matchesWrite = expectedWriteToken && authTokensMatch(token, expectedWriteToken);
+            const matchesPreviousWrite = expectedPreviousWriteToken
+              && authTokensMatch(token, expectedPreviousWriteToken);
             const matchesRead = expectedReadToken && authTokensMatch(token, expectedReadToken);
+            const matchesPreviousRead = expectedPreviousReadToken
+              && authTokensMatch(token, expectedPreviousReadToken);
 
-            if (matchesAuth || matchesWrite) {
+            if (matchesAuth || matchesWrite || matchesPreviousWrite) {
               authorized = true;
               isWriteAllowed = true;
-            } else if (matchesRead) {
+            } else if (matchesRead || matchesPreviousRead) {
               authorized = true;
               isWriteAllowed = false;
             }
@@ -1084,7 +1135,9 @@ export function createServer({
         return sendJSON(res, 200, buildAuthStatusResponse({
           authToken: expectedAuthToken,
           readToken: expectedReadToken,
+          previousReadToken: expectedPreviousReadToken,
           writeToken: expectedWriteToken,
+          previousWriteToken: expectedPreviousWriteToken,
         }));
       }
 
@@ -2058,13 +2111,25 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const dataDir = process.env.DATA_DIR || resolve(join(process.cwd(), 'data'));
   const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
   const readToken = process.env.LINKE_READ_TOKEN;
+  const previousReadToken = process.env.LINKE_PREVIOUS_READ_TOKEN;
   const writeToken = process.env.LINKE_WRITE_TOKEN;
+  const previousWriteToken = process.env.LINKE_PREVIOUS_WRITE_TOKEN;
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
   const auditRetention = parseAuditRetentionMaxEvents(process.env.LINKE_AUDIT_MAX_EVENTS);
 
-  const server = createServer({ dataDir, authToken, readToken, writeToken, restoreRoot: normalizedRestoreRoot, rateLimit, auditRetention });
+  const server = createServer({
+    dataDir,
+    authToken,
+    readToken,
+    previousReadToken,
+    writeToken,
+    previousWriteToken,
+    restoreRoot: normalizedRestoreRoot,
+    rateLimit,
+    auditRetention,
+  });
   server.listen(port, host, () => {
     console.log(`Linke server listening on http://${host}:${port}`);
     console.log(`Data directory: ${dataDir}`);
