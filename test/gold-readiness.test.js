@@ -196,8 +196,8 @@ const V146_AUTOMATION_EVIDENCE = Object.freeze([
 /**
  * V1.46 security-auth evidence tail: exact ordered suffix of the item's
  * evidence array documenting the management auth Keychain startup source
- * code path, while keeping the item partial (real macOS Keychain
- * provisioning/acceptance not verified).
+ * plus controlled rotation/restart code paths, while keeping the item
+ * partial (real macOS Keychain/launchctl/HTTP acceptance not verified).
  */
 const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'V1.46 management auth Keychain startup source code path',
@@ -211,6 +211,22 @@ const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'loaded once at controller startup; no hot reload',
   'behavioral tests use an injected in-memory fake Keychain; production Keychain path exists; real macOS Keychain provisioning/acceptance not verified',
   'no claim of complete secret management or automatic token rotation',
+  'V1.46 management auth controlled rotation and explicit restart code path',
+  'src/management-auth-rotation.js',
+  'src/management-auth-rotation-process-lock.js',
+  'src/management-auth-rotate-command.js',
+  'src/management-auth-controller-restart.js',
+  'test/management-auth-rotation.test.js',
+  'test/management-auth-rotation-process-lock.test.js',
+  'test/management-auth-rotate-command.test.js',
+  'test/management-auth-controller-restart.test.js',
+  'test/agent-management-auth-rotate.test.js',
+  'explicit --restart-controller with canonical --controller-port',
+  'required restart attempt audit before Keychain staging and launchctl',
+  'one-time in-process genuine staging receipt authority',
+  'fixed loopback /api/auth-status proof of keychain startup snapshot and previous-token overlap',
+  'behavioral tests use fake Keychain and injected launchctl/http effects; real macOS Keychain, launchctl action, and host HTTP acceptance not verified',
+  'do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready',
 ]);
 
 /**
@@ -2308,7 +2324,7 @@ describe('Gold Readiness Report', () => {
     for (const fragment of [
       'code-level partial evidence',
       'real macOS Keychain provisioning/acceptance',
-      'controlled-restart rotation orchestration',
+      'controlled-restart rotation real-host acceptance',
       'identity/user RBAC',
       'headless bootstrap/unlock handling',
       'token-memory and crash-dump exposure review',
