@@ -3091,3 +3091,580 @@ describe('C6 controller-runtime restore wiring (RED)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// V1.46 controller auth scope parity — 最终行为测试（TDD RED / 旧生产入口缺口）
+// 仅证明 startController / parseControllerEnv / runControllerMain 透传缺口；
+// 不得直接 createServer 冒充入口，也不得伪造 deviceAdministration。
+// ---------------------------------------------------------------------------
+
+describe('V1.46 controller auth scope parity', () => {
+  // 合成 sentinel：仅用于断言透传与日志脱敏，禁止真实凭证。
+  const FULL = 'v146-full-auth-sentinel';
+  const FULL_LEGACY = 'v146-legacy-token-sentinel';
+  const READ = 'v146-read-sentinel';
+  const PREV_READ = 'v146-previous-read-sentinel';
+  const WRITE = 'v146-write-sentinel';
+  const PREV_WRITE = 'v146-previous-write-sentinel';
+  const ADMIN = 'v146-admin-sentinel';
+  const ALL_SENTINELS = [FULL, FULL_LEGACY, READ, PREV_READ, WRITE, PREV_WRITE, ADMIN];
+  const MGMT_TOKEN_KEYS = [
+    'authToken',
+    'readToken',
+    'previousReadToken',
+    'writeToken',
+    'previousWriteToken',
+    'adminToken',
+  ];
+
+  /**
+   * 经真实 management listener 发起设备管理 POST。
+   * @param {number} port
+   * @param {string} path
+   * @param {object} body
+   * @param {string} token
+   */
+  function postDeviceAdmin(port, path, body, token) {
+    return fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * 在真实 DeviceRegistry 中激活设备，供后续 revoke 200。
+   * @param {string} dataDir
+   * @param {string} deviceId
+   * @param {string} enrollmentCode
+   */
+  async function activateDeviceFromEnrollment(dataDir, deviceId, enrollmentCode) {
+    const registry = new DeviceRegistry({ dataDir });
+    await registry.consumeEnrollment({
+      deviceId,
+      code: enrollmentCode,
+      protocolVersion: 2,
+    });
+  }
+
+  /**
+   * 断言文本不含任一 sentinel。
+   * @param {string} text
+   * @param {string} label
+   */
+  function assertNoSentinels(text, label) {
+    const joined = String(text);
+    for (const secret of ALL_SENTINELS) {
+      assert.equal(
+        joined.includes(secret),
+        false,
+        `${label} must not contain sentinel ${secret}`,
+      );
+    }
+  }
+
+  it('parseControllerEnv 返回六类令牌字段：AUTH 优先、未设置 undefined、空串原样', () => {
+    const full = parseControllerEnv({
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '192.168.10.4',
+      LINKE_AUTH_TOKEN: FULL,
+      LINKE_TOKEN: FULL_LEGACY,
+      LINKE_READ_TOKEN: READ,
+      LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
+      LINKE_WRITE_TOKEN: WRITE,
+      LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
+      LINKE_ADMIN_TOKEN: ADMIN,
+    });
+    // full 仍优先 LINKE_AUTH_TOKEN（不得回落到 LINKE_TOKEN）
+    assert.equal(full.authToken, FULL);
+    assert.equal(full.readToken, READ);
+    assert.equal(full.previousReadToken, PREV_READ);
+    assert.equal(full.writeToken, WRITE);
+    assert.equal(full.previousWriteToken, PREV_WRITE);
+    assert.equal(full.adminToken, ADMIN);
+    // 返回对象不得额外暴露 legacy env 名
+    assert.equal(Object.hasOwn(full, 'LINKE_TOKEN'), false);
+
+    const unset = parseControllerEnv({
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '10.0.0.5',
+    });
+    assert.equal(unset.authToken, undefined);
+    assert.equal(unset.readToken, undefined);
+    assert.equal(unset.previousReadToken, undefined);
+    assert.equal(unset.writeToken, undefined);
+    assert.equal(unset.previousWriteToken, undefined);
+    assert.equal(unset.adminToken, undefined);
+
+    const empty = parseControllerEnv({
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '172.16.1.2',
+      LINKE_READ_TOKEN: '',
+      LINKE_PREVIOUS_READ_TOKEN: '',
+      LINKE_WRITE_TOKEN: '',
+      LINKE_PREVIOUS_WRITE_TOKEN: '',
+      LINKE_ADMIN_TOKEN: '',
+    });
+    assert.equal(empty.readToken, '');
+    assert.equal(empty.previousReadToken, '');
+    assert.equal(empty.writeToken, '');
+    assert.equal(empty.previousWriteToken, '');
+    assert.equal(empty.adminToken, '');
+  });
+
+  it('startController 将六类令牌原值交给 management factory；Agent options 与 status 隔离', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-factory-'));
+    /** @type {Record<string, unknown> | null} */
+    let managementOptions = null;
+    /** @type {Record<string, unknown> | null} */
+    let agentOptions = null;
+    try {
+      const runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        authToken: FULL,
+        readToken: READ,
+        previousReadToken: PREV_READ,
+        writeToken: WRITE,
+        previousWriteToken: PREV_WRITE,
+        adminToken: ADMIN,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+        agentServerFactory: (options) => {
+          agentOptions = options;
+          return trackedServer([], 'agent');
+        },
+        managementServerFactory: (options) => {
+          managementOptions = options;
+          return trackedServer([], 'management');
+        },
+      });
+      openRuntimes.add(runtime);
+      try {
+        assert.ok(managementOptions, 'managementServerFactory must be called');
+        assert.equal(managementOptions.authToken, FULL);
+        assert.equal(managementOptions.readToken, READ);
+        assert.equal(managementOptions.previousReadToken, PREV_READ);
+        assert.equal(managementOptions.writeToken, WRITE);
+        assert.equal(managementOptions.previousWriteToken, PREV_WRITE);
+        assert.equal(managementOptions.adminToken, ADMIN);
+
+        assert.ok(agentOptions, 'agentServerFactory must be called');
+        for (const key of MGMT_TOKEN_KEYS) {
+          assert.equal(
+            Object.prototype.hasOwnProperty.call(agentOptions, key),
+            false,
+            `agent options must not own ${key}`,
+          );
+        }
+
+        const statusJson = JSON.stringify(runtime.status);
+        assertNoSentinels(statusJson, 'runtime.status JSON');
+        for (const key of MGMT_TOKEN_KEYS) {
+          assert.equal(Object.hasOwn(runtime.status, key), false, `status must not own ${key}`);
+        }
+        assert.equal(Object.hasOwn(runtime.status, 'token'), false);
+      } finally {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('真实 controller HTTP：admin 配置时 write/previous-write 403，admin 可 enrollment/revoke', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-http-admin-'));
+    // 默认 managementServerFactory（真实 createServer + DeviceRegistry 路径），禁止 factory 伪造。
+    let runtime;
+    try {
+      runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        writeToken: WRITE,
+        previousWriteToken: PREV_WRITE,
+        adminToken: ADMIN,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      openRuntimes.add(runtime);
+
+      const port = runtime.managementServer.address().port;
+      assert.ok(Number.isInteger(port) && port > 0);
+
+      for (const token of [WRITE, PREV_WRITE]) {
+        for (const path of ['/api/device-enrollment-codes', '/api/device-revoke']) {
+          const denied = await postDeviceAdmin(port, path, { deviceId: 'mac-v146-denied' }, token);
+          assert.equal(
+            denied.status,
+            403,
+            `admin configured: ${path} with ${token === WRITE ? 'write' : 'previous-write'} must be 403`,
+          );
+          assert.deepEqual(await denied.json(), { error: 'Forbidden' });
+        }
+      }
+
+      const enroll = await postDeviceAdmin(
+        port,
+        '/api/device-enrollment-codes',
+        { deviceId: 'mac-v146-admin-ok' },
+        ADMIN,
+      );
+      assert.equal(enroll.status, 201, 'admin enrollment must be 201');
+      const enrolled = await enroll.json();
+      assert.equal(typeof enrolled.enrollmentCode, 'string');
+      assert.ok(enrolled.enrollmentCode.length > 0);
+      assert.match(enrolled.tlsFingerprint, /^[a-f0-9]{64}$/);
+      assert.match(enrolled.agentUrl, /^https:\/\//);
+      assertNoSentinels(JSON.stringify(enrolled), 'enrollment response');
+
+      await activateDeviceFromEnrollment(dataDir, 'mac-v146-admin-ok', enrolled.enrollmentCode);
+
+      const revoke = await postDeviceAdmin(
+        port,
+        '/api/device-revoke',
+        { deviceId: 'mac-v146-admin-ok' },
+        ADMIN,
+      );
+      assert.equal(revoke.status, 200, 'admin revoke must be 200');
+      assert.deepEqual(await revoke.json(), { deviceId: 'mac-v146-admin-ok', revoked: true });
+    } finally {
+      if (runtime) {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('真实 controller HTTP：admin 缺省时 current/previous write 对 enrollment/revoke 均成功', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-http-no-admin-'));
+    let runtime;
+    try {
+      runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        writeToken: WRITE,
+        previousWriteToken: PREV_WRITE,
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      openRuntimes.add(runtime);
+
+      const port = runtime.managementServer.address().port;
+      const cases = [
+        { token: WRITE, deviceId: 'mac-v146-write-ok' },
+        { token: PREV_WRITE, deviceId: 'mac-v146-prev-write-ok' },
+      ];
+      for (const { token, deviceId } of cases) {
+        const enroll = await postDeviceAdmin(
+          port,
+          '/api/device-enrollment-codes',
+          { deviceId },
+          token,
+        );
+        assert.equal(
+          enroll.status,
+          201,
+          `no-admin enrollment with ${token === WRITE ? 'write' : 'previous-write'} must be 201`,
+        );
+        const body = await enroll.json();
+        await activateDeviceFromEnrollment(dataDir, deviceId, body.enrollmentCode);
+
+        const revoke = await postDeviceAdmin(
+          port,
+          '/api/device-revoke',
+          { deviceId },
+          token,
+        );
+        assert.equal(
+          revoke.status,
+          200,
+          `no-admin revoke with ${token === WRITE ? 'write' : 'previous-write'} must be 200`,
+        );
+        assert.deepEqual(await revoke.json(), { deviceId, revoked: true });
+      }
+    } finally {
+      if (runtime) {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('空 LINKE_ADMIN_TOKEN 等价未配置；空 previous 不激活 previous scope', async () => {
+    // 解析层：空串原样返回（随后 createServer 视为未配置）
+    const parsed = parseControllerEnv({
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '192.168.10.4',
+      LINKE_WRITE_TOKEN: WRITE,
+      LINKE_ADMIN_TOKEN: '',
+      LINKE_PREVIOUS_WRITE_TOKEN: '',
+      LINKE_PREVIOUS_READ_TOKEN: '',
+    });
+    assert.equal(parsed.adminToken, '');
+    assert.equal(parsed.previousWriteToken, '');
+    assert.equal(parsed.previousReadToken, '');
+    assert.equal(parsed.writeToken, WRITE);
+
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-empty-scope-'));
+    let runtime;
+    try {
+      runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        writeToken: WRITE,
+        adminToken: '',
+        previousWriteToken: '',
+        previousReadToken: '',
+        keychain: memoryKeychain(),
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      openRuntimes.add(runtime);
+      const port = runtime.managementServer.address().port;
+
+      // 空 admin ≡ 未配置：current write 仍可管理设备
+      const enroll = await postDeviceAdmin(
+        port,
+        '/api/device-enrollment-codes',
+        { deviceId: 'mac-v146-empty-admin' },
+        WRITE,
+      );
+      assert.equal(enroll.status, 201, 'empty adminToken must not block write enrollment');
+      const body = await enroll.json();
+      await activateDeviceFromEnrollment(dataDir, 'mac-v146-empty-admin', body.enrollmentCode);
+      const revoke = await postDeviceAdmin(
+        port,
+        '/api/device-revoke',
+        { deviceId: 'mac-v146-empty-admin' },
+        WRITE,
+      );
+      assert.equal(revoke.status, 200);
+
+      // 空 previous 不得把 previous sentinel 当成有效 previous-write 凭证
+      const prevEnroll = await postDeviceAdmin(
+        port,
+        '/api/device-enrollment-codes',
+        { deviceId: 'mac-v146-empty-prev' },
+        PREV_WRITE,
+      );
+      assert.equal(
+        prevEnroll.status,
+        401,
+        'empty previousWriteToken must not activate previous-write credentials',
+      );
+    } finally {
+      if (runtime) {
+        await runtime.close();
+        openRuntimes.delete(runtime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('previous-only 配置让真实 management createServer 失败并关闭 Agent、释放端口', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-prev-only-'));
+    // 预取空闲端口，供失败后立即 rebind 证明清理完成。
+    const probe = createHttpServer();
+    await new Promise((resolve, reject) => {
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', resolve);
+    });
+    const agentPort = probe.address().port;
+    await new Promise((resolve) => probe.close(resolve));
+
+    /** @type {Awaited<ReturnType<typeof startController>> | null} */
+    let leakedRuntime = null;
+    try {
+      try {
+        leakedRuntime = await startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort,
+          // previous-read 无 current read：真实 createServer 必须抛配对错误
+          previousReadToken: PREV_READ,
+          // 额外覆盖 previous-write 无 write 的同类契约（只测一次 previous-only）
+          keychain: memoryKeychain(),
+          listenServer: createLoopbackTestListenAdapter(),
+          // 使用默认 managementServerFactory = createServer
+        });
+        openRuntimes.add(leakedRuntime);
+      } catch (error) {
+        const message = String(error && error.message);
+        assert.match(
+          message,
+          /previousReadToken requires readToken/,
+          `expected pairing error, got: ${message}`,
+        );
+        assertNoSentinels(message, 'previous-only pairing error');
+        assertNoSentinels(String(error && error.stack || ''), 'previous-only error stack');
+
+        // Agent 必须已关闭：同一端口可立即 rebind
+        const rebound = createHttpServer();
+        await new Promise((resolve, reject) => {
+          rebound.once('error', reject);
+          rebound.listen(agentPort, '127.0.0.1', resolve);
+        });
+        assert.equal(rebound.listening, true);
+        await new Promise((resolve) => rebound.close(resolve));
+        return;
+      }
+
+      // 旧生产若忽略 previousReadToken 会半启动成功 → 行为 RED
+      assert.fail('expected previous-only management pairing failure from real createServer');
+    } finally {
+      if (leakedRuntime) {
+        await leakedRuntime.close().catch(() => {});
+        openRuntimes.delete(leakedRuntime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('runControllerMain 向 start 透传新增字段；成功/失败/运行时日志不含 sentinel', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-main-'));
+    try {
+      /** @type {Record<string, unknown> | null} */
+      let startOptions = null;
+      const successLogs = [];
+      const successErrors = [];
+      await runControllerMain({
+        env: {
+          DATA_DIR: dataDir,
+          LINKE_AGENT_HOST: '192.168.10.4',
+          LINKE_AUTH_TOKEN: FULL,
+          LINKE_TOKEN: FULL_LEGACY,
+          LINKE_READ_TOKEN: READ,
+          LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
+          LINKE_WRITE_TOKEN: WRITE,
+          LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
+          LINKE_ADMIN_TOKEN: ADMIN,
+        },
+        start: async (options) => {
+          startOptions = options;
+          return {
+            status: {
+              managementHost: '127.0.0.1',
+              managementListening: true,
+              agentBindConfigured: true,
+              agentListening: true,
+              tlsFingerprint: 'ab'.repeat(32),
+            },
+            close: async () => {},
+          };
+        },
+        log: (line) => successLogs.push(String(line)),
+        error: (line) => successErrors.push(String(line)),
+        exit: () => {},
+        onSignal: () => {},
+      });
+
+      assert.ok(startOptions, 'start stub must receive options');
+      assert.equal(startOptions.authToken, FULL);
+      assert.equal(startOptions.readToken, READ);
+      assert.equal(startOptions.previousReadToken, PREV_READ);
+      assert.equal(startOptions.writeToken, WRITE);
+      assert.equal(startOptions.previousWriteToken, PREV_WRITE);
+      assert.equal(startOptions.adminToken, ADMIN);
+      assertNoSentinels(successLogs.join('\n'), 'runControllerMain success logs');
+      assertNoSentinels(successErrors.join('\n'), 'runControllerMain success errors');
+
+      const failLogs = [];
+      const failErrors = [];
+      let failExit = null;
+      await runControllerMain({
+        env: {
+          DATA_DIR: dataDir,
+          LINKE_AGENT_HOST: '192.168.10.4',
+          LINKE_AUTH_TOKEN: FULL,
+          LINKE_READ_TOKEN: READ,
+          LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
+          LINKE_WRITE_TOKEN: WRITE,
+          LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
+          LINKE_ADMIN_TOKEN: ADMIN,
+        },
+        start: async () => {
+          throw new Error(`start boom ${FULL} ${PREV_READ} ${PREV_WRITE} ${ADMIN}`);
+        },
+        log: (line) => failLogs.push(String(line)),
+        error: (line) => failErrors.push(String(line)),
+        exit: (code) => {
+          failExit = code;
+        },
+        onSignal: () => {},
+      });
+      assert.equal(failExit, 1);
+      assert.match(failErrors.join('\n'), /failed to start/i);
+      assertNoSentinels(failLogs.join('\n'), 'startup failure logs');
+      assertNoSentinels(failErrors.join('\n'), 'startup failure errors');
+
+      // 运行时错误路径：真实 startController + 固定组件名日志
+      const runtimeLogs = [];
+      const runtimeErrors = [];
+      /** @type {{ status: object, close: Function, agentServer: object, managementServer: object } | null} */
+      let liveRuntime = null;
+      await runControllerMain({
+        env: {
+          DATA_DIR: dataDir,
+          LINKE_AGENT_HOST: '192.168.10.4',
+          LINKE_ADMIN_TOKEN: ADMIN,
+          LINKE_WRITE_TOKEN: WRITE,
+          LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
+        },
+        start: async (options) => {
+          liveRuntime = await startController({
+            ...options,
+            managementHost: '127.0.0.1',
+            managementPort: 0,
+            agentPort: 0,
+            keychain: memoryKeychain(),
+            listenServer: createLoopbackTestListenAdapter(),
+            agentServerFactory: () => trackedServer([], 'agent'),
+            managementServerFactory: () => trackedServer([], 'management'),
+            onRuntimeError: options.onRuntimeError,
+          });
+          openRuntimes.add(liveRuntime);
+          return liveRuntime;
+        },
+        log: (line) => runtimeLogs.push(String(line)),
+        error: (line) => runtimeErrors.push(String(line)),
+        exit: () => {},
+        onSignal: () => {},
+      });
+      assert.ok(liveRuntime);
+      liveRuntime.agentServer.emit(
+        'error',
+        new Error(`runtime agent ${ADMIN} ${WRITE} ${PREV_WRITE}`),
+      );
+      liveRuntime.managementServer.emit(
+        'error',
+        new Error(`runtime management ${ADMIN} ${PREV_READ}`),
+      );
+      assert.ok(runtimeErrors.some((line) => line === 'Linke controller runtime error: agent'));
+      assert.ok(runtimeErrors.some((line) => line === 'Linke controller runtime error: management'));
+      assertNoSentinels([...runtimeLogs, ...runtimeErrors].join('\n'), 'runtime error logs');
+      await liveRuntime.close();
+      openRuntimes.delete(liveRuntime);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
