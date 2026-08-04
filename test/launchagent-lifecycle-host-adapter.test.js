@@ -1887,17 +1887,27 @@ if (hostAdapterExists) {
   // 10) createLoopbackHealthChecker (+ ForTest)
   // =========================================================================
 
-  test('createLoopbackHealthCheckerForTest：仅 port；只请求 127.0.0.1/health；投影 {statusCode,ready,count}', async () => {
+  test('createLoopbackHealthCheckerForTest：仅 port；请求真实 controller /api/health 并投影 readiness', async () => {
     assert.equal(createLoopbackHealthChecker.length, 0);
 
     const requests = [];
     let nowMs = 1_000_000;
     const request = async (url, options) => {
       requests.push({ url, options: options ? { ...options } : options });
-      assert.equal(url, 'http://127.0.0.1:18456/health');
+      assert.equal(url, 'http://127.0.0.1:18456/api/health');
       return {
         statusCode: 200,
-        body: Buffer.from(JSON.stringify({ ready: true, count: 3, secret: CANARY_BODY })),
+        body: Buffer.from(JSON.stringify({
+          status: 'ok',
+          service: 'linke',
+          version: '1.46.0',
+          checks: {
+            http: 'ok',
+            dataDirReadable: 'ok',
+          },
+          timestamp: '2026-08-04T03:00:00.000Z',
+          ignored: CANARY_BODY,
+        })),
       };
     };
     const checker = createLoopbackHealthCheckerForTest({
@@ -1906,13 +1916,13 @@ if (hostAdapterExists) {
     });
 
     const ok = await checker.check({ port: 18456 });
-    assert.deepEqual(ok, { statusCode: 200, ready: true, count: 3 });
+    assert.deepEqual(ok, { statusCode: 200, ready: true, count: null });
     assertDeepFrozen(ok, 'healthOk');
     assertExactKeys(ok, ['statusCode', 'ready', 'count']);
     assertNoLeakage(ok, [CANARY_BODY, '127.0.0.1', 'http://'], 'health ok');
 
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, 'http://127.0.0.1:18456/health');
+    assert.equal(requests[0].url, 'http://127.0.0.1:18456/api/health');
     // caller 不得控制 host/url/path/timeout/body
     assert.equal(Object.hasOwn(requests[0].options ?? {}, 'body'), false);
     // 精确断言：传给 request 的 timeout/deadline 固定且不超过 30000ms
@@ -2029,16 +2039,54 @@ if (hostAdapterExists) {
       assert.ok(requestCalls <= 1, 'ceiling must bound request attempts');
     }
 
+    // legacy 假健康结构不得冒充真实 controller /api/health。
+    {
+      const checker = createLoopbackHealthCheckerForTest({
+        request: async () => ({
+          statusCode: 200,
+          body: Buffer.from(JSON.stringify({ ready: true, count: 1 })),
+        }),
+        now: () => 1_000_000,
+      });
+      const out = await checker.check({ port: 9 });
+      assert.deepEqual(out, failureShape);
+    }
+
+    // 真实 controller degraded 响应：HTTP 可达但 dataDir 未就绪。
+    {
+      const checker = createLoopbackHealthCheckerForTest({
+        request: async () => ({
+          statusCode: 200,
+          body: Buffer.from(JSON.stringify({
+            status: 'degraded',
+            service: 'linke',
+            version: '1.46.0',
+            checks: { http: 'ok', dataDirReadable: 'unavailable' },
+            timestamp: '2026-08-04T03:00:00.000Z',
+          })),
+        }),
+        now: () => 1_000_000,
+      });
+      const out = await checker.check({ port: 9 });
+      assert.deepEqual(out, { statusCode: 200, ready: false, count: null });
+    }
+
     // body cap：200 + 合法 JSON + 大量 trailing whitespace，总长 > 64KiB → fail closed
     // 证明不是仅依赖 JSON.parse 恰好失败（JSON.parse 允许尾随空白）
     {
-      const jsonCore = JSON.stringify({ ready: true, count: 1 });
-      assert.equal(JSON.parse(jsonCore + ' '.repeat(16)).ready, true);
+      const jsonCore = JSON.stringify({
+        status: 'ok',
+        service: 'linke',
+        version: '1.46.0',
+        checks: { http: 'ok', dataDirReadable: 'ok' },
+        timestamp: '2026-08-04T03:00:00.000Z',
+      });
+      assert.equal(JSON.parse(jsonCore + ' '.repeat(16)).status, 'ok');
       const oversizePad = ' '.repeat(64 * 1024 - Buffer.byteLength(jsonCore, 'utf8') + 1);
       const body = Buffer.from(jsonCore + oversizePad, 'utf8');
       assert.equal(body.length > 64 * 1024, true, 'fixture body must exceed 64KiB');
       // 对照：去掉长度门后 JSON.parse 仍成功，故 cap 不得只靠 parse 失败
-      assert.equal(JSON.parse(body.toString('utf8')).count, 1);
+      assert.equal(JSON.parse(body.toString('utf8')).checks.http, 'ok');
 
       const checker = createLoopbackHealthCheckerForTest({
         request: async () => ({
@@ -2059,7 +2107,13 @@ if (hostAdapterExists) {
       const checker = createLoopbackHealthCheckerForTest({
         request: async () => ({
           statusCode: 200,
-          body: Buffer.from(JSON.stringify({ ready: true, count: 2 })),
+          body: Buffer.from(JSON.stringify({
+            status: 'ok',
+            service: 'linke',
+            version: '1.46.0',
+            checks: { http: 'ok', dataDirReadable: 'ok' },
+            timestamp: '2026-08-04T03:00:00.000Z',
+          })),
         }),
         now: () => {
           tick += 1;

@@ -1175,7 +1175,7 @@ function createHealthCheckerInternal({ request, now }) {
         const port = requireSafeInteger(fields.port, 1);
         if (port > 65535) invalid();
 
-        const url = `http://127.0.0.1:${port}/health`;
+        const url = `http://127.0.0.1:${port}/api/health`;
         const start = now();
         if (!Number.isFinite(start)) invalid();
 
@@ -1235,17 +1235,26 @@ function createHealthCheckerInternal({ request, now }) {
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
           return HEALTH_FAILURE();
         }
-        if (typeof parsed.ready !== 'boolean') {
-          return HEALTH_FAILURE();
-        }
-        if (!Number.isSafeInteger(parsed.count) || parsed.count < 0) {
+        if (
+          typeof parsed.status !== 'string'
+          || parsed.service !== 'linke'
+          || parsed.checks === null
+          || typeof parsed.checks !== 'object'
+          || Array.isArray(parsed.checks)
+          || typeof parsed.checks.http !== 'string'
+          || typeof parsed.checks.dataDirReadable !== 'string'
+        ) {
           return HEALTH_FAILURE();
         }
 
         return deepFreeze({
           statusCode: 200,
-          ready: parsed.ready,
-          count: parsed.count,
+          ready: (
+            parsed.status === 'ok'
+            && parsed.checks.http === 'ok'
+            && parsed.checks.dataDirReadable === 'ok'
+          ),
+          count: null,
         });
       } catch (error) {
         normalizeTo(error, invalid);
