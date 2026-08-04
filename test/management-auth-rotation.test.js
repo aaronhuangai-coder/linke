@@ -247,10 +247,10 @@ describe('management-auth-rotation 前置校验（fixed invalid，零 lock/零 I
     assertZeroIo(world);
   });
 
-  it('scope 只接受精确 read/write：其它取值 fixed invalid 且不回显原值', async () => {
+  it('scope 只接受精确 full/read/write/admin：其它取值 fixed invalid 且不回显原值', async () => {
     const cases = [
-      'full', 'admin', 'previous-read', 'previous-write',
-      'READ', 'WRITE', 'Read', 'read ', ' read', '',
+      'previous-full', 'previous-read', 'previous-write', 'previous-admin',
+      'FULL', 'READ', 'WRITE', 'ADMIN', 'Read', 'read ', ' read', '',
       null, 42, undefined, ['write'],
     ];
     for (const scope of cases) {
@@ -303,8 +303,8 @@ describe('management-auth-rotation 前置校验（fixed invalid，零 lock/零 I
   });
 });
 
-describe('management-auth-rotation 成功 staging（read/write × previous absent/present）', () => {
-  for (const scope of ['read', 'write']) {
+describe('management-auth-rotation 成功 staging（四 scope × previous absent/present）', () => {
+  for (const scope of ['full', 'read', 'write', 'admin']) {
     for (const previousPresent of [false, true]) {
       it(`scope=${scope} previous ${previousPresent ? 'present' : 'absent'}：精确 I/O 顺序且全部在锁内`, async () => {
         const { currentId, previousId } = rotationItemIds(scope);

@@ -21,6 +21,7 @@ const ARGUMENTS_INVALID = 'management-auth-rotate-arguments-invalid';
 const STDIN_INVALID = 'management-auth-rotate-stdin-invalid';
 const MAX_STDIN_BYTES = 4_096;
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+const ROTATABLE_SCOPES = new Set(['full', 'read', 'write', 'admin']);
 
 /** 管理认证轮换命令的固定、无回显错误。 */
 export class ManagementAuthRotateCommandError extends Error {
@@ -54,7 +55,7 @@ function parseRawArgv(rawArgv) {
     || dataDirFlag !== '--data-dir'
     || scopeFlag !== '--scope'
     || stdinFlag !== '--token-stdin'
-    || (scope !== 'read' && scope !== 'write')
+    || !ROTATABLE_SCOPES.has(scope)
     || typeof dataDir !== 'string'
     || dataDir.length === 0
     || dataDir.includes('\0')

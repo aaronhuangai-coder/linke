@@ -73,7 +73,7 @@
  *   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-* commands)
  *   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 (64 hex; colons optional)
  *   --enrollment-code-stdin Read one-time enrollment code from stdin (required for device-enroll; never via argv)
- *   --scope <read|write> Management auth scope to rotate (management-auth-rotate)
+ *   --scope <full|read|write|admin> Management auth scope to rotate (management-auth-rotate)
  *   --token-stdin      Read the new management auth token from stdin (management-auth-rotate; token from stdin only, never via argv)
  *   --restart-controller Explicitly restart the managed controller after staging (management-auth-rotate)
  *   --controller-port <port> Managed controller loopback port used to verify the explicit restart
@@ -1272,7 +1272,7 @@ Options:
   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-enroll / device-heartbeat / device-token-rotate)
   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 fingerprint (64 hex, colons optional; independent channel)
   --enrollment-code-stdin Required for device-enroll: read one-time enrollment code from stdin (max 4096 bytes, single line). Enrollment codes and device tokens are never accepted as CLI arguments; tokens are stored and read only via Keychain
-  --scope <read|write>  Management auth scope to rotate (management-auth-rotate)
+  --scope <full|read|write|admin>  Management auth scope to rotate (management-auth-rotate)
   --token-stdin        Read the new management auth token from stdin (management-auth-rotate; token is never accepted as a CLI argument)
   --restart-controller Explicitly restart the managed controller after staging (management-auth-rotate; requires --controller-port)
   --controller-port <port> Managed controller loopback management port used to verify the explicit restart

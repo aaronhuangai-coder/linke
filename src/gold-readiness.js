@@ -382,7 +382,7 @@ const GOLD_READINESS_ITEMS = [
       'loaded once at controller startup; no hot reload',
       'behavioral tests use an injected in-memory fake Keychain; production Keychain path exists; real macOS Keychain provisioning/acceptance not verified',
       'no claim of complete secret management or automatic token rotation',
-      'V1.46 management auth controlled rotation and explicit restart code path',
+      'V1.46 full/read/write/admin management auth controlled rotation and explicit restart code path',
       'src/management-auth-rotation.js',
       'src/management-auth-rotation-process-lock.js',
       'src/management-auth-rotate-command.js',
@@ -403,7 +403,7 @@ const GOLD_READINESS_ITEMS = [
       'Keychain security child timeout fails closed, kills the child, and destroys stdio',
       'fake timer code-stage evidence only; real locked-Keychain and headless bootstrap acceptance not verified',
     ],
-    nextStep: 'V1.46 delivers scoped read/write current+previous overlap, optional admin scope, a Keychain-backed controller startup source, production staging/process-lock CLI, an explicit controlled-restart code path, and a bounded headless security runner as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, controlled-restart rotation real-host acceptance (including any required full/admin overlap), identity/user RBAC, headless bootstrap/unlock real-host acceptance, token-memory and crash-dump exposure review, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
+    nextStep: 'V1.46 delivers full/read/write/admin current+previous overlap, a Keychain-backed controller startup source, a four-scope production staging/process-lock CLI, an explicit controlled-restart code path, and a bounded headless security runner as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, four-scope controlled-restart rotation real-host acceptance, identity/user RBAC, headless bootstrap/unlock real-host acceptance, token-memory and crash-dump exposure review, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
   },
   {
     id: 'real-nas-remote-backup',

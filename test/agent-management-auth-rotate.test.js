@@ -168,6 +168,29 @@ describe('management-auth-rotate Agent refusal 与源码接线', () => {
     });
   });
 
+  for (const scope of ['full', 'admin']) {
+    it(`scope=${scope} 通过真实 Agent argv 解析后在锁边界 refused，而非 arguments-invalid`, async () => {
+      await withTempRoot(`refused-${scope}`, async (root) => {
+        const blocker = join(root, 'blocker');
+        await writeFile(blocker, 'synthetic', { mode: 0o600 });
+        const dataDir = join(blocker, 'child');
+        const result = await runAgent([
+          'management-auth-rotate',
+          '--data-dir',
+          dataDir,
+          '--scope',
+          scope,
+          '--token-stdin',
+        ], { input: `${TOKEN}\n` });
+        assertPublicResult(result, {
+          code: 2,
+          stderr: REFUSED_STDERR,
+          forbidden: [TOKEN, dataDir],
+        });
+      });
+    });
+  }
+
   it('显式 restart + required audit 不可写 → exit 2 refused，早于 Keychain/launchctl', async () => {
     await withTempRoot('restart-audit-refused', async (root) => {
       const blocker = join(root, 'blocker');
@@ -219,6 +242,7 @@ describe('management-auth-rotate Agent refusal 与源码接线', () => {
     assert.ok(source.includes('--token-stdin'));
     assert.ok(source.includes('--restart-controller'));
     assert.ok(source.includes('--controller-port'));
+    assert.ok(source.includes('--scope <full|read|write|admin>'));
     assert.equal(source.includes('--new-token-stdin'), false);
   });
 });

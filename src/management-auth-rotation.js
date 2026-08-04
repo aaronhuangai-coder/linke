@@ -2,7 +2,7 @@
  * V1.46 管理认证 Keychain 轮换 staging。
  *
  * 职责：
- * - 在调用方注入的排他锁临界区内，把指定 current scope（read/write）的 Keychain item
+ * - 在调用方注入的排他锁临界区内，把指定 current scope（full/read/write/admin）的 Keychain item
  *   轮换为 newToken：先把旧 current 写入配对的 previous item（overlap 回滚锚点），
  *   再写 current=newToken，最后严格复读校验；
  * - 幂等重试：crash window 状态（previous 已写/current 未写、两写均已完成）可被
@@ -30,6 +30,9 @@ const ROTATION_ERROR_CODES = new Set([
   ROTATION_UNAVAILABLE,
   ROTATION_RECOVERY_REQUIRED,
 ]);
+
+/** 只有具备匹配 previous item 的四个管理认证 current scope 可轮换。 */
+const ROTATABLE_SCOPES = new Set(['full', 'read', 'write', 'admin']);
 
 /** 真实 staging receipt 对象身份 → 一次性、脱敏的 controller restart authority。 */
 const restartAuthorityByReceipt = new WeakMap();
@@ -87,7 +90,7 @@ export function validateManagementAuthRotationToken(token) {
 
 /**
  * 从既有固定映射表派生 scope 的 current/previous itemId（不复制硬编码映射）。
- * @param {string} scope 已通过前置校验的 scope（read/write）
+ * @param {string} scope 已通过前置校验的 scope（full/read/write/admin）
  * @returns {{ currentId: string, previousId: string }}
  */
 function rotationItemIds(scope) {
@@ -169,7 +172,7 @@ function validateRotationInput(input) {
   if (typeof withExclusiveLock !== 'function') {
     throw new ManagementAuthRotationError(ROTATION_INVALID);
   }
-  if (scope !== 'read' && scope !== 'write') {
+  if (!ROTATABLE_SCOPES.has(scope)) {
     throw new ManagementAuthRotationError(ROTATION_INVALID);
   }
   // newToken 校验委托给单一真值源 validateManagementAuthRotationToken。

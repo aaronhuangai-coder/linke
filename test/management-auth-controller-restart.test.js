@@ -65,14 +65,16 @@ function healthyAuthBody(scope) {
     auth: {
       enabled: true,
       configuredScopes: {
-        full: false,
+        full: scope === 'full',
         read: scope === 'read',
         write: scope === 'write',
-        admin: false,
+        admin: scope === 'admin',
       },
       previousTokenOverlapConfigured: {
+        full: scope === 'full',
         read: scope === 'read',
         write: scope === 'write',
+        admin: scope === 'admin',
       },
     },
     startupCredentialSource: {
@@ -156,7 +158,7 @@ function assertFixedError(error, code, forbidden = []) {
 }
 
 describe('management-auth controller restart success contract', () => {
-  for (const scope of ['read', 'write']) {
+  for (const scope of ['full', 'read', 'write', 'admin']) {
     it(`scope=${scope}: 固定 kickstart controller，随后用新 token 验证 Keychain startup snapshot`, async () => {
       const receipt = await genuineReceipt(scope);
       const world = createEffects({

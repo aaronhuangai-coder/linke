@@ -153,7 +153,7 @@ describe('management-auth-rotate argv 固定六段合同', () => {
     ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope', 'read', '--token', secret],
     ['management-auth-rotate', '--data-dir', 'relative/path', '--scope', 'read', '--token-stdin'],
     ['management-auth-rotate', '--data-dir', '/tmp/a/../b', '--scope', 'read', '--token-stdin'],
-    ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope', 'admin', '--token-stdin'],
+    ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope', 'bogus', '--token-stdin'],
     ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope=read', '--token-stdin'],
     [...VALID_ARGV, '--restart-controller'],
     [...VALID_ARGV, '--restart-controller', '--controller-port'],
@@ -247,6 +247,19 @@ describe('management-auth-rotate 成功顺序与 receipt 原样输出', () => {
     assert.equal(world.stageArgs.scope, 'write');
     assert.equal(world.stageArgs.newToken, token);
   });
+
+  for (const scope of ['full', 'admin']) {
+    it(`scope=${scope} 可进入 staging 并原样输出对应 receipt`, async () => {
+      const argv = [...VALID_ARGV];
+      argv[4] = scope;
+      const receipt = Object.freeze({ state: 'staged', scope });
+      const world = createWorld({ receipt });
+
+      assert.equal(await runManagementAuthRotateCommand(argv, world.deps), receipt);
+      assert.equal(world.stageArgs.scope, scope);
+      assert.deepEqual(JSON.parse(world.writes[0]), receipt);
+    });
+  }
 });
 
 describe('management-auth-rotate 显式 controller restart 编排与审计', () => {
@@ -283,6 +296,32 @@ describe('management-auth-rotate 显式 controller restart 编排与审计', () 
     assert.equal(JSON.stringify(world.auditArgs).includes(TOKEN), false);
     assert.deepEqual(JSON.parse(world.writes[0]), result);
   });
+
+  for (const scope of ['full', 'admin']) {
+    it(`scope=${scope} 显式 restart 透传 receipt/newToken/port 并记录脱敏 operation`, async () => {
+      const argv = [...VALID_RESTART_ARGV];
+      argv[4] = scope;
+      const receipt = Object.freeze({
+        state: 'staged',
+        scope,
+        previousOverlapConfigured: true,
+        restartRequired: true,
+        hotReload: false,
+        automaticRestart: false,
+        sensitiveValuesReturned: false,
+        alreadyStaged: false,
+      });
+      const world = createWorld({ receipt });
+
+      const result = await runManagementAuthRotateCommand(argv, world.deps);
+      assert.equal(result.scope, scope);
+      assert.equal(world.restartArgs.rotationReceipt, receipt);
+      assert.equal(world.restartArgs.newToken, TOKEN);
+      assert.equal(world.restartArgs.controllerPort, 3000);
+      assert.ok(world.auditArgs.every(({ event }) => event.operation === scope));
+      assert.equal(JSON.stringify(world.auditArgs).includes(TOKEN), false);
+    });
+  }
 
   it('required start audit 失败在 Keychain/stage/launchctl 前固定拒绝', async () => {
     const raw = new Error(`audit unavailable ${TOKEN}`);

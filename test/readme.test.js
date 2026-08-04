@@ -3257,6 +3257,7 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/startup snapshot|启动快照/i, 'startup snapshot');
     assertReadmeContains(/受控重启|controlled restart/i, 'controlled restart');
     assertReadmeContains(/hot reload/i, 'no hot reload wording');
+    assertReadmeContains(/--scope <full\|read\|write\|admin>/, 'four-scope rotation CLI');
   });
 
   it('documents the bounded headless security runner timeout', () => {
