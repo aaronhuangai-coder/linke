@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
+import { assertNoAuditIntegrityAlertDeliveryClaim } from './audit-integrity-alert-delivery-claim-state.js';
 import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
@@ -291,35 +292,58 @@ export async function readAuditIntegrityAlertOutbox(dataDir) {
   }
 }
 
-/** Atomically remove exactly the current FIFO head occurrence. */
+/**
+ * Capability-guarded FIFO head acknowledgement under an active same-root lease.
+ * Does not consult or mutate claim state; may run while claim remains claimed
+ * (delivery completion). Must not re-enter the write queue.
+ */
+export async function acknowledgeAuditIntegrityAlertOutboxHeadUnderLease(
+  resolvedRoot,
+  lease,
+  sequence,
+) {
+  if (!Number.isSafeInteger(sequence) || sequence < 1) throw unavailableError();
+  try {
+    assertAuditIntegrityWriteLease(resolvedRoot, lease);
+    const state = await loadState(resolvedRoot);
+    if (state.entries.length === 0) {
+      return freezeAckReceipt('empty', false, null, 0);
+    }
+    if (state.entries[0].sequence !== sequence) fail();
+
+    const nextState = {
+      schemaVersion: 1,
+      nextSequence: state.nextSequence,
+      entries: state.entries.slice(1),
+    };
+    await publishState(resolvedRoot, lease, nextState);
+    return freezeAckReceipt(
+      'acknowledged',
+      true,
+      sequence,
+      nextState.entries.length,
+    );
+  } catch {
+    throw unavailableError();
+  }
+}
+
+/**
+ * Atomically remove exactly the current FIFO head occurrence.
+ * Enters the same-root write queue first, refuses any persisted claimed delivery
+ * claim, then delegates to the lease-guarded primitive (no nested enqueue).
+ */
 export async function acknowledgeAuditIntegrityAlertOutboxHead(dataDir, sequence) {
   if (!Number.isSafeInteger(sequence) || sequence < 1) throw unavailableError();
   try {
     const resolvedRoot = await assertSafeDataRoot(dataDir);
-    const observed = await loadState(resolvedRoot);
-    if (observed.entries.length === 0) {
-      return freezeAckReceipt('empty', false, null, 0);
-    }
-
     return await enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
       assertAuditIntegrityWriteLease(resolvedRoot, lease);
-      const state = await loadState(resolvedRoot);
-      if (state.entries.length === 0) {
-        return freezeAckReceipt('empty', false, null, 0);
-      }
-      if (state.entries[0].sequence !== sequence) fail();
-
-      const nextState = {
-        schemaVersion: 1,
-        nextSequence: state.nextSequence,
-        entries: state.entries.slice(1),
-      };
-      await publishState(resolvedRoot, lease, nextState);
-      return freezeAckReceipt(
-        'acknowledged',
-        true,
+      await assertNoAuditIntegrityAlertDeliveryClaim(resolvedRoot, lease);
+      return acknowledgeAuditIntegrityAlertOutboxHeadUnderLease(
+        resolvedRoot,
+        lease,
         sequence,
-        nextState.entries.length,
       );
     });
   } catch {
