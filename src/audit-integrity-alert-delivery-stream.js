@@ -149,3 +149,29 @@ export async function ensureAuditIntegrityAlertDeliveryStream(dataDir) {
     throw unavailableError();
   }
 }
+
+/**
+ * Read the existing canonical stream identity under an active same-root audit write lease.
+ * Missing leaf → null (does not create). Corrupt / unsafe / forged / wrong / expired lease
+ * → path-free audit-delivery-unavailable. Never enqueues, creates, or repairs.
+ *
+ * @param {unknown} resolvedRoot
+ * @param {unknown} lease
+ * @returns {Promise<Readonly<{ schemaVersion: 1, streamId: string }> | null>}
+ */
+export async function readAuditIntegrityAlertDeliveryStreamUnderLease(
+  resolvedRoot,
+  lease,
+) {
+  try {
+    assertAuditIntegrityWriteLease(resolvedRoot, lease);
+    const state = await loadStateOrMissing(resolvedRoot);
+    if (state === null) return null;
+    return Object.freeze({
+      schemaVersion: 1,
+      streamId: state.streamId,
+    });
+  } catch {
+    throw unavailableError();
+  }
+}
