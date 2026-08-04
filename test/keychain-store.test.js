@@ -70,7 +70,10 @@ function createFakeSpawn(scenario) {
     };
     const stdin = new EventEmitter();
     stdin.end = (chunk) => {
-      if (chunk !== undefined) call.stdinChunks.push(chunk);
+      if (chunk !== undefined) {
+        call.stdinChunks.push(chunk);
+        call.stdinText = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      }
       queueMicrotask(() => {
         if (scenario.spawnError) {
           child.emit('error', scenario.spawnError);
@@ -220,10 +223,41 @@ describe('createSecurityRunner', () => {
       assertNoLeak(JSON.stringify(env), [secret, hex, envelope], 'env-leak');
     }
     const stdin = calls[0].stdinChunks[0];
-    const stdinText = Buffer.isBuffer(stdin) ? stdin.toString('utf8') : String(stdin);
+    const stdinText = calls[0].stdinText;
     assert.ok(stdinText.startsWith('add-generic-password -U -s com.linke.test -a device-token.alpha -X '));
     assert.ok(stdinText.endsWith('\n'));
     assert.ok(stdinText.includes(hex));
+    assert.equal(Buffer.isBuffer(stdin), true, 'security stdin must receive a mutable Buffer');
+    assert.ok(stdin.every((byte) => byte === 0), 'successful security stdin Buffer must be wiped');
+    assert.strictEqual(result.exitCode, 0);
+  });
+
+  it('wipes the runner-owned stdin Buffer on finish before child close', async () => {
+    const observed = { text: '', wipedBeforeClose: false };
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = new EventEmitter();
+      stderr.resume = () => {};
+      stdin.end = (chunk) => {
+        observed.text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        stdin.emit('finish');
+        observed.wipedBeforeClose = Buffer.isBuffer(chunk)
+          && chunk.every((byte) => byte === 0);
+        queueMicrotask(() => child.emit('close', 0));
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.stdin = stdin;
+      return child;
+    };
+    const runner = createSecurityRunner({ spawnImpl });
+
+    const result = await runner(['-i'], { input: 'help\n' });
+
+    assert.strictEqual(observed.text, 'help\n');
+    assert.strictEqual(observed.wipedBeforeClose, true);
     assert.strictEqual(result.exitCode, 0);
   });
 
@@ -360,6 +394,7 @@ describe('createSecurityRunner', () => {
     const probeSecret = 'security-timeout-probe-secret';
     const effects = { kills: 0, destroys: 0, scheduled: [], cancelled: [] };
     const timerHandle = Object.freeze({ type: 'fake-security-timeout' });
+    let stdinBuffer;
     const spawnImpl = () => {
       const child = new EventEmitter();
       const stdout = new EventEmitter();
@@ -370,7 +405,8 @@ describe('createSecurityRunner', () => {
         stream.destroy = () => { effects.destroys += 1; };
       }
       child.kill = () => { effects.kills += 1; };
-      stdin.end = () => {
+      stdin.end = (chunk) => {
+        stdinBuffer = chunk;
         // Old production behavior has no hard timer. Settle it successfully so RED is finite.
         setTimeout(() => child.emit('close', 0), 20);
       };
@@ -401,6 +437,8 @@ describe('createSecurityRunner', () => {
     assert.strictEqual(effects.kills, 1);
     assert.strictEqual(effects.destroys, 3);
     assert.deepStrictEqual(effects.cancelled, [timerHandle]);
+    assert.equal(Buffer.isBuffer(stdinBuffer), true, 'timeout stdin must use a mutable Buffer');
+    assert.ok(stdinBuffer.every((byte) => byte === 0), 'timeout security stdin Buffer must be wiped');
   });
 
   it('cancels the hard timeout on close and makes a late timer callback inert', async () => {
@@ -445,7 +483,7 @@ describe('createSecurityRunner', () => {
   it('rejects stdin error including EPIPE as keychain-unavailable without leaking system text', async () => {
     const epiped = new Error('write EPIPE');
     epiped.code = 'EPIPE';
-    const { spawnImpl } = createFakeSpawn({ stdinError: epiped });
+    const { spawnImpl, calls } = createFakeSpawn({ stdinError: epiped });
     const runner = createSecurityRunner({ spawnImpl });
     await assert.rejects(
       runner(['-i'], { input: 'add-generic-password -U -s com.linke.test -a item -X ab\n' }),
@@ -457,17 +495,22 @@ describe('createSecurityRunner', () => {
         && !String(error).includes('write EPIPE')
       ),
     );
+    const stdinBuffer = calls[0].stdinChunks[0];
+    assert.equal(Buffer.isBuffer(stdinBuffer), true, 'failed stdin must use a mutable Buffer');
+    assert.ok(stdinBuffer.every((byte) => byte === 0), 'failed security stdin Buffer must be wiped');
   });
 
   it('maps synchronous stdin.end throw to keychain-unavailable without leaking system text or secrets', async () => {
     const probeSecret = 'stdin-end-sync-probe-secret';
+    let stdinBuffer;
     const spawnImpl = () => {
       const child = new EventEmitter();
       const stdout = new EventEmitter();
       const stderr = new EventEmitter();
       stderr.resume = () => {};
       const stdin = new EventEmitter();
-      stdin.end = () => {
+      stdin.end = (chunk) => {
+        stdinBuffer = chunk;
         const err = new Error(`write EPIPE containing ${probeSecret}`);
         err.code = 'EPIPE';
         throw err;
@@ -490,6 +533,8 @@ describe('createSecurityRunner', () => {
           && !text.includes('write EPIPE');
       },
     );
+    assert.equal(Buffer.isBuffer(stdinBuffer), true, 'throwing stdin must receive a mutable Buffer');
+    assert.ok(stdinBuffer.every((byte) => byte === 0), 'throwing security stdin Buffer must be wiped');
   });
 
   it('prefers same-turn stdin error after close as keychain-unavailable', async () => {
@@ -618,6 +663,7 @@ describe('createSecurityRunner', () => {
     const secret = 'stdin-only-secret-value';
     const hex = envelopeHex(secret);
     let written;
+    let writtenText;
     const spawnImpl = (binary, args, options) => {
       assert.strictEqual(binary, '/usr/bin/security');
       assert.deepStrictEqual(args, ['-i']);
@@ -631,6 +677,7 @@ describe('createSecurityRunner', () => {
       const stdin = new EventEmitter();
       stdin.end = (chunk) => {
         written = chunk;
+        writtenText = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
         queueMicrotask(() => child.emit('close', 0));
       };
       child.stdout = stdout;
@@ -641,9 +688,10 @@ describe('createSecurityRunner', () => {
     const runner = createSecurityRunner({ spawnImpl });
     const cmd = `add-generic-password -U -s com.linke.test -a device-token.alpha -X ${hex}\n`;
     await runner(['-i'], { input: cmd });
-    const text = Buffer.isBuffer(written) ? written.toString('utf8') : String(written);
     // Fixed boolean + fixed message only — never strictEqual full stdin/cmd/hex on failure.
-    assertSecretEqual(text, cmd, 'stdin-payload-mismatch');
+    assertSecretEqual(writtenText, cmd, 'stdin-payload-mismatch');
+    assert.equal(Buffer.isBuffer(written), true, 'security stdin must receive a mutable Buffer');
+    assert.ok(written.every((byte) => byte === 0), 'security stdin Buffer must be wiped');
   });
 
   it('fail-closes on oversized stdout without leaking chunk content or system text', async () => {

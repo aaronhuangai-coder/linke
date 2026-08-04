@@ -106,6 +106,8 @@ function destroySecurityChild(child) {
  * Create the production /usr/bin/security runner.
  * Production KeychainStore always uses argv `['-i']` and writes interactive commands to stdin.
  * Secret material (including envelope hex) must appear only on stdin — never argv, env, or temp files.
+ * String input is encoded into a runner-owned mutable Buffer and best-effort wiped after flush/settle;
+ * the source JavaScript string remains non-zeroizable.
  * stderr is consumed and never returned. Sync spawn/end throw, permanent stream error listeners,
  * deferred close success, hard timeout, and oversized stdout all fail closed without leaking system
  * error text, secrets, or chunk content. Kill/close/double stream errors settle only once.
@@ -129,7 +131,8 @@ export function createSecurityRunner({
     const stdout = [];
     const sourceStdoutBuffers = [];
     let combinedStdout = null;
-    const wipeStdoutBuffer = (buffer) => {
+    let stdinBuffer = null;
+    const wipeMutableBuffer = (buffer) => {
       try {
         if (Buffer.isBuffer(buffer)) buffer.fill(0);
       } catch {
@@ -138,11 +141,15 @@ export function createSecurityRunner({
     };
     const wipeCapturedStdout = () => {
       for (const buffer of [combinedStdout, ...stdout, ...sourceStdoutBuffers]) {
-        wipeStdoutBuffer(buffer);
+        wipeMutableBuffer(buffer);
       }
       combinedStdout = null;
       stdout.length = 0;
       sourceStdoutBuffers.length = 0;
+    };
+    const wipeCapturedStdin = () => {
+      wipeMutableBuffer(stdinBuffer);
+      stdinBuffer = null;
     };
     const cancelSecurityTimeout = () => {
       if (!timeoutActive) return;
@@ -160,6 +167,7 @@ export function createSecurityRunner({
       fn();
     };
     const failClosed = () => settle(() => {
+      wipeCapturedStdin();
       wipeCapturedStdout();
       reject(unavailableError());
     });
@@ -175,7 +183,7 @@ export function createSecurityRunner({
     let oversized = false;
     child.stdout.on('data', (chunk) => {
       if (settled || oversized || closeObserved) {
-        wipeStdoutBuffer(chunk);
+        wipeMutableBuffer(chunk);
         return;
       }
       const buf = Buffer.from(chunk);
@@ -193,6 +201,7 @@ export function createSecurityRunner({
     // Keep error listeners resident so repeated stream errors stay fail-closed.
     child.on('error', failClosed);
     child.stdin.on('error', failClosed);
+    child.stdin.once('finish', wipeCapturedStdin);
     child.stdout.on('error', failClosed);
     child.stderr.on('error', failClosed);
     try {
@@ -213,6 +222,7 @@ export function createSecurityRunner({
       if (settled || oversized) return;
       closeObserved = true;
       cancelSecurityTimeout();
+      wipeCapturedStdin();
       const code = Number.isInteger(exitCode) ? exitCode : 1;
       let out;
       try {
@@ -227,7 +237,10 @@ export function createSecurityRunner({
     });
     try {
       if (input === undefined) child.stdin.end();
-      else child.stdin.end(typeof input === 'string' ? input : Buffer.from(input));
+      else {
+        stdinBuffer = Buffer.from(input);
+        child.stdin.end(stdinBuffer);
+      }
     } catch {
       failClosed();
     }
