@@ -11,6 +11,7 @@ import {
 } from '../src/management-auth-rotate-command.js';
 import { ManagementAuthRotationError } from '../src/management-auth-rotation.js';
 import { ManagementAuthRotationProcessLockError } from '../src/management-auth-rotation-process-lock.js';
+import { ManagementAuthControllerRestartError } from '../src/management-auth-controller-restart.js';
 
 const ARGUMENTS_INVALID = 'management-auth-rotate-arguments-invalid';
 const STDIN_INVALID = 'management-auth-rotate-stdin-invalid';
@@ -23,6 +24,12 @@ const VALID_ARGV = Object.freeze([
   '--scope',
   'read',
   '--token-stdin',
+]);
+const VALID_RESTART_ARGV = Object.freeze([
+  ...VALID_ARGV,
+  '--restart-controller',
+  '--controller-port',
+  '3000',
 ]);
 
 function assertCommandError(error, code, forbidden = []) {
@@ -42,6 +49,8 @@ function createWorld({
   createKeychainImpl,
   createExclusiveLockImpl,
   stageImpl,
+  appendAuditImpl,
+  restartImpl,
   writeOutputImpl,
   receipt = Object.freeze({
     state: 'staged',
@@ -60,6 +69,8 @@ function createWorld({
   const withExclusiveLock = async (task) => task();
   let inputPulls = 0;
   let stageArgs = null;
+  const auditArgs = [];
+  let restartArgs = null;
   const input = Readable.from((function* inputChunks() {
     for (const chunk of chunks) {
       inputPulls += 1;
@@ -85,6 +96,29 @@ function createWorld({
       if (stageImpl) return stageImpl(args);
       return receipt;
     },
+    async appendAuditEvent(dataDir, event) {
+      events.push(`appendAudit:${event.outcome}`);
+      auditArgs.push({ dataDir, event: { ...event } });
+      if (appendAuditImpl) return appendAuditImpl(dataDir, event, auditArgs.length);
+      return { ...event };
+    },
+    async restartController(args) {
+      events.push('restartController');
+      restartArgs = args;
+      if (restartImpl) return restartImpl(args);
+      return Object.freeze({
+        state: 'restarted',
+        scope: args.rotationReceipt.scope,
+        previousOverlapConfigured: true,
+        controllerRestarted: true,
+        authenticationVerified: true,
+        restartRequired: false,
+        hotReload: false,
+        automaticRestart: false,
+        sensitiveValuesReturned: false,
+        alreadyStaged: false,
+      });
+    },
     writeOutput(value) {
       events.push('writeOutput');
       writes.push(value);
@@ -101,6 +135,8 @@ function createWorld({
     receipt,
     get inputPulls() { return inputPulls; },
     get stageArgs() { return stageArgs; },
+    get auditArgs() { return auditArgs; },
+    get restartArgs() { return restartArgs; },
   };
 }
 
@@ -119,6 +155,12 @@ describe('management-auth-rotate argv 固定六段合同', () => {
     ['management-auth-rotate', '--data-dir', '/tmp/a/../b', '--scope', 'read', '--token-stdin'],
     ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope', 'admin', '--token-stdin'],
     ['management-auth-rotate', '--data-dir', DATA_DIR, '--scope=read', '--token-stdin'],
+    [...VALID_ARGV, '--restart-controller'],
+    [...VALID_ARGV, '--restart-controller', '--controller-port'],
+    [...VALID_ARGV, '--restart-controller', '--controller-port', '0'],
+    [...VALID_ARGV, '--restart-controller', '--controller-port', '65536'],
+    [...VALID_ARGV, '--restart-controller', '--controller-port', '03000'],
+    [...VALID_ARGV, '--controller-port', '3000', '--restart-controller'],
   ];
 
   for (const argv of invalidArgv) {
@@ -204,6 +246,95 @@ describe('management-auth-rotate 成功顺序与 receipt 原样输出', () => {
     assert.equal(await runManagementAuthRotateCommand(argv, world.deps), receipt);
     assert.equal(world.stageArgs.scope, 'write');
     assert.equal(world.stageArgs.newToken, token);
+  });
+});
+
+describe('management-auth-rotate 显式 controller restart 编排与审计', () => {
+  it('精确 restart argv：required start audit → stage → restart → best-effort completed → 单行输出', async () => {
+    const world = createWorld();
+    const result = await runManagementAuthRotateCommand([...VALID_RESTART_ARGV], world.deps);
+
+    assert.equal(result.state, 'restarted');
+    assert.deepEqual(world.events, [
+      'stdin-read',
+      'appendAudit:started',
+      'createKeychain',
+      `createExclusiveLock:${DATA_DIR}`,
+      'stage',
+      'restartController',
+      'appendAudit:success',
+      'writeOutput',
+    ]);
+    assert.deepEqual(world.restartArgs, {
+      rotationReceipt: world.receipt,
+      newToken: TOKEN,
+      controllerPort: 3000,
+    });
+    assert.equal(world.auditArgs.length, 2);
+    assert.deepEqual(world.auditArgs[0], {
+      dataDir: DATA_DIR,
+      event: {
+        type: 'management.auth.controller-restart.started',
+        outcome: 'started',
+        operation: 'read',
+      },
+    });
+    assert.equal(world.auditArgs[1].event.type, 'management.auth.controller-restart.completed');
+    assert.equal(JSON.stringify(world.auditArgs).includes(TOKEN), false);
+    assert.deepEqual(JSON.parse(world.writes[0]), result);
+  });
+
+  it('required start audit 失败在 Keychain/stage/launchctl 前固定拒绝', async () => {
+    const raw = new Error(`audit unavailable ${TOKEN}`);
+    const world = createWorld({
+      appendAuditImpl: async () => { throw raw; },
+    });
+    await assert.rejects(
+      runManagementAuthRotateCommand([...VALID_RESTART_ARGV], world.deps),
+      (error) => {
+        assert.ok(error instanceof ManagementAuthControllerRestartError);
+        assert.equal(error.code, 'management-auth-controller-restart-unavailable');
+        assert.equal(error.message.includes(TOKEN), false);
+        return true;
+      },
+    );
+    assert.deepEqual(world.events, ['stdin-read', 'appendAudit:started']);
+    assert.equal(world.restartArgs, null);
+    assert.deepEqual(world.writes, []);
+  });
+
+  it('stage/restart 失败保留主错误并 best-effort 记录 failure，不输出', async () => {
+    const stageError = new ManagementAuthRotationError('management-auth-rotation-unavailable');
+    const stagedWorld = createWorld({ stageImpl: async () => { throw stageError; } });
+    await assert.rejects(
+      runManagementAuthRotateCommand([...VALID_RESTART_ARGV], stagedWorld.deps),
+      (error) => error === stageError,
+    );
+    assert.equal(stagedWorld.auditArgs.at(-1).event.outcome, 'failure');
+    assert.equal(stagedWorld.restartArgs, null);
+    assert.deepEqual(stagedWorld.writes, []);
+
+    const restartError = new ManagementAuthControllerRestartError(
+      'management-auth-controller-restart-authentication-failed',
+    );
+    const restartWorld = createWorld({ restartImpl: async () => { throw restartError; } });
+    await assert.rejects(
+      runManagementAuthRotateCommand([...VALID_RESTART_ARGV], restartWorld.deps),
+      (error) => error === restartError,
+    );
+    assert.equal(restartWorld.auditArgs.at(-1).event.outcome, 'failure');
+    assert.deepEqual(restartWorld.writes, []);
+  });
+
+  it('completed audit 失败不覆盖已经验证的重启结果', async () => {
+    const world = createWorld({
+      appendAuditImpl: async (_dataDir, event) => {
+        if (event.outcome === 'success') throw new Error(`post audit ${TOKEN}`);
+      },
+    });
+    const result = await runManagementAuthRotateCommand([...VALID_RESTART_ARGV], world.deps);
+    assert.equal(result.authenticationVerified, true);
+    assert.equal(world.writes.length, 1);
   });
 });
 

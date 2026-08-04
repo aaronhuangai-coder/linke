@@ -11,11 +11,10 @@
  *   ManagementAuthRotationError（message===code，绝不回显 token、itemId、scope、
  *   底层错误或路径）。
  *
- * 边界（本轮不交付）：
- * - 不接真实 Keychain、不提供 CLI、不接线任何自动重启；receipt 固定
- *   restartRequired:true / hotReload:false / automaticRestart:false；
- * - 排他锁由调用方注入；本模块只做单进程 task exact-once/结果防篡改 guard，
- *   不声称 production 多进程锁语义；
+ * 边界：
+ * - 本模块不自行构造 Keychain、不执行 launchctl；receipt 固定 restartRequired:true /
+ *   hotReload:false / automaticRestart:false；生产 CLI、进程锁与显式重启由相邻模块编排；
+ * - 排他锁由调用方注入；本模块只做 task exact-once/结果防篡改 guard；
  * - 失败路径只读分类，绝不 delete、绝不自动 rollback/修复。
  */
 
@@ -32,6 +31,9 @@ const ROTATION_ERROR_CODES = new Set([
   ROTATION_RECOVERY_REQUIRED,
 ]);
 
+/** 真实 staging receipt 对象身份 → 一次性、脱敏的 controller restart authority。 */
+const restartAuthorityByReceipt = new WeakMap();
+
 /**
  * 管理认证轮换固定错误：name/code/message 不包含 token、itemId、scope、路径或底层错误。
  */
@@ -45,6 +47,22 @@ export class ManagementAuthRotationError extends Error {
     this.name = 'ManagementAuthRotationError';
     this.code = fixedCode;
   }
+}
+
+/**
+ * 消费管理认证重启 authority；默认拒绝，只有真实 staging 成功回执可被后续实现授权。
+ * @param {unknown} receipt
+ */
+export function assertAndConsumeManagementAuthRestartAuthority(receipt) {
+  if (receipt === null || (typeof receipt !== 'object' && typeof receipt !== 'function')) {
+    throw new ManagementAuthRotationError(ROTATION_UNAVAILABLE);
+  }
+  const authority = restartAuthorityByReceipt.get(receipt);
+  if (authority === undefined) {
+    throw new ManagementAuthRotationError(ROTATION_UNAVAILABLE);
+  }
+  restartAuthorityByReceipt.delete(receipt);
+  return authority;
 }
 
 /** KeychainStore 缺失项错误码：仅在 previous 初读时视为 absent。 */
@@ -344,5 +362,9 @@ export async function stageManagementAuthKeychainRotation(input) {
   if (lockReturn !== taskOutcome.value) {
     throw new ManagementAuthRotationError(ROTATION_UNAVAILABLE);
   }
+  restartAuthorityByReceipt.set(
+    taskOutcome.value,
+    Object.freeze({ scope, alreadyStaged: taskOutcome.value.alreadyStaged }),
+  );
   return taskOutcome.value;
 }

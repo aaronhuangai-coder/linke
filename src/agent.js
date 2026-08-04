@@ -39,7 +39,7 @@
  *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
  *   device-heartbeat    — authenticated device heartbeat (token from Keychain only)
  *   device-token-rotate — rotate device token (token from Keychain only)
- *   management-auth-rotate — rotate management auth Keychain token under cross-process lock
+ *   management-auth-rotate — rotate management auth Keychain token and optionally restart the controller
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000); device-* require HTTPS Agent URL
@@ -73,8 +73,10 @@
  *   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-* commands)
  *   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 (64 hex; colons optional)
  *   --enrollment-code-stdin Read one-time enrollment code from stdin (required for device-enroll; never via argv)
- *   --scope <read|write> Management auth scope to rotate (management-auth-rotate; reserved fixed flag, not yet accepted)
- *   --token-stdin      Read the new management auth token from stdin (management-auth-rotate; reserved fixed flag, token from stdin only, never via argv)
+ *   --scope <read|write> Management auth scope to rotate (management-auth-rotate)
+ *   --token-stdin      Read the new management auth token from stdin (management-auth-rotate; token from stdin only, never via argv)
+ *   --restart-controller Explicitly restart the managed controller after staging (management-auth-rotate)
+ *   --controller-port <port> Managed controller loopback port used to verify the explicit restart
  */
 
 import { fileURLToPath } from 'node:url';
@@ -126,6 +128,7 @@ import {
   ManagementAuthRotateCommandError,
   runManagementAuthRotateCommand,
 } from './management-auth-rotate-command.js';
+import { ManagementAuthControllerRestartError } from './management-auth-controller-restart.js';
 import { ManagementAuthRotationError } from './management-auth-rotation.js';
 import { ManagementAuthRotationProcessLockError } from './management-auth-rotation-process-lock.js';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
@@ -1242,7 +1245,7 @@ Commands:
   device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
   device-heartbeat    Authenticated device heartbeat (device token from Keychain only)
   device-token-rotate Rotate device token (device token from Keychain only)
-  management-auth-rotate Rotate management auth Keychain token under cross-process lock
+  management-auth-rotate Rotate management auth Keychain token and optionally restart the controller
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000). device-* commands require an HTTPS Agent URL only
@@ -1271,6 +1274,8 @@ Options:
   --enrollment-code-stdin Required for device-enroll: read one-time enrollment code from stdin (max 4096 bytes, single line). Enrollment codes and device tokens are never accepted as CLI arguments; tokens are stored and read only via Keychain
   --scope <read|write>  Management auth scope to rotate (management-auth-rotate)
   --token-stdin        Read the new management auth token from stdin (management-auth-rotate; token is never accepted as a CLI argument)
+  --restart-controller Explicitly restart the managed controller after staging (management-auth-rotate; requires --controller-port)
+  --controller-port <port> Managed controller loopback management port used to verify the explicit restart
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
@@ -2444,6 +2449,7 @@ export async function main() {
           } else if (
             error instanceof ManagementAuthRotationError
             || error instanceof ManagementAuthRotationProcessLockError
+            || error instanceof ManagementAuthControllerRestartError
           ) {
             message = MANAGEMENT_AUTH_ROTATE_REFUSED_ERROR;
             exitCode = 2;

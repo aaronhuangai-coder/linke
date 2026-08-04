@@ -86,6 +86,14 @@ describe('management-auth-rotate Agent argv 早失败', () => {
     (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token-stdin', 'extra'],
     (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--new-token-stdin'],
     (dataDir) => ['management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token', TOKEN],
+    (dataDir) => [
+      'management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token-stdin',
+      '--restart-controller',
+    ],
+    (dataDir) => [
+      'management-auth-rotate', '--data-dir', dataDir, '--scope', 'read', '--token-stdin',
+      '--restart-controller', '--controller-port', '0',
+    ],
   ];
 
   for (const [index, buildArgv] of argvBuilders.entries()) {
@@ -160,6 +168,30 @@ describe('management-auth-rotate Agent refusal 与源码接线', () => {
     });
   });
 
+  it('显式 restart + required audit 不可写 → exit 2 refused，早于 Keychain/launchctl', async () => {
+    await withTempRoot('restart-audit-refused', async (root) => {
+      const blocker = join(root, 'blocker');
+      await writeFile(blocker, 'synthetic', { mode: 0o600 });
+      const dataDir = join(blocker, 'child');
+      const result = await runAgent([
+        'management-auth-rotate',
+        '--data-dir',
+        dataDir,
+        '--scope',
+        'read',
+        '--token-stdin',
+        '--restart-controller',
+        '--controller-port',
+        '3000',
+      ], { input: `${TOKEN}\n` });
+      assertPublicResult(result, {
+        code: 2,
+        stderr: REFUSED_STDERR,
+        forbidden: [TOKEN, dataDir, '/bin/launchctl'],
+      });
+    });
+  });
+
   it('真实 command、两类 refusal error 与固定文案均接入 management-auth-rotate case', async () => {
     const source = await readFile(AGENT_SRC, 'utf8');
     assert.ok(source.includes("from './management-auth-rotate-command.js'"));
@@ -167,6 +199,7 @@ describe('management-auth-rotate Agent refusal 与源码接线', () => {
     assert.ok(source.includes('ManagementAuthRotateCommandError'));
     assert.ok(source.includes('ManagementAuthRotationError'));
     assert.ok(source.includes('ManagementAuthRotationProcessLockError'));
+    assert.ok(source.includes('ManagementAuthControllerRestartError'));
     assert.ok(source.includes("case 'management-auth-rotate':"));
     assert.ok(source.includes('await runManagementAuthRotateCommand(rawArgv)'));
     for (const phrase of [
@@ -179,11 +212,13 @@ describe('management-auth-rotate Agent refusal 与源码接线', () => {
     }
   });
 
-  it('usage 仅公开 data-dir/scope/token-stdin，不公开 new-token-stdin', async () => {
+  it('usage 公开显式 restart-controller/controller-port，仍不公开 new-token-stdin', async () => {
     const source = await readFile(AGENT_SRC, 'utf8');
     assert.ok(source.includes('--data-dir'));
     assert.ok(source.includes('--scope'));
     assert.ok(source.includes('--token-stdin'));
+    assert.ok(source.includes('--restart-controller'));
+    assert.ok(source.includes('--controller-port'));
     assert.equal(source.includes('--new-token-stdin'), false);
   });
 });

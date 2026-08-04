@@ -13,6 +13,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assertAndConsumeManagementAuthRestartAuthority,
   ManagementAuthRotationError,
   stageManagementAuthKeychainRotation,
   validateManagementAuthRotationToken,
@@ -351,6 +352,72 @@ describe('management-auth-rotation 成功 staging（read/write × previous absen
         'sensitiveValuesReturned',
         'state',
       ].sort(),
+    );
+  });
+});
+
+describe('management-auth-rotation restart authority 对象身份与一次性消费', () => {
+  it('真实 staging receipt 可消费一次，返回冻结脱敏 authority；重放拒绝', async () => {
+    const { currentId } = rotationItemIds('read');
+    const world = createWorld({ backing: new Map([[currentId, OLD_TOKEN]]) });
+    const receipt = await stageManagementAuthKeychainRotation(validInput(world, { scope: 'read' }));
+
+    const authority = assertAndConsumeManagementAuthRestartAuthority(receipt);
+    assert.deepEqual(authority, { scope: 'read', alreadyStaged: false });
+    assert.equal(Object.isFrozen(authority), true);
+    assertNoSecrets(JSON.stringify(authority), ALL_SECRET_STRINGS);
+    assert.throws(
+      () => assertAndConsumeManagementAuthRestartAuthority(receipt),
+      (error) => {
+        assertFixedError(error, FIXED_UNAVAILABLE, ALL_SECRET_STRINGS);
+        return true;
+      },
+    );
+  });
+
+  it('alreadyStaged receipt authority 保留脱敏重试事实', async () => {
+    const { currentId, previousId } = rotationItemIds('write');
+    const world = createWorld({
+      backing: new Map([[currentId, NEW_TOKEN], [previousId, OLD_TOKEN]]),
+    });
+    const receipt = await stageManagementAuthKeychainRotation(validInput(world));
+    assert.deepEqual(
+      assertAndConsumeManagementAuthRestartAuthority(receipt),
+      { scope: 'write', alreadyStaged: true },
+    );
+  });
+
+  it('clone/lookalike/Proxy/primitive 均拒绝，Proxy getter/trap 不触发', async () => {
+    const { currentId } = rotationItemIds('write');
+    const world = createWorld({ backing: new Map([[currentId, OLD_TOKEN]]) });
+    const receipt = await stageManagementAuthKeychainRotation(validInput(world));
+    let traps = 0;
+    const hostile = new Proxy(receipt, {
+      get() { traps += 1; throw new Error('must-not-read'); },
+      getPrototypeOf() { traps += 1; throw new Error('must-not-probe'); },
+      ownKeys() { traps += 1; throw new Error('must-not-enumerate'); },
+    });
+    for (const candidate of [
+      structuredClone(receipt),
+      { ...receipt },
+      hostile,
+      null,
+      'receipt',
+      1,
+    ]) {
+      assert.throws(
+        () => assertAndConsumeManagementAuthRestartAuthority(candidate),
+        (error) => {
+          assertFixedError(error, FIXED_UNAVAILABLE, ALL_SECRET_STRINGS);
+          return true;
+        },
+      );
+    }
+    assert.equal(traps, 0);
+    // 伪品拒绝不得烧毁真实 receipt。
+    assert.deepEqual(
+      assertAndConsumeManagementAuthRestartAuthority(receipt),
+      { scope: 'write', alreadyStaged: false },
     );
   });
 });

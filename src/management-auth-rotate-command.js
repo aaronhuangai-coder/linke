@@ -6,6 +6,11 @@
 import { isAbsolute, normalize } from 'node:path';
 import { TextDecoder } from 'node:util';
 import { KeychainStore } from './keychain-store.js';
+import { appendAuditEvent as appendLocalAuditEvent } from './audit-log.js';
+import {
+  ManagementAuthControllerRestartError,
+  restartManagementAuthController,
+} from './management-auth-controller-restart.js';
 import {
   stageManagementAuthKeychainRotation,
   validateManagementAuthRotationToken,
@@ -36,11 +41,13 @@ function stdinInvalid() {
 }
 
 /**
- * 解析精确六段 argv；任何数量、顺序、值域或路径形状偏差都固定拒绝。
+ * 解析精确六段 staging argv 或九段显式重启 argv；任何偏差都固定拒绝。
  * @param {unknown} rawArgv
  */
 function parseRawArgv(rawArgv) {
-  if (!Array.isArray(rawArgv) || rawArgv.length !== 6) throw argumentsInvalid();
+  if (!Array.isArray(rawArgv) || (rawArgv.length !== 6 && rawArgv.length !== 9)) {
+    throw argumentsInvalid();
+  }
   const [command, dataDirFlag, dataDir, scopeFlag, scope, stdinFlag] = rawArgv;
   if (
     command !== 'management-auth-rotate'
@@ -56,7 +63,50 @@ function parseRawArgv(rawArgv) {
   ) {
     throw argumentsInvalid();
   }
-  return { dataDir, scope };
+  if (rawArgv.length === 6) {
+    return { dataDir, scope, restartController: false, controllerPort: null };
+  }
+
+  const [restartFlag, controllerPortFlag, rawControllerPort] = rawArgv.slice(6);
+  if (
+    restartFlag !== '--restart-controller'
+    || controllerPortFlag !== '--controller-port'
+    || typeof rawControllerPort !== 'string'
+    || !/^[1-9]\d{0,4}$/.test(rawControllerPort)
+  ) {
+    throw argumentsInvalid();
+  }
+  const controllerPort = Number(rawControllerPort);
+  if (
+    !Number.isSafeInteger(controllerPort)
+    || controllerPort > 65_535
+    || String(controllerPort) !== rawControllerPort
+  ) {
+    throw argumentsInvalid();
+  }
+  return { dataDir, scope, restartController: true, controllerPort };
+}
+
+async function appendRestartAuditBestEffort(appendAuditEvent, dataDir, event) {
+  try {
+    await appendAuditEvent(dataDir, event);
+  } catch {
+    // 重启主结果优先；post-outcome audit 保持 best-effort。
+  }
+}
+
+async function appendRequiredRestartStartAudit(appendAuditEvent, dataDir, scope) {
+  try {
+    await appendAuditEvent(dataDir, {
+      type: 'management.auth.controller-restart.started',
+      outcome: 'started',
+      operation: scope,
+    });
+  } catch {
+    throw new ManagementAuthControllerRestartError(
+      'management-auth-controller-restart-unavailable',
+    );
+  }
 }
 
 /**
@@ -98,22 +148,71 @@ async function readRotationToken(input) {
  *   createKeychain?: () => unknown | Promise<unknown>,
  *   createExclusiveLock?: (dataDir: string) => unknown | Promise<unknown>,
  *   stage?: typeof stageManagementAuthKeychainRotation,
+ *   appendAuditEvent?: typeof appendLocalAuditEvent,
+ *   restartController?: typeof restartManagementAuthController,
  *   writeOutput?: (value: string) => unknown | Promise<unknown>,
  * }} [deps]
  */
 export async function runManagementAuthRotateCommand(rawArgv, deps = {}) {
-  const { dataDir, scope } = parseRawArgv(rawArgv);
+  const {
+    dataDir,
+    scope,
+    restartController: restartRequested,
+    controllerPort,
+  } = parseRawArgv(rawArgv);
   const input = deps.input ?? process.stdin;
   const newToken = await readRotationToken(input);
 
   const createKeychain = deps.createKeychain ?? (() => new KeychainStore());
   const createExclusiveLock = deps.createExclusiveLock ?? createManagementAuthRotationExclusiveLock;
   const stage = deps.stage ?? stageManagementAuthKeychainRotation;
+  const appendAuditEvent = deps.appendAuditEvent ?? appendLocalAuditEvent;
+  const restartController = deps.restartController ?? restartManagementAuthController;
   const writeOutput = deps.writeOutput ?? ((value) => process.stdout.write(value));
 
-  const keychain = await createKeychain();
-  const withExclusiveLock = await createExclusiveLock(dataDir);
-  const receipt = await stage({ keychain, scope, newToken, withExclusiveLock });
-  await writeOutput(`${JSON.stringify(receipt)}\n`);
-  return receipt;
+  if (restartRequested) {
+    await appendRequiredRestartStartAudit(appendAuditEvent, dataDir, scope);
+  }
+
+  let rotationReceipt;
+  try {
+    const keychain = await createKeychain();
+    const withExclusiveLock = await createExclusiveLock(dataDir);
+    rotationReceipt = await stage({ keychain, scope, newToken, withExclusiveLock });
+  } catch (error) {
+    if (restartRequested) {
+      await appendRestartAuditBestEffort(appendAuditEvent, dataDir, {
+        type: 'management.auth.controller-restart.failed',
+        outcome: 'failure',
+        operation: scope,
+      });
+    }
+    throw error;
+  }
+
+  let outputReceipt = rotationReceipt;
+  if (restartRequested) {
+    try {
+      outputReceipt = await restartController({
+        rotationReceipt,
+        newToken,
+        controllerPort,
+      });
+    } catch (error) {
+      await appendRestartAuditBestEffort(appendAuditEvent, dataDir, {
+        type: 'management.auth.controller-restart.failed',
+        outcome: 'failure',
+        operation: scope,
+      });
+      throw error;
+    }
+    await appendRestartAuditBestEffort(appendAuditEvent, dataDir, {
+      type: 'management.auth.controller-restart.completed',
+      outcome: 'success',
+      operation: scope,
+    });
+  }
+
+  await writeOutput(`${JSON.stringify(outputReceipt)}\n`);
+  return outputReceipt;
 }
