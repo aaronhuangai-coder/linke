@@ -3115,6 +3115,27 @@ describe('README — long-lived safety boundaries', () => {
       'not production monitoring ready');
   });
 
+  it('documents explicit local audit alert capture CLI and its consumer ceiling', () => {
+    assertReadmeContains(/audit-integrity-alert-capture --data-dir/i,
+      'explicit local alert capture command');
+    assertReadmeContains(/exact raw argv|只接受[^\n]*exact/i,
+      'strict raw argv shape');
+    assertReadmeContains(/arguments are invalid[^\n]*path-free|path-free[^\n]*arguments are invalid/i,
+      'fixed path-free invalid arguments');
+    assertReadmeContains(/monitor[^\n]*(complete|完成)[^\n]*(enqueue|入队)/i,
+      'monitor completes before enqueue');
+    assertReadmeContains(/exit 0[^\n]*(healthy|ignored)[^\n]*exit 2[^\n]*(alert|queued|告警)/i,
+      'capture exit semantics');
+    assertReadmeContains(/no CLI read\/ack consumer|尚无 CLI[^\n]*(read|ack)/i,
+      'no CLI consumer yet');
+    assertReadmeContains(/not remote notification delivery/i,
+      'no remote notification delivery');
+    assertReadmeContains(/not managed scheduler/i,
+      'no managed scheduler');
+    assertReadmeContains(/not production monitoring ready/i,
+      'not production monitoring ready');
+  });
+
   it('documents supervisor-install-dry-run Web panel safety boundaries', () => {
     assertReadmeContains(/supervisor-install-dry-run-panel|POST `?\/api\/supervisor-install-dry-run`?|buildSupervisorInstallDryRunViewModel/i, 'README should document supervisor install dry-run Web panel');
     assertReadmeContains(/不调用 launchctl[\s\S]*不读取进程列表[\s\S]*不安装[\s\S]*不启动/i, 'README should preserve supervisor install Web panel safety boundaries');

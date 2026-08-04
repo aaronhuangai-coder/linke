@@ -32,6 +32,7 @@
  *   supervisor-lifecycle-guarded-runner-execution-gate — show sanitized guarded runner execution gate
  *   audit-log           — show sanitized local audit events
  *   audit-integrity-monitor — run-once local audit integrity monitor (JSON on stdout; no network; no write)
+ *   audit-integrity-alert-capture — explicitly persist one local monitor result to the bounded outbox
  *   audit-integrity-rotate — explicitly rotate the local audit integrity generation
  *   audit-integrity-rotation-recover — explicitly recover a local audit integrity rotation
  *   release-readiness   — evaluate release readiness from health status
@@ -56,7 +57,7 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor, explicit audit integrity rotation/recovery, and management-auth-rotate
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor/capture, explicit audit integrity rotation/recovery, and management-auth-rotate
  *   --expected-generation-id <hex> Expected audit generation ID (rotate only; 32 lowercase hex)
  *   --expected-head-digest <hex> Expected audit journal head digest (rotate only; 64 lowercase hex)
  *   --target <name>      NAS target name (nas-snapshot-replicate)
@@ -120,6 +121,7 @@ import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
 } from './audit-integrity-monitor.js';
+import { enqueueAuditIntegrityAlertOutbox } from './audit-integrity-alert-outbox.js';
 import {
   recoverAuditIntegrityRotation,
   rotateAuditIntegrityGeneration,
@@ -137,6 +139,13 @@ const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
 const AUDIT_INTEGRITY_MONITOR_ARG_KEYS = new Set(['_', 'data-dir']);
 const AUDIT_INTEGRITY_MONITOR_ARGS_ERROR = 'audit-integrity-monitor arguments are invalid';
 const AUDIT_INTEGRITY_MONITOR_EXECUTION_ERROR = 'audit-integrity-monitor failed';
+const AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND = 'audit-integrity-alert-capture';
+const AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR =
+  'audit-integrity-alert-capture arguments are invalid';
+const AUDIT_INTEGRITY_ALERT_CAPTURE_REFUSED_ERROR =
+  'audit-integrity-alert-capture refused';
+const AUDIT_INTEGRITY_ALERT_CAPTURE_EXECUTION_ERROR =
+  'audit-integrity-alert-capture failed';
 const AUDIT_INTEGRITY_ROTATE_COMMAND = 'audit-integrity-rotate';
 const AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND = 'audit-integrity-rotation-recover';
 const MANAGEMENT_AUTH_ROTATE_COMMAND = 'management-auth-rotate';
@@ -158,6 +167,7 @@ const AUDIT_INTEGRITY_GENERATION_ID_RE = /^[0-9a-f]{32}$/;
 const AUDIT_INTEGRITY_HEAD_DIGEST_RE = /^[0-9a-f]{64}$/;
 const AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS = new Set([
   AUDIT_INTEGRITY_MONITOR_COMMAND,
+  AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND,
   AUDIT_INTEGRITY_ROTATE_COMMAND,
   AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND,
   MANAGEMENT_AUTH_ROTATE_COMMAND,
@@ -222,6 +232,50 @@ function assertAuditIntegrityMonitorArgs(args, rawArgv) {
   // raw path token must match the parsed value (no reordering / alias tricks)
   if (rawArgv[2] !== dataDir) {
     throw new Error(AUDIT_INTEGRITY_MONITOR_ARGS_ERROR);
+  }
+}
+
+/**
+ * Strict local argv contract for explicit alert capture only.
+ * Fixed failures never echo a flag, path, or value.
+ *
+ * @param {object} args
+ * @param {string[]} rawArgv process.argv.slice(2); compared only, never echoed
+ */
+function assertAuditIntegrityAlertCaptureArgs(args, rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 3
+    || rawArgv[0] !== AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
+  }
+
+  const keys = Object.keys(args);
+  if (keys.length !== AUDIT_INTEGRITY_MONITOR_ARG_KEYS.size) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
+  }
+  for (const key of keys) {
+    if (!AUDIT_INTEGRITY_MONITOR_ARG_KEYS.has(key)) {
+      throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
+    }
+  }
+  for (const required of AUDIT_INTEGRITY_MONITOR_ARG_KEYS) {
+    if (!Object.hasOwn(args, required)) {
+      throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
+    }
+  }
+  if (
+    !Array.isArray(args._)
+    || args._.length !== 1
+    || args._[0] !== AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND
+    || args['data-dir'] !== rawArgv[2]
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
   }
 }
 
@@ -1248,6 +1302,7 @@ Commands:
   supervisor-lifecycle-guarded-runner-execution-gate Show sanitized supervisor lifecycle guarded runner execution gate
   audit-log           Show sanitized local audit events
   audit-integrity-monitor Run-once local audit integrity monitor (JSON on stdout; no network; no write)
+  audit-integrity-alert-capture Explicitly capture one local single-run monitor result into the bounded outbox (no network)
   audit-integrity-rotate Explicitly rotate the local audit integrity generation (local only)
   audit-integrity-rotation-recover Explicitly recover a local audit integrity rotation (local only)
   release-readiness   Evaluate release readiness from health status
@@ -1289,7 +1344,7 @@ Options:
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-alert-capture, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
   --expected-generation-id <hex> Expected audit generation ID (audit-integrity-rotate; 32 lowercase hex)
   --expected-head-digest <hex> Expected audit journal head digest (audit-integrity-rotate; 64 lowercase hex)
 `);
@@ -1324,6 +1379,31 @@ export async function main() {
     }
 
     switch (command) {
+      case 'audit-integrity-alert-capture': {
+        assertAuditIntegrityAlertCaptureArgs(args, rawArgv);
+        try {
+          const report = await runAuditIntegrityMonitor(args['data-dir']);
+          const receipt = await enqueueAuditIntegrityAlertOutbox(args['data-dir'], report);
+          process.stdout.write(`${JSON.stringify(receipt)}\n`);
+          process.exitCode = auditIntegrityMonitorExitCode(report);
+        } catch (error) {
+          if (
+            isAuditIntegrityRefusal(error)
+            || (
+              error
+              && typeof error === 'object'
+              && error.code === ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE
+            )
+          ) {
+            console.error(`Error: ${AUDIT_INTEGRITY_ALERT_CAPTURE_REFUSED_ERROR}`);
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_EXECUTION_ERROR);
+        }
+        break;
+      }
+
       case 'audit-integrity-monitor': {
         // Validator stays outside execution try so argv errors keep the fixed invalid phrase.
         assertAuditIntegrityMonitorArgs(args, rawArgv);
