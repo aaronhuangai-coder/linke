@@ -3246,6 +3246,14 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/hot reload/i, 'no hot reload wording');
   });
 
+  it('documents the bounded headless security runner timeout', () => {
+    assertReadmeContains(/10 秒[^\n]*硬(截止|超时)|hard timeout[^\n]*10/i,
+      'security runner hard timeout');
+    assertReadmeContains(/kill[^\n]*(stdio|标准流)|销毁[^\n]*(stdio|标准流)/i,
+      'timeout child and stdio cleanup');
+    assertReadmeContains(/keychain-unavailable/, 'fixed timeout failure code');
+  });
+
   it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
     assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
     assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');

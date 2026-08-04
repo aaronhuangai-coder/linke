@@ -288,6 +288,92 @@ describe('createSecurityRunner', () => {
     assert.strictEqual(result.exitCode, 1);
   });
 
+  it('hard-times out a non-closing security child, destroys stdio, and fails closed', async () => {
+    const probeSecret = 'security-timeout-probe-secret';
+    const effects = { kills: 0, destroys: 0, scheduled: [], cancelled: [] };
+    const timerHandle = Object.freeze({ type: 'fake-security-timeout' });
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = new EventEmitter();
+      stderr.resume = () => {};
+      for (const stream of [stdin, stdout, stderr]) {
+        stream.destroy = () => { effects.destroys += 1; };
+      }
+      child.kill = () => { effects.kills += 1; };
+      stdin.end = () => {
+        // Old production behavior has no hard timer. Settle it successfully so RED is finite.
+        setTimeout(() => child.emit('close', 0), 20);
+      };
+      child.stdin = stdin;
+      child.stdout = stdout;
+      child.stderr = stderr;
+      return child;
+    };
+    const setTimeoutImpl = (callback, delayMs) => {
+      effects.scheduled.push(delayMs);
+      queueMicrotask(callback);
+      return timerHandle;
+    };
+    const clearTimeoutImpl = (handle) => { effects.cancelled.push(handle); };
+    const runner = createSecurityRunner({ spawnImpl, setTimeoutImpl, clearTimeoutImpl });
+
+    await assert.rejects(
+      runner(['-i'], { input: `probe ${probeSecret}\n` }),
+      (error) => {
+        const text = `${error}\n${error.message}\n${error.stack || ''}`;
+        return error.name === 'LinkeError'
+          && error.code === 'keychain-unavailable'
+          && error.message === 'keychain-unavailable'
+          && !text.includes(probeSecret);
+      },
+    );
+    assert.deepStrictEqual(effects.scheduled, [10_000]);
+    assert.strictEqual(effects.kills, 1);
+    assert.strictEqual(effects.destroys, 3);
+    assert.deepStrictEqual(effects.cancelled, [timerHandle]);
+  });
+
+  it('cancels the hard timeout on close and makes a late timer callback inert', async () => {
+    const effects = { kills: 0, destroys: 0, cancelled: [] };
+    const timerHandle = Object.freeze({ type: 'fake-cancelled-security-timeout' });
+    let timeoutCallback;
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = new EventEmitter();
+      stderr.resume = () => {};
+      for (const stream of [stdin, stdout, stderr]) {
+        stream.destroy = () => { effects.destroys += 1; };
+      }
+      child.kill = () => { effects.kills += 1; };
+      stdin.end = () => { queueMicrotask(() => child.emit('close', 0)); };
+      child.stdin = stdin;
+      child.stdout = stdout;
+      child.stderr = stderr;
+      return child;
+    };
+    const runner = createSecurityRunner({
+      spawnImpl,
+      setTimeoutImpl(callback, delayMs) {
+        assert.strictEqual(delayMs, 10_000);
+        timeoutCallback = callback;
+        return timerHandle;
+      },
+      clearTimeoutImpl(handle) { effects.cancelled.push(handle); },
+    });
+
+    const result = await runner(['-i'], { input: 'help\n' });
+    assert.strictEqual(result.exitCode, 0);
+    assert.deepStrictEqual(effects.cancelled, [timerHandle]);
+    assert.strictEqual(typeof timeoutCallback, 'function');
+    timeoutCallback();
+    assert.strictEqual(effects.kills, 0);
+    assert.strictEqual(effects.destroys, 0);
+  });
+
   it('rejects stdin error including EPIPE as keychain-unavailable without leaking system text', async () => {
     const epiped = new Error('write EPIPE');
     epiped.code = 'EPIPE';

@@ -398,8 +398,12 @@ const GOLD_READINESS_ITEMS = [
       'fixed loopback /api/auth-status proof of keychain startup snapshot and previous-token overlap',
       'behavioral tests use fake Keychain and injected launchctl/http effects; real macOS Keychain, launchctl action, and host HTTP acceptance not verified',
       'do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready',
+      'src/keychain-store.js SECURITY_COMMAND_TIMEOUT_MS=10000',
+      'test/keychain-store.test.js hard timeout and late callback cancellation',
+      'Keychain security child timeout fails closed, kills the child, and destroys stdio',
+      'fake timer code-stage evidence only; real locked-Keychain and headless bootstrap acceptance not verified',
     ],
-    nextStep: 'V1.46 delivers scoped read/write current+previous overlap, optional admin scope, a Keychain-backed controller startup source, production staging/process-lock CLI, and an explicit controlled-restart code path as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, controlled-restart rotation real-host acceptance (including any required full/admin overlap), identity/user RBAC, headless bootstrap/unlock handling, token-memory and crash-dump exposure review, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
+    nextStep: 'V1.46 delivers scoped read/write current+previous overlap, optional admin scope, a Keychain-backed controller startup source, production staging/process-lock CLI, an explicit controlled-restart code path, and a bounded headless security runner as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, controlled-restart rotation real-host acceptance (including any required full/admin overlap), identity/user RBAC, headless bootstrap/unlock real-host acceptance, token-memory and crash-dump exposure review, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
   },
   {
     id: 'real-nas-remote-backup',

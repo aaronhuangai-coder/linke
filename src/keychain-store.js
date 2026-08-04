@@ -8,6 +8,8 @@ const ENVELOPE_PREFIX = 'linke.kc.v1:';
 const BASE64URL_BODY = /^[A-Za-z0-9_-]+$/;
 /** Max stdout bytes from /usr/bin/security (TLS PEM / token headroom; fail closed above). */
 export const MAX_SECURITY_STDOUT_BYTES = 1024 * 1024;
+/** Hard wall-clock bound for a headless /usr/bin/security operation. */
+export const SECURITY_COMMAND_TIMEOUT_MS = 10_000;
 
 function assertSafeId(value, label) {
   if (typeof value !== 'string' || !SAFE_ID.test(value)) throw new Error(`${label} is invalid`);
@@ -105,17 +107,37 @@ function destroySecurityChild(child) {
  * Production KeychainStore always uses argv `['-i']` and writes interactive commands to stdin.
  * Secret material (including envelope hex) must appear only on stdin — never argv, env, or temp files.
  * stderr is consumed and never returned. Sync spawn/end throw, permanent stream error listeners,
- * deferred close success, and oversized stdout all fail closed without leaking system error text,
- * secrets, or chunk content. Kill/close/double stream errors settle only once.
- * @param {{ spawnImpl?: typeof spawn }} [options]
+ * deferred close success, hard timeout, and oversized stdout all fail closed without leaking system
+ * error text, secrets, or chunk content. Kill/close/double stream errors settle only once.
+ * @param {{
+ *   spawnImpl?: typeof spawn,
+ *   setTimeoutImpl?: typeof setTimeout,
+ *   clearTimeoutImpl?: typeof clearTimeout,
+ * }} [options]
  * @returns {(args: string[], options?: { input?: string }) => Promise<{ stdout: string, exitCode: number }>}
  */
-export function createSecurityRunner({ spawnImpl = spawn } = {}) {
+export function createSecurityRunner({
+  spawnImpl = spawn,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+} = {}) {
   return (args, { input } = {}) => new Promise((resolve, reject) => {
     let settled = false;
+    let timeoutActive = false;
+    let timeoutHandle;
+    const cancelSecurityTimeout = () => {
+      if (!timeoutActive) return;
+      timeoutActive = false;
+      try {
+        clearTimeoutImpl(timeoutHandle);
+      } catch {
+        // ignore
+      }
+    };
     const settle = (fn) => {
       if (settled) return;
       settled = true;
+      cancelSecurityTimeout();
       fn();
     };
     const failClosed = () => settle(() => reject(unavailableError()));
@@ -149,9 +171,23 @@ export function createSecurityRunner({ spawnImpl = spawn } = {}) {
     child.stdin.on('error', failClosed);
     child.stdout.on('error', failClosed);
     child.stderr.on('error', failClosed);
+    try {
+      timeoutHandle = setTimeoutImpl(() => {
+        if (!timeoutActive || settled) return;
+        failClosed();
+        destroySecurityChild(child);
+      }, SECURITY_COMMAND_TIMEOUT_MS);
+      timeoutActive = true;
+      if (settled) cancelSecurityTimeout();
+    } catch {
+      failClosed();
+      destroySecurityChild(child);
+      return;
+    }
     // Defer successful close so same-turn errors after close win.
     child.once('close', (exitCode) => {
       if (settled || oversized) return;
+      cancelSecurityTimeout();
       const code = Number.isInteger(exitCode) ? exitCode : 1;
       const out = Buffer.concat(stdout).toString('utf8');
       queueMicrotask(() => settle(() => resolve({ stdout: out, exitCode: code })));
