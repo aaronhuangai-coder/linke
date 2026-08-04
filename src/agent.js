@@ -39,6 +39,7 @@
  *   device-enroll       — enroll device via certificate-pinned Agent HTTPS (code from stdin)
  *   device-heartbeat    — authenticated device heartbeat (token from Keychain only)
  *   device-token-rotate — rotate device token (token from Keychain only)
+ *   management-auth-rotate — rotate management auth Keychain token under cross-process lock (bootstrap: fixed refusal)
  *
  * Options:
  *   --server <url>       Server URL (default: http://localhost:3000); device-* require HTTPS Agent URL
@@ -55,7 +56,7 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor, and explicit audit integrity rotation/recovery
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor, explicit audit integrity rotation/recovery, and management-auth-rotate
  *   --expected-generation-id <hex> Expected audit generation ID (rotate only; 32 lowercase hex)
  *   --expected-head-digest <hex> Expected audit journal head digest (rotate only; 64 lowercase hex)
  *   --target <name>      NAS target name (nas-snapshot-replicate)
@@ -72,6 +73,8 @@
  *   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-* commands)
  *   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 (64 hex; colons optional)
  *   --enrollment-code-stdin Read one-time enrollment code from stdin (required for device-enroll; never via argv)
+ *   --scope <read|write> Management auth scope to rotate (management-auth-rotate; reserved fixed flag, not yet accepted)
+ *   --token-stdin      Read the new management auth token from stdin (management-auth-rotate; reserved fixed flag, token from stdin only, never via argv)
  */
 
 import { fileURLToPath } from 'node:url';
@@ -119,6 +122,7 @@ import {
   recoverAuditIntegrityRotation,
   rotateAuditIntegrityGeneration,
 } from './audit-integrity-rotation.js';
+import { runManagementAuthRotateCommand } from './management-auth-rotate-command.js';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 
 const AUDIT_INTEGRITY_MONITOR_COMMAND = 'audit-integrity-monitor';
@@ -1227,6 +1231,7 @@ Commands:
   device-enroll       Enroll device via HTTPS Agent URL with certificate pin (code from stdin only)
   device-heartbeat    Authenticated device heartbeat (device token from Keychain only)
   device-token-rotate Rotate device token (device token from Keychain only)
+  management-auth-rotate Rotate management auth Keychain token under cross-process lock (bootstrap: fixed refusal)
 
 Options:
   --server <url>       Server URL (default: http://localhost:3000). device-* commands require an HTTPS Agent URL only
@@ -1253,10 +1258,12 @@ Options:
   --token <token>      Bearer token for authenticated Linke Server management requests (not accepted by device-enroll / device-heartbeat / device-token-rotate)
   --tls-fingerprint <hex> Admin-confirmed Agent certificate SHA-256 fingerprint (64 hex, colons optional; independent channel)
   --enrollment-code-stdin Required for device-enroll: read one-time enrollment code from stdin (max 4096 bytes, single line). Enrollment codes and device tokens are never accepted as CLI arguments; tokens are stored and read only via Keychain
+  --scope <read|write>  Management auth scope to rotate (management-auth-rotate; reserved fixed flag, not yet accepted)
+  --token-stdin        Read the new management auth token from stdin (management-auth-rotate; reserved fixed flag; token from stdin only, never accepted as a CLI argument)
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-rotate, audit-integrity-rotation-recover)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
   --expected-generation-id <hex> Expected audit generation ID (audit-integrity-rotate; 32 lowercase hex)
   --expected-head-digest <hex> Expected audit journal head digest (audit-integrity-rotate; 64 lowercase hex)
 `);
@@ -2408,6 +2415,14 @@ export async function main() {
         if (args['fail-on-blocked'] === true && gate.state === 'blocked') {
           process.exitCode = 2;
         }
+        break;
+      }
+
+      case 'management-auth-rotate': {
+        // bootstrap 骨架：命令模块固定抛 management-auth-rotate-failed，
+        // 由顶层既有 catch 输出固定错误并 exit 1。
+        // 不传测试 deps、不读 env fake；不接真实 Keychain、lockf、launchctl。
+        await runManagementAuthRotateCommand(rawArgv);
         break;
       }
 

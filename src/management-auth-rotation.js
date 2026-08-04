@@ -54,6 +54,20 @@ const KEYCHAIN_ITEM_MISSING = 'keychain-item-missing';
 const NEW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
 /**
+ * newToken 单一真值源纯校验：base64url 字符集且长度 43..128。
+ * 合法时原样返回该字符串；非法时固定抛 ManagementAuthRotationError(invalid)，
+ * 绝不回显 token 内容。纯函数：零副作用、零 I/O。
+ * @param {unknown} token
+ * @returns {string} 校验通过的原 token 字符串
+ */
+export function validateManagementAuthRotationToken(token) {
+  if (typeof token !== 'string' || !NEW_TOKEN_PATTERN.test(token)) {
+    throw new ManagementAuthRotationError(ROTATION_INVALID);
+  }
+  return token;
+}
+
+/**
  * 从既有固定映射表派生 scope 的 current/previous itemId（不复制硬编码映射）。
  * @param {string} scope 已通过前置校验的 scope（read/write）
  * @returns {{ currentId: string, previousId: string }}
@@ -140,10 +154,8 @@ function validateRotationInput(input) {
   if (scope !== 'read' && scope !== 'write') {
     throw new ManagementAuthRotationError(ROTATION_INVALID);
   }
-  if (typeof newToken !== 'string' || !NEW_TOKEN_PATTERN.test(newToken)) {
-    throw new ManagementAuthRotationError(ROTATION_INVALID);
-  }
-  return { keychain, scope, newToken, withExclusiveLock };
+  // newToken 校验委托给单一真值源 validateManagementAuthRotationToken。
+  return { keychain, scope, newToken: validateManagementAuthRotationToken(newToken), withExclusiveLock };
 }
 
 /**
