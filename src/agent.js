@@ -35,6 +35,7 @@
  *   audit-integrity-alert-capture — explicitly persist one local monitor result to the bounded outbox
  *   audit-integrity-alert-outbox-read — read the bounded local alert outbox
  *   audit-integrity-alert-outbox-ack — acknowledge the exact local FIFO head
+ *   audit-integrity-alert-delivery-stream-ensure — ensure local non-secret delivery stream identity
  *   audit-integrity-rotate — explicitly rotate the local audit integrity generation
  *   audit-integrity-rotation-recover — explicitly recover a local audit integrity rotation
  *   release-readiness   — evaluate release readiness from health status
@@ -59,7 +60,7 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor/capture/outbox, explicit audit integrity rotation/recovery, and management-auth-rotate
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor/capture/outbox/delivery-stream-ensure, explicit audit integrity rotation/recovery, and management-auth-rotate
  *   --expected-generation-id <hex> Expected audit generation ID (rotate only; 32 lowercase hex)
  *   --expected-head-digest <hex> Expected audit journal head digest (rotate only; 64 lowercase hex)
  *   --target <name>      NAS target name (nas-snapshot-replicate)
@@ -128,6 +129,7 @@ import {
   enqueueAuditIntegrityAlertOutbox,
   readAuditIntegrityAlertOutbox,
 } from './audit-integrity-alert-outbox.js';
+import { ensureAuditIntegrityAlertDeliveryStream } from './audit-integrity-alert-delivery-stream.js';
 import {
   recoverAuditIntegrityRotation,
   rotateAuditIntegrityGeneration,
@@ -168,6 +170,14 @@ const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_REFUSED_ERROR =
   'audit-integrity-alert-outbox-ack refused';
 const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_EXECUTION_ERROR =
   'audit-integrity-alert-outbox-ack failed';
+const AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_COMMAND =
+  'audit-integrity-alert-delivery-stream-ensure';
+const AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_ARGS_ERROR =
+  'audit-integrity-alert-delivery-stream-ensure arguments are invalid';
+const AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_REFUSED_ERROR =
+  'audit-integrity-alert-delivery-stream-ensure refused';
+const AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_EXECUTION_ERROR =
+  'audit-integrity-alert-delivery-stream-ensure failed';
 const AUDIT_INTEGRITY_ROTATE_COMMAND = 'audit-integrity-rotate';
 const AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND = 'audit-integrity-rotation-recover';
 const MANAGEMENT_AUTH_ROTATE_COMMAND = 'management-auth-rotate';
@@ -192,6 +202,7 @@ const AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS = new Set([
   AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND,
   AUDIT_INTEGRITY_ALERT_OUTBOX_READ_COMMAND,
   AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_COMMAND,
+  AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_COMMAND,
   AUDIT_INTEGRITY_ROTATE_COMMAND,
   AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND,
   MANAGEMENT_AUTH_ROTATE_COMMAND,
@@ -330,6 +341,47 @@ function parseAuditIntegrityAlertOutboxReadArgs(args, rawArgv) {
     throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_READ_ARGS_ERROR);
   }
   return Object.freeze({ dataDir: rawArgv[2] });
+}
+
+/**
+ * Parse the exact local delivery-stream-ensure argv surface.
+ * Raw argv must be exactly command + --data-dir + nonblank path in that order.
+ *
+ * @param {object} args
+ * @param {string[]} rawArgv process.argv.slice(2); compared only, never echoed
+ * @returns {Readonly<{ dataDir: string }>}
+ */
+function parseAuditIntegrityAlertDeliveryStreamEnsureArgs(args, rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 3
+    || rawArgv[0] !== AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_ARGS_ERROR);
+  }
+  const keys = Object.keys(args);
+  if (
+    keys.length !== AUDIT_INTEGRITY_MONITOR_ARG_KEYS.size
+    || keys.some((key) => !AUDIT_INTEGRITY_MONITOR_ARG_KEYS.has(key))
+    || !Object.hasOwn(args, '_')
+    || !Object.hasOwn(args, 'data-dir')
+    || !Array.isArray(args._)
+    || args._.length !== 1
+    || args._[0] !== AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_COMMAND
+    || args['data-dir'] !== rawArgv[2]
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_ARGS_ERROR);
+  }
+  return Object.freeze({ dataDir: rawArgv[2] });
+}
+
+function isAuditIntegrityAlertDeliveryStreamRefusal(error) {
+  return error instanceof LinkeError
+    && error.code === ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE;
 }
 
 /** Parse the exact local FIFO-head acknowledgement argv surface. */
@@ -1402,6 +1454,7 @@ Commands:
   audit-integrity-alert-capture Explicitly capture one local single-run monitor result into the bounded outbox (no network)
   audit-integrity-alert-outbox-read Read the bounded local alert outbox (no network; no write)
   audit-integrity-alert-outbox-ack Acknowledge the exact local FIFO alert head (no network)
+  audit-integrity-alert-delivery-stream-ensure Ensure local non-secret delivery stream identity (no network)
   audit-integrity-rotate Explicitly rotate the local audit integrity generation (local only)
   audit-integrity-rotation-recover Explicitly recover a local audit integrity rotation (local only)
   release-readiness   Evaluate release readiness from health status
@@ -1443,7 +1496,7 @@ Options:
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-alert-capture, audit-integrity-alert-outbox-read, audit-integrity-alert-outbox-ack, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-alert-capture, audit-integrity-alert-outbox-read, audit-integrity-alert-outbox-ack, audit-integrity-alert-delivery-stream-ensure, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
   --sequence <n>       Exact positive FIFO head sequence (audit-integrity-alert-outbox-ack)
   --expected-generation-id <hex> Expected audit generation ID (audit-integrity-rotate; 32 lowercase hex)
   --expected-head-digest <hex> Expected audit journal head digest (audit-integrity-rotate; 64 lowercase hex)
@@ -1491,6 +1544,24 @@ export async function main() {
             break;
           }
           throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_READ_EXECUTION_ERROR);
+        }
+        break;
+      }
+
+      case 'audit-integrity-alert-delivery-stream-ensure': {
+        const parsed = parseAuditIntegrityAlertDeliveryStreamEnsureArgs(args, rawArgv);
+        try {
+          const receipt = await ensureAuditIntegrityAlertDeliveryStream(parsed.dataDir);
+          process.stdout.write(`${JSON.stringify(receipt)}\n`);
+        } catch (error) {
+          if (isAuditIntegrityAlertDeliveryStreamRefusal(error)) {
+            console.error(
+              `Error: ${AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_REFUSED_ERROR}`,
+            );
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_ENSURE_EXECUTION_ERROR);
         }
         break;
       }

@@ -3409,4 +3409,19 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/not remote notification delivery/i,
       'not remote notification delivery');
   });
+
+  it('documents the explicit local stream ensure CLI and remote-registration ceiling', () => {
+    assertReadmeContains(/audit-integrity-alert-delivery-stream-ensure --data-dir/i,
+      'stream ensure CLI command');
+    assertReadmeContains(/created.*existing|existing.*created/i,
+      'created and existing receipts');
+    assertReadmeContains(/non-secret stream UUID|非敏感.*stream UUID/i,
+      'non-secret stream UUID');
+    assertReadmeContains(/no API\/Web stream provisioning|无 API\/Web.*stream provisioning/i,
+      'no API/Web provisioning wiring');
+    assertReadmeContains(/does not prove remote registration or delivery|不证明.*remote registration/i,
+      'no remote registration or delivery proof');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+  });
 });

@@ -2506,6 +2506,28 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records explicit local stream ensure CLI without remote-registration overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'explicit local audit-integrity alert delivery stream ensure CLI',
+      'src/agent.js audit-integrity-alert-delivery-stream-ensure --data-dir',
+      'test/agent-audit-integrity-alert-delivery-stream.test.js',
+      'exact raw argv and fixed path-free refused/failed mapping',
+      'created/existing compact receipt with non-secret stream UUID',
+      'local stream provisioning does not prove remote registration or delivery',
+      'no API/Web stream provisioning wiring',
+      'not remote notification delivery',
+      'not managed scheduler',
+      'not production monitoring ready',
+    ]) {
+      assert.ok(item.evidence.includes(atom), `missing stream CLI evidence atom: ${atom}`);
+    }
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];
