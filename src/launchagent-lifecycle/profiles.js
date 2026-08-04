@@ -6,6 +6,11 @@ import {
   LAUNCHAGENT_LIFECYCLE,
   LaunchAgentLifecycleError,
 } from './contracts.js';
+import {
+  MANAGEMENT_AUTH_KEYCHAIN_SCOPES_ENV,
+  MANAGEMENT_AUTH_SOURCE_ENV,
+  parseManagementAuthEnv,
+} from '../management-auth-keychain.js';
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -27,6 +32,8 @@ const ALLOWED_ENVIRONMENT_KEYS = Object.freeze([
   'LINKE_RESTORE_ROOT',
   'LINKE_RATE_LIMIT_PER_MINUTE',
   'LINKE_AUDIT_MAX_EVENTS',
+  MANAGEMENT_AUTH_SOURCE_ENV,
+  MANAGEMENT_AUTH_KEYCHAIN_SCOPES_ENV,
 ]);
 
 function invalid() {
@@ -296,6 +303,20 @@ function validateControllerEnvironment(value) {
     if (typeof descriptor.value !== 'string') invalid();
     fields[key] = descriptor.value;
   }
+
+  let managementAuth;
+  try {
+    managementAuth = parseManagementAuthEnv(fields);
+  } catch {
+    invalid();
+  }
+  if (
+    managementAuth.mode === 'keychain'
+    && fields[MANAGEMENT_AUTH_KEYCHAIN_SCOPES_ENV] !== managementAuth.scopes.join(',')
+  ) {
+    invalid();
+  }
+
   const projection = {};
   for (const key of ALLOWED_ENVIRONMENT_KEYS) {
     if (Object.hasOwn(fields, key)) projection[key] = fields[key];

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { parseManagementAuthEnv } from '../src/management-auth-keychain.js';
 
 const profilesUrl = new URL('../src/launchagent-lifecycle/profiles.js', import.meta.url);
 const profilesPath = fileURLToPath(profilesUrl);
@@ -45,6 +46,8 @@ if (profilesExists) {
     'LINKE_RESTORE_ROOT',
     'LINKE_RATE_LIMIT_PER_MINUTE',
     'LINKE_AUDIT_MAX_EVENTS',
+    'LINKE_MANAGEMENT_AUTH_SOURCE',
+    'LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES',
   ];
 
   function sha256(bytes) {
@@ -333,6 +336,8 @@ if (profilesExists) {
         LINKE_RESTORE_ROOT: '/private/tmp/linke-restore',
         LINKE_RATE_LIMIT_PER_MINUTE: '60',
         LINKE_AUDIT_MAX_EVENTS: '1000',
+        LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+        LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,previous-read,write,previous-write,admin',
       };
       const rendered = await render(binding, { controllerEnvironment });
       assert.deepEqual(rendered.controller.descriptor.EnvironmentVariables, controllerEnvironment);
@@ -347,6 +352,48 @@ if (profilesExists) {
       for (const key of ALLOWED_ENVIRONMENT_KEYS) assert.equal(schedulerXml.includes(key), false);
       assert.doesNotMatch(controllerXml, /token|password|api.?key|secret/i);
       assert.doesNotMatch(schedulerXml, /token|password|api.?key|secret/i);
+
+      const managementAuth = parseManagementAuthEnv(
+        rendered.controller.descriptor.EnvironmentVariables,
+      );
+      assert.deepEqual(managementAuth, {
+        mode: 'keychain',
+        scopes: ['read', 'previous-read', 'write', 'previous-write', 'admin'],
+      });
+    });
+  });
+
+  test('controller environment 对 Keychain selector/scopes 做成对且规范化的 fail-closed 校验', async () => {
+    await withFixture(async (fixture) => {
+      const binding = await bindFixture(fixture);
+      const invalidEnvironments = [
+        { LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain' },
+        { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,previous-read' },
+        {
+          LINKE_MANAGEMENT_AUTH_SOURCE: 'KEYCHAIN',
+          LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,previous-read',
+        },
+        {
+          LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+          LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-read',
+        },
+        {
+          LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+          LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,read',
+        },
+        {
+          LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+          LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read, previous-read',
+        },
+        {
+          LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+          LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,unknown',
+        },
+      ];
+
+      for (const controllerEnvironment of invalidEnvironments) {
+        await assertInvalid(() => render(binding, { controllerEnvironment }));
+      }
     });
   });
 

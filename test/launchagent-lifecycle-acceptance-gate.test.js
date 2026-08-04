@@ -1601,7 +1601,7 @@ test('Task 4 safe index production module exists', () => {
 });
 
 /**
- * Task 4 allowlist：仅四条模块路径，各允许一次只读 loader openSync。
+ * Task 4 allowlist：仅 safe index 的五条静态模块路径，各允许一次只读 loader openSync。
  */
 function getTask4Allowlist() {
   const lifecycleDir = resolve(
@@ -1612,6 +1612,7 @@ function getTask4Allowlist() {
     resolve(lifecycleDir, 'contracts.js'),
     resolve(lifecycleDir, 'profiles.js'),
     resolve(lifecycleDir, 'acceptance-gate.js'),
+    resolve(lifecycleDir, '..', 'management-auth-keychain.js'),
   ];
 }
 
@@ -2189,7 +2190,7 @@ function assertTask4GuardedPayload(allowlist, payload) {
   assert.deepEqual(
     [...payload.loaderPathsSeen].sort(),
     allowlistSorted,
-    'loader path multiset must equal exact four-path allowlist',
+    'loader path multiset must equal exact five-path allowlist',
   );
   for (const pathKey of allowlist) {
     assert.equal(
