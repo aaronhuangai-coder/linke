@@ -3284,6 +3284,13 @@ describe('README — V1.46 management auth Keychain source', () => {
       'token-memory review remains incomplete');
   });
 
+  it('documents Keychain raw stdout byte wiping and decoded-string limitation', () => {
+    assertReadmeContains(/Keychain.*stdout.*(Buffer|字节).*(覆写|清零|wipe)/i,
+      'Keychain raw stdout byte wiping');
+    assertReadmeContains(/解码后的.*字符串.*(不能|无法|不可).*(可靠)?清零/i,
+      'decoded Keychain string limitation');
+  });
+
   it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
     assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
     assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');

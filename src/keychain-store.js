@@ -125,6 +125,25 @@ export function createSecurityRunner({
     let settled = false;
     let timeoutActive = false;
     let timeoutHandle;
+    let closeObserved = false;
+    const stdout = [];
+    const sourceStdoutBuffers = [];
+    let combinedStdout = null;
+    const wipeStdoutBuffer = (buffer) => {
+      try {
+        if (Buffer.isBuffer(buffer)) buffer.fill(0);
+      } catch {
+        // 清理保持 best-effort，不能覆盖既有成功或固定失败语义。
+      }
+    };
+    const wipeCapturedStdout = () => {
+      for (const buffer of [combinedStdout, ...stdout, ...sourceStdoutBuffers]) {
+        wipeStdoutBuffer(buffer);
+      }
+      combinedStdout = null;
+      stdout.length = 0;
+      sourceStdoutBuffers.length = 0;
+    };
     const cancelSecurityTimeout = () => {
       if (!timeoutActive) return;
       timeoutActive = false;
@@ -140,7 +159,10 @@ export function createSecurityRunner({
       cancelSecurityTimeout();
       fn();
     };
-    const failClosed = () => settle(() => reject(unavailableError()));
+    const failClosed = () => settle(() => {
+      wipeCapturedStdout();
+      reject(unavailableError());
+    });
 
     let child;
     try {
@@ -149,21 +171,23 @@ export function createSecurityRunner({
       failClosed();
       return;
     }
-    const stdout = [];
     let totalStdoutBytes = 0;
     let oversized = false;
     child.stdout.on('data', (chunk) => {
-      if (settled || oversized) return;
+      if (settled || oversized || closeObserved) {
+        wipeStdoutBuffer(chunk);
+        return;
+      }
       const buf = Buffer.from(chunk);
+      stdout.push(buf);
+      if (Buffer.isBuffer(chunk)) sourceStdoutBuffers.push(chunk);
       totalStdoutBytes += buf.length;
       if (totalStdoutBytes > MAX_SECURITY_STDOUT_BYTES) {
         oversized = true;
-        stdout.length = 0;
         destroySecurityChild(child);
         failClosed();
         return;
       }
-      stdout.push(buf);
     });
     child.stderr.resume();
     // Keep error listeners resident so repeated stream errors stay fail-closed.
@@ -187,9 +211,18 @@ export function createSecurityRunner({
     // Defer successful close so same-turn errors after close win.
     child.once('close', (exitCode) => {
       if (settled || oversized) return;
+      closeObserved = true;
       cancelSecurityTimeout();
       const code = Number.isInteger(exitCode) ? exitCode : 1;
-      const out = Buffer.concat(stdout).toString('utf8');
+      let out;
+      try {
+        combinedStdout = Buffer.concat(stdout);
+        out = combinedStdout.toString('utf8');
+      } catch {
+        failClosed();
+        return;
+      }
+      wipeCapturedStdout();
       queueMicrotask(() => settle(() => resolve({ stdout: out, exitCode: code })));
     });
     try {

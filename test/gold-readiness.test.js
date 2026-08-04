@@ -240,6 +240,10 @@ const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'successful, invalid, and oversized stdin paths wipe source, chunk, and concat buffers before Keychain construction',
   'test/management-auth-rotate-command.test.js mutable stdin byte wiping',
   'JavaScript token strings and Keychain command strings remain non-zeroizable; token-memory exposure review remains incomplete',
+  'Keychain security runner raw stdout mutable Buffer wiping code-stage mitigation',
+  'successful, stream-error, and oversized stdout paths wipe source, chunk, and concat buffers',
+  'test/keychain-store.test.js raw stdout byte wiping',
+  'decoded Keychain secret strings remain non-zeroizable; token-memory exposure review remains incomplete',
 ]);
 
 /**

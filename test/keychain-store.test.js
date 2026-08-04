@@ -89,7 +89,12 @@ function createFakeSpawn(scenario) {
           return;
         }
         if (scenario.stdoutData !== undefined) {
-          stdout.emit('data', Buffer.from(scenario.stdoutData));
+          stdout.emit(
+            'data',
+            Buffer.isBuffer(scenario.stdoutData)
+              ? scenario.stdoutData
+              : Buffer.from(scenario.stdoutData),
+          );
         }
         if (scenario.stderrData !== undefined) {
           stderr.emit('data', Buffer.from(scenario.stderrData));
@@ -223,9 +228,10 @@ describe('createSecurityRunner', () => {
   });
 
   it('collects stdout and never surfaces stderr content in result or errors', async () => {
+    const stdoutData = Buffer.from('stored-from-stdout');
     const { spawnImpl, calls } = createFakeSpawn({
       closeCode: 0,
-      stdoutData: 'stored-from-stdout',
+      stdoutData,
       stderrData: 'stderr-must-not-leak',
     });
     const runner = createSecurityRunner({ spawnImpl });
@@ -238,6 +244,68 @@ describe('createSecurityRunner', () => {
     assert.strictEqual(result.exitCode, 0);
     assert.ok(!Object.prototype.hasOwnProperty.call(result, 'stderr'));
     assert.ok(!JSON.stringify(result).includes('stderr-must-not-leak'));
+    assert.ok(stdoutData.every((byte) => byte === 0), 'successful raw stdout must be wiped');
+  });
+
+  it('wipes and ignores raw stdout arriving after close before deferred success settles', async () => {
+    const acceptedStdout = Buffer.from('accepted-keychain-secret');
+    const lateStdout = Buffer.from('late-keychain-secret');
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = new EventEmitter();
+      stderr.resume = () => {};
+      stdin.end = () => {
+        queueMicrotask(() => {
+          stdout.emit('data', acceptedStdout);
+          child.emit('close', 0);
+          stdout.emit('data', lateStdout);
+        });
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.stdin = stdin;
+      return child;
+    };
+    const runner = createSecurityRunner({ spawnImpl });
+
+    const result = await runner(['-i'], {
+      input: 'find-generic-password -s com.linke.test -a item -w\n',
+    });
+
+    assert.strictEqual(result.stdout, 'accepted-keychain-secret');
+    assert.ok(acceptedStdout.every((byte) => byte === 0), 'accepted raw stdout must be wiped');
+    assert.ok(lateStdout.every((byte) => byte === 0), 'late raw stdout must be wiped');
+  });
+
+  it('wipes captured raw stdout before a later stream error fails closed', async () => {
+    const stdoutData = Buffer.from('captured-keychain-secret');
+    const spawnImpl = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = new EventEmitter();
+      stderr.resume = () => {};
+      stdin.end = () => {
+        queueMicrotask(() => {
+          stdout.emit('data', stdoutData);
+          stdout.emit('error', new Error('synthetic read failure'));
+        });
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.stdin = stdin;
+      return child;
+    };
+    const runner = createSecurityRunner({ spawnImpl });
+
+    await assert.rejects(
+      runner(['-i'], { input: 'find-generic-password -s com.linke.test -a item -w\n' }),
+      (error) => error.code === 'keychain-unavailable',
+    );
+
+    assert.ok(stdoutData.every((byte) => byte === 0), 'failed raw stdout must be wiped');
   });
 
   it('maps child spawn error to LinkeError keychain-unavailable with exact message', async () => {
@@ -580,6 +648,10 @@ describe('createSecurityRunner', () => {
 
   it('fail-closes on oversized stdout without leaking chunk content or system text', async () => {
     const probeSecret = 'oversized-stdout-probe-secret';
+    const stdoutChunks = [
+      Buffer.alloc(MAX_SECURITY_STDOUT_BYTES, 0x41),
+      Buffer.from(`+${probeSecret}`, 'utf8'),
+    ];
     let killCount = 0;
     let destroyCount = 0;
     const spawnImpl = () => {
@@ -603,8 +675,8 @@ describe('createSecurityRunner', () => {
       stdin.end = () => {
         queueMicrotask(() => {
           // Exactly at limit is allowed; one more byte must fail closed.
-          stdout.emit('data', Buffer.alloc(MAX_SECURITY_STDOUT_BYTES, 0x41));
-          stdout.emit('data', Buffer.from(`+${probeSecret}`, 'utf8'));
+          stdout.emit('data', stdoutChunks[0]);
+          stdout.emit('data', stdoutChunks[1]);
           // kill may race with close / stream errors — settle only once.
           child.emit('close', 0);
           stdout.emit('error', new Error(`post-kill read containing ${probeSecret}`));
@@ -630,6 +702,9 @@ describe('createSecurityRunner', () => {
     );
     assert.equal(killCount >= 1, true, 'oversized-must-kill');
     assert.equal(destroyCount >= 1, true, 'oversized-must-destroy');
+    for (const chunk of stdoutChunks) {
+      assert.ok(chunk.every((byte) => byte === 0), 'oversized raw stdout must be wiped');
+    }
   });
 
   it('assertion failure diagnostics use fixed codes without probe secret or hex', () => {
