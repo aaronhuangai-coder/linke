@@ -1,20 +1,23 @@
 /**
- * Bounded audit integrity alert HTTPS transport (Task 1) — corrected RED/GREEN.
+ * Bounded audit integrity alert HTTPS transport — Task 1 baseline + Task 4 DNS pin.
  *
- * Production module (absent on old HEAD):
+ * Production module:
  *   src/audit-integrity-alert-https-transport.js
  *
  * Authority:
  *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-https-transport-design.md
  *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-https-transport-plan.md (Task 1)
+ *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-destination-allowlist-design.md
+ *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-destination-allowlist-plan.md (Task 4)
  *
  * Old-HEAD RED is exactly one behavior-specific failure:
  *   assert message = `bounded HTTPS transport implementation missing`
  * Detailed suites register only when executor + test factory exports exist.
+ * Module currently exists: this file is incremental Task 4 RED (not missing RED).
  *
- * Deterministic EventEmitter fakes only. No listener, DNS, TLS handshake, socket,
+ * Deterministic EventEmitter fakes only. No real DNS, TLS handshake, socket,
  * fetch, or external/local network I/O. Every case settles via the virtual harness
- * (no wall-clock 10s wait, no real timers).
+ * (no wall-clock wait, no real timers).
  */
 
 import { describe, it } from 'node:test';
@@ -36,9 +39,13 @@ const PRODUCTION_MODULE_PATH = fileURLToPath(PRODUCTION_MODULE_URL);
 const MISSING_MSG = 'bounded HTTPS transport implementation missing';
 const CODE_UNAVAILABLE = 'audit-delivery-unavailable';
 const TIMEOUT_MS = 10_000;
+const DNS_TIMEOUT_MS = 4_000;
 const MAX_RESPONSE_BYTES = 4_096;
+const MAX_REQUEST_BODY_BYTES = 8_192;
+const MAX_DNS_ANSWERS = 16;
 
 const CANONICAL_URL = 'https://alerts.example.invalid/hooks/audit-integrity';
+const CANONICAL_HOSTNAME = 'alerts.example.invalid';
 const STREAM_ID = 'a1111111-b111-4c11-8d11-e11111111111';
 const IDEMPOTENCY_KEY = `audit-integrity-alert:${STREAM_ID}:1`;
 const SECRET_TOKEN = 'Bearer secret-token-xyz';
@@ -46,10 +53,23 @@ const SECRET_HOST = 'evil-cert.example.invalid';
 const SECRET_PATH = '/Users/ah/secret/audit-ca.pem';
 const SECRET_BODY_MARKER = 'response-body-secret-bytes-do-not-leak';
 
+/** Public fixtures matching src/audit-integrity-alert-public-address.js contract. */
+const PUBLIC_V4 = '8.8.8.8';
+const PUBLIC_V6 = '2606:4700:4700::1111';
+const PUBLIC_V4_B = '1.1.1.1';
+const PUBLIC_V6_B = '2606:4700:4700::1001';
+
+/** Special/private fixtures rejected by the public-address classifier. */
+const SPECIAL_V4_LOOPBACK = '127.0.0.1';
+const SPECIAL_V4_PRIVATE = '10.0.0.1';
+const SPECIAL_V6_LOOPBACK = '::1';
+const SPECIAL_V6_DOC = '2001:db8::1';
+
 const REQUEST_KEYS = Object.freeze(['schemaVersion', 'url', 'method', 'headers', 'body']);
 const HEADER_KEYS = Object.freeze(['content-type', 'idempotency-key']);
 const RESULT_KEYS = Object.freeze(['schemaVersion', 'status']);
-const DEPS_KEYS = Object.freeze(['request', 'setTimer', 'clearTimer']);
+/** Task 4 exact factory deps order. */
+const DEPS_KEYS = Object.freeze(['request', 'lookupAll', 'setTimer', 'clearTimer']);
 const REQUEST_HEADER_KEYS = Object.freeze([
   'content-type',
   'idempotency-key',
@@ -59,6 +79,9 @@ const REQUEST_HEADER_KEYS = Object.freeze([
 /** @type {null | {
  *   AUDIT_INTEGRITY_ALERT_HTTPS_TIMEOUT_MS: number,
  *   AUDIT_INTEGRITY_ALERT_HTTPS_MAX_RESPONSE_BYTES: number,
+ *   AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS: number,
+ *   AUDIT_INTEGRITY_ALERT_HTTPS_MAX_REQUEST_BODY_BYTES: number,
+ *   AUDIT_INTEGRITY_ALERT_HTTPS_MAX_DNS_ANSWERS: number,
  *   executeAuditIntegrityAlertHttpsRequest: Function,
  *   createAuditIntegrityAlertHttpsExecutorForTesting: Function,
  * }} */
@@ -75,6 +98,12 @@ try {
       AUDIT_INTEGRITY_ALERT_HTTPS_TIMEOUT_MS: mod.AUDIT_INTEGRITY_ALERT_HTTPS_TIMEOUT_MS,
       AUDIT_INTEGRITY_ALERT_HTTPS_MAX_RESPONSE_BYTES:
         mod.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_RESPONSE_BYTES,
+      AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS:
+        mod.AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS,
+      AUDIT_INTEGRITY_ALERT_HTTPS_MAX_REQUEST_BODY_BYTES:
+        mod.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_REQUEST_BODY_BYTES,
+      AUDIT_INTEGRITY_ALERT_HTTPS_MAX_DNS_ANSWERS:
+        mod.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_DNS_ANSWERS,
       executeAuditIntegrityAlertHttpsRequest: mod.executeAuditIntegrityAlertHttpsRequest,
       createAuditIntegrityAlertHttpsExecutorForTesting:
         mod.createAuditIntegrityAlertHttpsExecutorForTesting,
@@ -150,14 +179,24 @@ function assertUnavailable(error, leakTokens = []) {
 
   const defaults = [
     CANONICAL_URL,
+    CANONICAL_HOSTNAME,
     'alerts.example.invalid',
     SECRET_TOKEN,
     SECRET_HOST,
     SECRET_PATH,
     SECRET_BODY_MARKER,
+    PUBLIC_V4,
+    PUBLIC_V6,
+    PUBLIC_V4_B,
+    PUBLIC_V6_B,
+    SPECIAL_V4_LOOPBACK,
+    SPECIAL_V4_PRIVATE,
+    SPECIAL_V6_LOOPBACK,
+    SPECIAL_V6_DOC,
     'ECONNRESET',
     'ENOTFOUND',
     'ECONNREFUSED',
+    'getaddrinfo',
     'certificate',
     'BEGIN CERTIFICATE',
     'errno',
@@ -302,6 +341,23 @@ function utf8BodyDescriptor() {
   };
 }
 
+/**
+ * Build a valid descriptor whose body is exactly `byteLength` UTF-8 bytes.
+ * Uses multi-byte characters so string length ≠ byte length when possible.
+ * @param {number} byteLength
+ */
+function descriptorWithBodyBytes(byteLength) {
+  assert.ok(byteLength >= 0);
+  // Prefer multi-byte fill ('€' = 3 bytes) then pad with ASCII.
+  const euro = '€';
+  const euroBytes = 3;
+  const euros = Math.floor(byteLength / euroBytes);
+  const rem = byteLength - euros * euroBytes;
+  const body = euro.repeat(euros) + 'x'.repeat(rem);
+  assert.equal(Buffer.byteLength(body, 'utf8'), byteLength);
+  return validDescriptor({ body });
+}
+
 // ─── Deterministic EventEmitter harness ───────────────────────────────────
 
 /**
@@ -346,11 +402,37 @@ function createFakeResponse(statusCode) {
  */
 
 /**
- * @param {(call: HarnessCall) => void} [onEnd]
+ * @typedef {{
+ *   hostname: unknown,
+ *   args: unknown[],
+ * }} LookupAllCall
  */
-function createTransportHarness(onEnd) {
+
+/**
+ * Deterministic transport harness.
+ *
+ * - Default `lookupAll(hostname, callback)` returns at least one public fixture
+ *   and records exact call count / hostname / args.
+ * - Fake `request` must actively call `options.lookup(originalHostname, {all:true}, cb)`
+ *   before running the response/script path. Lookup error emits `error` on the
+ *   fake request (node:https-equivalent path to fixed reject). Lookup success
+ *   with addresses proceeds to the original request script.
+ * - No real DNS / network / wall-clock timers.
+ * - Timers distinguish total 10_000 vs DNS 4_000 and fire by exact ms.
+ *
+ * @param {(call: HarnessCall) => void} [onEnd]
+ * @param {{
+ *   autoLookup?: boolean,
+ *   lookupAll?: (hostname: unknown, callback: Function) => void,
+ * }} [harnessOptions]
+ */
+function createTransportHarness(onEnd, harnessOptions = {}) {
   /** @type {HarnessCall[]} */
   const calls = [];
+  /** @type {LookupAllCall[]} */
+  const lookupAllCalls = [];
+  /** @type {Array<{ err: unknown, addresses: unknown }>} */
+  const lookupCallbackResults = [];
   /** @type {Map<number, { fn: Function, ms: number }>} */
   const timers = new Map();
   let nextTimerId = 1;
@@ -360,6 +442,23 @@ function createTransportHarness(onEnd) {
   let lastCall = null;
   /** @type {ReturnType<typeof createFakeResponse> | null} */
   let lastResponse = null;
+  const autoLookup = harnessOptions.autoLookup !== false;
+
+  /**
+   * Default public DNS fixture — at least one public address record.
+   * @param {unknown} hostname
+   * @param {Function} callback
+   */
+  function defaultLookupAll(hostname, callback) {
+    lookupAllCalls.push({ hostname, args: [hostname, callback] });
+    callback(null, Object.freeze([
+      Object.freeze({ address: PUBLIC_V4, family: 4 }),
+    ]));
+  }
+
+  const lookupAllImpl = typeof harnessOptions.lookupAll === 'function'
+    ? harnessOptions.lookupAll
+    : defaultLookupAll;
 
   const deps = {
     /**
@@ -387,11 +486,69 @@ function createTransportHarness(onEnd) {
         };
         lastCall = call;
         calls.push(call);
-        if (typeof onEnd === 'function') {
-          onEnd(call);
+
+        /**
+         * Simulate node:https: custom lookup must succeed before connect/script.
+         * No default parameter: explicit `undefined` must reach options.lookup unchanged.
+         * @param {unknown} lookupOptions
+         */
+        function runLookup(lookupOptions) {
+          const lookup = options && typeof options === 'object'
+            ? /** @type {Record<string, unknown>} */ (options).lookup
+            : undefined;
+          if (typeof lookup !== 'function') {
+            // Missing custom lookup cannot proceed — mirrors pin contract failure.
+            queueMicrotask(() => {
+              req.emit('error', new Error('harness: options.lookup missing'));
+            });
+            return;
+          }
+
+          let hostname;
+          try {
+            hostname = typeof url === 'string' ? new URL(url).hostname : undefined;
+          } catch {
+            hostname = undefined;
+          }
+
+          /** @type {boolean} */
+          let lookupSettled = false;
+          lookup(hostname, lookupOptions, (err, addresses) => {
+            if (lookupSettled) return;
+            lookupSettled = true;
+            lookupCallbackResults.push({ err, addresses });
+            if (err) {
+              const error = err instanceof Error
+                ? err
+                : Object.assign(new Error('lookup failed'), { cause: err });
+              queueMicrotask(() => {
+                req.emit('error', error);
+              });
+              return;
+            }
+            if (typeof onEnd === 'function') {
+              onEnd(call);
+            }
+          });
+        }
+
+        if (autoLookup) {
+          runLookup(Object.freeze({ all: true }));
+        } else {
+          // Expose manual control for hostile lookup-options matrix.
+          /** @type {*} */ (call).runLookup = runLookup;
         }
       };
       return req;
+    },
+    /**
+     * Injected DNS surface: `lookupAll(hostname, callback)` only.
+     * Production wraps real `dns.lookup(hostname, {all:true, verbatim:true}, cb)`.
+     * @param {unknown} hostname
+     * @param {Function} callback
+     */
+    lookupAll(hostname, callback) {
+      return lookupAllImpl(hostname, callback);
     },
     /**
      * @param {Function} fn
@@ -416,22 +573,46 @@ function createTransportHarness(onEnd) {
   assertExactKeys(deps, DEPS_KEYS, 'harness deps');
 
   /**
-   * Fire the sole pending timer (must be exactly TIMEOUT_MS by default).
+   * Fire exactly one pending timer registered for `expectedMs`.
+   * Distinguishes total 10_000 from DNS 4_000 without conflating them.
+   * @param {number} expectedMs
+   */
+  function fireTimerMs(expectedMs) {
+    const matches = [...timers.entries()].filter(([, entry]) => entry.ms === expectedMs);
+    assert.equal(
+      matches.length,
+      1,
+      `exactly one pending timer for ${expectedMs}ms expected, found ${matches.length}`,
+    );
+    matches[0][1].fn();
+  }
+
+  /**
+   * Fire the sole pending timer of the given deadline (default: total TIMEOUT_MS).
+   * Old fireDeadline semantics retained; pass DNS_TIMEOUT_MS for DNS subdeadline.
    * @param {number} [expectedMs]
    */
   function fireDeadline(expectedMs = TIMEOUT_MS) {
-    assert.equal(timers.size, 1, 'exactly one pending timer expected');
-    const [[, entry]] = [...timers.entries()];
-    assert.equal(entry.ms, expectedMs, `timer must be registered for ${expectedMs}ms`);
-    entry.fn();
+    fireTimerMs(expectedMs);
+  }
+
+  /**
+   * @param {number} ms
+   */
+  function pendingTimersWithMs(ms) {
+    return [...timers.values()].filter((entry) => entry.ms === ms);
   }
 
   return {
     deps,
     calls,
     timers,
+    lookupAllCalls,
+    lookupCallbackResults,
     createResponse: createFakeResponse,
     fireDeadline,
+    fireTimerMs,
+    pendingTimersWithMs,
     get lastCall() {
       return lastCall;
     },
@@ -449,6 +630,12 @@ function createTransportHarness(onEnd) {
     },
     get requestInvocations() {
       return requestInvocations;
+    },
+    get setTimerInvocations() {
+      return nextTimerId - 1;
+    },
+    get lookupAllInvocations() {
+      return lookupAllCalls.length;
     },
   };
 }
@@ -490,11 +677,15 @@ function settleResponse(harness, call, statusCode, chunks = []) {
 }
 
 /**
+ * Task 4 request options: agent/autoSelectFamily/lookup + exact TLS contract.
  * @param {unknown} options
  */
 function assertStrictTlsOptions(options) {
   const opts = /** @type {Record<string, unknown>} */ (options);
   assert.equal(opts.agent, false);
+  assert.equal(opts.autoSelectFamily, true);
+  assert.equal(opts.autoSelectFamilyAttemptTimeout, 250);
+  assert.equal(typeof opts.lookup, 'function', 'custom lookup function required');
   assert.equal(opts.rejectUnauthorized, true);
   assert.equal(opts.checkServerIdentity, tls.checkServerIdentity);
   assert.equal(opts.minVersion, 'TLSv1.2');
@@ -527,7 +718,6 @@ function assertStrictTlsOptions(options) {
   for (const forbidden of [
     'proxy',
     'createConnection',
-    'lookup',
     'auth',
     'pfx',
     'key',
@@ -568,9 +758,23 @@ function assertExactRequestOptions(options, body) {
   assertStrictTlsOptions(opts);
 }
 
+/**
+ * Assert preflight failure never armed timers / DNS / request.
+ * @param {ReturnType<typeof createTransportHarness>} harness
+ */
+function assertNoIoStarted(harness) {
+  assert.equal(harness.requestInvocations, 0, 'request must not be invoked');
+  assert.equal(harness.lookupAllInvocations, 0, 'lookupAll must not be invoked');
+  assert.equal(harness.calls.length, 0);
+  assert.equal(harness.timers.size, 0, 'no timers may be armed');
+  // setTimer may have been called and immediately cleared only if production
+  // armed then aborted — preflight must not call setTimer at all.
+  assert.equal(harness.setTimerInvocations, 0, 'setTimer must not be invoked');
+}
+
 // ─── Suite ────────────────────────────────────────────────────────────────
 
-describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
+describe('audit integrity alert HTTPS transport (Task 1 + Task 4 DNS pin)', () => {
   // Old HEAD: exactly one dedicated RED. Full matrix only when exports exist.
   if (implementationMissing || transportApi === null) {
     it('bounded HTTPS transport implementation missing', () => {
@@ -582,10 +786,16 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
   // ── 1. Constants, exports, frozen results, registered fixed error ───────
 
   describe('1 exports, constants, frozen results, registered fixed error', () => {
-    it('exports exact constants and both executor surfaces', () => {
+    it('exports exact constants including Task 4 DNS/body bounds and both executor surfaces', () => {
       const api = requireApi();
       assert.equal(api.AUDIT_INTEGRITY_ALERT_HTTPS_TIMEOUT_MS, TIMEOUT_MS);
       assert.equal(api.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES);
+      assert.equal(api.AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS, DNS_TIMEOUT_MS);
+      assert.equal(
+        api.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_REQUEST_BODY_BYTES,
+        MAX_REQUEST_BODY_BYTES,
+      );
+      assert.equal(api.AUDIT_INTEGRITY_ALERT_HTTPS_MAX_DNS_ANSWERS, MAX_DNS_ANSWERS);
       assert.equal(typeof api.executeAuditIntegrityAlertHttpsRequest, 'function');
       assert.equal(typeof api.createAuditIntegrityAlertHttpsExecutorForTesting, 'function');
       assert.equal(ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE, CODE_UNAVAILABLE);
@@ -616,30 +826,61 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         undefined,
         [],
         'request',
-        { setTimer: good.deps.setTimer, clearTimer: good.deps.clearTimer },
+        // missing lookupAll
         {
           request: good.deps.request,
+          setTimer: good.deps.setTimer,
+          clearTimer: good.deps.clearTimer,
+        },
+        // missing request
+        {
+          lookupAll: good.deps.lookupAll,
+          setTimer: good.deps.setTimer,
+          clearTimer: good.deps.clearTimer,
+        },
+        // extra key
+        {
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
           setTimer: good.deps.setTimer,
           clearTimer: good.deps.clearTimer,
           extra: () => {},
         },
+        // reordered (lookupAll after setTimer)
+        {
+          request: good.deps.request,
+          setTimer: good.deps.setTimer,
+          lookupAll: good.deps.lookupAll,
+          clearTimer: good.deps.clearTimer,
+        },
+        // reordered (setTimer first)
         {
           setTimer: good.deps.setTimer,
           request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
           clearTimer: good.deps.clearTimer,
         },
         {
           request: 'not-fn',
+          lookupAll: good.deps.lookupAll,
           setTimer: good.deps.setTimer,
           clearTimer: good.deps.clearTimer,
         },
         {
           request: good.deps.request,
+          lookupAll: 'not-fn',
+          setTimer: good.deps.setTimer,
+          clearTimer: good.deps.clearTimer,
+        },
+        {
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
           setTimer: 1,
           clearTimer: good.deps.clearTimer,
         },
         {
           request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
           setTimer: good.deps.setTimer,
           clearTimer: null,
         },
@@ -651,10 +892,10 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
     });
   });
 
-  // ── 2. Exact descriptor validation ──────────────────────────────────────
+  // ── 2. Exact descriptor validation (preflight: no timer/DNS/request) ────
 
-  describe('2 exact descriptor validation before request', () => {
-    it('rejects missing/extra/reordered keys and never calls request', async () => {
+  describe('2 exact descriptor validation before timer/DNS/request', () => {
+    it('rejects missing/extra/reordered keys with zero setTimer/lookupAll/request', async () => {
       const api = requireApi();
       const harness = createTransportHarness(() => {
         assert.fail('request end must not run for invalid descriptor');
@@ -685,12 +926,11 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
 
       for (const bad of [missingBody, extraKey, reordered, null, undefined, [], 'desc', 1]) {
         await expectUnavailableAsync(Promise.resolve().then(() => execute(bad)));
-        assert.equal(harness.requestInvocations, 0, 'request must not be invoked');
-        assert.equal(harness.calls.length, 0);
+        assertNoIoStarted(harness);
       }
     });
 
-    it('rejects Proxy/accessor/symbol/non-enumerable/class descriptor objects', async () => {
+    it('rejects Proxy/accessor/symbol/non-enumerable/class descriptor objects preflight', async () => {
       const api = requireApi();
       const harness = createTransportHarness(() => {
         assert.fail('request must not run for hostile descriptor');
@@ -729,11 +969,11 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
           Promise.resolve().then(() => execute(bad)),
           [SECRET_PATH, SECRET_TOKEN],
         );
-        assert.equal(harness.requestInvocations, 0);
+        assertNoIoStarted(harness);
       }
     });
 
-    it('rejects wrong schema/method/headers/body/url and hostile header order', async () => {
+    it('rejects wrong schema/method/headers/body/url and hostile header order preflight', async () => {
       const api = requireApi();
       const harness = createTransportHarness(() => {
         assert.fail('request must not run for invalid field values');
@@ -787,7 +1027,77 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
           Promise.resolve().then(() => execute(bad)),
           [SECRET_TOKEN, 'alerts.example.invalid', 'user:pass'],
         );
-        assert.equal(harness.requestInvocations, 0, 'invalid descriptor must not call request');
+        assertNoIoStarted(harness);
+      }
+    });
+
+    it('rejects all IP-literal endpoints at preflight (private, link-local, public v4/v6)', async () => {
+      // P1: Node skips options.lookup when host isIP !== 0. Transport must fail-closed
+      // on IP-literal endpoints in descriptor validation — not rely on fake lookup.
+      // Node v24: URL.hostname keeps IPv6 brackets (`[::1]`); production must strip
+      // brackets then isIP(...) — do not assume URL.hostname already unwrapped.
+      // Fail-loud: if a buggy build reaches request, settle 204 so the promise
+      // resolves and expectUnavailableAsync fails immediately (no hang / swallowed assert.fail).
+      const api = requireApi();
+      const harness = createTransportHarness((call) => {
+        settleResponse(harness, call, 204);
+      });
+      const execute = api.createAuditIntegrityAlertHttpsExecutorForTesting(harness.deps);
+
+      /** @type {Array<{ label: string, url: string, leak: string[] }>} */
+      const cases = [
+        {
+          label: 'private-ipv4-loopback',
+          url: 'https://127.0.0.1/hooks/audit-integrity',
+          leak: ['127.0.0.1', 'https://127.0.0.1/hooks/audit-integrity'],
+        },
+        {
+          label: 'metadata-link-local-ipv4',
+          url: 'https://169.254.169.254/hooks/audit-integrity',
+          leak: ['169.254.169.254', 'https://169.254.169.254/hooks/audit-integrity'],
+        },
+        {
+          label: 'public-ipv4-literal',
+          url: 'https://8.8.8.8/hooks/audit-integrity',
+          leak: ['8.8.8.8', 'https://8.8.8.8/hooks/audit-integrity'],
+        },
+        {
+          label: 'loopback-ipv6-literal',
+          url: 'https://[::1]/hooks/audit-integrity',
+          leak: ['::1', '[::1]', 'https://[::1]/hooks/audit-integrity'],
+        },
+        {
+          label: 'public-ipv6-literal',
+          url: 'https://[2606:4700:4700::1111]/hooks/audit-integrity',
+          leak: [
+            '2606:4700:4700::1111',
+            '[2606:4700:4700::1111]',
+            'https://[2606:4700:4700::1111]/hooks/audit-integrity',
+          ],
+        },
+      ];
+
+      for (const { label, url, leak } of cases) {
+        await expectUnavailableAsync(
+          Promise.resolve().then(() => execute(validDescriptor({ url }))),
+          leak,
+        );
+        assertNoIoStarted(harness);
+        assert.equal(
+          harness.requestInvocations,
+          0,
+          `${label}: request must stay 0 (preflight, not fake-lookup)`,
+        );
+        assert.equal(
+          harness.lookupAllInvocations,
+          0,
+          `${label}: lookupAll must stay 0 (preflight, not fake-lookup)`,
+        );
+        assert.equal(
+          harness.setTimerInvocations,
+          0,
+          `${label}: setTimer must stay 0 (preflight, not fake-lookup)`,
+        );
       }
     });
 
@@ -811,6 +1121,7 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
       // Poison between timer arming and request construction if snapshot is late.
       const poisonedDeps = {
         request: harness.deps.request,
+        lookupAll: harness.deps.lookupAll,
         setTimer(fn, ms) {
           descriptor.url = `https://${SECRET_HOST}/mutated`;
           descriptor.body = `mutated-${SECRET_BODY_MARKER}`;
@@ -837,18 +1148,55 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
     });
   });
 
+  // ── 2b. Request body bound 8192 / 8193 (Task 4 preflight) ───────────────
+
+  describe('2b request body UTF-8 bound 8192 / 8193 preflight', () => {
+    it('accepts body of exactly 8192 UTF-8 bytes', async () => {
+      const api = requireApi();
+      const descriptor = descriptorWithBodyBytes(MAX_REQUEST_BODY_BYTES);
+      const body = /** @type {string} */ (descriptor.body);
+      assert.equal(Buffer.byteLength(body, 'utf8'), MAX_REQUEST_BODY_BYTES);
+      const harness = createTransportHarness((call) => {
+        assert.equal(call.body, body);
+        const headers = /** @type {Record<string, string>} */ (call.options.headers);
+        assert.equal(headers['content-length'], String(MAX_REQUEST_BODY_BYTES));
+        settleResponse(harness, call, 200);
+      });
+      const result = await executeWith(api, harness, descriptor);
+      assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+    });
+
+    it('rejects body of 8193 UTF-8 bytes before setTimer/lookupAll/request', async () => {
+      const api = requireApi();
+      const harness = createTransportHarness(() => {
+        assert.fail('request must not run for oversize body');
+      });
+      const execute = api.createAuditIntegrityAlertHttpsExecutorForTesting(harness.deps);
+      const descriptor = descriptorWithBodyBytes(MAX_REQUEST_BODY_BYTES + 1);
+      assert.equal(
+        Buffer.byteLength(/** @type {string} */ (descriptor.body), 'utf8'),
+        MAX_REQUEST_BODY_BYTES + 1,
+      );
+      await expectUnavailableAsync(Promise.resolve().then(() => execute(descriptor)));
+      assertNoIoStarted(harness);
+    });
+  });
+
   // ── 3–4. Internally constructed request options + UTF-8 content-length ──
 
   describe('3–4 internally constructed request options and UTF-8 content-length', () => {
-    it('constructs POST options with exact headers, content-length, agent:false, TLS 1.2 roots', async () => {
+    it('constructs POST options with agent:false, autoSelectFamily, lookup, TLS 1.2 roots', async () => {
       const api = requireApi();
       const { descriptor, body, byteLength } = utf8BodyDescriptor();
       const harness = createTransportHarness((call) => {
-        assert.equal(call.url, CANONICAL_URL);
+        assert.equal(call.url, CANONICAL_URL, 'original URL retained — not replaced with IP');
         assert.equal(call.body, body);
         assert.equal(Buffer.byteLength(/** @type {string} */ (call.body), 'utf8'), byteLength);
         assert.notEqual(byteLength, /** @type {string} */ (call.body).length);
         assertExactRequestOptions(call.options, body);
+        // URL hostname path — request must not receive a bare IP string.
+        assert.equal(String(call.url).includes(PUBLIC_V4), false);
+        assert.equal(String(call.url).includes(PUBLIC_V6), false);
         settleResponse(harness, call, 200);
       });
 
@@ -889,6 +1237,85 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
       });
       const result = await executeWith(api, harness, descriptor);
       assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+    });
+
+    it('lookup options non-plain / missing all / all:false / string true / getter / Proxy fail without traps', async () => {
+      const api = requireApi();
+      /** @type {Array<{ label: string, options: unknown, leak?: string[] }>} */
+      const hostileCases = [];
+
+      // non-plain / null / array
+      hostileCases.push({ label: 'null-options', options: null });
+      hostileCases.push({ label: 'undefined-options', options: undefined });
+      hostileCases.push({ label: 'array-options', options: [] });
+      hostileCases.push({ label: 'string-options', options: 'all' });
+
+      // missing all
+      hostileCases.push({ label: 'missing-all', options: { hints: 1024 } });
+
+      // all:false
+      hostileCases.push({ label: 'all-false', options: { all: false } });
+
+      // all:'true' string
+      hostileCases.push({ label: 'all-string-true', options: { all: 'true' } });
+
+      // all:1 truthy non-boolean
+      hostileCases.push({ label: 'all-number-1', options: { all: 1 } });
+
+      // getter for all — must not execute getter body for success path
+      let getterHits = 0;
+      const getterOptions = {};
+      Object.defineProperty(getterOptions, 'all', {
+        enumerable: true,
+        get() {
+          getterHits += 1;
+          return true;
+        },
+      });
+      hostileCases.push({ label: 'all-getter', options: getterOptions });
+
+      // Proxy options — traps must not run for acceptance
+      let proxyGets = 0;
+      const proxyOptions = new Proxy(
+        { all: true },
+        {
+          get(target, prop, receiver) {
+            proxyGets += 1;
+            return Reflect.get(target, prop, receiver);
+          },
+          ownKeys(target) {
+            proxyGets += 1;
+            return Reflect.ownKeys(target);
+          },
+        },
+      );
+      hostileCases.push({ label: 'proxy-options', options: proxyOptions });
+
+      for (const { label, options } of hostileCases) {
+        getterHits = 0;
+        proxyGets = 0;
+        const harness = createTransportHarness(() => {
+          assert.fail(`onEnd must not run for hostile lookup options (${label})`);
+        }, { autoLookup: false });
+        const promise = executeWith(api, harness, validDescriptor());
+        await flushMicrotasks();
+        assert.equal(harness.calls.length, 1, `${label}: request constructed`);
+        assert.equal(harness.lookupAllInvocations, 0, `${label}: lookupAll not yet`);
+        const call = harness.calls[0];
+        assert.equal(typeof call.options.lookup, 'function');
+        /** @type {(opts?: unknown) => void} */
+        const runLookup = /** @type {*} */ (call).runLookup;
+        runLookup(options);
+        await expectUnavailableAsync(promise, [CANONICAL_HOSTNAME, PUBLIC_V4]);
+        assert.equal(harness.lookupAllInvocations, 0, `${label}: lookupAll never called`);
+        // Getter/Proxy traps must not be exercised for a successful all:true read.
+        if (label === 'all-getter') {
+          assert.equal(getterHits, 0, 'getter must not be executed for acceptance');
+        }
+        if (label === 'proxy-options') {
+          assert.equal(proxyGets, 0, 'Proxy traps must not run for acceptance');
+        }
+      }
     });
   });
 
@@ -1006,25 +1433,24 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
     });
   });
 
-  // ── 9. Deadline 10_000 ms ───────────────────────────────────────────────
+  // ── 9. Total deadline 10_000 ms + DNS subdeadline 4_000 ms ──────────────
 
-  describe('9 total deadline 10_000 ms', () => {
-    it('remains pending just before deadline and fails exactly when callback fires', async () => {
+  describe('9 total deadline 10_000 ms and DNS subdeadline 4_000 ms', () => {
+    it('remains pending just before total deadline and fails exactly when callback fires', async () => {
       const api = requireApi();
       const harness = createTransportHarness((_call) => {
-        // Hold open: no response, no error.
+        // Hold open: no response, no error. DNS already succeeded via default fixture.
       });
       const promise = executeWith(api, harness, validDescriptor());
       await flushMicrotasks();
-      assert.equal(harness.timers.size, 1);
-      const [[, timer]] = [...harness.timers.entries()];
-      assert.equal(timer.ms, TIMEOUT_MS);
+      // After DNS success only total timer should remain (DNS timer cleared).
+      assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+      assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 0);
       await assertStillPending(promise);
 
-      // Observe clear + single settlement on fire.
       const clearsBefore = harness.clearTimerCalls;
       harness.fireDeadline(TIMEOUT_MS);
-      await expectUnavailableAsync(promise, [CANONICAL_URL, 'alerts.example.invalid']);
+      await expectUnavailableAsync(promise, [CANONICAL_URL, CANONICAL_HOSTNAME, PUBLIC_V4]);
       assert.equal(harness.clearTimerCalls > clearsBefore, true, 'timer cleared on timeout');
       assert.ok(harness.calls[0].req.destroyCount >= 1, 'request destroyed on timeout');
 
@@ -1033,13 +1459,121 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
       harness.calls[0].onResponse(late);
       late.emit('end');
       await flushMicrotasks();
-      // Already settled rejected — no throw from late events expected.
     });
 
-    it('synchronous setTimer deadline rejects once and issues no request', async () => {
-      // F4: injected setTimer fires the deadline callback before returning its handle.
+    it('total timer 9999ms still pending; 10000ms fixed fail', async () => {
+      const api = requireApi();
+      const harness = createTransportHarness(() => {});
+      const promise = executeWith(api, harness, validDescriptor());
+      await flushMicrotasks();
+      assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+      // No 9999 timer exists — observe pending state without wall clock.
+      await assertStillPending(promise);
+      harness.fireDeadline(TIMEOUT_MS);
+      await expectUnavailableAsync(promise);
+    });
+
+    it('DNS subdeadline 3999ms pending; 4000ms fixed fail; clears DNS timer only', async () => {
+      const api = requireApi();
+      /** @type {Function | null} */
+      let hangCallback = null;
+      const harness = createTransportHarness(() => {
+        assert.fail('onEnd must not run while DNS hangs');
+      }, {
+        lookupAll(hostname, callback) {
+          harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+          hangCallback = callback;
+          // Hang: never invoke callback.
+        },
+      });
+      const promise = executeWith(api, harness, validDescriptor());
+      await flushMicrotasks();
+      assert.equal(harness.lookupAllInvocations, 1);
+      assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 1);
+      assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+      await assertStillPending(promise);
+
+      // Fire DNS subdeadline only — must not confuse with total.
+      const totalBefore = harness.pendingTimersWithMs(TIMEOUT_MS).length;
+      harness.fireTimerMs(DNS_TIMEOUT_MS);
+      await expectUnavailableAsync(promise, [
+        CANONICAL_HOSTNAME,
+        PUBLIC_V4,
+        'ENOTFOUND',
+        'getaddrinfo',
+      ]);
+      // Total timer must still be clearable / not silently dropped as if it were DNS.
+      assert.equal(totalBefore, 1);
+      // Late lookupAll callback after DNS timeout is ignored (single settle).
+      assert.equal(typeof hangCallback, 'function');
+      assert.doesNotThrow(() => {
+        /** @type {Function} */ (hangCallback)(
+          null,
+          [{ address: PUBLIC_V4, family: 4 }],
+        );
+      });
+      await flushMicrotasks();
+    });
+
+    it('DNS success and DNS failure both clear the DNS timer; total remains independent', async () => {
+      const api = requireApi();
+
+      // Success path: DNS timer cleared, total remains until response settle.
+      {
+        const harness = createTransportHarness((call) => {
+          assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 0);
+          assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+          settleResponse(harness, call, 200);
+        });
+        const result = await executeWith(api, harness, validDescriptor());
+        assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+        assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 0);
+        assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 0);
+      }
+
+      // Failure path: empty answers → fixed fail, DNS timer cleared.
+      {
+        const harness = createTransportHarness(() => {
+          assert.fail('onEnd must not run for empty DNS');
+        }, {
+          lookupAll(hostname, callback) {
+            harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+            callback(null, []);
+          },
+        });
+        await expectUnavailableAsync(
+          executeWith(api, harness, validDescriptor()),
+          [CANONICAL_HOSTNAME, PUBLIC_V4],
+        );
+        assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 0);
+      }
+    });
+
+    it('total timeout still destroys request/response; clearing DNS does not clear total', async () => {
+      const api = requireApi();
+      const harness = createTransportHarness((call) => {
+        // After DNS success: only total timer pending.
+        assert.equal(harness.pendingTimersWithMs(DNS_TIMEOUT_MS).length, 0);
+        assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+        const res = createFakeResponse(200);
+        harness.setLastResponse(res);
+        call.onResponse(res);
+        // Hold without end — await total timeout.
+      });
+      const promise = executeWith(api, harness, validDescriptor());
+      await flushMicrotasks();
+      assert.ok(harness.lastResponse);
+      harness.fireDeadline(TIMEOUT_MS);
+      await expectUnavailableAsync(promise);
+      assert.ok(harness.calls[0].req.destroyCount >= 1);
+      assert.ok(/** @type {{ destroyCount: number }} */ (harness.lastResponse).destroyCount >= 1);
+    });
+
+    it('synchronous setTimer total deadline rejects once and issues no request', async () => {
+      // F4: injected setTimer fires the total deadline callback before returning its handle.
       const api = requireApi();
       let requestInvocations = 0;
+      let lookupAllInvocations = 0;
       let timerReturns = 0;
       /** @type {Function | null} */
       let deadlineFn = null;
@@ -1048,7 +1582,12 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
           requestInvocations += 1;
           assert.fail('request must not run after synchronous deadline');
         },
+        lookupAll() {
+          lookupAllInvocations += 1;
+          assert.fail('lookupAll must not run after synchronous deadline');
+        },
         setTimer(fn, ms) {
+          // First arm is total deadline; DNS timer must not be reached.
           assert.equal(ms, TIMEOUT_MS);
           deadlineFn = fn;
           // Fire before returning a handle — timerId is not yet assigned in production.
@@ -1064,17 +1603,51 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
       const execute = api.createAuditIntegrityAlertHttpsExecutorForTesting(deps);
       await expectUnavailableAsync(
         Promise.resolve().then(() => execute(validDescriptor())),
-        [CANONICAL_URL, 'alerts.example.invalid'],
+        [CANONICAL_URL, CANONICAL_HOSTNAME],
       );
       assert.equal(typeof deadlineFn, 'function');
       assert.equal(timerReturns, 1);
       assert.equal(requestInvocations, 0, 'no request after synchronous timeout');
+      assert.equal(lookupAllInvocations, 0, 'no lookupAll after synchronous timeout');
 
       // Single settlement: a second deadline fire must not throw or open a path.
       assert.doesNotThrow(() => {
         /** @type {Function} */ (deadlineFn)();
       });
       assert.equal(requestInvocations, 0);
+    });
+
+    it('custom lookup callback single-settles; late second callback is ignored', async () => {
+      const api = requireApi();
+      /** @type {Function | null} */
+      let dnsCb = null;
+      let lookupAllCount = 0;
+      const harness = createTransportHarness((call) => {
+        settleResponse(harness, call, 200);
+      }, {
+        lookupAll(hostname, callback) {
+          lookupAllCount += 1;
+          harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+          dnsCb = callback;
+          // First success delivered once.
+          callback(null, [{ address: PUBLIC_V4, family: 4 }]);
+        },
+      });
+      const result = await executeWith(api, harness, validDescriptor());
+      assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+      assert.equal(lookupAllCount, 1);
+      // Late second DNS callback must not throw / re-open settlement.
+      assert.doesNotThrow(() => {
+        /** @type {Function} */ (dnsCb)(
+          new Error(`late ENOTFOUND ${SECRET_HOST}`),
+          undefined,
+        );
+        /** @type {Function} */ (dnsCb)(
+          null,
+          [{ address: SPECIAL_V4_PRIVATE, family: 4 }],
+        );
+      });
+      await flushMicrotasks();
     });
   });
 
@@ -1090,6 +1663,7 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         request() {
           throw new Error(`connect ${SECRET_HOST} errno=ECONNREFUSED path=${SECRET_PATH}`);
         },
+        lookupAll: base.deps.lookupAll,
         setTimer: base.deps.setTimer,
         clearTimer: base.deps.clearTimer,
       };
@@ -1208,20 +1782,253 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
     });
   });
 
-  // ── 11. No secret leakage on every public failure ───────────────────────
+  // ── 11. DNS execution matrix (Task 4) ───────────────────────────────────
 
-  describe('11 public failures contain only fixed code/message', () => {
-    it('maps representative failures without endpoint/body/header/cert/errno/path', async () => {
+  describe('11 DNS execution: lookupAll pin and public-address closed set', () => {
+    it('lookupAll exactly once with original hostname; options all:true; returns all validated entries', async () => {
+      const api = requireApi();
+      const dual = Object.freeze([
+        Object.freeze({ address: PUBLIC_V6, family: 6 }),
+        Object.freeze({ address: PUBLIC_V4, family: 4 }),
+        Object.freeze({ address: PUBLIC_V6_B, family: 6 }),
+      ]);
+      const harness = createTransportHarness((call) => {
+        // Production custom lookup must pass ALL validated entries to node callback.
+        assert.equal(harness.lookupCallbackResults.length, 1);
+        const result = harness.lookupCallbackResults[0];
+        assert.equal(result.err, null);
+        assert.deepEqual(result.addresses, [...dual]);
+        settleResponse(harness, call, 200);
+      }, {
+        lookupAll(hostname, callback) {
+          harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+          callback(null, [...dual]);
+        },
+      });
+      const result = await executeWith(api, harness, validDescriptor());
+      assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+      assert.equal(harness.lookupAllInvocations, 1);
+      assert.equal(harness.lookupAllCalls[0].hostname, CANONICAL_HOSTNAME);
+      assert.equal(harness.lookupAllCalls[0].args[0], CANONICAL_HOSTNAME);
+      assert.equal(typeof harness.lookupAllCalls[0].args[1], 'function');
+      // Original URL still handed to request — not rewritten to IP.
+      assert.equal(harness.calls[0].url, CANONICAL_URL);
+    });
+
+    /**
+     * @returns {{ address: string, family: number }[]}
+     */
+    function uniquePublicAnswers(count) {
+      /** @type {{ address: string, family: number }[]} */
+      const unique = [];
+      for (let i = 0; i < count; i += 1) {
+        // Distinct public IPv4 fixtures outside the special-purpose deny tables.
+        const a = i < 8 ? `8.8.4.${i + 1}` : `1.0.0.${i - 7}`;
+        unique.push({ address: a, family: 4 });
+      }
+      return unique;
+    }
+
+    for (const [label, answers] of /** @type {const} */ ([
+      ['public-ipv4-only', [{ address: PUBLIC_V4, family: 4 }]],
+      ['public-ipv6-only', [{ address: PUBLIC_V6, family: 6 }]],
+      ['public-dual-stack', [
+        { address: PUBLIC_V6, family: 6 },
+        { address: PUBLIC_V4, family: 4 },
+      ]],
+      ['public-16-answers', uniquePublicAnswers(MAX_DNS_ANSWERS)],
+    ])) {
+      it(`accepts all-public answers: ${label}`, async () => {
+        const api = requireApi();
+        const expected = answers.map((e) => ({ ...e }));
+        const harness = createTransportHarness((call) => {
+          assert.deepEqual(harness.lookupCallbackResults[0].addresses, expected);
+          settleResponse(harness, call, 200);
+        }, {
+          lookupAll(hostname, callback) {
+            harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+            callback(null, expected.map((e) => ({ ...e })));
+          },
+        });
+        const result = await executeWith(api, harness, validDescriptor());
+        assert.deepEqual(result, { schemaVersion: 1, status: 'accepted' });
+        assert.equal(harness.lookupAllInvocations, 1);
+      });
+    }
+
+    /** @type {Array<[string, (hostname: unknown, callback: Function, record: Function) => void]>} */
+    const dnsFailCases = [
+      ['empty-answers', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, []);
+      }],
+      ['dns-error', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${SECRET_HOST}`), {
+          code: 'ENOTFOUND',
+          hostname: SECRET_HOST,
+        }));
+      }],
+      ['dns-throw', (hostname, callback, record) => {
+        record(hostname, callback);
+        throw new Error(`resolver crash ${SECRET_PATH}`);
+      }],
+      ['malformed-outer-null', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, null);
+      }],
+      ['malformed-outer-string', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, '8.8.8.8');
+      }],
+      ['proxy-answers', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, new Proxy([{ address: PUBLIC_V4, family: 4 }], {}));
+      }],
+      ['accessor-entry', (hostname, callback, record) => {
+        record(hostname, callback);
+        const entry = {};
+        Object.defineProperty(entry, 'address', {
+          enumerable: true,
+          get() {
+            return PUBLIC_V4;
+          },
+        });
+        Object.defineProperty(entry, 'family', {
+          enumerable: true,
+          get() {
+            return 4;
+          },
+        });
+        callback(null, [entry]);
+      }],
+      ['symbol-entry-key', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{
+          address: PUBLIC_V4,
+          family: 4,
+          [Symbol('leak')]: SECRET_PATH,
+        }]);
+      }],
+      ['non-enumerable-entry-field', (hostname, callback, record) => {
+        record(hostname, callback);
+        const entry = { address: PUBLIC_V4, family: 4 };
+        Object.defineProperty(entry, 'hidden', {
+          value: SECRET_TOKEN,
+          enumerable: false,
+        });
+        callback(null, [entry]);
+      }],
+      ['class-entry', (hostname, callback, record) => {
+        record(hostname, callback);
+        class Addr {
+          constructor() {
+            this.address = PUBLIC_V4;
+            this.family = 4;
+          }
+        }
+        callback(null, [new Addr()]);
+      }],
+      ['family-string', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: PUBLIC_V4, family: '4' }]);
+      }],
+      ['family-mismatch-v4-as-v6', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: PUBLIC_V4, family: 6 }]);
+      }],
+      ['duplicate-address', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [
+          { address: PUBLIC_V4, family: 4 },
+          { address: PUBLIC_V4, family: 4 },
+        ]);
+      }],
+      ['seventeen-answers', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, uniquePublicAnswers(MAX_DNS_ANSWERS + 1));
+      }],
+      ['special-loopback-v4', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: SPECIAL_V4_LOOPBACK, family: 4 }]);
+      }],
+      ['special-private-v4', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: SPECIAL_V4_PRIVATE, family: 4 }]);
+      }],
+      ['special-loopback-v6', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: SPECIAL_V6_LOOPBACK, family: 6 }]);
+      }],
+      ['special-doc-v6', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [{ address: SPECIAL_V6_DOC, family: 6 }]);
+      }],
+      ['mixed-public-and-special', (hostname, callback, record) => {
+        record(hostname, callback);
+        callback(null, [
+          { address: PUBLIC_V4, family: 4 },
+          { address: SPECIAL_V4_PRIVATE, family: 4 },
+        ]);
+      }],
+    ];
+
+    for (const [label, impl] of dnsFailCases) {
+      it(`fixed fail DNS case: ${label}`, async () => {
+        const api = requireApi();
+        const harness = createTransportHarness(() => {
+          assert.fail(`onEnd must not run for DNS fail case ${label}`);
+        }, {
+          lookupAll(hostname, callback) {
+            impl(hostname, callback, (hn, cb) => {
+              harness.lookupAllCalls.push({ hostname: hn, args: [hn, cb] });
+            });
+          },
+        });
+
+        await expectUnavailableAsync(
+          executeWith(api, harness, validDescriptor()),
+          [
+            CANONICAL_HOSTNAME,
+            SECRET_HOST,
+            SECRET_PATH,
+            SECRET_TOKEN,
+            PUBLIC_V4,
+            PUBLIC_V6,
+            SPECIAL_V4_LOOPBACK,
+            SPECIAL_V4_PRIVATE,
+            SPECIAL_V6_LOOPBACK,
+            SPECIAL_V6_DOC,
+            'ENOTFOUND',
+            'getaddrinfo',
+          ],
+        );
+        assert.equal(harness.lookupAllInvocations, 1, `${label}: lookupAll once`);
+        assert.equal(harness.lookupAllCalls[0].hostname, CANONICAL_HOSTNAME);
+      });
+    }
+  });
+
+  // ── 12. No secret leakage on every public failure ───────────────────────
+
+  describe('12 public failures contain only fixed code/message', () => {
+    it('maps representative failures without hostname/IP/resolver/endpoint/body/header/path', async () => {
       const api = requireApi();
       const leak = [
         CANONICAL_URL,
+        CANONICAL_HOSTNAME,
         'alerts.example.invalid',
         SECRET_TOKEN,
         SECRET_HOST,
         SECRET_PATH,
         SECRET_BODY_MARKER,
         IDEMPOTENCY_KEY,
+        PUBLIC_V4,
+        PUBLIC_V6,
+        SPECIAL_V4_PRIVATE,
         'BEGIN CERTIFICATE',
+        'ENOTFOUND',
+        'getaddrinfo',
       ];
 
       // Every subcase must settle via the virtual harness (no wall-clock wait).
@@ -1263,7 +2070,22 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
             }))),
             leak,
           );
-          assert.equal(harness.requestInvocations, 0);
+          assertNoIoStarted(harness);
+        },
+        async () => {
+          // Private DNS answer — fixed fail without leaking IP/hostname.
+          const harness = createTransportHarness(() => {
+            assert.fail('onEnd must not run for private DNS');
+          }, {
+            lookupAll(hostname, callback) {
+              harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+              callback(null, [{ address: SPECIAL_V4_PRIVATE, family: 4 }]);
+            },
+          });
+          await expectUnavailableAsync(
+            executeWith(api, harness, validDescriptor()),
+            leak,
+          );
         },
       ];
 
@@ -1273,10 +2095,10 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
     });
   });
 
-  // ── 12. Structural source scan (module exists) ──────────────────────────
+  // ── 13. Structural source scan (Task 4) ─────────────────────────────────
 
-  describe('12 structural source scan', () => {
-    it('permits only node:buffer/https/tls/util and ./error-codes.js; forbids forbidden surfaces', async () => {
+  describe('13 structural source scan', () => {
+    it('requires node:dns + node:net isIP + public predicate; forbids resolve/cache/proxy/connect', async () => {
       const source = await readFile(PRODUCTION_MODULE_PATH, 'utf8');
 
       const importRe = /\bfrom\s+['"]([^'"]+)['"]/g;
@@ -1290,12 +2112,22 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         'node:https',
         'node:tls',
         'node:util',
+        'node:dns',
+        'node:net',
         './error-codes.js',
+        './audit-integrity-alert-public-address.js',
       ]);
       for (const imp of imports) {
         assert.equal(allowed.has(imp), true, `unexpected import: ${imp}`);
       }
-      for (const required of ['node:https', 'node:tls', './error-codes.js']) {
+      for (const required of [
+        'node:https',
+        'node:tls',
+        'node:dns',
+        'node:net',
+        './error-codes.js',
+        './audit-integrity-alert-public-address.js',
+      ]) {
         assert.equal(imports.includes(required), true, `missing required import: ${required}`);
       }
       // Exact specifier check: reject node:http without substring-matching node:https.
@@ -1334,8 +2166,6 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         'fs/promises',
         'node:path',
         'node:child_process',
-        'node:net',
-        'node:dns',
         'node:dgram',
         'createServer',
         'keychain',
@@ -1343,6 +2173,21 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         'writeFileSync',
         'https.Agent',
         'new Agent',
+        'dns.resolve',
+        'dns.Resolver',
+        'promises.lookup',
+        'dns.promises',
+        'lookupCache',
+        'dnsCache',
+        'resolve4',
+        'resolve6',
+        'resolveAny',
+        // node:net is allowed only for isIP classification — no connection surface.
+        'net.connect',
+        'createConnection',
+        'new Socket',
+        'net.Socket',
+        'Socket(',
       ]) {
         assert.equal(
           source.includes(forbidden),
@@ -1351,12 +2196,50 @@ describe('audit integrity alert HTTPS transport (Task 1 RED)', () => {
         );
       }
 
-      // Built-in surfaces that must appear for the TLS/options contract.
+      // Built-in surfaces that must appear for the TLS/options + DNS pin contract.
       assert.equal(source.includes('rootCertificates'), true);
       assert.equal(source.includes('checkServerIdentity'), true);
       assert.equal(source.includes('TLSv1.2'), true);
       assert.equal(source.includes('rejectUnauthorized'), true);
       assert.equal(source.includes("agent: false") || source.includes('agent:false'), true);
+      assert.equal(
+        source.includes('autoSelectFamily: true') || source.includes('autoSelectFamily:true'),
+        true,
+        'must set autoSelectFamily:true explicitly',
+      );
+      assert.equal(
+        source.includes('autoSelectFamilyAttemptTimeout: 250')
+          || source.includes('autoSelectFamilyAttemptTimeout:250'),
+        true,
+        'must set autoSelectFamilyAttemptTimeout:250',
+      );
+      assert.equal(
+        source.includes('isPublicAuditIntegrityAlertAddress'),
+        true,
+        'must use public-address predicate',
+      );
+      // IP-literal gate: require isIP (from node:net). Node URL.hostname does NOT strip
+      // IPv6 brackets (`[::1]`); production must explicitly unwrap [] then isIP(host).
+      // Anchor presence only — not a fragile full-source order self-proof.
+      assert.equal(
+        /\bisIP\b/.test(source),
+        true,
+        'must call isIP on hostname after explicit IPv6 bracket strip (URL.hostname keeps [])',
+      );
+      assert.equal(
+        /import\s*\{[^}]*\bisIP\b[^}]*\}\s*from\s*['"]node:net['"]/.test(source)
+          || /import\s+\w+\s+from\s*['"]node:net['"]/.test(source),
+        true,
+        'must import isIP (or net) from node:net for IP-literal preflight',
+      );
+      // Must not rewrite request URL to a resolved IP literal.
+      assert.equal(
+        /replace\s*\(.*url|url\s*=\s*[`'"]https?:\/\/\$\{/.test(source),
+        false,
+        'must not replace URL with IP',
+      );
+      // No DNS answer caching surface.
+      assert.equal(source.includes('cache'), false, 'must not cache DNS answers');
     });
   });
 });
