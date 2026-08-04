@@ -3668,3 +3668,451 @@ describe('V1.46 controller auth scope parity', () => {
     }
   });
 });
+
+// V1.46 management auth Keychain source — 启动读取路径行为验证。
+// 最初在旧 HEAD 形成 behavior RED；现用于锁定已落地合约。只使用当前公开入口
+// parseControllerEnv/startController/runControllerMain 与本文件既有 module-level helper。
+describe('V1.46 management auth Keychain source', () => {
+  // 合成 sentinel：仅用于断言透传/隔离与日志脱敏，禁止真实凭证。
+  const KC_FULL = 'v146kc-full-item-sentinel';
+  const KC_LEGACY = 'v146kc-legacy-token-sentinel';
+  const KC_READ = 'v146kc-read-item-sentinel';
+  const KC_PREV_READ = 'v146kc-previous-read-item-sentinel';
+  const KC_WRITE = 'v146kc-write-item-sentinel';
+  const KC_PREV_WRITE = 'v146kc-previous-write-item-sentinel';
+  const KC_ADMIN = 'v146kc-admin-item-sentinel';
+  const KC_ALL_SENTINELS = [KC_FULL, KC_LEGACY, KC_READ, KC_PREV_READ, KC_WRITE, KC_PREV_WRITE, KC_ADMIN];
+  const DIRECT_TOKEN_KEYS = [
+    'authToken',
+    'readToken',
+    'previousReadToken',
+    'writeToken',
+    'previousWriteToken',
+    'adminToken',
+  ];
+
+  /**
+   * 断言文本不含任一 Keychain 合成 sentinel（失败消息本身也不回显 sentinel）。
+   * @param {string} text
+   * @param {string} label
+   */
+  function assertNoKcSentinels(text, label) {
+    const joined = String(text);
+    for (const secret of KC_ALL_SENTINELS) {
+      assert.equal(joined.includes(secret), false, `${label} must not contain a synthetic sentinel`);
+    }
+  }
+
+  /**
+   * 经真实 management listener 发起设备管理 POST。
+   * @param {number} port
+   * @param {string} path
+   * @param {object} body
+   * @param {string} token
+   */
+  function postKcDeviceAdmin(port, path, body, token) {
+    return fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('A: parseControllerEnv 接受精确 keychain selector，按声明顺序返回 trim 后 scopes 且六 direct token undefined', () => {
+    const parsed = parseControllerEnv({
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '192.168.10.4',
+      LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+      LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: ' write , previous-write , admin ',
+    });
+    assert.deepEqual(
+      parsed.managementAuthKeychainScopes,
+      ['write', 'previous-write', 'admin'],
+      'scopes must keep declared order after comma split + per-item trim',
+    );
+    for (const key of DIRECT_TOKEN_KEYS) {
+      assert.equal(parsed[key], undefined, `keychain mode must not return direct token ${key}`);
+    }
+  });
+
+  it('B: parseControllerEnv 对非法 selector/scopes/previous 配对/七 direct token 混用全部 throw', () => {
+    const BASE_ENV = {
+      DATA_DIR: 'data',
+      LINKE_AGENT_HOST: '192.168.10.4',
+      LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+      LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,admin',
+    };
+    // 错误断言只匹配非秘密稳定词（env 名/scope/previous/current/token）。
+    const SELECTOR_MATCH = /LINKE_MANAGEMENT_AUTH_SOURCE|management auth source/i;
+    const SCOPE_MATCH = /scope/i;
+    const PAIRING_MATCH = /previous|current/i;
+    const TOKEN_MATCH = /token/i;
+    const cases = [
+      { name: 'selector 大写非精确 keychain', env: { LINKE_MANAGEMENT_AUTH_SOURCE: 'KEYCHAIN' }, match: SELECTOR_MATCH },
+      { name: 'selector 未知来源值', env: { LINKE_MANAGEMENT_AUTH_SOURCE: 'env' }, match: SELECTOR_MATCH },
+      { name: 'selector 空串视同已定义', env: { LINKE_MANAGEMENT_AUTH_SOURCE: '' }, match: SELECTOR_MATCH },
+      { name: 'selector 尾随空格非精确', env: { LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain ' }, match: SELECTOR_MATCH },
+      { name: 'keychain 模式缺少 scopes', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: undefined }, match: SCOPE_MATCH },
+      { name: 'scopes 空串', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: '' }, match: SCOPE_MATCH },
+      { name: 'scopes 全空白无 current', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: '   ' }, match: SCOPE_MATCH },
+      { name: 'scopes 含空项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,,admin' }, match: SCOPE_MATCH },
+      { name: 'scopes 含未知项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,bogus' }, match: SCOPE_MATCH },
+      { name: 'scopes 大小写敏感未知项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,WRITE' }, match: SCOPE_MATCH },
+      { name: 'scopes 重复项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,write,admin' }, match: SCOPE_MATCH },
+      { name: 'previous-write 无 matching current write', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-write' }, match: PAIRING_MATCH },
+      { name: 'previous-read 无 matching current read', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-read' }, match: PAIRING_MATCH },
+      { name: 'previous-write 错配 read current', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,previous-write' }, match: PAIRING_MATCH },
+      { name: '混用 LINKE_AUTH_TOKEN', env: { LINKE_AUTH_TOKEN: KC_FULL }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_TOKEN', env: { LINKE_TOKEN: KC_LEGACY }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_READ_TOKEN', env: { LINKE_READ_TOKEN: KC_READ }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_PREVIOUS_READ_TOKEN', env: { LINKE_PREVIOUS_READ_TOKEN: KC_PREV_READ }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_WRITE_TOKEN', env: { LINKE_WRITE_TOKEN: KC_WRITE }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_PREVIOUS_WRITE_TOKEN', env: { LINKE_PREVIOUS_WRITE_TOKEN: KC_PREV_WRITE }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_ADMIN_TOKEN', env: { LINKE_ADMIN_TOKEN: KC_ADMIN }, match: TOKEN_MATCH },
+      { name: '混用已定义空串 direct token', env: { LINKE_ADMIN_TOKEN: '' }, match: TOKEN_MATCH },
+    ];
+    for (const { name, env, match } of cases) {
+      let thrown = null;
+      try {
+        parseControllerEnv({ ...BASE_ENV, ...env });
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof Error, `${name}: parseControllerEnv must throw`);
+      assert.match(
+        String(thrown.message),
+        match,
+        `${name}: error message must use stable non-secret wording`,
+      );
+      assertNoKcSentinels(String(thrown.message), `${name} error message`);
+      assertNoKcSentinels(String(thrown.stack || ''), `${name} error stack`);
+    }
+  });
+
+  it('C: startController 首个 Keychain get 必须是 management-auth.write，读取失败在 factory/listen 前 fail closed', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146kc-order-'));
+    const gets = [];
+    // 首个 get 即抛合成错误；set/delete 同样不得被调用。
+    const failingKeychain = {
+      async get(id) {
+        gets.push(id);
+        throw new Error('keychain read failed (synthetic)');
+      },
+      async set() {
+        throw new Error('keychain set must not run (synthetic)');
+      },
+      async delete() {
+        throw new Error('keychain delete must not run (synthetic)');
+      },
+    };
+    let agentFactoryCalled = false;
+    let managementFactoryCalled = false;
+    let listenCalled = false;
+    try {
+      await assert.rejects(
+        startController({
+          dataDir,
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          managementAuthKeychainScopes: ['write', 'previous-write', 'admin'],
+          keychain: failingKeychain,
+          listenServer: async () => {
+            listenCalled = true;
+          },
+          agentServerFactory: () => {
+            agentFactoryCalled = true;
+            return trackedServer([], 'agent');
+          },
+          managementServerFactory: () => {
+            managementFactoryCalled = true;
+            return trackedServer([], 'management');
+          },
+        }).then((runtime) => {
+          // 非预期成功也必须可清理；assert.rejects 随后失败。
+          openRuntimes.add(runtime);
+          return runtime;
+        }),
+        // 只确认 fail closed 发生，不解析/打印合成错误本体。
+        (error) => error instanceof Error,
+      );
+      assert.equal(
+        gets[0],
+        'management-auth.write',
+        'first keychain get must be the declared write scope item',
+      );
+      assert.equal(agentFactoryCalled, false, 'agent factory must not run after keychain read failure');
+      assert.equal(managementFactoryCalled, false, 'management factory must not run after keychain read failure');
+      assert.equal(listenCalled, false, 'listen must not run after keychain read failure');
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('D: fake Keychain 供给 scopes 与已有 TLS identity 时，真实 management HTTP 保持 admin scope 语义', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146kc-http-'));
+    const backing = new Map();
+    const baseKeychain = memoryKeychain(backing);
+    let setupRuntime = null;
+    let runtime = null;
+    try {
+      // 预置已有 TLS identity：私钥进 fake Keychain、证书落 dataDir/tls。
+      setupRuntime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        keychain: baseKeychain,
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      await setupRuntime.close();
+      setupRuntime = null;
+
+      // fake Keychain 提供 write/previous-write/admin 三项管理凭证。
+      backing.set('management-auth.write', KC_WRITE);
+      backing.set('management-auth.write.previous', KC_PREV_WRITE);
+      backing.set('management-auth.admin', KC_ADMIN);
+
+      const gets = [];
+      const recordingKeychain = {
+        get: async (id) => {
+          gets.push(id);
+          return baseKeychain.get(id);
+        },
+        set: (id, value) => baseKeychain.set(id, value),
+        delete: (id) => baseKeychain.delete(id),
+      };
+
+      // 默认 managementServerFactory（真实 createServer + DeviceRegistry 路径），禁止 factory 伪造。
+      runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        managementAuthKeychainScopes: ['write', 'previous-write', 'admin'],
+        keychain: recordingKeychain,
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      openRuntimes.add(runtime);
+
+      // 复用注入 keychain，按声明顺序且先于 TLS identity 读取管理凭证。
+      assert.deepEqual(
+        gets.slice(0, 3),
+        ['management-auth.write', 'management-auth.write.previous', 'management-auth.admin'],
+        'management auth items must be read in declared scope order before TLS identity',
+      );
+
+      const port = runtime.managementServer.address().port;
+      assert.ok(Number.isInteger(port) && port > 0);
+
+      for (const token of [KC_WRITE, KC_PREV_WRITE]) {
+        const denied = await postKcDeviceAdmin(
+          port,
+          '/api/device-enrollment-codes',
+          { deviceId: 'mac-v146kc-denied' },
+          token,
+        );
+        assert.equal(
+          denied.status,
+          403,
+          `admin configured: enrollment with ${token === KC_WRITE ? 'write' : 'previous-write'} must be 403`,
+        );
+        assert.deepEqual(await denied.json(), { error: 'Forbidden' });
+      }
+
+      const enroll = await postKcDeviceAdmin(
+        port,
+        '/api/device-enrollment-codes',
+        { deviceId: 'mac-v146kc-admin-ok' },
+        KC_ADMIN,
+      );
+      assert.equal(enroll.status, 201, 'admin enrollment must be 201');
+      const enrolled = await enroll.json();
+      assert.equal(typeof enrolled.enrollmentCode, 'string');
+      assert.ok(enrolled.enrollmentCode.length > 0);
+      assertNoKcSentinels(JSON.stringify(enrolled), 'enrollment response');
+    } finally {
+      if (setupRuntime) {
+        await setupRuntime.close().catch(() => {});
+      }
+      if (runtime) {
+        await runtime.close().catch(() => {});
+        openRuntimes.delete(runtime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('E: runControllerMain 透传 scopes 且 direct token undefined；失败路径仅输出固定 failed-to-start', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146kc-main-'));
+    const KEYCHAIN_ENV = {
+      DATA_DIR: dataDir,
+      LINKE_AGENT_HOST: '192.168.10.4',
+      LINKE_MANAGEMENT_AUTH_SOURCE: 'keychain',
+      LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,previous-write,admin',
+    };
+    try {
+      let startOptions = null;
+      const successLogs = [];
+      const successErrors = [];
+      await runControllerMain({
+        env: KEYCHAIN_ENV,
+        start: async (options) => {
+          startOptions = options;
+          return {
+            status: {
+              managementHost: '127.0.0.1',
+              managementListening: true,
+              agentBindConfigured: true,
+              agentListening: true,
+              tlsFingerprint: 'cd'.repeat(32),
+            },
+            close: async () => {},
+          };
+        },
+        log: (line) => successLogs.push(String(line)),
+        error: (line) => successErrors.push(String(line)),
+        exit: () => {},
+        onSignal: () => {},
+      });
+      assert.ok(startOptions, 'start stub must receive options');
+      assert.deepEqual(
+        startOptions.managementAuthKeychainScopes,
+        ['write', 'previous-write', 'admin'],
+        'runControllerMain must pass keychain scopes through to start',
+      );
+      for (const key of DIRECT_TOKEN_KEYS) {
+        assert.equal(startOptions[key], undefined, `keychain mode start options must not carry ${key}`);
+      }
+      assertNoKcSentinels(successLogs.join('\n'), 'runControllerMain success logs');
+      assertNoKcSentinels(successErrors.join('\n'), 'runControllerMain success errors');
+
+      const failLogs = [];
+      const failErrors = [];
+      let failExit = null;
+      await runControllerMain({
+        env: KEYCHAIN_ENV,
+        start: async () => {
+          throw new Error(`synthetic boom ${KC_WRITE} ${KC_ADMIN} management-auth.write.previous`);
+        },
+        log: (line) => failLogs.push(String(line)),
+        error: (line) => failErrors.push(String(line)),
+        exit: (code) => {
+          failExit = code;
+        },
+        onSignal: () => {},
+      });
+      assert.equal(failExit, 1);
+      assert.deepEqual(
+        failErrors,
+        ['Linke controller failed to start'],
+        'failure output must be the fixed failed-to-start line only',
+      );
+      assert.deepEqual(failLogs, [], 'failure path must not write info logs');
+      assertNoKcSentinels([...failLogs, ...failErrors].join('\n'), 'startup failure output');
+      assert.equal(
+        failErrors.join('\n').includes('management-auth'),
+        false,
+        'failure output must not leak keychain item ids',
+      );
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('F: startController scopes 与任一直接 token 选项（含空串）混用在 keychain get/factory/filesystem 前拒绝', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'linke-v146kc-mix-'));
+    try {
+      const directOptionCases = [
+        ['authToken', KC_FULL],
+        ['readToken', KC_READ],
+        ['previousReadToken', KC_PREV_READ],
+        ['writeToken', KC_WRITE],
+        ['previousWriteToken', KC_PREV_WRITE],
+        ['adminToken', KC_ADMIN],
+        // 已定义空串与值同罪：同样必须在任何副作用前拒绝
+        ['adminToken', ''],
+      ];
+      for (const [key, value] of directOptionCases) {
+        const dataDir = join(root, `case-${key}-${value === '' ? 'empty' : 'set'}`);
+        const gets = [];
+        let factoryCalled = false;
+        let listenCalled = false;
+        const guardKeychain = {
+          async get(id) {
+            gets.push(id);
+            throw new Error('keychain must not be read (synthetic)');
+          },
+          async set() {
+            throw new Error('keychain must not be written (synthetic)');
+          },
+          async delete() {
+            throw new Error('keychain must not be deleted (synthetic)');
+          },
+        };
+        await assert.rejects(
+          startController({
+            dataDir,
+            managementHost: '127.0.0.1',
+            managementPort: 0,
+            agentHost: '192.168.10.4',
+            agentPort: 0,
+            managementAuthKeychainScopes: ['write', 'previous-write', 'admin'],
+            [key]: value,
+            keychain: guardKeychain,
+            listenServer: async () => {
+              listenCalled = true;
+            },
+            agentServerFactory: () => {
+              factoryCalled = true;
+              return trackedServer([], 'agent');
+            },
+            managementServerFactory: () => {
+              factoryCalled = true;
+              return trackedServer([], 'management');
+            },
+          }),
+          /token/i,
+          `${key}: mixing with scopes must reject with stable wording`,
+        );
+        assert.equal(gets.length, 0, `${key}: keychain get must not run`);
+        assert.equal(factoryCalled, false, `${key}: factory must not run`);
+        assert.equal(listenCalled, false, `${key}: listen must not run`);
+        await assert.rejects(
+          access(dataDir),
+          (error) => error && error.code === 'ENOENT',
+          `${key}: dataDir must not be created before rejection`,
+        );
+      }
+
+      // 非数组 scopes 同样在所有副作用前拒绝
+      const gets = [];
+      await assert.rejects(
+        startController({
+          dataDir: join(root, 'case-non-array'),
+          managementHost: '127.0.0.1',
+          managementPort: 0,
+          agentHost: '192.168.10.4',
+          agentPort: 0,
+          managementAuthKeychainScopes: 'write',
+          keychain: {
+            get: async (id) => {
+              gets.push(id);
+              throw new Error('keychain must not be read (synthetic)');
+            },
+          },
+        }),
+        /array|scope/i,
+      );
+      assert.equal(gets.length, 0, 'non-array scopes: keychain get must not run');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

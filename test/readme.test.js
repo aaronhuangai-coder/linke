@@ -3193,3 +3193,63 @@ describe('README — G0a real two-Mac acceptance harness', () => {
       'automation must not claim real hardware PASS');
   });
 });
+
+describe('README — V1.46 management auth Keychain source', () => {
+  it('documents the selector contract', () => {
+    assertReadmeContains(/LINKE_MANAGEMENT_AUTH_SOURCE/, 'selector env name');
+    assertReadmeContains(/精确(小写)?\s*`keychain`/, 'exact lowercase keychain selector');
+    assertReadmeContains(/legacy/, 'legacy default when selector undefined');
+  });
+
+  it('documents scopes env, parsing rules and allowed set', () => {
+    assertReadmeContains(/LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES/, 'scopes env name');
+    assertReadmeContains(/逐项 trim/i, 'per-item trim');
+    assertReadmeContains(/声明顺序/, 'declared order retained');
+    for (const scope of ['full', 'read', 'previous-read', 'write', 'previous-write', 'admin']) {
+      assertReadmeContains(new RegExp(`\`${scope}\``), `allowed scope ${scope}`);
+    }
+    assertReadmeContains(/至少(声明)?一个 current scope/i, 'at least one current scope');
+  });
+
+  it('documents the fixed item mapping under the default service', () => {
+    assertReadmeContains(/com\.linke\.gold/, 'default Keychain service');
+    for (const item of [
+      'management-auth.full',
+      'management-auth.read',
+      'management-auth.read.previous',
+      'management-auth.write',
+      'management-auth.write.previous',
+      'management-auth.admin',
+    ]) {
+      assertReadmeContains(new RegExp(item.replace(/\./g, '\\.')), `Keychain item ${item}`);
+    }
+  });
+
+  it('documents direct-token mixing rejection with no fallback', () => {
+    assertReadmeContains(/无 fallback|不回退/i, 'no fallback wording');
+    for (const name of [
+      'LINKE_AUTH_TOKEN',
+      'LINKE_TOKEN',
+      'LINKE_READ_TOKEN',
+      'LINKE_PREVIOUS_READ_TOKEN',
+      'LINKE_WRITE_TOKEN',
+      'LINKE_PREVIOUS_WRITE_TOKEN',
+      'LINKE_ADMIN_TOKEN',
+    ]) {
+      assertReadmeContains(new RegExp(name), `mixing rejection covers ${name}`);
+    }
+  });
+
+  it('documents startup snapshot and controlled restart', () => {
+    assertReadmeContains(/startup snapshot|启动快照/i, 'startup snapshot');
+    assertReadmeContains(/受控重启|controlled restart/i, 'controlled restart');
+    assertReadmeContains(/hot reload/i, 'no hot reload wording');
+  });
+
+  it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
+    assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
+    assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');
+    assertReadmeContains(/Gold 仍 partial|Gold remains partial/i, 'Gold remains partial');
+    assertReadmeContains(/security-auth/, 'security-auth partial reference');
+  });
+});

@@ -272,6 +272,15 @@ LINKE_AGENT_HOST=192.168.10.4 LINKE_RATE_LIMIT_PER_MINUTE=60 LINKE_AUDIT_MAX_EVE
 
 > 设置 `LINKE_AUTH_TOKEN`、兼容变量 `LINKE_TOKEN`、`LINKE_READ_TOKEN` 或 `LINKE_WRITE_TOKEN` 后，服务端会要求所有 `/api/*` 请求带 `Authorization: Bearer <token>`；未带或错误 token 会返回 `401 Unauthorized`。`LINKE_READ_TOKEN` 只能访问只读 API，访问 `POST /api/heartbeat`、`POST /api/backups` 或 `POST /api/restore` 会返回 `403 Forbidden` 并记录 `auth.forbidden`；`LINKE_WRITE_TOKEN` 可访问读写 API。GET `/api/auth-status` 也是只读 API，返回 `configuredScopes` 与 `writeRoutes` 等 sanitized 认证状态，不返回 token 值。Web Console 顶部的 API Token 控件可在当前页面内存中应用或清除 token，并随后的 `/api/*` 请求发送 Bearer header；它不会把 token 写入 localStorage、sessionStorage、cookie 或 metadata，刷新页面后需重新输入。
 
+> **V1.46 管理面认证 Keychain 来源（startup read path）**：`LINKE_MANAGEMENT_AUTH_SOURCE` 未定义时保持 legacy 环境变量直读，行为不变；设置为精确小写 `keychain` 时，管理面六类 token 改为启动时从 macOS Keychain 读取（默认 service `com.linke.gold`，account 即 itemId）。
+>
+> - **selector**：仅接受未定义（legacy）或精确 `keychain`；空串、空白、大小写变体（如 `KEYCHAIN`）与其它取值均 fail-closed 拒绝。selector 未定义却设置 scopes 变量同样拒绝。
+> - **scopes**：keychain 模式必须设置 `LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES`，逗号分隔、逐项 trim、保持声明顺序；合法取值仅 `full` / `read` / `previous-read` / `write` / `previous-write` / `admin`；空项、未知项、大小写变体与重复项均拒绝；`previous-read` 需同时声明 `read`，`previous-write` 需同时声明 `write`；至少声明一个 current scope。
+> - **item 映射**：`full` → `management-auth.full` → `authToken`；`read` → `management-auth.read` → `readToken`；`previous-read` → `management-auth.read.previous` → `previousReadToken`；`write` → `management-auth.write` → `writeToken`；`previous-write` → `management-auth.write.previous` → `previousWriteToken`；`admin` → `management-auth.admin` → `adminToken`。
+> - **互斥无 fallback**：keychain 模式下 `LINKE_AUTH_TOKEN` / `LINKE_TOKEN` / `LINKE_READ_TOKEN` / `LINKE_PREVIOUS_READ_TOKEN` / `LINKE_WRITE_TOKEN` / `LINKE_PREVIOUS_WRITE_TOKEN` / `LINKE_ADMIN_TOKEN` 任一已定义（含空串）即在启动时拒绝，**无 fallback**，绝不回退到环境变量直读。
+> - **启动快照**：Keychain 读取发生在 filesystem/TLS/listener 之前，按声明顺序逐项进行，构成非原子的 startup snapshot；不做 hot reload，运行期 Keychain 变更必须**受控重启**后生效；previous/current pairing 仅为 presence 校验；同一 token 值跨 scope 沿用既有最宽权限语义。
+> - **诚实边界**：自动测试只使用内存 fake Keychain 与合成 sentinel，不使用真实凭据；本轮未执行真实 macOS Keychain 验收，不代表 security-auth 完成；**Gold 仍 partial**（automation-installation / security-auth / production-hardening 三项 partial 不变）。
+
 ## Agent CLI
 
 ```bash

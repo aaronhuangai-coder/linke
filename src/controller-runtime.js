@@ -24,6 +24,11 @@ import { createRestoreSnapshotReader } from './restore-snapshot-reader.js';
 import { createRestoreTaskStore } from './restore-task-store.js';
 import { createRestoreChunkReader } from './restore-chunk-reader.js';
 import { createRestoreService } from './restore-service.js';
+import {
+  parseManagementAuthEnv,
+  validateManagementAuthOptions,
+  loadManagementAuthTokens,
+} from './management-auth-keychain.js';
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -256,6 +261,7 @@ function parseEnvPort(raw, fallback, label) {
  *   writeToken?: string,
  *   previousWriteToken?: string,
  *   adminToken?: string,
+ *   managementAuthKeychainScopes?: string[],
  *   restoreRoot?: string,
  *   rateLimit?: object | null,
  *   auditRetention?: object | null,
@@ -298,6 +304,7 @@ export async function startController({
   writeToken,
   previousWriteToken,
   adminToken,
+  managementAuthKeychainScopes,
   restoreRoot,
   rateLimit,
   auditRetention,
@@ -331,6 +338,18 @@ export async function startController({
   assertPort(managementPort, 'management');
   assertPort(agentPort, 'agent');
 
+  // 纯配置阶段即校验 scopes 数组形状与 direct token 选项互斥（含空串）；
+  // 必须先于生产 KeychainStore 构造与任何 filesystem/TLS/factory/listener 副作用。
+  const resolvedManagementAuthScopes = validateManagementAuthOptions({
+    managementAuthKeychainScopes,
+    authToken,
+    readToken,
+    previousReadToken,
+    writeToken,
+    previousWriteToken,
+    adminToken,
+  });
+
   // Structure-validate and build Agent limiters after pure config checks, before any
   // Keychain / TLS / registry side effects. null/false must fall back to defaults
   // (never disable). Construct once here; do not rebuild later.
@@ -346,6 +365,21 @@ export async function startController({
   const resolvedMaxGlobalTransfers = assertMaxGlobalTransfers(maxGlobalTransfers);
 
   const resolvedKeychain = keychain ?? new KeychainStore();
+
+  // Keychain 模式：filesystem/TLS/registry/factory/listener 之前，复用同一 resolvedKeychain
+  // 按声明顺序读取管理认证项；缺失/不可用/空值整体 fail closed，读取拒绝原样传播，无 fallback。
+  // 解析出的 token 只进入 managementServerFactory，不得进入 Agent options/status/log。
+  const managementTokens = resolvedManagementAuthScopes !== null
+    ? await loadManagementAuthTokens(resolvedKeychain, resolvedManagementAuthScopes)
+    : {
+      authToken,
+      readToken,
+      previousReadToken,
+      writeToken,
+      previousWriteToken,
+      adminToken,
+    };
+
   const identityPort = agentPort === 0 ? DEFAULT_AGENT_PORT : agentPort;
   // Root-relative safe wiring: create/validate dataDir without recursive symlink follow;
   // tls/ is then created with the same no-follow segment walk.
@@ -485,14 +519,10 @@ export async function startController({
     };
 
     // 管理面独立 options：透传 previous/admin 与 full/read/write；不得写入 Agent options。
+    // keychain 模式下六字段来自启动时 Keychain 读取快照；legacy 模式保持 direct options 原值。
     managementServer = managementServerFactory({
       dataDir,
-      authToken,
-      readToken,
-      previousReadToken,
-      writeToken,
-      previousWriteToken,
-      adminToken,
+      ...managementTokens,
       restoreRoot,
       rateLimit,
       auditRetention,
@@ -549,6 +579,7 @@ export async function startController({
  *   writeToken?: string,
  *   previousWriteToken?: string,
  *   adminToken?: string,
+ *   managementAuthKeychainScopes?: string[],
  *   restoreRoot?: string | null,
  *   rateLimit?: object | null,
  *   auditRetention?: object | null,
@@ -573,6 +604,30 @@ export function parseControllerEnv(env = process.env) {
   const managementPort = parseEnvPort(env.PORT, DEFAULT_MANAGEMENT_PORT, 'management');
   const agentPort = parseEnvPort(env.LINKE_AGENT_PORT, DEFAULT_AGENT_PORT, 'agent');
   const acceptTlsFingerprintChange = env.LINKE_ACCEPT_TLS_FINGERPRINT_CHANGE === 'enabled';
+
+  // V1.46 selector：undefined=legacy（行为逐字节不变）；精确 keychain=启动时 Keychain 读取。
+  // keychain 模式返回 managementAuthKeychainScopes，六个 direct token 字段固定 undefined。
+  const managementAuth = parseManagementAuthEnv(env);
+  if (managementAuth.mode === 'keychain') {
+    return {
+      dataDir,
+      managementHost: DEFAULT_MANAGEMENT_HOST,
+      managementPort,
+      agentHost: trimmedHost,
+      agentPort,
+      authToken: undefined,
+      readToken: undefined,
+      previousReadToken: undefined,
+      writeToken: undefined,
+      previousWriteToken: undefined,
+      adminToken: undefined,
+      managementAuthKeychainScopes: managementAuth.scopes,
+      restoreRoot: normalizeRestoreRoot(env.LINKE_RESTORE_ROOT),
+      rateLimit: parseRateLimitPerMinute(env.LINKE_RATE_LIMIT_PER_MINUTE),
+      auditRetention: parseAuditRetentionMaxEvents(env.LINKE_AUDIT_MAX_EVENTS),
+      acceptTlsFingerprintChange,
+    };
+  }
 
   return {
     dataDir,
