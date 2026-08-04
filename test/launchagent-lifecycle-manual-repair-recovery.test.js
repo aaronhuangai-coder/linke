@@ -5474,6 +5474,16 @@ test('highest-risk real-process manual repair recovers after owner SIGKILL at se
   assert.equal(owner.stdout, HIGHEST_RISK_READY_LINE, 'exactly one READY_TO_KILL line');
   assert.equal(owner.stderr, '', 'owner stderr must be empty');
 
+  // Bounded grace window: owner must remain alive after READY until external SIGKILL.
+  // A pending Promise alone is not a referenced event-loop handle; catch natural exit races.
+  await new Promise((resolve) => {
+    setTimeout(resolve, 100);
+  });
+  assert.equal(owner.exitCode, null, 'owner must not exit during READY grace window');
+  assert.equal(owner.exitSignal, null, 'owner must not receive a signal during READY grace window');
+  assert.equal(owner.child.exitCode, null, 'recorded owner child must still be running');
+  assert.equal(owner.child.signalCode, null, 'recorded owner child must not have a signal yet');
+
   // SIGKILL only the recorded owner PID; await confirmed signal.
   process.kill(ownerPid, 'SIGKILL');
   const ownerExit = await owner.waitExit();

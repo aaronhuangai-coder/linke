@@ -1273,6 +1273,11 @@ async function runManualRepairCrashOwner(fixturePath, crashImagePath) {
 
   // Exactly one READY_TO_KILL line, then block without successful result.
   writeSync(1, 'READY_TO_KILL\n');
+  // A pending Promise alone is not a referenced Node event-loop handle; the child
+  // can exit 0 before the parent delivers SIGKILL. Keep a referenced test-only
+  // interval (no unref, no I/O/output) until external SIGKILL; parent remains
+  // the authoritative watchdog/cleanup.
+  setInterval(() => {}, 60_000);
   await new Promise(() => {
     // intentional hang until parent SIGKILL
   });
