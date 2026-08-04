@@ -72,8 +72,10 @@ describe('Auth status response', () => {
           admin: false,
         },
         previousTokenOverlapConfigured: {
+          full: false,
           read: false,
           write: false,
+          admin: false,
         },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       },
@@ -100,11 +102,48 @@ describe('Auth status response', () => {
       previousWriteToken: 'write-previous-status-token',
     });
 
-    assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: true, write: true });
+    assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, {
+      full: false,
+      read: true,
+      write: true,
+      admin: false,
+    });
     assert.strictEqual(body.safety.tokenValuesReturned, false);
     assert.doesNotMatch(
       JSON.stringify(body),
       /read-current-status-token|read-previous-status-token|write-current-status-token|write-previous-status-token/,
+    );
+  });
+
+  it('buildAuthStatusResponse reports full/admin rotation overlap without returning token values', () => {
+    const body = buildAuthStatusResponse({
+      authToken: 'full-current-status-token',
+      previousAuthToken: 'full-previous-status-token',
+      adminToken: 'admin-current-status-token',
+      previousAdminToken: 'admin-previous-status-token',
+    });
+
+    assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, {
+      full: true,
+      read: false,
+      write: false,
+      admin: true,
+    });
+    assert.strictEqual(body.safety.tokenValuesReturned, false);
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /full-current-status-token|full-previous-status-token|admin-current-status-token|admin-previous-status-token/,
+    );
+  });
+
+  it('buildAuthStatusResponse fails closed for previous full/admin tokens without current pairs', () => {
+    assert.throws(
+      () => buildAuthStatusResponse({ previousAuthToken: 'full-previous-only' }),
+      { name: 'Error', message: 'previousAuthToken requires authToken' },
+    );
+    assert.throws(
+      () => buildAuthStatusResponse({ previousAdminToken: 'admin-previous-only' }),
+      { name: 'Error', message: 'previousAdminToken requires adminToken' },
     );
   });
 
@@ -145,7 +184,12 @@ describe('Auth status response', () => {
       write: false,
       admin: true,
     });
-    assert.deepStrictEqual(auth.auth.previousTokenOverlapConfigured, { read: false, write: false });
+    assert.deepStrictEqual(auth.auth.previousTokenOverlapConfigured, {
+      full: false,
+      read: false,
+      write: false,
+      admin: false,
+    });
     assert.doesNotMatch(JSON.stringify(auth), /admin-status-secret/);
   });
 });
@@ -399,7 +443,12 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(body.service, 'linke');
       assert.strictEqual(body.version, LINKE_RELEASE_VERSION);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false, admin: false });
-      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, {
+        full: false,
+        read: false,
+        write: false,
+        admin: false,
+      });
       assert.strictEqual(body.auth.enabled, false);
       assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
       assert.deepStrictEqual(body.startupCredentialSource, {
@@ -431,7 +480,12 @@ describe('GET /api/auth-status', () => {
       const body = await res.json();
       assert.strictEqual(body.auth.enabled, true);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true, admin: false });
-      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, {
+        full: false,
+        read: false,
+        write: false,
+        admin: false,
+      });
       assert.deepStrictEqual(body.startupCredentialSource, {
         mode: 'direct',
         startupSnapshot: true,
@@ -465,7 +519,12 @@ describe('GET /api/auth-status', () => {
       });
       assert.strictEqual(res.status, 200);
       const body = await res.json();
-      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: true, write: true });
+      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, {
+        full: false,
+        read: true,
+        write: true,
+        admin: false,
+      });
       assert.strictEqual(body.safety.tokenValuesReturned, false);
       assert.doesNotMatch(
         JSON.stringify(body),

@@ -3205,7 +3205,16 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES/, 'scopes env name');
     assertReadmeContains(/逐项 trim/i, 'per-item trim');
     assertReadmeContains(/声明顺序/, 'declared order retained');
-    for (const scope of ['full', 'read', 'previous-read', 'write', 'previous-write', 'admin']) {
+    for (const scope of [
+      'full',
+      'previous-full',
+      'read',
+      'previous-read',
+      'write',
+      'previous-write',
+      'admin',
+      'previous-admin',
+    ]) {
       assertReadmeContains(new RegExp(`\`${scope}\``), `allowed scope ${scope}`);
     }
     assertReadmeContains(/至少(声明)?一个 current scope/i, 'at least one current scope');
@@ -3215,11 +3224,13 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/com\.linke\.gold/, 'default Keychain service');
     for (const item of [
       'management-auth.full',
+      'management-auth.full.previous',
       'management-auth.read',
       'management-auth.read.previous',
       'management-auth.write',
       'management-auth.write.previous',
       'management-auth.admin',
+      'management-auth.admin.previous',
     ]) {
       assertReadmeContains(new RegExp(item.replace(/\./g, '\\.')), `Keychain item ${item}`);
     }
@@ -3230,11 +3241,13 @@ describe('README — V1.46 management auth Keychain source', () => {
     for (const name of [
       'LINKE_AUTH_TOKEN',
       'LINKE_TOKEN',
+      'LINKE_PREVIOUS_AUTH_TOKEN',
       'LINKE_READ_TOKEN',
       'LINKE_PREVIOUS_READ_TOKEN',
       'LINKE_WRITE_TOKEN',
       'LINKE_PREVIOUS_WRITE_TOKEN',
       'LINKE_ADMIN_TOKEN',
+      'LINKE_PREVIOUS_ADMIN_TOKEN',
     ]) {
       assertReadmeContains(new RegExp(name), `mixing rejection covers ${name}`);
     }

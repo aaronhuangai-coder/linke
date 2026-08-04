@@ -256,11 +256,13 @@ function parseEnvPort(raw, fallback, label) {
  *   agentHost?: string,
  *   agentPort?: number,
  *   authToken?: string,
+ *   previousAuthToken?: string,
  *   readToken?: string,
  *   previousReadToken?: string,
  *   writeToken?: string,
  *   previousWriteToken?: string,
  *   adminToken?: string,
+ *   previousAdminToken?: string,
  *   managementAuthKeychainScopes?: string[],
  *   restoreRoot?: string,
  *   rateLimit?: object | null,
@@ -299,11 +301,13 @@ export async function startController({
   agentHost,
   agentPort = DEFAULT_AGENT_PORT,
   authToken,
+  previousAuthToken,
   readToken,
   previousReadToken,
   writeToken,
   previousWriteToken,
   adminToken,
+  previousAdminToken,
   managementAuthKeychainScopes,
   restoreRoot,
   rateLimit,
@@ -343,11 +347,13 @@ export async function startController({
   const resolvedManagementAuthScopes = validateManagementAuthOptions({
     managementAuthKeychainScopes,
     authToken,
+    previousAuthToken,
     readToken,
     previousReadToken,
     writeToken,
     previousWriteToken,
     adminToken,
+    previousAdminToken,
   });
 
   // Structure-validate and build Agent limiters after pure config checks, before any
@@ -373,11 +379,13 @@ export async function startController({
     ? await loadManagementAuthTokens(resolvedKeychain, resolvedManagementAuthScopes)
     : {
       authToken,
+      previousAuthToken,
       readToken,
       previousReadToken,
       writeToken,
       previousWriteToken,
       adminToken,
+      previousAdminToken,
     };
 
   const identityPort = agentPort === 0 ? DEFAULT_AGENT_PORT : agentPort;
@@ -518,8 +526,8 @@ export async function startController({
       tlsFingerprint: identity.fingerprint,
     };
 
-    // 管理面独立 options：透传 previous/admin 与 full/read/write；不得写入 Agent options。
-    // keychain 模式下六字段来自启动时 Keychain 读取快照；legacy 模式保持 direct options 原值。
+    // 管理面独立 options：透传 current/previous 与 full/read/write/admin；不得写入 Agent options。
+    // keychain 模式下八字段来自启动时 Keychain 读取快照；legacy 模式保持 direct options 原值。
     // V1.46 仅有 direct/keychain 两种管理凭证来源：scopes 为 null 即 legacy/direct，
     // 否则为 keychain；未来新增来源必须同步枚举/映射/测试。
     managementServer = managementServerFactory({
@@ -577,11 +585,13 @@ export async function startController({
  *   agentHost: string,
  *   agentPort: number,
  *   authToken?: string,
+ *   previousAuthToken?: string,
  *   readToken?: string,
  *   previousReadToken?: string,
  *   writeToken?: string,
  *   previousWriteToken?: string,
  *   adminToken?: string,
+ *   previousAdminToken?: string,
  *   managementAuthKeychainScopes?: string[],
  *   restoreRoot?: string | null,
  *   rateLimit?: object | null,
@@ -609,7 +619,7 @@ export function parseControllerEnv(env = process.env) {
   const acceptTlsFingerprintChange = env.LINKE_ACCEPT_TLS_FINGERPRINT_CHANGE === 'enabled';
 
   // V1.46 selector：undefined=legacy（行为逐字节不变）；精确 keychain=启动时 Keychain 读取。
-  // keychain 模式返回 managementAuthKeychainScopes，六个 direct token 字段固定 undefined。
+  // keychain 模式返回 managementAuthKeychainScopes，八个 direct token 字段固定 undefined。
   const managementAuth = parseManagementAuthEnv(env);
   if (managementAuth.mode === 'keychain') {
     return {
@@ -619,11 +629,13 @@ export function parseControllerEnv(env = process.env) {
       agentHost: trimmedHost,
       agentPort,
       authToken: undefined,
+      previousAuthToken: undefined,
       readToken: undefined,
       previousReadToken: undefined,
       writeToken: undefined,
       previousWriteToken: undefined,
       adminToken: undefined,
+      previousAdminToken: undefined,
       managementAuthKeychainScopes: managementAuth.scopes,
       restoreRoot: normalizeRestoreRoot(env.LINKE_RESTORE_ROOT),
       rateLimit: parseRateLimitPerMinute(env.LINKE_RATE_LIMIT_PER_MINUTE),
@@ -640,11 +652,13 @@ export function parseControllerEnv(env = process.env) {
     agentPort,
     // full 仍优先 LINKE_AUTH_TOKEN；空串/未设置沿用既有 || 语义，不另建 precedence。
     authToken: env.LINKE_AUTH_TOKEN || env.LINKE_TOKEN,
+    previousAuthToken: env.LINKE_PREVIOUS_AUTH_TOKEN,
     readToken: env.LINKE_READ_TOKEN,
     previousReadToken: env.LINKE_PREVIOUS_READ_TOKEN,
     writeToken: env.LINKE_WRITE_TOKEN,
     previousWriteToken: env.LINKE_PREVIOUS_WRITE_TOKEN,
     adminToken: env.LINKE_ADMIN_TOKEN,
+    previousAdminToken: env.LINKE_PREVIOUS_ADMIN_TOKEN,
     restoreRoot: normalizeRestoreRoot(env.LINKE_RESTORE_ROOT),
     rateLimit: parseRateLimitPerMinute(env.LINKE_RATE_LIMIT_PER_MINUTE),
     auditRetention: parseAuditRetentionMaxEvents(env.LINKE_AUDIT_MAX_EVENTS),

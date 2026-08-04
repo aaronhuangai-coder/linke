@@ -28,11 +28,13 @@ const MANAGEMENT_AUTH_SOURCE_KEYCHAIN = 'keychain';
  */
 export const MANAGEMENT_AUTH_SCOPE_MAP = Object.freeze([
   Object.freeze({ scope: 'full', itemId: 'management-auth.full', optionKey: 'authToken', current: true, requires: null }),
+  Object.freeze({ scope: 'previous-full', itemId: 'management-auth.full.previous', optionKey: 'previousAuthToken', current: false, requires: 'full' }),
   Object.freeze({ scope: 'read', itemId: 'management-auth.read', optionKey: 'readToken', current: true, requires: null }),
   Object.freeze({ scope: 'previous-read', itemId: 'management-auth.read.previous', optionKey: 'previousReadToken', current: false, requires: 'read' }),
   Object.freeze({ scope: 'write', itemId: 'management-auth.write', optionKey: 'writeToken', current: true, requires: null }),
   Object.freeze({ scope: 'previous-write', itemId: 'management-auth.write.previous', optionKey: 'previousWriteToken', current: false, requires: 'write' }),
   Object.freeze({ scope: 'admin', itemId: 'management-auth.admin', optionKey: 'adminToken', current: true, requires: null }),
+  Object.freeze({ scope: 'previous-admin', itemId: 'management-auth.admin.previous', optionKey: 'previousAdminToken', current: false, requires: 'admin' }),
 ]);
 
 const SCOPE_BY_NAME = new Map(MANAGEMENT_AUTH_SCOPE_MAP.map((def) => [def.scope, def]));
@@ -41,21 +43,25 @@ const SCOPE_BY_NAME = new Map(MANAGEMENT_AUTH_SCOPE_MAP.map((def) => [def.scope,
 const DIRECT_TOKEN_ENV_NAMES = Object.freeze([
   'LINKE_AUTH_TOKEN',
   'LINKE_TOKEN',
+  'LINKE_PREVIOUS_AUTH_TOKEN',
   'LINKE_READ_TOKEN',
   'LINKE_PREVIOUS_READ_TOKEN',
   'LINKE_WRITE_TOKEN',
   'LINKE_PREVIOUS_WRITE_TOKEN',
   'LINKE_ADMIN_TOKEN',
+  'LINKE_PREVIOUS_ADMIN_TOKEN',
 ]);
 
 /** startController options 中与 managementAuthKeychainScopes 互斥的 direct token 字段。 */
 const DIRECT_TOKEN_OPTION_KEYS = Object.freeze([
   'authToken',
+  'previousAuthToken',
   'readToken',
   'previousReadToken',
   'writeToken',
   'previousWriteToken',
   'adminToken',
+  'previousAdminToken',
 ]);
 
 /**
@@ -112,7 +118,7 @@ export function parseManagementAuthScopeList(raw) {
 /**
  * 解析管理认证 selector 环境（纯函数，无 I/O）。
  * legacy：LINKE_MANAGEMENT_AUTH_SOURCE 未定义（此时 scopes 变量必须也未定义）；
- * keychain：精确小写 keychain + 合法 scopes + 七个 direct token 环境变量全部未定义。
+ * keychain：精确小写 keychain + 合法 scopes + 九个 direct token 环境变量全部未定义。
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} [env]
  * @returns {{ mode: 'legacy', scopes: undefined } | { mode: 'keychain', scopes: string[] }}
  */
@@ -145,11 +151,13 @@ export function parseManagementAuthEnv(env = {}) {
  * @param {{
  *   managementAuthKeychainScopes?: unknown,
  *   authToken?: unknown,
+ *   previousAuthToken?: unknown,
  *   readToken?: unknown,
  *   previousReadToken?: unknown,
  *   writeToken?: unknown,
  *   previousWriteToken?: unknown,
  *   adminToken?: unknown,
+ *   previousAdminToken?: unknown,
  * }} [options]
  * @returns {string[] | null} keychain 模式返回校验后的 scope 不可变快照；legacy 返回 null
  */
@@ -177,11 +185,13 @@ export function validateManagementAuthOptions(options = {}) {
  * @param {string[]} scopes 已通过校验的 scope 列表
  * @returns {Promise<{
  *   authToken?: string,
+ *   previousAuthToken?: string,
  *   readToken?: string,
  *   previousReadToken?: string,
  *   writeToken?: string,
  *   previousWriteToken?: string,
  *   adminToken?: string,
+ *   previousAdminToken?: string,
  * }>} 仅含已声明 scope 对应字段的 token 对象
  */
 export async function loadManagementAuthTokens(keychain, scopes) {

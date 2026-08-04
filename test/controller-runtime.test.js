@@ -3101,20 +3101,34 @@ describe('C6 controller-runtime restore wiring (RED)', () => {
 describe('V1.46 controller auth scope parity', () => {
   // 合成 sentinel：仅用于断言透传与日志脱敏，禁止真实凭证。
   const FULL = 'v146-full-auth-sentinel';
+  const PREV_FULL = 'v146-previous-full-auth-sentinel';
   const FULL_LEGACY = 'v146-legacy-token-sentinel';
   const READ = 'v146-read-sentinel';
   const PREV_READ = 'v146-previous-read-sentinel';
   const WRITE = 'v146-write-sentinel';
   const PREV_WRITE = 'v146-previous-write-sentinel';
   const ADMIN = 'v146-admin-sentinel';
-  const ALL_SENTINELS = [FULL, FULL_LEGACY, READ, PREV_READ, WRITE, PREV_WRITE, ADMIN];
+  const PREV_ADMIN = 'v146-previous-admin-sentinel';
+  const ALL_SENTINELS = [
+    FULL,
+    PREV_FULL,
+    FULL_LEGACY,
+    READ,
+    PREV_READ,
+    WRITE,
+    PREV_WRITE,
+    ADMIN,
+    PREV_ADMIN,
+  ];
   const MGMT_TOKEN_KEYS = [
     'authToken',
+    'previousAuthToken',
     'readToken',
     'previousReadToken',
     'writeToken',
     'previousWriteToken',
     'adminToken',
+    'previousAdminToken',
   ];
 
   /**
@@ -3166,25 +3180,29 @@ describe('V1.46 controller auth scope parity', () => {
     }
   }
 
-  it('parseControllerEnv 返回六类令牌字段：AUTH 优先、未设置 undefined、空串原样', () => {
+  it('parseControllerEnv 返回八类令牌字段：AUTH 优先、未设置 undefined、空串原样', () => {
     const full = parseControllerEnv({
       DATA_DIR: 'data',
       LINKE_AGENT_HOST: '192.168.10.4',
       LINKE_AUTH_TOKEN: FULL,
+      LINKE_PREVIOUS_AUTH_TOKEN: PREV_FULL,
       LINKE_TOKEN: FULL_LEGACY,
       LINKE_READ_TOKEN: READ,
       LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
       LINKE_WRITE_TOKEN: WRITE,
       LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
       LINKE_ADMIN_TOKEN: ADMIN,
+      LINKE_PREVIOUS_ADMIN_TOKEN: PREV_ADMIN,
     });
     // full 仍优先 LINKE_AUTH_TOKEN（不得回落到 LINKE_TOKEN）
     assert.equal(full.authToken, FULL);
+    assert.equal(full.previousAuthToken, PREV_FULL);
     assert.equal(full.readToken, READ);
     assert.equal(full.previousReadToken, PREV_READ);
     assert.equal(full.writeToken, WRITE);
     assert.equal(full.previousWriteToken, PREV_WRITE);
     assert.equal(full.adminToken, ADMIN);
+    assert.equal(full.previousAdminToken, PREV_ADMIN);
     // 返回对象不得额外暴露 legacy env 名
     assert.equal(Object.hasOwn(full, 'LINKE_TOKEN'), false);
 
@@ -3193,29 +3211,35 @@ describe('V1.46 controller auth scope parity', () => {
       LINKE_AGENT_HOST: '10.0.0.5',
     });
     assert.equal(unset.authToken, undefined);
+    assert.equal(unset.previousAuthToken, undefined);
     assert.equal(unset.readToken, undefined);
     assert.equal(unset.previousReadToken, undefined);
     assert.equal(unset.writeToken, undefined);
     assert.equal(unset.previousWriteToken, undefined);
     assert.equal(unset.adminToken, undefined);
+    assert.equal(unset.previousAdminToken, undefined);
 
     const empty = parseControllerEnv({
       DATA_DIR: 'data',
       LINKE_AGENT_HOST: '172.16.1.2',
       LINKE_READ_TOKEN: '',
+      LINKE_PREVIOUS_AUTH_TOKEN: '',
       LINKE_PREVIOUS_READ_TOKEN: '',
       LINKE_WRITE_TOKEN: '',
       LINKE_PREVIOUS_WRITE_TOKEN: '',
       LINKE_ADMIN_TOKEN: '',
+      LINKE_PREVIOUS_ADMIN_TOKEN: '',
     });
     assert.equal(empty.readToken, '');
+    assert.equal(empty.previousAuthToken, '');
     assert.equal(empty.previousReadToken, '');
     assert.equal(empty.writeToken, '');
     assert.equal(empty.previousWriteToken, '');
     assert.equal(empty.adminToken, '');
+    assert.equal(empty.previousAdminToken, '');
   });
 
-  it('startController 将六类令牌原值交给 management factory；Agent options 与 status 隔离', async () => {
+  it('startController 将八类令牌原值交给 management factory；Agent options 与 status 隔离', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146-factory-'));
     /** @type {Record<string, unknown> | null} */
     let managementOptions = null;
@@ -3229,11 +3253,13 @@ describe('V1.46 controller auth scope parity', () => {
         agentHost: '192.168.10.4',
         agentPort: 0,
         authToken: FULL,
+        previousAuthToken: PREV_FULL,
         readToken: READ,
         previousReadToken: PREV_READ,
         writeToken: WRITE,
         previousWriteToken: PREV_WRITE,
         adminToken: ADMIN,
+        previousAdminToken: PREV_ADMIN,
         keychain: memoryKeychain(),
         listenServer: createLoopbackTestListenAdapter(),
         agentServerFactory: (options) => {
@@ -3249,11 +3275,13 @@ describe('V1.46 controller auth scope parity', () => {
       try {
         assert.ok(managementOptions, 'managementServerFactory must be called');
         assert.equal(managementOptions.authToken, FULL);
+        assert.equal(managementOptions.previousAuthToken, PREV_FULL);
         assert.equal(managementOptions.readToken, READ);
         assert.equal(managementOptions.previousReadToken, PREV_READ);
         assert.equal(managementOptions.writeToken, WRITE);
         assert.equal(managementOptions.previousWriteToken, PREV_WRITE);
         assert.equal(managementOptions.adminToken, ADMIN);
+        assert.equal(managementOptions.previousAdminToken, PREV_ADMIN);
 
         assert.ok(agentOptions, 'agentServerFactory must be called');
         for (const key of MGMT_TOKEN_KEYS) {
@@ -3551,12 +3579,14 @@ describe('V1.46 controller auth scope parity', () => {
           DATA_DIR: dataDir,
           LINKE_AGENT_HOST: '192.168.10.4',
           LINKE_AUTH_TOKEN: FULL,
+          LINKE_PREVIOUS_AUTH_TOKEN: PREV_FULL,
           LINKE_TOKEN: FULL_LEGACY,
           LINKE_READ_TOKEN: READ,
           LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
           LINKE_WRITE_TOKEN: WRITE,
           LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
           LINKE_ADMIN_TOKEN: ADMIN,
+          LINKE_PREVIOUS_ADMIN_TOKEN: PREV_ADMIN,
         },
         start: async (options) => {
           startOptions = options;
@@ -3579,11 +3609,13 @@ describe('V1.46 controller auth scope parity', () => {
 
       assert.ok(startOptions, 'start stub must receive options');
       assert.equal(startOptions.authToken, FULL);
+      assert.equal(startOptions.previousAuthToken, PREV_FULL);
       assert.equal(startOptions.readToken, READ);
       assert.equal(startOptions.previousReadToken, PREV_READ);
       assert.equal(startOptions.writeToken, WRITE);
       assert.equal(startOptions.previousWriteToken, PREV_WRITE);
       assert.equal(startOptions.adminToken, ADMIN);
+      assert.equal(startOptions.previousAdminToken, PREV_ADMIN);
       assertNoSentinels(successLogs.join('\n'), 'runControllerMain success logs');
       assertNoSentinels(successErrors.join('\n'), 'runControllerMain success errors');
 
@@ -3595,14 +3627,16 @@ describe('V1.46 controller auth scope parity', () => {
           DATA_DIR: dataDir,
           LINKE_AGENT_HOST: '192.168.10.4',
           LINKE_AUTH_TOKEN: FULL,
+          LINKE_PREVIOUS_AUTH_TOKEN: PREV_FULL,
           LINKE_READ_TOKEN: READ,
           LINKE_PREVIOUS_READ_TOKEN: PREV_READ,
           LINKE_WRITE_TOKEN: WRITE,
           LINKE_PREVIOUS_WRITE_TOKEN: PREV_WRITE,
           LINKE_ADMIN_TOKEN: ADMIN,
+          LINKE_PREVIOUS_ADMIN_TOKEN: PREV_ADMIN,
         },
         start: async () => {
-          throw new Error(`start boom ${FULL} ${PREV_READ} ${PREV_WRITE} ${ADMIN}`);
+          throw new Error(`start boom ${FULL} ${PREV_FULL} ${PREV_READ} ${PREV_WRITE} ${ADMIN} ${PREV_ADMIN}`);
         },
         log: (line) => failLogs.push(String(line)),
         error: (line) => failErrors.push(String(line)),
@@ -3675,20 +3709,34 @@ describe('V1.46 controller auth scope parity', () => {
 describe('V1.46 management auth Keychain source', () => {
   // 合成 sentinel：仅用于断言透传/隔离与日志脱敏，禁止真实凭证。
   const KC_FULL = 'v146kc-full-item-sentinel';
+  const KC_PREV_FULL = 'v146kc-previous-full-item-sentinel';
   const KC_LEGACY = 'v146kc-legacy-token-sentinel';
   const KC_READ = 'v146kc-read-item-sentinel';
   const KC_PREV_READ = 'v146kc-previous-read-item-sentinel';
   const KC_WRITE = 'v146kc-write-item-sentinel';
   const KC_PREV_WRITE = 'v146kc-previous-write-item-sentinel';
   const KC_ADMIN = 'v146kc-admin-item-sentinel';
-  const KC_ALL_SENTINELS = [KC_FULL, KC_LEGACY, KC_READ, KC_PREV_READ, KC_WRITE, KC_PREV_WRITE, KC_ADMIN];
+  const KC_PREV_ADMIN = 'v146kc-previous-admin-item-sentinel';
+  const KC_ALL_SENTINELS = [
+    KC_FULL,
+    KC_PREV_FULL,
+    KC_LEGACY,
+    KC_READ,
+    KC_PREV_READ,
+    KC_WRITE,
+    KC_PREV_WRITE,
+    KC_ADMIN,
+    KC_PREV_ADMIN,
+  ];
   const DIRECT_TOKEN_KEYS = [
     'authToken',
+    'previousAuthToken',
     'readToken',
     'previousReadToken',
     'writeToken',
     'previousWriteToken',
     'adminToken',
+    'previousAdminToken',
   ];
 
   /**
@@ -3721,7 +3769,7 @@ describe('V1.46 management auth Keychain source', () => {
     });
   }
 
-  it('A: parseControllerEnv 接受精确 keychain selector，按声明顺序返回 trim 后 scopes 且六 direct token undefined', () => {
+  it('A: parseControllerEnv 接受精确 keychain selector，按声明顺序返回 trim 后 scopes 且八 direct token undefined', () => {
     const parsed = parseControllerEnv({
       DATA_DIR: 'data',
       LINKE_AGENT_HOST: '192.168.10.4',
@@ -3738,7 +3786,7 @@ describe('V1.46 management auth Keychain source', () => {
     }
   });
 
-  it('B: parseControllerEnv 对非法 selector/scopes/previous 配对/七 direct token 混用全部 throw', () => {
+  it('B: parseControllerEnv 对非法 selector/scopes/previous 配对/九 direct token env 混用全部 throw', () => {
     const BASE_ENV = {
       DATA_DIR: 'data',
       LINKE_AGENT_HOST: '192.168.10.4',
@@ -3762,16 +3810,20 @@ describe('V1.46 management auth Keychain source', () => {
       { name: 'scopes 含未知项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,bogus' }, match: SCOPE_MATCH },
       { name: 'scopes 大小写敏感未知项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,WRITE' }, match: SCOPE_MATCH },
       { name: 'scopes 重复项', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'write,write,admin' }, match: SCOPE_MATCH },
+      { name: 'previous-full 无 matching current full', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-full' }, match: PAIRING_MATCH },
       { name: 'previous-write 无 matching current write', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-write' }, match: PAIRING_MATCH },
       { name: 'previous-read 无 matching current read', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-read' }, match: PAIRING_MATCH },
+      { name: 'previous-admin 无 matching current admin', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'previous-admin' }, match: PAIRING_MATCH },
       { name: 'previous-write 错配 read current', env: { LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES: 'read,previous-write' }, match: PAIRING_MATCH },
       { name: '混用 LINKE_AUTH_TOKEN', env: { LINKE_AUTH_TOKEN: KC_FULL }, match: TOKEN_MATCH },
       { name: '混用 LINKE_TOKEN', env: { LINKE_TOKEN: KC_LEGACY }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_PREVIOUS_AUTH_TOKEN', env: { LINKE_PREVIOUS_AUTH_TOKEN: KC_PREV_FULL }, match: TOKEN_MATCH },
       { name: '混用 LINKE_READ_TOKEN', env: { LINKE_READ_TOKEN: KC_READ }, match: TOKEN_MATCH },
       { name: '混用 LINKE_PREVIOUS_READ_TOKEN', env: { LINKE_PREVIOUS_READ_TOKEN: KC_PREV_READ }, match: TOKEN_MATCH },
       { name: '混用 LINKE_WRITE_TOKEN', env: { LINKE_WRITE_TOKEN: KC_WRITE }, match: TOKEN_MATCH },
       { name: '混用 LINKE_PREVIOUS_WRITE_TOKEN', env: { LINKE_PREVIOUS_WRITE_TOKEN: KC_PREV_WRITE }, match: TOKEN_MATCH },
       { name: '混用 LINKE_ADMIN_TOKEN', env: { LINKE_ADMIN_TOKEN: KC_ADMIN }, match: TOKEN_MATCH },
+      { name: '混用 LINKE_PREVIOUS_ADMIN_TOKEN', env: { LINKE_PREVIOUS_ADMIN_TOKEN: KC_PREV_ADMIN }, match: TOKEN_MATCH },
       { name: '混用已定义空串 direct token', env: { LINKE_ADMIN_TOKEN: '' }, match: TOKEN_MATCH },
     ];
     for (const { name, env, match } of cases) {
@@ -3853,7 +3905,7 @@ describe('V1.46 management auth Keychain source', () => {
     }
   });
 
-  it('D: fake Keychain 供给 scopes 与已有 TLS identity 时，真实 management HTTP 保持 admin scope 语义', async () => {
+  it('D: fake Keychain 供给八 scopes 与已有 TLS identity 时，真实 management HTTP 保持 overlap 权限语义', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146kc-http-'));
     const backing = new Map();
     const baseKeychain = memoryKeychain(backing);
@@ -3873,10 +3925,13 @@ describe('V1.46 management auth Keychain source', () => {
       await setupRuntime.close();
       setupRuntime = null;
 
-      // fake Keychain 提供 write/previous-write/admin 三项管理凭证。
+      // fake Keychain 提供 full/write/admin 的 current/previous 管理凭证。
+      backing.set('management-auth.full', KC_FULL);
+      backing.set('management-auth.full.previous', KC_PREV_FULL);
       backing.set('management-auth.write', KC_WRITE);
       backing.set('management-auth.write.previous', KC_PREV_WRITE);
       backing.set('management-auth.admin', KC_ADMIN);
+      backing.set('management-auth.admin.previous', KC_PREV_ADMIN);
 
       const gets = [];
       const recordingKeychain = {
@@ -3895,7 +3950,14 @@ describe('V1.46 management auth Keychain source', () => {
         managementPort: 0,
         agentHost: '192.168.10.4',
         agentPort: 0,
-        managementAuthKeychainScopes: ['write', 'previous-write', 'admin'],
+        managementAuthKeychainScopes: [
+          'full',
+          'previous-full',
+          'write',
+          'previous-write',
+          'admin',
+          'previous-admin',
+        ],
         keychain: recordingKeychain,
         listenServer: createLoopbackTestListenAdapter(),
       });
@@ -3903,8 +3965,15 @@ describe('V1.46 management auth Keychain source', () => {
 
       // 复用注入 keychain，按声明顺序且先于 TLS identity 读取管理凭证。
       assert.deepEqual(
-        gets.slice(0, 3),
-        ['management-auth.write', 'management-auth.write.previous', 'management-auth.admin'],
+        gets.slice(0, 6),
+        [
+          'management-auth.full',
+          'management-auth.full.previous',
+          'management-auth.write',
+          'management-auth.write.previous',
+          'management-auth.admin',
+          'management-auth.admin.previous',
+        ],
         'management auth items must be read in declared scope order before TLS identity',
       );
 
@@ -3926,17 +3995,19 @@ describe('V1.46 management auth Keychain source', () => {
         assert.deepEqual(await denied.json(), { error: 'Forbidden' });
       }
 
-      const enroll = await postKcDeviceAdmin(
-        port,
-        '/api/device-enrollment-codes',
-        { deviceId: 'mac-v146kc-admin-ok' },
-        KC_ADMIN,
-      );
-      assert.equal(enroll.status, 201, 'admin enrollment must be 201');
-      const enrolled = await enroll.json();
-      assert.equal(typeof enrolled.enrollmentCode, 'string');
-      assert.ok(enrolled.enrollmentCode.length > 0);
-      assertNoKcSentinels(JSON.stringify(enrolled), 'enrollment response');
+      for (const token of [KC_FULL, KC_PREV_FULL, KC_ADMIN, KC_PREV_ADMIN]) {
+        const enroll = await postKcDeviceAdmin(
+          port,
+          '/api/device-enrollment-codes',
+          { deviceId: 'mac-v146kc-admin-ok' },
+          token,
+        );
+        assert.equal(enroll.status, 201, 'full/admin current/previous enrollment must be 201');
+        const enrolled = await enroll.json();
+        assert.equal(typeof enrolled.enrollmentCode, 'string');
+        assert.ok(enrolled.enrollmentCode.length > 0);
+        assertNoKcSentinels(JSON.stringify(enrolled), 'enrollment response');
+      }
     } finally {
       if (setupRuntime) {
         await setupRuntime.close().catch(() => {});
@@ -4031,11 +4102,13 @@ describe('V1.46 management auth Keychain source', () => {
     try {
       const directOptionCases = [
         ['authToken', KC_FULL],
+        ['previousAuthToken', KC_PREV_FULL],
         ['readToken', KC_READ],
         ['previousReadToken', KC_PREV_READ],
         ['writeToken', KC_WRITE],
         ['previousWriteToken', KC_PREV_WRITE],
         ['adminToken', KC_ADMIN],
+        ['previousAdminToken', KC_PREV_ADMIN],
         // 已定义空串与值同罪：同样必须在任何副作用前拒绝
         ['adminToken', ''],
       ];

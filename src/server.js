@@ -534,16 +534,26 @@ function authTokensMatch(actualToken, expectedToken) {
  * (hasAuth ignores previous*, so previous-only would open unauthenticated localhost).
  */
 function assertPreviousScopedTokensRequireCurrent({
+  authToken,
+  previousAuthToken,
   readToken,
   previousReadToken,
   writeToken,
   previousWriteToken,
+  adminToken,
+  previousAdminToken,
 }) {
+  if (previousAuthToken && !authToken) {
+    throw new Error('previousAuthToken requires authToken');
+  }
   if (previousReadToken && !readToken) {
     throw new Error('previousReadToken requires readToken');
   }
   if (previousWriteToken && !writeToken) {
     throw new Error('previousWriteToken requires writeToken');
+  }
+  if (previousAdminToken && !adminToken) {
+    throw new Error('previousAdminToken requires adminToken');
   }
 }
 
@@ -670,24 +680,32 @@ export function buildHealthResponse({ dataDirReadable, now = new Date() } = {}) 
 
 export function buildAuthStatusResponse({
   authToken,
+  previousAuthToken,
   readToken,
   previousReadToken,
   writeToken,
   previousWriteToken,
   adminToken,
+  previousAdminToken,
   managementAuthSource,
 } = {}) {
   const normAuth = normalizeAuthToken(authToken);
+  const normPreviousAuth = normalizeAuthToken(previousAuthToken);
   const normRead = normalizeReadToken(readToken);
   const normPreviousRead = normalizeReadToken(previousReadToken);
   const normWrite = normalizeWriteToken(writeToken);
   const normPreviousWrite = normalizeWriteToken(previousWriteToken);
   const normAdmin = normalizeAdminToken(adminToken);
+  const normPreviousAdmin = normalizeAdminToken(previousAdminToken);
   assertPreviousScopedTokensRequireCurrent({
+    authToken: normAuth,
+    previousAuthToken: normPreviousAuth,
     readToken: normRead,
     previousReadToken: normPreviousRead,
     writeToken: normWrite,
     previousWriteToken: normPreviousWrite,
+    adminToken: normAdmin,
+    previousAdminToken: normPreviousAdmin,
   });
   const enabled = Boolean(normAuth || normRead || normWrite || normAdmin);
   const startupCredentialMode = resolveStartupCredentialMode(
@@ -708,8 +726,10 @@ export function buildAuthStatusResponse({
         admin: Boolean(normAdmin),
       },
       previousTokenOverlapConfigured: {
+        full: Boolean(normPreviousAuth),
         read: Boolean(normPreviousRead),
         write: Boolean(normPreviousWrite),
+        admin: Boolean(normPreviousAdmin),
       },
       writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
     },
@@ -867,11 +887,13 @@ export function createServer({
   dataDir,
   backupHooks,
   authToken,
+  previousAuthToken,
   readToken,
   previousReadToken,
   writeToken,
   previousWriteToken,
   adminToken,
+  previousAdminToken,
   managementAuthSource,
   restoreRoot,
   rateLimit,
@@ -881,16 +903,22 @@ export function createServer({
 } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const expectedAuthToken = normalizeAuthToken(authToken);
+  const expectedPreviousAuthToken = normalizeAuthToken(previousAuthToken);
   const expectedReadToken = normalizeReadToken(readToken);
   const expectedPreviousReadToken = normalizeReadToken(previousReadToken);
   const expectedWriteToken = normalizeWriteToken(writeToken);
   const expectedPreviousWriteToken = normalizeWriteToken(previousWriteToken);
   const expectedAdminToken = normalizeAdminToken(adminToken);
+  const expectedPreviousAdminToken = normalizeAdminToken(previousAdminToken);
   assertPreviousScopedTokensRequireCurrent({
+    authToken: expectedAuthToken,
+    previousAuthToken: expectedPreviousAuthToken,
     readToken: expectedReadToken,
     previousReadToken: expectedPreviousReadToken,
     writeToken: expectedWriteToken,
     previousWriteToken: expectedPreviousWriteToken,
+    adminToken: expectedAdminToken,
+    previousAdminToken: expectedPreviousAdminToken,
   });
   // Startup credential source snapshot: resolved once at construction together with
   // the normalized tokens (undefined stays direct-compatible; keychain without any
@@ -942,7 +970,11 @@ export function createServer({
             const token = header.slice('Bearer '.length);
 
             const matchesAuth = expectedAuthToken && authTokensMatch(token, expectedAuthToken);
+            const matchesPreviousAuth = expectedPreviousAuthToken
+              && authTokensMatch(token, expectedPreviousAuthToken);
             const matchesAdmin = expectedAdminToken && authTokensMatch(token, expectedAdminToken);
+            const matchesPreviousAdmin = expectedPreviousAdminToken
+              && authTokensMatch(token, expectedPreviousAdminToken);
             const matchesWrite = expectedWriteToken && authTokensMatch(token, expectedWriteToken);
             const matchesPreviousWrite = expectedPreviousWriteToken
               && authTokensMatch(token, expectedPreviousWriteToken);
@@ -952,7 +984,7 @@ export function createServer({
 
             // Full/admin 权限最宽：同时拥有写入与管理权限。
             // 仅在未配置管理令牌时，写入凭证才保留管理权限。
-            if (matchesAuth || matchesAdmin) {
+            if (matchesAuth || matchesPreviousAuth || matchesAdmin || matchesPreviousAdmin) {
               authorized = true;
               isWriteAllowed = true;
               isAdminAllowed = true;
@@ -1261,11 +1293,13 @@ export function createServer({
       if (method === 'GET' && pathname === '/api/auth-status') {
         return sendJSON(res, 200, buildAuthStatusResponse({
           authToken: expectedAuthToken,
+          previousAuthToken: expectedPreviousAuthToken,
           readToken: expectedReadToken,
           previousReadToken: expectedPreviousReadToken,
           writeToken: expectedWriteToken,
           previousWriteToken: expectedPreviousWriteToken,
           adminToken: expectedAdminToken,
+          previousAdminToken: expectedPreviousAdminToken,
           managementAuthSource: startupManagementAuthSource,
         }));
       }
@@ -2240,11 +2274,13 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const host = process.env.HOST || '127.0.0.1';
   const dataDir = process.env.DATA_DIR || resolve(join(process.cwd(), 'data'));
   const authToken = process.env.LINKE_AUTH_TOKEN || process.env.LINKE_TOKEN;
+  const previousAuthToken = process.env.LINKE_PREVIOUS_AUTH_TOKEN;
   const readToken = process.env.LINKE_READ_TOKEN;
   const previousReadToken = process.env.LINKE_PREVIOUS_READ_TOKEN;
   const writeToken = process.env.LINKE_WRITE_TOKEN;
   const previousWriteToken = process.env.LINKE_PREVIOUS_WRITE_TOKEN;
   const adminToken = process.env.LINKE_ADMIN_TOKEN;
+  const previousAdminToken = process.env.LINKE_PREVIOUS_ADMIN_TOKEN;
   const restoreRoot = process.env.LINKE_RESTORE_ROOT;
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const rateLimit = parseRateLimitPerMinute(process.env.LINKE_RATE_LIMIT_PER_MINUTE);
@@ -2253,11 +2289,13 @@ if (process.argv[1] && resolve(process.argv[1]) === __filename) {
   const server = createServer({
     dataDir,
     authToken,
+    previousAuthToken,
     readToken,
     previousReadToken,
     writeToken,
     previousWriteToken,
     adminToken,
+    previousAdminToken,
     restoreRoot: normalizedRestoreRoot,
     rateLimit,
     auditRetention,

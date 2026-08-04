@@ -12,24 +12,37 @@ import {
 
 // 合成 sentinel：仅用于断言映射/透传，禁止真实凭证。
 const FULL = 'makc-full-sentinel';
+const PREV_FULL = 'makc-previous-full-sentinel';
 const READ = 'makc-read-sentinel';
 const PREV_READ = 'makc-previous-read-sentinel';
 const WRITE = 'makc-write-sentinel';
 const PREV_WRITE = 'makc-previous-write-sentinel';
 const ADMIN = 'makc-admin-sentinel';
-const ALL_SENTINELS = [FULL, READ, PREV_READ, WRITE, PREV_WRITE, ADMIN];
+const PREV_ADMIN = 'makc-previous-admin-sentinel';
+const ALL_SENTINELS = [FULL, PREV_FULL, READ, PREV_READ, WRITE, PREV_WRITE, ADMIN, PREV_ADMIN];
 
-/** 六个 scope 的全量合法声明（映射表顺序）。 */
-const ALL_SCOPES = ['full', 'read', 'previous-read', 'write', 'previous-write', 'admin'];
+/** 八个 scope 的全量合法声明（映射表顺序）。 */
+const ALL_SCOPES = [
+  'full',
+  'previous-full',
+  'read',
+  'previous-read',
+  'write',
+  'previous-write',
+  'admin',
+  'previous-admin',
+];
 
 /** scope → 合成值，用于填充 fake Keychain backing。 */
 const SCOPE_VALUES = new Map([
   ['full', FULL],
+  ['previous-full', PREV_FULL],
   ['read', READ],
   ['previous-read', PREV_READ],
   ['write', WRITE],
   ['previous-write', PREV_WRITE],
   ['admin', ADMIN],
+  ['previous-admin', PREV_ADMIN],
 ]);
 
 /**
@@ -84,18 +97,20 @@ function backingFor(scopes) {
 }
 
 describe('management-auth-keychain 固定映射', () => {
-  it('映射表覆盖六 scope，itemId 与 optionKey 固定', () => {
+  it('映射表覆盖八 scope，itemId 与 optionKey 固定', () => {
     assert.deepEqual(
       MANAGEMENT_AUTH_SCOPE_MAP.map(({ scope, itemId, optionKey, current, requires }) => (
         { scope, itemId, optionKey, current, requires }
       )),
       [
         { scope: 'full', itemId: 'management-auth.full', optionKey: 'authToken', current: true, requires: null },
+        { scope: 'previous-full', itemId: 'management-auth.full.previous', optionKey: 'previousAuthToken', current: false, requires: 'full' },
         { scope: 'read', itemId: 'management-auth.read', optionKey: 'readToken', current: true, requires: null },
         { scope: 'previous-read', itemId: 'management-auth.read.previous', optionKey: 'previousReadToken', current: false, requires: 'read' },
         { scope: 'write', itemId: 'management-auth.write', optionKey: 'writeToken', current: true, requires: null },
         { scope: 'previous-write', itemId: 'management-auth.write.previous', optionKey: 'previousWriteToken', current: false, requires: 'write' },
         { scope: 'admin', itemId: 'management-auth.admin', optionKey: 'adminToken', current: true, requires: null },
+        { scope: 'previous-admin', itemId: 'management-auth.admin.previous', optionKey: 'previousAdminToken', current: false, requires: 'admin' },
       ],
     );
     // 映射表冻结，运行期不可改写
@@ -114,6 +129,15 @@ describe('management-auth-keychain scope 列表解析', () => {
     assert.deepEqual(parseManagementAuthScopeList(ALL_SCOPES.join(',')), ALL_SCOPES);
   });
 
+  it('接受 previous-full/previous-admin 且要求各自 current 配对', () => {
+    assert.deepEqual(
+      parseManagementAuthScopeList('full,previous-full,admin,previous-admin'),
+      ['full', 'previous-full', 'admin', 'previous-admin'],
+    );
+    assert.throws(() => parseManagementAuthScopeList('previous-full,admin'), /previous|current/i);
+    assert.throws(() => parseManagementAuthScopeList('full,previous-admin'), /previous|current/i);
+  });
+
   it('拒绝非字符串/空串/空项/未知/大小写变体/重复/previous 失配/无 current', () => {
     const cases = [
       [undefined, /scope/i],
@@ -123,10 +147,14 @@ describe('management-auth-keychain scope 列表解析', () => {
       ['write,bogus', /scope/i],
       ['write,WRITE', /scope/i],
       ['write,write,admin', /duplicate/i],
+      ['previous-full', /previous|current/i],
       ['previous-read', /previous|current/i],
       ['previous-write', /previous|current/i],
+      ['previous-admin', /previous|current/i],
+      ['admin,previous-full', /previous|current/i],
       ['read,previous-write', /previous|current/i],
       ['write,previous-read', /previous|current/i],
+      ['full,previous-admin', /previous|current/i],
     ];
     for (const [raw, match] of cases) {
       assert.throws(() => parseManagementAuthScopeList(raw), match, `must reject: ${JSON.stringify(raw)}`);
@@ -178,15 +206,17 @@ describe('management-auth-keychain selector 与 direct token 互斥（env）', (
     );
   });
 
-  it('keychain 模式与七个 direct token 环境变量（含空串）混用全部拒绝且无 fallback', () => {
+  it('keychain 模式与九个 direct token 环境变量（含空串）混用全部拒绝且无 fallback', () => {
     const tokenEnvs = [
       'LINKE_AUTH_TOKEN',
       'LINKE_TOKEN',
+      'LINKE_PREVIOUS_AUTH_TOKEN',
       'LINKE_READ_TOKEN',
       'LINKE_PREVIOUS_READ_TOKEN',
       'LINKE_WRITE_TOKEN',
       'LINKE_PREVIOUS_WRITE_TOKEN',
       'LINKE_ADMIN_TOKEN',
+      'LINKE_PREVIOUS_ADMIN_TOKEN',
     ];
     for (const name of tokenEnvs) {
       for (const value of [FULL, '']) {
@@ -251,7 +281,16 @@ describe('management-auth-keychain startController 选项校验', () => {
   });
 
   it('scopes 与任一直接 token 选项（含空串）混用拒绝', () => {
-    const keys = ['authToken', 'readToken', 'previousReadToken', 'writeToken', 'previousWriteToken', 'adminToken'];
+    const keys = [
+      'authToken',
+      'previousAuthToken',
+      'readToken',
+      'previousReadToken',
+      'writeToken',
+      'previousWriteToken',
+      'adminToken',
+      'previousAdminToken',
+    ];
     for (const key of keys) {
       for (const value of [FULL, '']) {
         assert.throws(
@@ -290,24 +329,28 @@ describe('management-auth-keychain 加载器', () => {
     });
   });
 
-  it('全量声明按映射表顺序读取并完整映射六字段', async () => {
+  it('全量声明按映射表顺序读取并完整映射八字段', async () => {
     const keychain = recordingKeychain(backingFor(ALL_SCOPES));
     const tokens = await loadManagementAuthTokens(keychain, ALL_SCOPES);
     assert.deepEqual(keychain.gets, [
       'management-auth.full',
+      'management-auth.full.previous',
       'management-auth.read',
       'management-auth.read.previous',
       'management-auth.write',
       'management-auth.write.previous',
       'management-auth.admin',
+      'management-auth.admin.previous',
     ]);
     assert.deepEqual(tokens, {
       authToken: FULL,
+      previousAuthToken: PREV_FULL,
       readToken: READ,
       previousReadToken: PREV_READ,
       writeToken: WRITE,
       previousWriteToken: PREV_WRITE,
       adminToken: ADMIN,
+      previousAdminToken: PREV_ADMIN,
     });
   });
 

@@ -884,6 +884,10 @@ describe('Security — optional bearer token authentication', () => {
 
   it('fails fast when a previous scoped token is only whitespace', () => {
     assert.throws(
+      () => createServer({ dataDir, previousAuthToken: '   ' }),
+      /authToken must be a non-empty string/,
+    );
+    assert.throws(
       () => createServer({ dataDir, previousReadToken: '   ' }),
       /readToken must be a non-empty string/,
     );
@@ -891,9 +895,17 @@ describe('Security — optional bearer token authentication', () => {
       () => createServer({ dataDir, previousWriteToken: '   ' }),
       /writeToken must be a non-empty string/,
     );
+    assert.throws(
+      () => createServer({ dataDir, previousAdminToken: '   ' }),
+      /adminToken must be a non-empty string/,
+    );
   });
 
   it('fails fast when a previous scoped token is not a string', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousAuthToken: 42 }),
+      /authToken must be a string/,
+    );
     assert.throws(
       () => createServer({ dataDir, previousReadToken: 42 }),
       /readToken must be a string/,
@@ -901,6 +913,10 @@ describe('Security — optional bearer token authentication', () => {
     assert.throws(
       () => createServer({ dataDir, previousWriteToken: {} }),
       /writeToken must be a string/,
+    );
+    assert.throws(
+      () => createServer({ dataDir, previousAdminToken: [] }),
+      /adminToken must be a string/,
     );
   });
 
@@ -931,6 +947,17 @@ describe('Security — optional bearer token authentication', () => {
         readToken: 'read-current-only',
       }),
       { name: 'Error', message: 'previousWriteToken requires writeToken' },
+    );
+  });
+
+  it('fails closed when previous full/admin tokens are configured without their current pairs', () => {
+    assert.throws(
+      () => createServer({ dataDir, previousAuthToken: 'full-previous-only' }),
+      { name: 'Error', message: 'previousAuthToken requires authToken' },
+    );
+    assert.throws(
+      () => createServer({ dataDir, previousAdminToken: 'admin-previous-only' }),
+      { name: 'Error', message: 'previousAdminToken requires adminToken' },
     );
   });
 
@@ -1984,6 +2011,40 @@ describe('Security — loopback device administration routes', () => {
         const revoke = await postJson(port, '/api/device-revoke', { deviceId: 'mac-alpha' }, token);
         assert.strictEqual(revoke.status, 200, `revoke token=${token}`);
         assert.deepStrictEqual(await revoke.json(), { deviceId: 'mac-alpha', revoked: true });
+      }
+    });
+
+    assert.strictEqual(issueCount, 2);
+    assert.strictEqual(revokeCount, 2);
+  });
+
+  it('allows previous full/admin tokens on both device administration routes during overlap', async () => {
+    let issueCount = 0;
+    let revokeCount = 0;
+    const deviceAdministration = baseAdmin({
+      issueEnrollment: async ({ deviceId }) => {
+        issueCount += 1;
+        return { deviceId, code: SYNTHETIC_CODE, expiresAt: '2026-07-13T00:10:00.000Z' };
+      },
+      revokeDevice: async (deviceId) => {
+        revokeCount += 1;
+        return { deviceId, revoked: true };
+      },
+    });
+
+    await withServer({
+      authToken: 'full-current-token',
+      previousAuthToken: 'full-previous-token',
+      adminToken: 'admin-current-token',
+      previousAdminToken: 'admin-previous-token',
+      deviceAdministration,
+    }, async (port) => {
+      for (const token of ['full-previous-token', 'admin-previous-token']) {
+        const enroll = await postJson(port, '/api/device-enrollment-codes', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(enroll.status, 201, `enroll token=${token}`);
+
+        const revoke = await postJson(port, '/api/device-revoke', { deviceId: 'mac-alpha' }, token);
+        assert.strictEqual(revoke.status, 200, `revoke token=${token}`);
       }
     });
 

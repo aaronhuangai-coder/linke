@@ -61,7 +61,7 @@ describe('Agent auth-status CLI', () => {
       assert.deepStrictEqual(body.auth, {
         enabled: false,
         configuredScopes: { full: false, read: false, write: false, admin: false },
-        previousTokenOverlapConfigured: { read: false, write: false },
+        previousTokenOverlapConfigured: { full: false, read: false, write: false, admin: false },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
@@ -104,7 +104,7 @@ describe('Agent auth-status CLI', () => {
       assert.deepStrictEqual(body.auth, {
         enabled: true,
         configuredScopes: { full: false, read: true, write: true, admin: false },
-        previousTokenOverlapConfigured: { read: false, write: false },
+        previousTokenOverlapConfigured: { full: false, read: false, write: false, admin: false },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
       assert.deepStrictEqual(body.startupCredentialSource, {
@@ -149,7 +149,10 @@ describe('Agent auth-status CLI', () => {
         write: false,
         admin: true,
       });
-      assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.deepStrictEqual(
+        body.auth.previousTokenOverlapConfigured,
+        { full: false, read: false, write: false, admin: false },
+      );
       assert.deepStrictEqual(body.startupCredentialSource, {
         mode: 'direct',
         startupSnapshot: true,
