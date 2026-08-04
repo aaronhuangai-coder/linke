@@ -248,6 +248,10 @@ const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'command strings are encoded into runner-owned buffers and wiped on finish, close, failure, timeout, and synchronous end throw',
   'test/keychain-store.test.js runner-owned stdin buffer wiping',
   'source JavaScript command strings remain non-zeroizable; token-memory exposure review remains incomplete',
+  'Keychain envelope, decode, and equality mutable Buffer wiping code-stage mitigation',
+  'encode, envelope-to-hex, decode, equal, and length-mismatch paths wipe transient buffers',
+  'test/keychain-store.test.js transient envelope and comparison buffer wiping',
+  'envelope, base64url, hex, and decoded secret strings remain non-zeroizable; token-memory exposure review remains incomplete',
 ]);
 
 /**

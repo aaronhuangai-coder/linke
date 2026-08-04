@@ -918,6 +918,69 @@ describe('KeychainStore production security -i contract', () => {
     assertSecretEqual(await store.get('tls.key.item'), withNul, 'nul-mismatch');
   });
 
+  it('wipes transient envelope, decode, and equality Buffers after verified set', async () => {
+    const secret = 'transient-buffer-success-secret';
+    const envelope = encodeEnvelope(secret);
+    const payload = envelope.slice(ENVELOPE_PREFIX.length);
+    const captured = [];
+    const originalFrom = Buffer.from;
+    Buffer.from = function patchedFrom(...args) {
+      const buffer = originalFrom.apply(this, args);
+      const [value] = args;
+      if (value === secret || value === envelope || value === payload) captured.push(buffer);
+      return buffer;
+    };
+    try {
+      const runner = async (_args, { input }) => {
+        const command = String(input);
+        if (command.startsWith('add-generic-password')) return { stdout: '', exitCode: 0 };
+        return { stdout: `${envelope}\n`, exitCode: 0 };
+      };
+      const store = new KeychainStore({ runner, service: 'com.linke.test' });
+      await store.set('item.transient', secret);
+    } finally {
+      Buffer.from = originalFrom;
+    }
+
+    assert.equal(captured.length >= 5, true, 'expected transient Keychain buffers');
+    for (const buffer of captured) {
+      assert.ok(buffer.every((byte) => byte === 0), 'transient Keychain Buffer must be wiped');
+    }
+  });
+
+  it('wipes transient equality Buffers when verified set detects a mismatch', async () => {
+    const expectedSecret = 'transient-buffer-expected-secret';
+    const readBackSecret = 'short-mismatch';
+    const readBackEnvelope = encodeEnvelope(readBackSecret);
+    const captured = [];
+    const originalFrom = Buffer.from;
+    Buffer.from = function patchedFrom(...args) {
+      const buffer = originalFrom.apply(this, args);
+      const [value] = args;
+      if (value === expectedSecret || value === readBackSecret) captured.push(buffer);
+      return buffer;
+    };
+    try {
+      const runner = async (_args, { input }) => {
+        const command = String(input);
+        if (command.startsWith('add-generic-password')) return { stdout: '', exitCode: 0 };
+        return { stdout: `${readBackEnvelope}\n`, exitCode: 0 };
+      };
+      const store = new KeychainStore({ runner, service: 'com.linke.test' });
+      await assert.rejects(
+        store.set('item.mismatch', expectedSecret),
+        (error) => error.code === 'keychain-unavailable',
+      );
+    } finally {
+      Buffer.from = originalFrom;
+    }
+
+    assert.equal(captured.length >= 3, true, 'expected mismatch comparison buffers');
+    for (const buffer of captured) {
+      assert.ok(buffer.every((byte) => byte === 0), 'mismatch Keychain Buffer must be wiped');
+    }
+  });
+
   it('get strips only one CLI trailing newline; preserves significant trailing newline in envelope payload', async () => {
     const secret = 'value-with-trailing-nl\n';
     const { spawnImpl } = createInteractiveKeychainFake();

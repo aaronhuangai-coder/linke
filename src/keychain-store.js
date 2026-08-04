@@ -20,13 +20,27 @@ function unavailableError() {
   return new LinkeError(ERROR_CODES.KEYCHAIN_UNAVAILABLE);
 }
 
+function wipeMutableBuffer(buffer) {
+  try {
+    if (Buffer.isBuffer(buffer)) buffer.fill(0);
+  } catch {
+    // 清理保持 best-effort，不能覆盖既有成功或固定失败语义。
+  }
+}
+
 /**
  * Encode a non-empty UTF-8 secret as a versioned single-line envelope.
  * @param {string} secret
  * @returns {string}
  */
 function encodeEnvelope(secret) {
-  return `${ENVELOPE_PREFIX}${Buffer.from(secret, 'utf8').toString('base64url')}`;
+  let secretBytes;
+  try {
+    secretBytes = Buffer.from(secret, 'utf8');
+    return `${ENVELOPE_PREFIX}${secretBytes.toString('base64url')}`;
+  } finally {
+    wipeMutableBuffer(secretBytes);
+  }
 }
 
 /**
@@ -58,10 +72,14 @@ function decodeStoredPassword(rawStdout) {
     const payload = stored.slice(ENVELOPE_PREFIX.length);
     if (payload.length > 0 && BASE64URL_BODY.test(payload)) {
       const buf = Buffer.from(payload, 'base64url');
-      // Strict: re-encode must match exactly (rejects non-canonical / corrupt payloads).
-      if (buf.toString('base64url') === payload) {
-        if (buf.length === 0) throw unavailableError();
-        return buf.toString('utf8');
+      try {
+        // Strict: re-encode must match exactly (rejects non-canonical / corrupt payloads).
+        if (buf.toString('base64url') === payload) {
+          if (buf.length === 0) throw unavailableError();
+          return buf.toString('utf8');
+        }
+      } finally {
+        wipeMutableBuffer(buf);
       }
     }
     // Invalid envelope payload → legacy compatibility (do not surface structure errors).
@@ -76,10 +94,17 @@ function decodeStoredPassword(rawStdout) {
  * @returns {boolean}
  */
 function secretsEqual(a, b) {
-  const ba = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
+  let ba;
+  let bb;
+  try {
+    ba = Buffer.from(a, 'utf8');
+    bb = Buffer.from(b, 'utf8');
+    if (ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
+  } finally {
+    wipeMutableBuffer(ba);
+    wipeMutableBuffer(bb);
+  }
 }
 
 /**
@@ -132,13 +157,6 @@ export function createSecurityRunner({
     const sourceStdoutBuffers = [];
     let combinedStdout = null;
     let stdinBuffer = null;
-    const wipeMutableBuffer = (buffer) => {
-      try {
-        if (Buffer.isBuffer(buffer)) buffer.fill(0);
-      } catch {
-        // 清理保持 best-effort，不能覆盖既有成功或固定失败语义。
-      }
-    };
     const wipeCapturedStdout = () => {
       for (const buffer of [combinedStdout, ...stdout, ...sourceStdoutBuffers]) {
         wipeMutableBuffer(buffer);
@@ -294,7 +312,14 @@ export class KeychainStore {
     const account = assertSafeId(itemId, 'itemId');
     if (typeof secret !== 'string' || secret.length === 0) throw new Error('secret is required');
     const envelope = encodeEnvelope(secret);
-    const hex = Buffer.from(envelope, 'utf8').toString('hex');
+    let envelopeBytes;
+    let hex;
+    try {
+      envelopeBytes = Buffer.from(envelope, 'utf8');
+      hex = envelopeBytes.toString('hex');
+    } finally {
+      wipeMutableBuffer(envelopeBytes);
+    }
     const cmd = `add-generic-password -U -s ${this.service} -a ${account} -X ${hex}\n`;
     return this.runner(['-i'], { input: cmd }).then(async (result) => {
       if (result.exitCode !== 0) throw unavailableError();

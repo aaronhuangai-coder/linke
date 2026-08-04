@@ -3300,6 +3300,13 @@ describe('README — V1.46 management auth Keychain source', () => {
       'source JavaScript command string limitation');
   });
 
+  it('documents transient Keychain envelope/comparison Buffer wiping and string limits', () => {
+    assertReadmeContains(/Keychain.*(envelope|信封).*(decode|解码).*(equality|比较).*(Buffer|字节).*(覆写|清零|wipe)/i,
+      'transient Keychain envelope/decode/equality Buffer wiping');
+    assertReadmeContains(/(base64url|hex).*(字符串).*(不能|无法|不可).*(可靠)?清零/i,
+      'transient Keychain string limitation');
+  });
+
   it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
     assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
     assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');
