@@ -327,6 +327,38 @@ const CRASH_EVENT_NAMES = new Set([
   'mir-lock-released',
 ]);
 
+/** Task 6B.2 Task 5：跨进程 crash-image 二进制信封上限（4 MiB）。 */
+const CRASH_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+/** 信封顶层 exact own enumerable data keys（顺序固定）。 */
+const CRASH_IMAGE_ENVELOPE_KEYS = Object.freeze(['schemaVersion', 'image', 'sha256']);
+/** crash image 顶层 durable allowlist（含 Task 5 selected-host evidence）。 */
+const CRASH_IMAGE_DURABLE_KEYS = Object.freeze([
+  'schemaVersion',
+  'files',
+  'candidates',
+  'journal',
+  'anchors',
+  'receipts',
+  'transactionLock',
+  'manualInterventionLock',
+  'attestations',
+  'recoveryClaim',
+  'host',
+  'sequence',
+  'selectedFakeHostActionEvidence',
+]);
+const CRASH_IMAGE_HOST_KEYS = Object.freeze([
+  'loaded', 'jobIdentity', 'foreignJob', 'probeMode',
+  'health', 'schedulerOutcome', 'runtimeArtifacts',
+]);
+const CRASH_IMAGE_SEQUENCE_KEYS = Object.freeze(['clockIndex', 'idIndex', 'inodeIndex']);
+const CRASH_IMAGE_EVIDENCE_KEYS = Object.freeze(['action', 'count']);
+/** host.runtimeArtifacts exact closed shape: node,controller,agent × pathId,sha256. */
+const CRASH_IMAGE_RUNTIME_ARTIFACT_KEYS = Object.freeze(['node', 'controller', 'agent']);
+const CRASH_IMAGE_RUNTIME_ARTIFACT_FIELD_KEYS = Object.freeze(['pathId', 'sha256']);
+/** pathId: nonempty safe identifier (alphanumeric + . _ / -). */
+const CRASH_IMAGE_PATH_ID_RE = /^[A-Za-z0-9._/-]+$/;
+
 function validatePositiveOccurrence(value) {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw harnessError('crash capture occurrence must be a positive integer');
@@ -346,6 +378,584 @@ function decodeBytes(value) {
   const bytes = Buffer.from(value, 'base64');
   if (bytes.toString('base64') !== value) throw harnessError('invalid crash image base64');
   return bytes;
+}
+
+/**
+ * Descriptor-first plain-data object read with exact key *order* and no accessors.
+ * @param {unknown} value
+ * @param {readonly string[]} expectedKeys
+ * @returns {Record<string, unknown>}
+ */
+function readExactOrderedObject(value, expectedKeys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw harnessError('crash image field must be a plain object');
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    throw harnessError('crash image field must be a plain object');
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== expectedKeys.length || ownKeys.some((k) => typeof k !== 'string')) {
+    throw harnessError('crash image field has invalid keys');
+  }
+  for (let i = 0; i < expectedKeys.length; i += 1) {
+    if (ownKeys[i] !== expectedKeys[i]) {
+      throw harnessError('crash image field key order mismatch');
+    }
+  }
+  const fields = Object.create(null);
+  for (const key of expectedKeys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      throw harnessError('crash image field rejects accessors');
+    }
+    fields[key] = descriptor.value;
+  }
+  return fields;
+}
+
+function requireNonNegativeSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw harnessError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function validateIdentityPairShape(identity, label) {
+  const fields = readExactOrderedObject(identity, ['available', 'value']);
+  if (fields.available === false) {
+    if (fields.value !== null) throw harnessError(`${label} unavailable value must be null`);
+    return { available: false, value: null };
+  }
+  if (fields.available === true) {
+    if (typeof fields.value !== 'string' || fields.value.length === 0) {
+      throw harnessError(`${label} available value must be non-empty string`);
+    }
+    return { available: true, value: fields.value };
+  }
+  throw harnessError(`${label} available must be boolean`);
+}
+
+function validateSerializedLockRecord(record) {
+  if (record === null) return null;
+  const fields = readExactOrderedObject(record, [...LOCK_KEYS]);
+  if (fields.schemaVersion !== 1) throw harnessError('unsupported lock schema');
+  const transactionId = requireUuid(fields.transactionId);
+  const ownerNonce = requireUuid(fields.ownerNonce);
+  if (transactionId === ownerNonce) throw harnessError('lock identity collision');
+  if (!Number.isSafeInteger(fields.ownerPid) || fields.ownerPid <= 0) {
+    throw harnessError('lock ownerPid must be positive');
+  }
+  return {
+    schemaVersion: 1,
+    transactionId,
+    ownerPid: fields.ownerPid,
+    ownerNonce,
+    bootSessionIdentity: validateIdentityPairShape(
+      fields.bootSessionIdentity,
+      'bootSessionIdentity',
+    ),
+    processStartIdentity: validateIdentityPairShape(
+      fields.processStartIdentity,
+      'processStartIdentity',
+    ),
+  };
+}
+
+function validateSelectedFakeHostActionEvidence(value) {
+  if (value === null) return null;
+  const fields = readExactOrderedObject(value, CRASH_IMAGE_EVIDENCE_KEYS);
+  if (typeof fields.action !== 'string' || !CRASH_HOST_ACTIONS.has(fields.action)) {
+    throw harnessError('selected fake host action evidence action invalid');
+  }
+  if (!Number.isSafeInteger(fields.count) || fields.count <= 0) {
+    throw harnessError('selected fake host action evidence count invalid');
+  }
+  return { action: fields.action, count: fields.count };
+}
+
+/**
+ * Exact closed host.runtimeArtifacts: keys node,controller,agent (order fixed);
+ * each exact pathId,sha256; nonempty safe pathId; lowercase sha256.
+ * @param {unknown} value
+ * @returns {{
+ *   node: { pathId: string, sha256: string },
+ *   controller: { pathId: string, sha256: string },
+ *   agent: { pathId: string, sha256: string },
+ * }}
+ */
+function validateRuntimeArtifactsProjection(value) {
+  const artifacts = readExactOrderedObject(value, CRASH_IMAGE_RUNTIME_ARTIFACT_KEYS);
+  const out = Object.create(null);
+  for (const role of CRASH_IMAGE_RUNTIME_ARTIFACT_KEYS) {
+    const fields = readExactOrderedObject(
+      artifacts[role],
+      CRASH_IMAGE_RUNTIME_ARTIFACT_FIELD_KEYS,
+    );
+    if (typeof fields.pathId !== 'string' || fields.pathId.length === 0) {
+      throw harnessError('host.runtimeArtifacts pathId invalid');
+    }
+    if (!CRASH_IMAGE_PATH_ID_RE.test(fields.pathId)) {
+      throw harnessError('host.runtimeArtifacts pathId unsafe');
+    }
+    // requireSha256 enforces lowercase [0-9a-f]{64}.
+    out[role] = {
+      pathId: fields.pathId,
+      sha256: requireSha256(fields.sha256),
+    };
+  }
+  return {
+    node: out.node,
+    controller: out.controller,
+    agent: out.agent,
+  };
+}
+
+/**
+ * Reject duplicate logical keys so Map revival cannot silently overwrite.
+ * @param {string[]} keys
+ * @param {string} label
+ */
+function rejectDuplicateLogicalKeys(keys, label) {
+  const seen = new Set();
+  for (const key of keys) {
+    if (seen.has(key)) {
+      throw harnessError(`crash image ${label} duplicate logical key`);
+    }
+    seen.add(key);
+  }
+}
+
+/**
+ * Rebuild crash image with exact durable key order for canonical JSON.
+ * Validates nested shapes/values/bindings/hashes strictly (fail closed).
+ * @param {unknown} raw
+ * @returns {object}
+ */
+function materializeCrashImageProjection(raw) {
+  const top = readExactOrderedObject(raw, CRASH_IMAGE_DURABLE_KEYS);
+  if (top.schemaVersion !== 1) throw harnessError('unsupported crash image schema');
+
+  if (!Array.isArray(top.files)) throw harnessError('crash image files must be array');
+  const files = top.files.map((item) => {
+    const fields = readExactOrderedObject(item, [
+      'key', 'bytesBase64', 'device', 'inode', 'ownerUid',
+    ]);
+    if (typeof fields.key !== 'string' || fields.key.length === 0) {
+      throw harnessError('crash image file key invalid');
+    }
+    const bytes = decodeBytes(fields.bytesBase64);
+    if (typeof fields.device !== 'string' || fields.device.length === 0) {
+      throw harnessError('crash image file device invalid');
+    }
+    if (typeof fields.inode !== 'string' || fields.inode.length === 0) {
+      throw harnessError('crash image file inode invalid');
+    }
+    if (!Number.isSafeInteger(fields.ownerUid) || fields.ownerUid < 0) {
+      throw harnessError('crash image file ownerUid invalid');
+    }
+    return {
+      key: fields.key,
+      bytesBase64: encodeBytes(bytes),
+      device: fields.device,
+      inode: fields.inode,
+      ownerUid: fields.ownerUid,
+    };
+  });
+  rejectDuplicateLogicalKeys(files.map((item) => item.key), 'files');
+
+  if (!Array.isArray(top.candidates)) throw harnessError('crash image candidates must be array');
+  const candidates = top.candidates.map((item) => {
+    const fields = readExactOrderedObject(item, [
+      'key', 'bytesBase64', 'sha256', 'role', 'transactionId',
+    ]);
+    if (typeof fields.key !== 'string' || fields.key.length === 0) {
+      throw harnessError('crash image candidate key invalid');
+    }
+    const bytes = decodeBytes(fields.bytesBase64);
+    const sha256 = requireSha256(fields.sha256);
+    if (sha256Hex(bytes) !== sha256) {
+      throw harnessError('crash image candidate hash mismatch');
+    }
+    if (
+      fields.role !== 'controller'
+      && fields.role !== 'scheduler'
+      && fields.role !== 'manifest'
+    ) {
+      throw harnessError('crash image candidate role invalid');
+    }
+    return {
+      key: fields.key,
+      bytesBase64: encodeBytes(bytes),
+      sha256,
+      role: fields.role,
+      transactionId: requireUuid(fields.transactionId),
+    };
+  });
+  rejectDuplicateLogicalKeys(candidates.map((item) => item.key), 'candidates');
+
+  if (!Array.isArray(top.journal)) throw harnessError('crash image journal must be array');
+  const journal = top.journal.map((entry) => {
+    const projection = validateLaunchAgentJournal(structuredClone(entry));
+    if (computeJournalEntrySha256(projection) !== projection.entrySha256) {
+      throw harnessError('crash image journal entry hash mismatch');
+    }
+    return structuredClone(projection);
+  });
+
+  if (!Array.isArray(top.anchors)) throw harnessError('crash image anchors must be array');
+  const anchors = top.anchors.map((item) => {
+    if (!Array.isArray(item) || item.length !== 2) {
+      throw harnessError('crash image anchor entry must be [key, value]');
+    }
+    const [key, value] = item;
+    if (typeof key !== 'string' || !UUID_RE.test(key)) {
+      throw harnessError('crash image anchor key invalid');
+    }
+    const projection = validateLaunchAgentAnchor(structuredClone(value));
+    if (projection.anchorId !== key) {
+      throw harnessError('crash image anchor key binding mismatch');
+    }
+    return [key, structuredClone(projection)];
+  });
+  rejectDuplicateLogicalKeys(anchors.map(([key]) => key), 'anchors');
+
+  if (!Array.isArray(top.receipts)) throw harnessError('crash image receipts must be array');
+  const receipts = top.receipts.map((item) => {
+    if (!Array.isArray(item) || item.length !== 2) {
+      throw harnessError('crash image receipt entry must be [key, value]');
+    }
+    const [key, value] = item;
+    requireUuid(key);
+    const valueFields = readExactOrderedObject(value, ['projection', 'sha256']);
+    const projection = validateLaunchAgentReceipt(structuredClone(valueFields.projection));
+    const sha256 = requireSha256(valueFields.sha256);
+    const computed = sha256Hex(Buffer.from(JSON.stringify(projection), 'utf8'));
+    if (computed !== sha256) throw harnessError('crash image receipt hash mismatch');
+    if (projection.transactionId !== key) {
+      throw harnessError('crash image receipt key binding mismatch');
+    }
+    return [key, { projection: structuredClone(projection), sha256 }];
+  });
+  rejectDuplicateLogicalKeys(receipts.map(([key]) => key), 'receipts');
+
+  const transactionLock = validateSerializedLockRecord(top.transactionLock);
+  const manualInterventionLock = validateSerializedLockRecord(top.manualInterventionLock);
+
+  if (!Array.isArray(top.attestations)) {
+    throw harnessError('crash image attestations must be an array');
+  }
+  const attestations = top.attestations.map((item) => {
+    if (!Array.isArray(item) || item.length !== 2) {
+      throw harnessError('crash image attestation entry must be [key, value]');
+    }
+    const [key, value] = item;
+    if (typeof key !== 'string' || !UUID_RE.test(key)) {
+      throw harnessError('crash image attestation key invalid');
+    }
+    const projection = validateLaunchAgentManualRepairAttestation(structuredClone(value));
+    if (projection.manualRepairConfirmationId !== key) {
+      throw harnessError('crash image attestation key binding mismatch');
+    }
+    return [key, structuredClone(projection)];
+  });
+  rejectDuplicateLogicalKeys(attestations.map(([key]) => key), 'attestations');
+
+  let recoveryClaim = null;
+  if (top.recoveryClaim !== null) {
+    const claimFields = readExactOrderedObject(top.recoveryClaim, ['record', 'ref']);
+    const recordFields = readExactOrderedObject(claimFields.record, [
+      'schemaVersion', 'kind', 'claimId', 'transactionId', 'ownerPid', 'ownerNonce',
+      'bootSessionIdentity', 'processStartIdentity',
+      'expectedTransactionLockRef', 'manualInterventionLockRef', 'freshTransactionLockRef',
+    ]);
+    if (recordFields.schemaVersion !== 1) throw harnessError('recovery claim schema invalid');
+    if (recordFields.kind !== 'recovery-claim-lock') {
+      throw harnessError('recovery claim kind invalid');
+    }
+    const claimId = requireUuid(recordFields.claimId);
+    const transactionId = requireUuid(recordFields.transactionId);
+    const ownerNonce = requireUuid(recordFields.ownerNonce);
+    if (claimId === transactionId || claimId === ownerNonce || transactionId === ownerNonce) {
+      throw harnessError('recovery claim identity collision');
+    }
+    if (!Number.isSafeInteger(recordFields.ownerPid) || recordFields.ownerPid <= 0) {
+      throw harnessError('recovery claim ownerPid invalid');
+    }
+    // Canonical record for hash binding (exact key order).
+    const record = {
+      schemaVersion: 1,
+      kind: 'recovery-claim-lock',
+      claimId,
+      transactionId,
+      ownerPid: recordFields.ownerPid,
+      ownerNonce,
+      bootSessionIdentity: validateIdentityPairShape(
+        recordFields.bootSessionIdentity,
+        'claim.bootSessionIdentity',
+      ),
+      processStartIdentity: validateIdentityPairShape(
+        recordFields.processStartIdentity,
+        'claim.processStartIdentity',
+      ),
+      expectedTransactionLockRef: recordFields.expectedTransactionLockRef === null
+        ? null
+        : (() => {
+          const er = readExactOrderedObject(recordFields.expectedTransactionLockRef, [
+            'kind', 'transactionId', 'ownerNonce', 'sha256',
+          ]);
+          if (er.kind !== 'transaction-lock') throw harnessError('claim expected tx kind');
+          return {
+            kind: 'transaction-lock',
+            transactionId: requireUuid(er.transactionId),
+            ownerNonce: requireUuid(er.ownerNonce),
+            sha256: requireSha256(er.sha256),
+          };
+        })(),
+      manualInterventionLockRef: (() => {
+        const mir = readExactOrderedObject(recordFields.manualInterventionLockRef, [
+          'kind', 'transactionId', 'ownerNonce', 'sha256',
+        ]);
+        if (mir.kind !== 'manual-intervention-lock') throw harnessError('claim mir kind');
+        return {
+          kind: 'manual-intervention-lock',
+          transactionId: requireUuid(mir.transactionId),
+          ownerNonce: requireUuid(mir.ownerNonce),
+          sha256: requireSha256(mir.sha256),
+        };
+      })(),
+      freshTransactionLockRef: (() => {
+        const fr = readExactOrderedObject(recordFields.freshTransactionLockRef, [
+          'kind', 'transactionId', 'ownerNonce', 'sha256',
+        ]);
+        if (fr.kind !== 'transaction-lock') throw harnessError('claim fresh tx kind');
+        return {
+          kind: 'transaction-lock',
+          transactionId: requireUuid(fr.transactionId),
+          ownerNonce: requireUuid(fr.ownerNonce),
+          sha256: requireSha256(fr.sha256),
+        };
+      })(),
+    };
+    const claimSha = sha256Hex(Buffer.from(JSON.stringify(record), 'utf8'));
+    const refIn = readExactOrderedObject(claimFields.ref, [
+      'kind', 'claimId', 'transactionId', 'ownerNonce', 'sha256',
+    ]);
+    if (
+      refIn.kind !== 'recovery-claim-lock'
+      || refIn.claimId !== claimId
+      || refIn.transactionId !== transactionId
+      || refIn.ownerNonce !== ownerNonce
+      || refIn.sha256 !== claimSha
+    ) {
+      throw harnessError('crash image recoveryClaim ref/hash mismatch');
+    }
+    recoveryClaim = {
+      record,
+      ref: {
+        kind: 'recovery-claim-lock',
+        claimId,
+        transactionId,
+        ownerNonce,
+        sha256: claimSha,
+      },
+    };
+  }
+
+  const hostFields = readExactOrderedObject(top.host, CRASH_IMAGE_HOST_KEYS);
+  const loaded = readExactOrderedObject(hostFields.loaded, ['controller', 'scheduler']);
+  if (typeof loaded.controller !== 'boolean' || typeof loaded.scheduler !== 'boolean') {
+    throw harnessError('host.loaded booleans required');
+  }
+  const jobIdentity = readExactOrderedObject(hostFields.jobIdentity, ['controller', 'scheduler']);
+  for (const role of ['controller', 'scheduler']) {
+    const value = jobIdentity[role];
+    if (value !== null && (typeof value !== 'string' || !SHA_RE.test(value))) {
+      throw harnessError('host.jobIdentity invalid');
+    }
+  }
+  const foreignJob = readExactOrderedObject(hostFields.foreignJob, ['controller', 'scheduler']);
+  if (typeof foreignJob.controller !== 'boolean' || typeof foreignJob.scheduler !== 'boolean') {
+    throw harnessError('host.foreignJob booleans required');
+  }
+  const probeMode = readExactOrderedObject(hostFields.probeMode, ['controller', 'scheduler']);
+  for (const role of ['controller', 'scheduler']) {
+    if (probeMode[role] !== 'normal' && probeMode[role] !== 'unknown') {
+      throw harnessError('host.probeMode invalid');
+    }
+  }
+  const health = readExactOrderedObject(hostFields.health, ['statusCode', 'ready', 'count']);
+  if (!Number.isSafeInteger(health.statusCode) || typeof health.ready !== 'boolean') {
+    throw harnessError('host.health invalid');
+  }
+  requireNonNegativeSafeInteger(health.count, 'host.health.count');
+  if (
+    hostFields.schedulerOutcome !== 'ok'
+    && hostFields.schedulerOutcome !== 'failed'
+  ) {
+    // harness may use other synthetic outcomes; accept non-empty string only.
+    if (typeof hostFields.schedulerOutcome !== 'string' || hostFields.schedulerOutcome.length === 0) {
+      throw harnessError('host.schedulerOutcome invalid');
+    }
+  }
+  const runtimeArtifacts = validateRuntimeArtifactsProjection(hostFields.runtimeArtifacts);
+
+  const sequence = readExactOrderedObject(top.sequence, CRASH_IMAGE_SEQUENCE_KEYS);
+  requireNonNegativeSafeInteger(sequence.clockIndex, 'sequence.clockIndex');
+  requireNonNegativeSafeInteger(sequence.idIndex, 'sequence.idIndex');
+  requireNonNegativeSafeInteger(sequence.inodeIndex, 'sequence.inodeIndex');
+
+  const selectedFakeHostActionEvidence = validateSelectedFakeHostActionEvidence(
+    top.selectedFakeHostActionEvidence,
+  );
+
+  return {
+    schemaVersion: 1,
+    files,
+    candidates,
+    journal,
+    anchors,
+    receipts,
+    transactionLock,
+    manualInterventionLock,
+    attestations,
+    recoveryClaim,
+    host: {
+      loaded: { controller: loaded.controller, scheduler: loaded.scheduler },
+      jobIdentity: {
+        controller: jobIdentity.controller,
+        scheduler: jobIdentity.scheduler,
+      },
+      foreignJob: {
+        controller: foreignJob.controller,
+        scheduler: foreignJob.scheduler,
+      },
+      probeMode: {
+        controller: probeMode.controller,
+        scheduler: probeMode.scheduler,
+      },
+      health: {
+        statusCode: health.statusCode,
+        ready: health.ready,
+        count: health.count,
+      },
+      schedulerOutcome: hostFields.schedulerOutcome,
+      runtimeArtifacts,
+    },
+    sequence: {
+      clockIndex: sequence.clockIndex,
+      idIndex: sequence.idIndex,
+      inodeIndex: sequence.inodeIndex,
+    },
+    selectedFakeHostActionEvidence,
+  };
+}
+
+function canonicalCrashImageBytes(image) {
+  return Buffer.from(JSON.stringify(image), 'utf8');
+}
+
+/**
+ * Task 6B.2 Task 5：将 branded crash image 序列化为闭合二进制信封。
+ * 信封 = canonical UTF-8 JSON `{schemaVersion:1,image,sha256}`；
+ * sha256 覆盖 image 单独的 canonical JSON bytes；总长 ≤ 4 MiB。
+ * @param {object} image
+ * @returns {Buffer}
+ */
+export function serializeLaunchAgentLifecycleCrashImageForTest(image) {
+  if (image === null || typeof image !== 'object' || Array.isArray(image)) {
+    throw harnessError('serialize requires branded crash image');
+  }
+  if (!CRASH_IMAGE_BRAND.has(image)) {
+    throw harnessError('serialize requires branded crash image');
+  }
+  // Materialize through validator so envelope always carries canonical key order.
+  const canonicalImage = materializeCrashImageProjection(image);
+  const imageBytes = canonicalCrashImageBytes(canonicalImage);
+  const digest = sha256Hex(imageBytes);
+  const envelope = {
+    schemaVersion: 1,
+    image: canonicalImage,
+    sha256: digest,
+  };
+  const bytes = Buffer.from(JSON.stringify(envelope), 'utf8');
+  if (bytes.length > CRASH_IMAGE_MAX_BYTES) {
+    throw harnessError('serialized crash image exceeds 4 MiB');
+  }
+  return bytes;
+}
+
+/**
+ * Task 6B.2 Task 5：从闭合二进制信封 revive branded crash image。
+ * 拒绝 empty/invalid UTF-8、非 canonical JSON、额外/缺失/accessor/非 plain、
+ * digest 不匹配与全部非法嵌套形状。成功时 deep-freeze 并打 module-private brand。
+ * @param {Buffer} bytes
+ * @returns {object}
+ */
+export function reviveLaunchAgentLifecycleCrashImageForTest(bytes) {
+  if (!Buffer.isBuffer(bytes)) {
+    throw harnessError('revive requires Buffer');
+  }
+  if (bytes.length === 0) throw harnessError('revive rejects empty buffer');
+  if (bytes.length > CRASH_IMAGE_MAX_BYTES) {
+    throw harnessError('revive rejects buffer over 4 MiB');
+  }
+
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw harnessError('revive rejects invalid UTF-8');
+  }
+  // Reject non-canonical UTF-8 round-trip (e.g. overlong would already fail fatal).
+  if (!Buffer.from(text, 'utf8').equals(bytes)) {
+    throw harnessError('revive rejects noncanonical UTF-8 bytes');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw harnessError('revive rejects invalid JSON');
+  }
+
+  const envelope = readExactOrderedObject(parsed, CRASH_IMAGE_ENVELOPE_KEYS);
+  if (envelope.schemaVersion !== 1) {
+    throw harnessError('unsupported crash image envelope schema');
+  }
+  if (typeof envelope.sha256 !== 'string' || !SHA_RE.test(envelope.sha256)) {
+    throw harnessError('envelope sha256 invalid');
+  }
+
+  const canonicalImage = materializeCrashImageProjection(envelope.image);
+  const imageBytes = canonicalCrashImageBytes(canonicalImage);
+  const digest = sha256Hex(imageBytes);
+  if (digest !== envelope.sha256) {
+    throw harnessError('crash image digest mismatch');
+  }
+
+  // Noncanonical envelope/image bytes: re-encode must equal input exactly.
+  const reencoded = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    image: canonicalImage,
+    sha256: digest,
+  }), 'utf8');
+  if (!reencoded.equals(bytes)) {
+    throw harnessError('revive rejects noncanonical JSON bytes');
+  }
+
+  const image = deepFreeze(canonicalImage);
+  CRASH_IMAGE_BRAND.add(image);
+  // Dry-run restore through factory so nested restore validators also apply.
+  try {
+    createLaunchAgentLifecycleHarness({ crashImage: image });
+  } catch (error) {
+    CRASH_IMAGE_BRAND.delete(image);
+    if (error instanceof Error && typeof error.message === 'string') {
+      throw harnessError(`revive restore failed: ${error.message}`);
+    }
+    throw harnessError('revive restore failed');
+  }
+  return image;
 }
 
 export function createLaunchAgentLifecycleHarness(options = {}) {
@@ -460,6 +1070,12 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   let raceRecoveryClaimArm = null;
   // Task 5 test-only：readRecoveryClaimObservation 只读历史（present/absent）。
   const recoveryClaimObservationHistory = [];
+  // Task 6B.2 Task 5：闭合 selected fake host action evidence（仅 arm 后计数）。
+  // 进入 crash image；不进 dependencies/factoryContract。
+  let selectedFakeHostActionArm = null;
+  let selectedFakeHostActionEvidence = null;
+  /** @type {(() => void) | null} */
+  let selectedFakeHostActionWaiter = null;
 
   // crash image 只恢复 durable allowlist；hooks/失败注入/trace/计数保持新 harness 默认。
   if (revivedImage !== null) {
@@ -1933,6 +2549,7 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   // 无一断言 image.schemaVersion；升 2 无收益）。新增 Task 5 durable 字段
   // attestations / recoveryClaim 写入同一 v1 image；restore 经 validator/hash/binding 重算，
   // 禁止盲信 image 字节。
+  // Task 6B.2 Task 5：selectedFakeHostActionEvidence 同入 v1 allowlist。
   function captureDurableState() {
     const image = deepFreeze({
       schemaVersion: 1,
@@ -1976,6 +2593,12 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
         runtimeArtifacts: structuredClone(state.runtimeArtifacts),
       },
       sequence: { clockIndex, idIndex, inodeIndex },
+      selectedFakeHostActionEvidence: selectedFakeHostActionEvidence === null
+        ? null
+        : {
+          action: selectedFakeHostActionEvidence.action,
+          count: selectedFakeHostActionEvidence.count,
+        },
     });
     CRASH_IMAGE_BRAND.add(image);
     return image;
@@ -2077,6 +2700,20 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
     clockIndex = image.sequence.clockIndex;
     idIndex = image.sequence.idIndex;
     inodeIndex = image.sequence.inodeIndex;
+    // Task 6B.2 Task 5：strict revive of selected evidence（null 或 exact shape）。
+    if (!Object.hasOwn(image, 'selectedFakeHostActionEvidence')) {
+      // 兼容同进程旧 branded image（Task 5 前 capture 无此字段）→ 视为 null。
+      selectedFakeHostActionEvidence = null;
+    } else if (image.selectedFakeHostActionEvidence === null) {
+      selectedFakeHostActionEvidence = null;
+    } else {
+      const evidence = validateSelectedFakeHostActionEvidence(
+        image.selectedFakeHostActionEvidence,
+      );
+      selectedFakeHostActionEvidence = evidence === null
+        ? null
+        : deepFreeze({ action: evidence.action, count: evidence.count });
+    }
   }
 
   function maybeCaptureCrash(kind, value) {
@@ -2105,7 +2742,21 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
   // 只在真实 fake 状态变更成功且计数增加之后调用；失败/非零退出/CAS mismatch/未知状态
   // 绝不生成 post-mutation image。
   function recordSuccessfulHostMutation(fallbackAction) {
-    maybeCaptureCrash('host-mutation', semanticMutationAction(fallbackAction));
+    const action = semanticMutationAction(fallbackAction);
+    // Task 6B.2 Task 5：armed selected action 在成功 mutation 后计入 durable evidence。
+    if (selectedFakeHostActionArm !== null && selectedFakeHostActionArm === action) {
+      const prior = selectedFakeHostActionEvidence;
+      const nextCount = prior !== null && prior.action === action ? prior.count + 1 : 1;
+      selectedFakeHostActionEvidence = deepFreeze({ action, count: nextCount });
+      maybeCaptureCrash('host-mutation', action);
+      if (selectedFakeHostActionWaiter !== null) {
+        const resolve = selectedFakeHostActionWaiter;
+        selectedFakeHostActionWaiter = null;
+        resolve();
+      }
+      return;
+    }
+    maybeCaptureCrash('host-mutation', action);
   }
 
   /**
@@ -2276,6 +2927,40 @@ export function createLaunchAgentLifecycleHarness(options = {}) {
       if (!store.anchors.delete(anchorId)) {
         throw harnessError('cannot delete missing anchor');
       }
+    },
+
+    /**
+     * Task 6B.2 Task 5：闭合 selected fake host action evidence 接缝。
+     * 仅绑定 CRASH_HOST_ACTIONS 词汇；arm 后每次成功 fake mutation 计数。
+     * 返回 Promise：在该 action 首次成功 mutation 且 crash capture（若已 arm）
+     * 完成之后 resolve，供 owner child 在 completed journal 前导出 crash image。
+     * 禁止 generic callback；不进 dependencies/factoryContract。
+     * @param {{ action: string }} input
+     * @returns {Promise<void>}
+     */
+    armSelectedFakeHostActionEvidenceForTest(input) {
+      if (selectedFakeHostActionArm !== null) {
+        throw harnessError('selected fake host action evidence already armed');
+      }
+      const fields = readExactObject(input, ['action']);
+      if (typeof fields.action !== 'string' || !CRASH_HOST_ACTIONS.has(fields.action)) {
+        throw harnessError('unknown selected fake host action');
+      }
+      selectedFakeHostActionArm = fields.action;
+      return new Promise((resolve) => {
+        selectedFakeHostActionWaiter = resolve;
+      });
+    },
+
+    /**
+     * 只读：当前 durable selected fake host action evidence（null 或 exact shape）。
+     */
+    selectedFakeHostActionEvidenceForTest() {
+      if (selectedFakeHostActionEvidence === null) return null;
+      return deepFreeze({
+        action: selectedFakeHostActionEvidence.action,
+        count: selectedFakeHostActionEvidence.count,
+      });
     },
 
     armCrashCapture(selector) {

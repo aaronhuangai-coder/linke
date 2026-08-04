@@ -10,6 +10,17 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { fork } from 'node:child_process';
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import {
@@ -31,6 +42,7 @@ import {
 import * as metadataStoreModule from '../src/launchagent-lifecycle/metadata-store.js';
 import { createLaunchAgentLifecycleCoordinator } from '../src/launchagent-lifecycle/transaction-coordinator.js';
 import { createLaunchAgentLifecycleHarness } from './helpers/launchagent-lifecycle-harness.js';
+import * as launchAgentLifecycleHarnessModule from './helpers/launchagent-lifecycle-harness.js';
 
 // ---------------------------------------------------------------------------
 // Literal fixtures (adapted from acceptance-gate conventions; not imported).
@@ -4373,6 +4385,7 @@ const CRASH_IMAGE_TOP_KEYS = Object.freeze([
   'recoveryClaim',
   'host',
   'sequence',
+  'selectedFakeHostActionEvidence',
 ]);
 
 const CRASH_WINDOW_CASES = Object.freeze([
@@ -5181,4 +5194,559 @@ test('manual repair crash window both-absent rejects ordinary recovered transact
   assertPublisherHostUnchanged(harness, hostSentinelsBefore);
   assert.equal(harness.hasManualRepairAttestation(confirmationId), true);
   await assertCapabilityReplayDenied(capability);
+});
+
+// ---------------------------------------------------------------------------
+// Task 6B.2 Task 5 — highest-risk real-process manual repair path.
+// Owner child builds MIR frozen-compensation fixture (install final action
+// remove-controller / after-intent-pre), arms selected fake host evidence,
+// runs authorized recover until post-mutation pre-completed, serializes crash
+// image, emits READY_TO_KILL, then hangs. Parent SIGKILLs only that PID.
+// Recovery child revives image, proves real dead observations, claim-fenced
+// takeover, resumes without replaying the selected action.
+// ---------------------------------------------------------------------------
+
+const HIGHEST_RISK_HELPER_LEAF = 'launchagent-lock-contender.js';
+const HIGHEST_RISK_HELPER_PATH = fileURLToPath(
+  new URL(`./helpers/${HIGHEST_RISK_HELPER_LEAF}`, import.meta.url),
+);
+const HIGHEST_RISK_ROOT_PREFIX = 'linke-la-realproc-';
+const HIGHEST_RISK_CHILD_TIMEOUT_MS = 20_000;
+const HIGHEST_RISK_STDOUT_CAP = 64 * 1024;
+const HIGHEST_RISK_STDERR_CAP = 16 * 1024;
+const HIGHEST_RISK_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+const HIGHEST_RISK_RESULT_MAX_BYTES = 64 * 1024;
+const HIGHEST_RISK_READY_LINE = 'READY_TO_KILL\n';
+const HIGHEST_RISK_SELECTED_ACTION = 'remove-controller';
+
+const HIGHEST_RISK_FIXTURE_KEYS = Object.freeze([
+  'schemaVersion',
+  'operation',
+  'action',
+  'position',
+  'sourceCommit',
+  'scheduleSeconds',
+  'claimId',
+  'freshOwnerNonce',
+  'confirmationId',
+  'requestId',
+  'mirNonce',
+]);
+
+const HIGHEST_RISK_RESULT_KEYS = Object.freeze([
+  'status',
+  'transactionId',
+  'terminalJournalState',
+  'receiptCount',
+  'receiptValid',
+  'transactionLockPresent',
+  'manualInterventionLockPresent',
+  'recoveryClaimPresent',
+  'selectedFakeHostActionCount',
+  'ownerObservationStatuses',
+]);
+
+function highestRiskCanonicalJson(value) {
+  return `${JSON.stringify(value)}\n`;
+}
+
+function forceTerminateHighestRiskChild(child) {
+  if (!child) return;
+  try {
+    if (typeof child.connected === 'boolean' && child.connected && typeof child.disconnect === 'function') {
+      child.disconnect();
+    }
+  } catch {
+    // ignore
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Spawn a highest-risk contender mode with bounded stdout/stderr and watchdog.
+ * @param {import('node:test').TestContext} t
+ * @param {string[]} argv
+ */
+function spawnHighestRiskChild(t, argv) {
+  const state = {
+    stdout: '',
+    stderr: '',
+    exited: false,
+    exitCode: null,
+    exitSignal: null,
+    failure: null,
+    settled: false,
+    timer: null,
+    ready: false,
+  };
+  /** @type {{ resolve: Function, reject: Function }[]} */
+  const readyWaiters = [];
+  /** @type {{ resolve: Function, reject: Function }[]} */
+  const exitWaiters = [];
+
+  // Strip color-env conflict that Node emits on stderr (FORCE_COLOR + NO_COLOR).
+  const childEnv = { ...process.env };
+  delete childEnv.FORCE_COLOR;
+  delete childEnv.NO_COLOR;
+  const child = fork(HIGHEST_RISK_HELPER_PATH, argv, {
+    execArgv: [],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    serialization: 'json',
+    env: childEnv,
+  });
+
+  const settleFailure = (message) => {
+    if (state.settled) return;
+    state.settled = true;
+    if (state.timer !== null) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    forceTerminateHighestRiskChild(child);
+    const error = new assert.AssertionError({ message });
+    state.failure = error;
+    for (const waiter of readyWaiters.splice(0)) waiter.reject(error);
+    for (const waiter of exitWaiters.splice(0)) waiter.reject(error);
+  };
+
+  state.timer = setTimeout(() => {
+    settleFailure('highest-risk real-process manual repair: child watchdog timeout');
+  }, HIGHEST_RISK_CHILD_TIMEOUT_MS);
+
+  t.after(() => {
+    if (state.timer !== null) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    forceTerminateHighestRiskChild(child);
+    try {
+      if (child.stdout) child.stdout.destroy();
+    } catch {
+      // ignore
+    }
+    try {
+      if (child.stderr) child.stderr.destroy();
+    } catch {
+      // ignore
+    }
+  });
+
+  child.on('error', () => {
+    settleFailure('highest-risk real-process manual repair: child process error');
+  });
+
+  if (child.stdout) {
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (state.stdout.length < HIGHEST_RISK_STDOUT_CAP) {
+        state.stdout += chunk;
+      }
+      if (!state.ready && state.stdout.includes(HIGHEST_RISK_READY_LINE)) {
+        // exact single READY line only (no other stdout before ready)
+        if (state.stdout !== HIGHEST_RISK_READY_LINE) {
+          settleFailure(
+            'highest-risk real-process manual repair: owner stdout must be exactly READY_TO_KILL',
+          );
+          return;
+        }
+        state.ready = true;
+        for (const waiter of readyWaiters.splice(0)) waiter.resolve(undefined);
+      }
+    });
+  }
+  if (child.stderr) {
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      if (state.stderr.length < HIGHEST_RISK_STDERR_CAP) {
+        state.stderr += chunk;
+      }
+    });
+  }
+
+  child.on('exit', (code, signal) => {
+    state.exited = true;
+    state.exitCode = code;
+    state.exitSignal = signal;
+    if (state.timer !== null) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    for (const waiter of exitWaiters.splice(0)) {
+      waiter.resolve({ code, signal });
+    }
+  });
+
+  return {
+    child,
+    get pid() {
+      return child.pid;
+    },
+    get stdout() {
+      return state.stdout;
+    },
+    get stderr() {
+      return state.stderr;
+    },
+    get exitCode() {
+      return state.exitCode;
+    },
+    get exitSignal() {
+      return state.exitSignal;
+    },
+    waitReady() {
+      if (state.failure) return Promise.reject(state.failure);
+      if (state.ready) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        readyWaiters.push({ resolve, reject });
+      });
+    },
+    waitExit() {
+      if (state.failure) return Promise.reject(state.failure);
+      if (state.exited) {
+        return Promise.resolve({ code: state.exitCode, signal: state.exitSignal });
+      }
+      return new Promise((resolve, reject) => {
+        exitWaiters.push({ resolve, reject });
+      });
+    },
+  };
+}
+
+test('highest-risk real-process manual repair recovers after owner SIGKILL at selected host action', async (t) => {
+  // Task 5 exports must exist on the harness module (serialize/revive binary envelope).
+  assert.equal(
+    typeof launchAgentLifecycleHarnessModule.serializeLaunchAgentLifecycleCrashImageForTest,
+    'function',
+    'serializeLaunchAgentLifecycleCrashImageForTest must be exported',
+  );
+  assert.equal(
+    typeof launchAgentLifecycleHarnessModule.reviveLaunchAgentLifecycleCrashImageForTest,
+    'function',
+    'reviveLaunchAgentLifecycleCrashImageForTest must be exported',
+  );
+  const serializeCrashImage =
+    launchAgentLifecycleHarnessModule.serializeLaunchAgentLifecycleCrashImageForTest;
+  const reviveCrashImage =
+    launchAgentLifecycleHarnessModule.reviveLaunchAgentLifecycleCrashImageForTest;
+
+  // Private temp root under realproc prefix; fixture/image/result files only.
+  const tempRoot = await mkdtemp(join(tmpdir(), HIGHEST_RISK_ROOT_PREFIX));
+  t.after(async () => {
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+  await chmod(tempRoot, 0o700);
+
+  const fixturePath = join(tempRoot, 'fixture.json');
+  const crashImagePath = join(tempRoot, 'crash-image.bin');
+  const resultPath = join(tempRoot, 'result.json');
+
+  const fixture = {
+    schemaVersion: 1,
+    operation: 'install',
+    action: HIGHEST_RISK_SELECTED_ACTION,
+    position: 'after-intent-pre',
+    sourceCommit: FROZEN_COMMIT_PRIOR,
+    scheduleSeconds: 300,
+    claimId: 'a5b20001-aaaa-4aaa-8aaa-000000000001',
+    freshOwnerNonce: 'b5b20001-bbbb-4bbb-8bbb-000000000001',
+    confirmationId: 'c5b20001-cccc-4ccc-8ccc-000000000001',
+    requestId: 'd5b20001-dddd-4ddd-8ddd-000000000001',
+    mirNonce: 'e5b20001-eeee-4eee-8eee-000000000001',
+  };
+  assert.deepEqual(Object.keys(fixture), [...HIGHEST_RISK_FIXTURE_KEYS]);
+  await writeFile(fixturePath, highestRiskCanonicalJson(fixture), { mode: 0o600 });
+  await chmod(fixturePath, 0o600);
+
+  // 1) Owner: build MIR fixture, arm evidence, crash post selected host action.
+  const owner = spawnHighestRiskChild(t, [
+    'manual-repair-crash-owner',
+    fixturePath,
+    crashImagePath,
+  ]);
+  assert.ok(Number.isSafeInteger(owner.pid) && owner.pid > 0, 'owner pid recorded');
+  const ownerPid = owner.pid;
+  await owner.waitReady();
+  assert.equal(owner.stdout, HIGHEST_RISK_READY_LINE, 'exactly one READY_TO_KILL line');
+  assert.equal(owner.stderr, '', 'owner stderr must be empty');
+
+  // SIGKILL only the recorded owner PID; await confirmed signal.
+  process.kill(ownerPid, 'SIGKILL');
+  const ownerExit = await owner.waitExit();
+  assert.equal(ownerExit.signal, 'SIGKILL', 'owner must die by SIGKILL');
+  assert.equal(ownerExit.code, null);
+
+  // 2) Persisted image: stale recovery tx lock, post-action host/evidence,
+  // missing selected completed, one MIR, no residual claim.
+  const imageBytes = await readFile(crashImagePath);
+  assert.ok(imageBytes.length > 0, 'crash image must be non-empty');
+  assert.ok(
+    imageBytes.length <= HIGHEST_RISK_IMAGE_MAX_BYTES,
+    'crash image must be <= 4 MiB',
+  );
+  const image = reviveCrashImage(imageBytes);
+  assert.equal(image.schemaVersion, 1);
+  assert.ok(image.transactionLock !== null, 'stale recovery transaction lock present');
+  assert.equal(
+    image.transactionLock.ownerPid,
+    ownerPid,
+    'stale recovery lock must bind dead owner PID',
+  );
+  assert.ok(image.manualInterventionLock !== null, 'exactly one MIR lock');
+  assert.equal(image.recoveryClaim, null, 'no residual recovery claim');
+  assert.ok(
+    image.selectedFakeHostActionEvidence !== null
+      && image.selectedFakeHostActionEvidence.action === HIGHEST_RISK_SELECTED_ACTION
+      && image.selectedFakeHostActionEvidence.count === 1,
+    'selected fake host action evidence must be exactly once in image',
+  );
+  const imageJournalStates = image.journal
+    .filter((entry) => typeof entry.state === 'string')
+    .map((entry) => entry.state);
+  assert.equal(
+    imageJournalStates.includes(`compensate-${HIGHEST_RISK_SELECTED_ACTION}-completed`),
+    false,
+    'selected completed journal state must be absent in crash image',
+  );
+  assert.equal(
+    imageJournalStates.filter((state) => state === 'manual-intervention-required').length,
+    1,
+    'exactly one MIR journal marker',
+  );
+  assert.equal(
+    image.host.loaded.controller,
+    false,
+    'post-action host: controller unloaded after remove-controller',
+  );
+  // Controller file removed by selected action (install compensation final step).
+  const controllerFilePresent = image.files.some((item) => (
+    typeof item.key === 'string' && item.key.endsWith(':ai.linke.controller.plist')
+  ));
+  assert.equal(controllerFilePresent, false, 'post-action host: controller file absent');
+
+  // Round-trip serialize of revived branded image must re-encode under 4 MiB.
+  const reencoded = serializeCrashImage(image);
+  assert.ok(Buffer.isBuffer(reencoded));
+  assert.ok(reencoded.length <= HIGHEST_RISK_IMAGE_MAX_BYTES);
+
+  // 3) Recovery child: fresh auth, real dead observations, no selected replay.
+  const recovery = spawnHighestRiskChild(t, [
+    'manual-repair-recover',
+    crashImagePath,
+    resultPath,
+  ]);
+  const recoveryExit = await recovery.waitExit();
+  assert.equal(recoveryExit.code, 0, 'recovery must exit 0');
+  assert.equal(recoveryExit.signal, null);
+  assert.equal(recovery.stderr, '', 'recovery stderr must be empty');
+  // Child contract: result-file-only — recovery stdout must be exact empty.
+  assert.equal(recovery.stdout, '', 'recovery stdout must be exact empty (result-file-only)');
+
+  const resultBytes = await readFile(resultPath);
+  assert.ok(resultBytes.length > 0);
+  assert.ok(resultBytes.length <= HIGHEST_RISK_RESULT_MAX_BYTES);
+  const resultText = resultBytes.toString('utf8');
+  assert.equal(resultText.endsWith('\n'), true, 'result must be newline-terminated');
+  const resultLine = resultText.slice(0, -1);
+  assert.equal(resultLine.includes('\n'), false, 'exactly one result line');
+  const result = JSON.parse(resultLine);
+  assert.deepEqual(
+    Reflect.ownKeys(result).filter((key) => typeof key === 'string'),
+    [...HIGHEST_RISK_RESULT_KEYS],
+    'result envelope exact keys',
+  );
+  assert.equal(result.status, 'recovered');
+  assert.equal(typeof result.transactionId, 'string');
+  assert.match(
+    result.transactionId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert.equal(result.terminalJournalState, 'recovered');
+  assert.equal(result.receiptCount, 1);
+  assert.equal(result.receiptValid, true);
+  assert.equal(result.transactionLockPresent, false);
+  assert.equal(result.manualInterventionLockPresent, false);
+  assert.equal(result.recoveryClaimPresent, false);
+  assert.equal(
+    result.selectedFakeHostActionCount,
+    1,
+    'selected fake host action count exactly 1 across image/result',
+  );
+  assert.deepEqual(
+    result.ownerObservationStatuses,
+    ['dead', 'dead'],
+    'two real dead owner observations required',
+  );
+
+  // No real host writes: harness-only fakes; temp root must not contain LaunchAgents.
+  assert.equal(owner.stderr, '');
+  assert.equal(recovery.stderr, '');
+});
+
+/**
+ * Task 5 P1: focused negative coverage for serialize/revive envelope + nested
+ * closed projection. Name includes the focused pattern so existing runners pick it up.
+ * Starts from one valid serialized branded image; no branding seam exposed.
+ */
+test('highest-risk real-process manual repair serialize/revive envelope rejects noncanonical and nested corruption', async () => {
+  assert.equal(
+    typeof launchAgentLifecycleHarnessModule.serializeLaunchAgentLifecycleCrashImageForTest,
+    'function',
+  );
+  assert.equal(
+    typeof launchAgentLifecycleHarnessModule.reviveLaunchAgentLifecycleCrashImageForTest,
+    'function',
+  );
+  const serializeCrashImage =
+    launchAgentLifecycleHarnessModule.serializeLaunchAgentLifecycleCrashImageForTest;
+  const reviveCrashImage =
+    launchAgentLifecycleHarnessModule.reviveLaunchAgentLifecycleCrashImageForTest;
+
+  // One valid branded image via real coordinator crash capture (bounded, harness-only).
+  const runHarness = createLaunchAgentLifecycleHarness();
+  runHarness.failNextRevalidation('before-commit');
+  runHarness.armCrashCapture({
+    kind: 'journal-state',
+    state: 'compensating',
+    occurrence: 1,
+  });
+  const runCoordinator = createLaunchAgentLifecycleCoordinator(runHarness.dependencies());
+  const runReceipt = validateLaunchAgentReceipt(
+    await runCoordinator.install(frozenInstallInput()),
+  );
+  assert.equal(runReceipt.state, 'recovered');
+  const brandedImage = runHarness.takeCrashImage();
+  const goodBytes = serializeCrashImage(brandedImage);
+  assert.ok(Buffer.isBuffer(goodBytes));
+  assert.ok(goodBytes.length > 0);
+  assert.ok(goodBytes.length <= HIGHEST_RISK_IMAGE_MAX_BYTES);
+  // Round-trip sanity: valid path still revives.
+  const revivedOk = reviveCrashImage(goodBytes);
+  assert.equal(revivedOk.schemaVersion, 1);
+
+  // unbranded serialize rejects (no branding seam — plain object is not branded).
+  assert.throws(
+    () => serializeCrashImage({
+      schemaVersion: 1,
+      files: [],
+      candidates: [],
+      journal: [],
+      anchors: [],
+      receipts: [],
+      transactionLock: null,
+      manualInterventionLock: null,
+      attestations: [],
+      recoveryClaim: null,
+      host: revivedOk.host,
+      sequence: revivedOk.sequence,
+      selectedFakeHostActionEvidence: null,
+    }),
+    /branded|serialize/,
+    'unbranded serialize must reject',
+  );
+
+  // empty and non-Buffer revive reject.
+  assert.throws(() => reviveCrashImage(Buffer.alloc(0)), /empty|revive/);
+  assert.throws(() => reviveCrashImage(/** @type {any} */ ('not-a-buffer')), /Buffer|revive/);
+  assert.throws(() => reviveCrashImage(/** @type {any} */ (null)), /Buffer|revive/);
+
+  // invalid UTF-8 rejects.
+  assert.throws(
+    () => reviveCrashImage(Buffer.from([0xff, 0xfe, 0xfd])),
+    /UTF-8|utf-8|revive/i,
+  );
+
+  // whitespace / noncanonical JSON rejects.
+  const pretty = `${JSON.stringify(JSON.parse(goodBytes.toString('utf8')), null, 2)}`;
+  assert.throws(
+    () => reviveCrashImage(Buffer.from(pretty, 'utf8')),
+    /noncanonical|revive/,
+    'pretty-printed JSON must reject',
+  );
+  assert.throws(
+    () => reviveCrashImage(Buffer.from(` ${goodBytes.toString('utf8')}`, 'utf8')),
+    /noncanonical|JSON|revive/,
+    'leading whitespace JSON must reject',
+  );
+
+  // helper: mutate parsed envelope and re-encode (digest may be stale/wrong).
+  function envelopeBytes(mutator) {
+    const parsed = JSON.parse(goodBytes.toString('utf8'));
+    mutator(parsed);
+    return Buffer.from(JSON.stringify(parsed), 'utf8');
+  }
+
+  // extra / missing envelope key rejects.
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      e.extra = true;
+    })),
+    /key|envelope|revive|crash image/i,
+    'extra envelope key must reject',
+  );
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      delete e.sha256;
+    })),
+    /key|envelope|revive|crash image/i,
+    'missing envelope key must reject',
+  );
+
+  // image digest mismatch rejects.
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      e.sha256 = 'b'.repeat(64);
+    })),
+    /digest|mismatch|revive/,
+    'image digest mismatch must reject',
+  );
+
+  // >4 MiB rejects before parse.
+  assert.throws(
+    () => reviveCrashImage(Buffer.alloc(HIGHEST_RISK_IMAGE_MAX_BYTES + 1)),
+    /4 MiB|over|revive/,
+    '>4 MiB must reject before parse',
+  );
+
+  // one representative nested extra-key corruption rejects (runtimeArtifacts extra field).
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      e.image.host.runtimeArtifacts.extra = { pathId: 'nope', sha256: 'c'.repeat(64) };
+      e.sha256 = 'a'.repeat(64);
+    })),
+    /runtimeArtifacts|key|crash image|revive/i,
+    'runtimeArtifacts extra field must reject',
+  );
+
+  // one representative nested hash/binding corruption rejects (candidate hash).
+  assert.ok(
+    Array.isArray(revivedOk.candidates) && revivedOk.candidates.length > 0,
+    'fixture must expose at least one candidate for nested hash corruption',
+  );
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      e.image.candidates[0].sha256 = 'd'.repeat(64);
+      e.sha256 = 'a'.repeat(64);
+    })),
+    /hash|mismatch|candidate|crash image|revive/i,
+    'nested candidate hash corruption must reject',
+  );
+
+  // compact: one duplicate logical key in map-like array rejects (files).
+  assert.ok(
+    Array.isArray(revivedOk.files) && revivedOk.files.length > 0,
+    'fixture must expose at least one file for duplicate-key corruption',
+  );
+  assert.throws(
+    () => reviveCrashImage(envelopeBytes((e) => {
+      e.image.files.push(structuredClone(e.image.files[0]));
+      e.sha256 = 'a'.repeat(64);
+    })),
+    /duplicate|files|crash image|revive/i,
+    'duplicate files logical key must reject',
+  );
 });
