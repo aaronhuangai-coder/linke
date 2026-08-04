@@ -77,6 +77,13 @@ describe('Auth status response', () => {
         },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       },
+      startupCredentialSource: {
+        mode: 'direct',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      },
       safety: {
         tokenValuesReturned: false,
         successAuditEvent: false,
@@ -140,6 +147,132 @@ describe('Auth status response', () => {
     });
     assert.deepStrictEqual(auth.auth.previousTokenOverlapConfigured, { read: false, write: false });
     assert.doesNotMatch(JSON.stringify(auth), /admin-status-secret/);
+  });
+});
+
+describe('Auth startup credential source provenance', () => {
+  const provenance = (mode) => ({
+    mode,
+    startupSnapshot: true,
+    hotReload: false,
+    selfReported: true,
+    attested: false,
+  });
+
+  it('buildAuthStatusResponse reports exact self-reported non-attested startup snapshot provenance', () => {
+    const body = buildAuthStatusResponse({ adminToken: 'provenance-admin-token' });
+    assert.deepStrictEqual(body.startupCredentialSource, provenance('direct'));
+    assert.deepStrictEqual(
+      Object.keys(body.startupCredentialSource).sort(),
+      ['attested', 'hotReload', 'mode', 'selfReported', 'startupSnapshot'],
+      'provenance carries no attestation material beyond the fixed self-reported shape',
+    );
+    assert.doesNotMatch(JSON.stringify(body.startupCredentialSource), /provenance-admin-token/);
+  });
+
+  it('managementAuthSource undefined stays direct-compatible', () => {
+    assert.deepStrictEqual(
+      buildAuthStatusResponse({ readToken: 'provenance-read-token' }).startupCredentialSource,
+      provenance('direct'),
+    );
+    assert.deepStrictEqual(buildAuthStatusResponse().startupCredentialSource, provenance('none'));
+    assert.deepStrictEqual(buildAuthStatusResponse({}).startupCredentialSource, provenance('none'));
+  });
+
+  it('managementAuthSource direct resolves mode from configured token presence', () => {
+    assert.deepStrictEqual(
+      buildAuthStatusResponse({
+        managementAuthSource: 'direct',
+        writeToken: 'provenance-write-token',
+      }).startupCredentialSource,
+      provenance('direct'),
+    );
+    assert.deepStrictEqual(
+      buildAuthStatusResponse({ managementAuthSource: 'direct' }).startupCredentialSource,
+      provenance('none'),
+    );
+  });
+
+  it('managementAuthSource keychain reports keychain mode and fails closed without a startup token', () => {
+    assert.deepStrictEqual(
+      buildAuthStatusResponse({
+        managementAuthSource: 'keychain',
+        adminToken: 'provenance-keychain-admin-token',
+      }).startupCredentialSource,
+      provenance('keychain'),
+    );
+    assert.throws(
+      () => buildAuthStatusResponse({ managementAuthSource: 'keychain' }),
+      { name: 'Error', message: /managementAuthSource/ },
+    );
+  });
+
+  it('managementAuthSource fails closed for non-exact values without echoing them', () => {
+    const illegalValues = [
+      '',
+      '   ',
+      'Direct',
+      'DIRECT',
+      'direct ',
+      ' direct',
+      'keychain ',
+      'KEYCHAIN',
+      'Keychain',
+      'legacy',
+      'none',
+      'null',
+      'undefined',
+      null,
+      0,
+      1,
+      true,
+      false,
+      {},
+      [],
+      ['direct'],
+      ['keychain'],
+    ];
+    for (const value of illegalValues) {
+      assert.throws(
+        () => buildAuthStatusResponse({ managementAuthSource: value, adminToken: 'provenance-admin-token' }),
+        (error) => {
+          assert.strictEqual(error.name, 'Error');
+          assert.match(String(error.message), /managementAuthSource/);
+          if (typeof value === 'string' && value.trim().length > 0) {
+            assert.ok(
+              !String(error.message).includes(value),
+              `error must not echo illegal managementAuthSource ${JSON.stringify(value)}`,
+            );
+          }
+          return true;
+        },
+        `managementAuthSource ${JSON.stringify(value)} must fail closed`,
+      );
+    }
+  });
+
+  it('createServer applies the same managementAuthSource fail-closed validation', () => {
+    const dataDir = join(tmpdir(), 'linke-auth-source-validation-unused');
+    for (const value of ['', 'Direct', 'direct ', 'KEYCHAIN', 'legacy', null, ['direct']]) {
+      assert.throws(
+        () => createServer({ dataDir, managementAuthSource: value, adminToken: 'provenance-admin-token' }),
+        (error) => {
+          assert.match(String(error.message), /managementAuthSource/);
+          if (typeof value === 'string' && value.trim().length > 0) {
+            assert.ok(
+              !String(error.message).includes(value),
+              `error must not echo illegal managementAuthSource ${JSON.stringify(value)}`,
+            );
+          }
+          return true;
+        },
+        `createServer managementAuthSource ${JSON.stringify(value)} must fail closed`,
+      );
+    }
+    assert.throws(
+      () => createServer({ dataDir, managementAuthSource: 'keychain' }),
+      { name: 'Error', message: /managementAuthSource/ },
+    );
   });
 });
 
@@ -269,6 +402,13 @@ describe('GET /api/auth-status', () => {
       assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
       assert.strictEqual(body.auth.enabled, false);
       assert.deepStrictEqual(body.auth.writeRoutes, API_WRITE_ROUTES.map(formatApiRoute));
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'none',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
       assert.deepStrictEqual(await readdir(dataDir), []);
     } finally {
@@ -292,6 +432,13 @@ describe('GET /api/auth-status', () => {
       assert.strictEqual(body.auth.enabled, true);
       assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: true, write: true, admin: false });
       assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'direct',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
       assert.doesNotMatch(JSON.stringify(body), /read-status-token|write-status-token|Bearer/);
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {
@@ -325,6 +472,57 @@ describe('GET /api/auth-status', () => {
         /read-current-status-token|read-previous-status-token|write-current-status-token|write-previous-status-token/,
       );
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('snapshots direct management tokens and provenance at server creation', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-auth-source-snapshot-'));
+    const options = {
+      dataDir,
+      adminToken: 'startup-admin-snapshot-token',
+      managementAuthSource: 'direct',
+    };
+    const server = createServer(options);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      // 创建后改写可变 options 的 token 字段：运行态必须继续使用启动快照。
+      options.adminToken = 'rotated-admin-after-listen-token';
+
+      const startup = await fetch(`http://localhost:${port}/api/auth-status`, {
+        headers: { Authorization: 'Bearer startup-admin-snapshot-token' },
+      });
+      assert.strictEqual(startup.status, 200);
+      const body = await startup.json();
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'direct',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
+      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false, admin: true });
+      assert.doesNotMatch(
+        JSON.stringify(body),
+        /startup-admin-snapshot-token|rotated-admin-after-listen-token|Bearer/,
+      );
+
+      const rotated = await fetch(`http://localhost:${port}/api/auth-status`, {
+        headers: { Authorization: 'Bearer rotated-admin-after-listen-token' },
+      });
+      assert.strictEqual(rotated.status, 401);
+      assert.deepStrictEqual(await rotated.json(), { error: 'Unauthorized' });
+
+      // 启动快照不热更新：启动 token 仍可读取，provenance 逐字节不变。
+      const again = await fetch(`http://localhost:${port}/api/auth-status`, {
+        headers: { Authorization: 'Bearer startup-admin-snapshot-token' },
+      });
+      assert.strictEqual(again.status, 200);
+      assert.deepStrictEqual((await again.json()).startupCredentialSource, body.startupCredentialSource);
     } finally {
       await new Promise((resolve) => server.close(resolve));
       await rm(dataDir, { recursive: true, force: true });

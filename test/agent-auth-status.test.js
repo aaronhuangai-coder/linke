@@ -65,7 +65,15 @@ describe('Agent auth-status CLI', () => {
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
       assert.deepStrictEqual(body.safety, { tokenValuesReturned: false, successAuditEvent: false });
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'none',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
       assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
+      assert.doesNotMatch(stdout, /LINKE_|com\.linke\.gold|management-auth\.|Authorization|Bearer/);
       assert.deepStrictEqual(await readdir(dataDir), []);
     } finally {
       await close(server);
@@ -99,7 +107,15 @@ describe('Agent auth-status CLI', () => {
         previousTokenOverlapConfigured: { read: false, write: false },
         writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
       });
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'direct',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
       assert.doesNotMatch(stdout, /auth-read-token|auth-write-token|Bearer/);
+      assert.doesNotMatch(stdout, /LINKE_|com\.linke\.gold|management-auth\.|Authorization/);
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {
       await close(server);
@@ -134,7 +150,55 @@ describe('Agent auth-status CLI', () => {
         admin: true,
       });
       assert.deepStrictEqual(body.auth.previousTokenOverlapConfigured, { read: false, write: false });
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'direct',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
       assert.doesNotMatch(stdout, /auth-admin-only-token|Bearer/);
+      assert.doesNotMatch(stdout, /LINKE_|com\.linke\.gold|management-auth\.|Authorization/);
+      assert.deepStrictEqual(await readAuditEvents(dataDir), []);
+    } finally {
+      await close(server);
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('inherits keychain startup provenance without printing keychain material', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-agent-auth-keychain-'));
+    const server = createServer({
+      dataDir,
+      adminToken: 'auth-keychain-admin-token',
+      managementAuthSource: 'keychain',
+    });
+    const port = await listen(server);
+
+    try {
+      const { stdout, stderr } = await runAgent([
+        'auth-status',
+        '--server',
+        `http://127.0.0.1:${port}`,
+        '--token',
+        'auth-keychain-admin-token',
+      ]);
+      const body = JSON.parse(stdout);
+
+      assert.strictEqual(stderr, '');
+      assert.deepStrictEqual(body.startupCredentialSource, {
+        mode: 'keychain',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
+      assert.deepStrictEqual(body.auth.configuredScopes, { full: false, read: false, write: false, admin: true });
+      assert.doesNotMatch(
+        stdout,
+        /auth-keychain-admin-token|com\.linke\.gold|management-auth\.|LINKE_|Authorization|Bearer/,
+      );
+      assert.ok(!stdout.includes(dataDir), 'stdout must not leak dataDir');
       assert.deepStrictEqual(await readAuditEvents(dataDir), []);
     } finally {
       await close(server);

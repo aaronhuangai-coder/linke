@@ -547,6 +547,63 @@ function assertPreviousScopedTokensRequireCurrent({
   }
 }
 
+const MANAGEMENT_AUTH_SOURCE_DIRECT = 'direct';
+const MANAGEMENT_AUTH_SOURCE_KEYCHAIN = 'keychain';
+
+/**
+ * Fail closed: managementAuthSource is an internal startup credential source selector.
+ * undefined stays direct-compatible; only exact 'direct'/'keychain' are accepted.
+ * Any other value (empty/blank, case or whitespace variants, null, unknown or
+ * non-string) rejects with a fixed message that never echoes the illegal input.
+ * @param {unknown} managementAuthSource
+ * @returns {'direct'|'keychain'}
+ */
+function resolveManagementAuthSource(managementAuthSource) {
+  if (managementAuthSource === undefined) {
+    return MANAGEMENT_AUTH_SOURCE_DIRECT;
+  }
+  if (managementAuthSource === MANAGEMENT_AUTH_SOURCE_DIRECT
+    || managementAuthSource === MANAGEMENT_AUTH_SOURCE_KEYCHAIN) {
+    return managementAuthSource;
+  }
+  throw new Error('managementAuthSource must be exactly "direct" or "keychain"');
+}
+
+/**
+ * Resolve the startup credential provenance mode from the startup source and the
+ * normalized startup token snapshot: direct without any valid token reports 'none';
+ * keychain without any valid token fails closed at construction/pure-response time.
+ * The provenance is self-reported by the process and not attested; it is not an
+ * authorization, security-auth or Gold/compliance signal.
+ * @param {'direct'|'keychain'} source
+ * @param {boolean} authConfigured
+ * @returns {'none'|'direct'|'keychain'}
+ */
+function resolveStartupCredentialMode(source, authConfigured) {
+  if (source === MANAGEMENT_AUTH_SOURCE_KEYCHAIN && !authConfigured) {
+    throw new Error('managementAuthSource "keychain" requires at least one configured management token');
+  }
+  return authConfigured ? source : 'none';
+}
+
+/**
+ * Fixed startup credential provenance shape for auth-status responses.
+ * startupSnapshot:true / hotReload:false pin that the value is the startup snapshot
+ * only; selfReported:true / attested:false pin that it is process self-report,
+ * never a Gold/security attestation. No token, Keychain service/itemId, env value,
+ * dataDir or Authorization/Bearer material is ever included.
+ * @param {'none'|'direct'|'keychain'} mode
+ */
+function buildStartupCredentialSource(mode) {
+  return {
+    mode,
+    startupSnapshot: true,
+    hotReload: false,
+    selfReported: true,
+    attested: false,
+  };
+}
+
 export function isAuthorizedRequest(req, authToken) {
   const expectedToken = normalizeAuthToken(authToken);
   if (!expectedToken) return true;
@@ -618,6 +675,7 @@ export function buildAuthStatusResponse({
   writeToken,
   previousWriteToken,
   adminToken,
+  managementAuthSource,
 } = {}) {
   const normAuth = normalizeAuthToken(authToken);
   const normRead = normalizeReadToken(readToken);
@@ -632,6 +690,10 @@ export function buildAuthStatusResponse({
     previousWriteToken: normPreviousWrite,
   });
   const enabled = Boolean(normAuth || normRead || normWrite || normAdmin);
+  const startupCredentialMode = resolveStartupCredentialMode(
+    resolveManagementAuthSource(managementAuthSource),
+    enabled,
+  );
 
   return {
     status: 'ok',
@@ -651,6 +713,7 @@ export function buildAuthStatusResponse({
       },
       writeRoutes: API_WRITE_ROUTES.map(formatApiRoute),
     },
+    startupCredentialSource: buildStartupCredentialSource(startupCredentialMode),
     safety: {
       tokenValuesReturned: false,
       successAuditEvent: false,
@@ -809,6 +872,7 @@ export function createServer({
   writeToken,
   previousWriteToken,
   adminToken,
+  managementAuthSource,
   restoreRoot,
   rateLimit,
   auditRetention,
@@ -828,6 +892,15 @@ export function createServer({
     writeToken: expectedWriteToken,
     previousWriteToken: expectedPreviousWriteToken,
   });
+  // Startup credential source snapshot: resolved once at construction together with
+  // the normalized tokens (undefined stays direct-compatible; keychain without any
+  // valid startup token fails closed here). Request handlers only use the snapshot —
+  // mutating the caller's options object later never hot-reloads source or tokens.
+  const startupManagementAuthSource = resolveManagementAuthSource(managementAuthSource);
+  resolveStartupCredentialMode(
+    startupManagementAuthSource,
+    Boolean(expectedAuthToken || expectedReadToken || expectedWriteToken || expectedAdminToken),
+  );
   const normalizedRestoreRoot = normalizeRestoreRoot(restoreRoot);
   const apiRateLimiter = createFixedWindowRateLimiter(rateLimit);
   const adminAuthConfigured = Boolean(expectedAuthToken || expectedWriteToken || expectedAdminToken);
@@ -1193,6 +1266,7 @@ export function createServer({
           writeToken: expectedWriteToken,
           previousWriteToken: expectedPreviousWriteToken,
           adminToken: expectedAdminToken,
+          managementAuthSource: startupManagementAuthSource,
         }));
       }
 

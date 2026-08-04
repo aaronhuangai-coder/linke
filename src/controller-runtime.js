@@ -520,9 +520,12 @@ export async function startController({
 
     // 管理面独立 options：透传 previous/admin 与 full/read/write；不得写入 Agent options。
     // keychain 模式下六字段来自启动时 Keychain 读取快照；legacy 模式保持 direct options 原值。
+    // V1.46 仅有 direct/keychain 两种管理凭证来源：scopes 为 null 即 legacy/direct，
+    // 否则为 keychain；未来新增来源必须同步枚举/映射/测试。
     managementServer = managementServerFactory({
       dataDir,
       ...managementTokens,
+      managementAuthSource: resolvedManagementAuthScopes === null ? 'direct' : 'keychain',
       restoreRoot,
       rateLimit,
       auditRetention,

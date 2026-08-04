@@ -4115,4 +4115,66 @@ describe('V1.46 management auth Keychain source', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('G: keychain 模式 auth-status provenance 锁定启动快照，运行期替换 backing 不热更新', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'linke-v146kc-prov-'));
+    const backing = new Map();
+    backing.set('management-auth.admin', KC_ADMIN);
+    let runtime = null;
+    try {
+      // 真实 startController + 默认 managementServerFactory（真实 createServer）+ fake Keychain。
+      runtime = await startController({
+        dataDir,
+        managementHost: '127.0.0.1',
+        managementPort: 0,
+        agentHost: '192.168.10.4',
+        agentPort: 0,
+        managementAuthKeychainScopes: ['admin'],
+        keychain: memoryKeychain(backing),
+        listenServer: createLoopbackTestListenAdapter(),
+      });
+      openRuntimes.add(runtime);
+
+      const port = runtime.managementServer.address().port;
+      assert.ok(Number.isInteger(port) && port > 0);
+      const getAuthStatus = (token) => fetch(`http://127.0.0.1:${port}/api/auth-status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      const startupRes = await getAuthStatus(KC_ADMIN);
+      assert.equal(startupRes.status, 200);
+      const startupBody = await startupRes.json();
+      assert.deepEqual(startupBody.startupCredentialSource, {
+        mode: 'keychain',
+        startupSnapshot: true,
+        hotReload: false,
+        selfReported: true,
+        attested: false,
+      });
+      assertNoKcSentinels(JSON.stringify(startupBody), 'auth-status keychain response');
+
+      // 启动后替换 fake backing 中的 admin token：启动快照不得热更新。
+      backing.set('management-auth.admin', KC_FULL);
+
+      const rotatedRes = await getAuthStatus(KC_FULL);
+      assert.equal(rotatedRes.status, 401, 'post-startup keychain value must not authenticate');
+      assert.deepEqual(await rotatedRes.json(), { error: 'Unauthorized' });
+
+      const againRes = await getAuthStatus(KC_ADMIN);
+      assert.equal(againRes.status, 200, 'startup snapshot token must keep working');
+      const againBody = await againRes.json();
+      assert.deepEqual(
+        againBody.startupCredentialSource,
+        startupBody.startupCredentialSource,
+        'provenance must stay the startup snapshot after backing rotation',
+      );
+      assertNoKcSentinels(JSON.stringify(againBody), 'auth-status keychain response after rotation');
+    } finally {
+      if (runtime) {
+        await runtime.close().catch(() => {});
+        openRuntimes.delete(runtime);
+      }
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });
