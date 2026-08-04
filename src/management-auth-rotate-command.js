@@ -115,18 +115,22 @@ async function appendRequiredRestartStartAudit(appendAuditEvent, dataDir, scope)
  * @param {AsyncIterable<unknown>} input
  */
 async function readRotationToken(input) {
+  const chunks = [];
+  const sourceBuffers = [];
+  let combined = null;
   try {
     if (!input || typeof input[Symbol.asyncIterator] !== 'function') throw stdinInvalid();
-    const chunks = [];
     let totalBytes = 0;
     for await (const chunk of input) {
       const buffer = Buffer.from(chunk);
+      chunks.push(buffer);
+      if (Buffer.isBuffer(chunk)) sourceBuffers.push(chunk);
       totalBytes += buffer.length;
       if (totalBytes > MAX_STDIN_BYTES) throw stdinInvalid();
-      chunks.push(buffer);
     }
 
-    let value = UTF8_DECODER.decode(Buffer.concat(chunks));
+    combined = Buffer.concat(chunks);
+    let value = UTF8_DECODER.decode(combined);
     if (value.endsWith('\r\n')) value = value.slice(0, -2);
     else if (value.endsWith('\n')) value = value.slice(0, -1);
     if (!value || value.includes('\n') || value.includes('\r') || value.includes('\0')) {
@@ -138,6 +142,17 @@ async function readRotationToken(input) {
       throw error;
     }
     throw stdinInvalid();
+  } finally {
+    // Node 字符串不可可靠清零；这里只收敛可变 stdin 字节及内部复制品的驻留窗口。
+    for (const buffer of [combined, ...chunks, ...sourceBuffers]) {
+      try {
+        if (Buffer.isBuffer(buffer)) buffer.fill(0);
+      } catch {
+        // 清理保持 best-effort，不能覆盖既有成功或固定失败语义。
+      }
+    }
+    chunks.length = 0;
+    sourceBuffers.length = 0;
   }
 }
 

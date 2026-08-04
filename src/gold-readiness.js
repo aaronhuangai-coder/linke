@@ -407,8 +407,12 @@ const GOLD_READINESS_ITEMS = [
       'src/agent.js launchd-dry-run core dump limits',
       'test/launchagent-lifecycle-profiles.test.js and test/launchd-dry-run.test.js',
       'code-stage plist evidence only; real installed-process limit acceptance and token-memory exposure review remain incomplete',
+      'management-auth rotation stdin mutable Buffer wiping code-stage mitigation',
+      'successful, invalid, and oversized stdin paths wipe source, chunk, and concat buffers before Keychain construction',
+      'test/management-auth-rotate-command.test.js mutable stdin byte wiping',
+      'JavaScript token strings and Keychain command strings remain non-zeroizable; token-memory exposure review remains incomplete',
     ],
-    nextStep: 'V1.46 delivers full/read/write/admin current+previous overlap, a Keychain-backed controller startup source, a four-scope production staging/process-lock CLI, an explicit controlled-restart code path, a bounded headless security runner, and launchd core-dump disabling for all generated agent profiles as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, four-scope controlled-restart rotation real-host acceptance, identity/user RBAC, headless bootstrap/unlock real-host acceptance, token-memory exposure review, real-host core-dump-limit acceptance, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
+    nextStep: 'V1.46 delivers full/read/write/admin current+previous overlap, a Keychain-backed controller startup source, a four-scope production staging/process-lock CLI, an explicit controlled-restart code path, a bounded headless security runner, launchd core-dump disabling for all generated agent profiles, and bounded mutable stdin byte wiping as code-level partial evidence. Keep security-auth partial until real macOS Keychain provisioning/acceptance, four-scope controlled-restart rotation real-host acceptance, identity/user RBAC, headless bootstrap/unlock real-host acceptance, token-memory exposure review including non-zeroizable JavaScript and Keychain command strings, real-host core-dump-limit acceptance, production-grade audit, distributed rate limiting, and an independent production security review are complete; do not claim complete secret management; do not claim automatic token rotation; do not claim security-auth ready; do not claim Gold ready.',
   },
   {
     id: 'real-nas-remote-backup',

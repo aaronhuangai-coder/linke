@@ -44,6 +44,13 @@ function assertCommandError(error, code, forbidden = []) {
   return true;
 }
 
+function assertBuffersZero(buffers) {
+  for (const buffer of buffers) {
+    assert.ok(Buffer.isBuffer(buffer));
+    assert.ok(buffer.every((byte) => byte === 0), 'stdin secret bytes must be overwritten');
+  }
+}
+
 function createWorld({
   chunks = [Buffer.from(`${TOKEN}\n`)],
   createKeychainImpl,
@@ -206,9 +213,45 @@ describe('management-auth-rotate stdin 单行/字节/UTF-8 合同', () => {
       assert.deepEqual(world.writes, []);
     });
   }
+
+  it('无效 token 与超限输入也覆写已读取的可变 stdin Buffer', async () => {
+    for (const chunks of [
+      [Buffer.from('invalid-token\n')],
+      [Buffer.alloc(4_097, 0x41)],
+    ]) {
+      const world = createWorld({ chunks });
+      await assert.rejects(
+        runManagementAuthRotateCommand([...VALID_ARGV], world.deps),
+        (error) => assertCommandError(error, STDIN_INVALID),
+      );
+      assertBuffersZero(chunks);
+    }
+  });
 });
 
 describe('management-auth-rotate 成功顺序与 receipt 原样输出', () => {
+  it('在创建 Keychain 前覆写所有已读取的可变 stdin Buffer', async () => {
+    const chunks = [
+      Buffer.from(TOKEN.slice(0, 19)),
+      Buffer.from(`${TOKEN.slice(19)}\n`),
+    ];
+    let zeroBeforeKeychain = false;
+    const world = createWorld({
+      chunks,
+      createKeychainImpl() {
+        assertBuffersZero(chunks);
+        zeroBeforeKeychain = true;
+        return Object.freeze({ marker: 'synthetic-keychain' });
+      },
+    });
+
+    await runManagementAuthRotateCommand([...VALID_ARGV], world.deps);
+
+    assert.equal(zeroBeforeKeychain, true);
+    assertBuffersZero(chunks);
+    assert.equal(world.stageArgs.newToken, TOKEN);
+  });
+
   for (const suffix of ['', '\n', '\r\n']) {
     it(`允许单行 token 结尾 ${JSON.stringify(suffix)}`, async () => {
       const world = createWorld({ chunks: [Buffer.from(`${TOKEN}${suffix}`)] });

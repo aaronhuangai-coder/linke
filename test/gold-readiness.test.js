@@ -236,6 +236,10 @@ const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'src/agent.js launchd-dry-run core dump limits',
   'test/launchagent-lifecycle-profiles.test.js and test/launchd-dry-run.test.js',
   'code-stage plist evidence only; real installed-process limit acceptance and token-memory exposure review remain incomplete',
+  'management-auth rotation stdin mutable Buffer wiping code-stage mitigation',
+  'successful, invalid, and oversized stdin paths wipe source, chunk, and concat buffers before Keychain construction',
+  'test/management-auth-rotate-command.test.js mutable stdin byte wiping',
+  'JavaScript token strings and Keychain command strings remain non-zeroizable; token-memory exposure review remains incomplete',
 ]);
 
 /**

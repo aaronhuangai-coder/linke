@@ -3275,6 +3275,15 @@ describe('README — V1.46 management auth Keychain source', () => {
       'real-host and token-memory work remain incomplete');
   });
 
+  it('documents mutable stdin byte wiping without claiming JavaScript string zeroization', () => {
+    assertReadmeContains(/stdin.*(Buffer|字节).*(覆写|清零|wipe)/i,
+      'mutable stdin byte wiping');
+    assertReadmeContains(/JavaScript 字符串.*(不能|无法|不可).*(可靠)?清零/i,
+      'JavaScript string zeroization limitation');
+    assertReadmeContains(/token-memory exposure review.*(仍未完成|remain.*incomplete)/i,
+      'token-memory review remains incomplete');
+  });
+
   it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
     assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
     assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');
