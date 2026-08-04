@@ -58,7 +58,11 @@ const PATHS = Object.freeze({
   readme: join(REPO_ROOT, 'README.md'),
 });
 
-/** Exact current V1.45 NAS dry-run configuration-readiness PASS signature. */
+/** Exact current V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature. */
+const V146_SIGNATURE =
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure PASS';
+
+/** Exact historical V1.45 NAS dry-run configuration-readiness PASS signature. */
 const V145_SIGNATURE =
   'V1.45 NAS dry-run configuration-readiness PASS';
 
@@ -73,6 +77,23 @@ const V143_SIGNATURE =
 /** Exact historical V1.42 signature — retained G0c base; must not be erased. */
 const V142_SIGNATURE =
   'V1.42 G0c endpoint-pull restore with crash-recoverable rollback anchor implementation';
+
+const V146_AUTOMATION_EVIDENCE = Object.freeze([
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure',
+  'src/launchagent-lifecycle/acceptance-gate.js',
+  'src/launchagent-lifecycle/process-identity.js',
+  'test/launchagent-lifecycle-acceptance-gate.test.js',
+  'test/launchagent-lifecycle-manual-repair-recovery.test.js',
+  'test/launchagent-lifecycle-recovery.test.js',
+  'manual repair attestation pure closeout',
+  'frozen compensation/crash windows',
+  'real Node owner SIGKILL/recovery child',
+  'no real launchctl',
+  'no clean-Mac lifecycle evidence',
+  'not installation complete',
+  'code-stage only',
+  'conditional fake host adapters',
+]);
 
 /** Exact six V1.43 rotation error registry values (key → kebab value). */
 const EXPECTED_ROTATION_ERROR_CODES = Object.freeze({
@@ -1258,20 +1279,20 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
     );
   });
 
-  it('Q4 locks the V1.45 NAS dry-run configuration-readiness PASS surface and V1.44/V1.43 historical boundaries', async () => {
+  it('Q4 locks the V1.46 LaunchAgent code-stage closure surface and V1.45/V1.44/V1.43 historical boundaries', async () => {
     assert.strictEqual(
       LINKE_RELEASE_VERSION,
-      'V1.45',
-      'LINKE_RELEASE_VERSION must be exactly V1.45',
+      'V1.46',
+      'LINKE_RELEASE_VERSION must be exactly V1.46',
     );
 
     const sources = await readAllowedSources();
     const { currentSurface, lines } = extractReadmeCurrentSurface(sources.readme);
 
-    // Exact V1.45 NAS dry-run configuration-readiness PASS signature + fixed current-state phrases on current surface.
+    // Exact V1.46 LaunchAgent code-stage closure PASS signature + fixed current-state phrases on current surface.
     assert.ok(
-      currentSurface.includes(V145_SIGNATURE),
-      `README current surface must include exact signature: ${V145_SIGNATURE}`,
+      currentSurface.includes(V146_SIGNATURE),
+      `README current surface must include exact signature: ${V146_SIGNATURE}`,
     );
     assert.ok(
       currentSurface.includes('nas-dry-run ready'),
@@ -1321,8 +1342,64 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       currentSurface.includes('three partial items remain'),
       'current surface must state three partial items remain',
     );
+    for (const phrase of [
+      'manual repair attestation pure closeout',
+      'frozen compensation/crash windows',
+      'real Node owner SIGKILL/recovery child',
+      'no real launchctl',
+      'no clean-Mac lifecycle evidence',
+      'not installation complete',
+      'code-stage only',
+      'conditional fake host adapters',
+    ]) {
+      assert.ok(
+        currentSurface.includes(phrase),
+        `current surface must include V1.46 LaunchAgent boundary phrase: ${phrase}`,
+      );
+    }
 
-    // V1.44 demoted to historical row with its exact hardware acceptance facts.
+    // V1.45 demoted to historical row with its exact NAS configuration-only readiness facts.
+    const v145Row = lines.find(
+      (line) => line.includes('| V1.45 |') && line.includes('历史版本'),
+    );
+    assert.ok(v145Row, 'README version table must contain V1.45 historical row');
+    assert.ok(
+      v145Row.includes(V145_SIGNATURE),
+      'V1.45 historical row must carry the exact V1.45 signature',
+    );
+    assert.ok(
+      v145Row.includes('nas-dry-run ready'),
+      'V1.45 historical row must state nas-dry-run ready',
+    );
+    assert.ok(
+      v145Row.includes('configuration-only ready'),
+      'V1.45 historical row must state configuration-only ready',
+    );
+    assert.ok(
+      v145Row.includes('real-nas-remote-backup ready'),
+      'V1.45 historical row must state real-nas-remote-backup ready',
+    );
+    assert.ok(
+      v145Row.includes('NAS-REAL-V144-20260727-01'),
+      'V1.45 historical row must retain acceptance ID NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      v145Row.includes('not Gold'),
+      'V1.45 historical row must include not Gold',
+    );
+    assert.ok(
+      v145Row.includes('Gold remains partial 6/3/0/9'),
+      'V1.45 historical row must include Gold remains partial 6/3/0/9',
+    );
+    assert.ok(
+      v145Row.includes('three partial items remain'),
+      'V1.45 historical row must include three partial items remain',
+    );
+    assert.ok(
+      v145Row.includes('G0c real-LAN evidence absent'),
+      'V1.45 historical row must include G0c real-LAN evidence absent',
+    );
+
     const v144Row = lines.find(
       (line) => line.includes('| V1.44 |') && line.includes('历史版本'),
     );
@@ -1464,9 +1541,9 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       'current surface must not claim production-hardening ready',
     );
 
-    // Gold-readiness surface: version V1.45; nas-dry-run ready; V1.43 evidence foundation unchanged.
+    // Gold-readiness surface: version V1.46; automation-installation stays partial with V1.46 code-stage evidence; V1.43 evidence foundation unchanged.
     const report = buildGoldReadinessReport({ now: new Date('2026-07-25T00:00:00.000Z') });
-    assert.strictEqual(report.version, 'V1.45', 'gold-readiness report version must be V1.45');
+    assert.strictEqual(report.version, 'V1.46', 'gold-readiness report version must be V1.46');
     assert.strictEqual(report.status, 'partial', 'Gold overall status must remain partial');
     assert.deepStrictEqual(
       report.summary,
@@ -1509,6 +1586,14 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       'nas-dry-run evidence must state configuredEndpointSentinelConnections:0',
     );
     assert.ok(
+      nasDryRun.nextStep.includes('V1.46'),
+      'nas-dry-run nextStep must state V1.46 retains V1.45 evidence',
+    );
+    assert.ok(
+      nasDryRun.nextStep.includes('V1.45'),
+      'nas-dry-run nextStep must retain V1.45 evidence reference',
+    );
+    assert.ok(
       nasDryRun.nextStep.includes('no real NAS connection is made'),
       'nas-dry-run nextStep must state no real NAS connection is made',
     );
@@ -1523,6 +1608,38 @@ export async function appendAuditEventWithIntegrityDualWrite(dataDir, event, opt
       realNas.evidence.join('\n').includes('NAS-REAL-V144-20260727-01'),
       'real-nas-remote-backup must retain committed V1.44 acceptance evidence NAS-REAL-V144-20260727-01',
     );
+    const automation = report.items.find((item) => item.id === 'automation-installation');
+    assert.ok(automation, 'automation-installation item must exist');
+    assert.strictEqual(automation.status, 'partial', 'automation-installation must remain partial');
+    assert.deepStrictEqual(
+      automation.evidence.slice(0, V146_AUTOMATION_EVIDENCE.length),
+      [...V146_AUTOMATION_EVIDENCE],
+      'automation-installation must prepend the exact V1.46 LaunchAgent evidence atoms',
+    );
+    assert.ok(
+      automation.nextStep.includes('V1.46'),
+      'automation-installation nextStep must lead with V1.46 code-stage closure honesty',
+    );
+    assert.ok(
+      automation.nextStep.includes('Gold remains partial 6/3/0/9'),
+      'automation-installation nextStep must retain Gold remains partial 6/3/0/9',
+    );
+    for (const phrase of [
+      'not installation complete',
+      'no real launchctl',
+      'no clean-Mac lifecycle evidence',
+      'code-stage only',
+      'conditional fake host adapters',
+      'real Node owner SIGKILL/recovery child',
+      'manual repair attestation pure closeout',
+      'frozen compensation/crash windows',
+      'V1.33',
+    ]) {
+      assert.ok(
+        automation.nextStep.includes(phrase),
+        `automation-installation nextStep must include ${phrase}`,
+      );
+    }
     const hardening = report.items.find((item) => item.id === 'production-hardening');
     assert.ok(hardening, 'production-hardening item must exist');
     assert.strictEqual(hardening.status, 'partial', 'production-hardening must remain partial');

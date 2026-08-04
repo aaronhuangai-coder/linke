@@ -157,7 +157,9 @@ const STALE_MULTI_PROCESS_YET = 'not multi-process exclusive lock yet';
 
 /**
  * Frozen Gold item id/status snapshot.
- * V1.45 NAS dry-run configuration-readiness PASS rotates nas-dry-run
+ * V1.46 promotes only the current release/version surface and
+ * automation-installation evidence prefix; status counts remain unchanged while
+ * the V1.45 NAS dry-run configuration-readiness PASS rotation stays retained.
  * partial → ready; all other item statuses unchanged (V1.44 C1 committed
  * real-NAS acceptance PASS previously rotated real-nas-remote-backup
  * blocked → ready).
@@ -172,6 +174,23 @@ const GOLD_ITEM_STATUS_SNAPSHOT = Object.freeze([
   { id: 'security-auth', status: 'partial' },
   { id: 'real-nas-remote-backup', status: 'ready' },
   { id: 'production-hardening', status: 'partial' },
+]);
+
+const V146_AUTOMATION_EVIDENCE = Object.freeze([
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure',
+  'src/launchagent-lifecycle/acceptance-gate.js',
+  'src/launchagent-lifecycle/process-identity.js',
+  'test/launchagent-lifecycle-acceptance-gate.test.js',
+  'test/launchagent-lifecycle-manual-repair-recovery.test.js',
+  'test/launchagent-lifecycle-recovery.test.js',
+  'manual repair attestation pure closeout',
+  'frozen compensation/crash windows',
+  'real Node owner SIGKILL/recovery child',
+  'no real launchctl',
+  'no clean-Mac lifecycle evidence',
+  'not installation complete',
+  'code-stage only',
+  'conditional fake host adapters',
 ]);
 
 /**
@@ -337,13 +356,13 @@ function assertGuardedRunnerExecutionGateEvidence(evidence) {
 }
 
 describe('Gold Readiness Report', () => {
-  it('expects LINKE_RELEASE_VERSION to be V1.45', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.45');
+  it('expects LINKE_RELEASE_VERSION to be V1.46', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.46');
   });
 
-  it('expects report.version to be V1.45', () => {
+  it('expects report.version to be V1.46', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-07T12:00:00.000Z") });
-    assert.strictEqual(report.version, 'V1.45');
+    assert.strictEqual(report.version, 'V1.46');
   });
 
   it('expects status partial and correct summary count', () => {
@@ -358,7 +377,7 @@ describe('Gold Readiness Report', () => {
     assert.strictEqual(report.items.find((item) => item.id === 'production-hardening').status, 'partial');
   });
 
-  it('freezes all 9 item id/status bit-for-bit (V1.45 NAS dry-run configuration-readiness rotates only nas-dry-run to ready)', () => {
+  it('freezes all 9 item id/status bit-for-bit (V1.46 keeps 6/3/0/9 while rotating only current version/evidence surface)', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const snapshot = report.items.map((item) => ({ id: item.id, status: item.status }));
     assert.deepStrictEqual(snapshot, GOLD_ITEM_STATUS_SNAPSHOT);
@@ -463,7 +482,7 @@ describe('Gold Readiness Report', () => {
     assert.ok(nasEvidence.includes('rendering'));
     assert.ok(nasEvidence.includes('DOM tests'));
 
-    // V1.45 conjunctive evidence atoms — each must be an exact evidence element.
+    // Retained NAS conjunctive evidence atoms — each must be an exact evidence element.
     for (const atom of [
       'schemaVersion:2',
       'adapterAvailable:true',
@@ -480,13 +499,21 @@ describe('Gold Readiness Report', () => {
     ]) {
       assert.ok(
         nasItem.evidence.includes(atom),
-        `nas-dry-run evidence must exact-include V1.45 conjunctive atom: ${atom}`,
+        `nas-dry-run evidence must exact-include retained conjunctive atom: ${atom}`,
       );
     }
 
-    // V1.45 nextStep: configuration-only ready, runtime mount verification remains
-    // execution-time/pending, three named partial items remain, overall not Gold;
-    // stale V0.69 description must be gone.
+    // V1.46 nextStep: explicitly retains V1.45 configuration-only ready evidence,
+    // runtime mount verification remains execution-time/pending, three named partial
+    // items remain, overall not Gold; stale V0.69 description must be gone.
+    assert.ok(
+      nasItem.nextStep.includes('V1.46'),
+      'nas-dry-run nextStep must state V1.46 retains V1.45 evidence',
+    );
+    assert.ok(
+      nasItem.nextStep.includes('V1.45'),
+      'nas-dry-run nextStep must retain V1.45 evidence reference',
+    );
     assert.ok(
       nasItem.nextStep.includes('configuration-only ready'),
       'nas-dry-run nextStep must state configuration-only ready',
@@ -652,6 +679,21 @@ describe('Gold Readiness Report', () => {
     assert.ok(automationEvidence.includes('test/web-console.test.js supervisor lifecycle guarded runner readiness'));
     assertGuardedRunnerExecutionPreviewEvidence(automationEvidence);
     assertGuardedRunnerExecutionGateEvidence(automationEvidence);
+    assert.deepStrictEqual(
+      automationItem.evidence.slice(0, V146_AUTOMATION_EVIDENCE.length),
+      [...V146_AUTOMATION_EVIDENCE],
+      'automation-installation must prepend exact V1.46 LaunchAgent evidence atoms',
+    );
+    assert.ok(automationItem.nextStep.includes('V1.46'));
+    assert.ok(automationItem.nextStep.includes('Gold remains partial 6/3/0/9'));
+    assert.ok(automationItem.nextStep.includes('not installation complete'));
+    assert.ok(automationItem.nextStep.includes('no real launchctl'));
+    assert.ok(automationItem.nextStep.includes('no clean-Mac lifecycle evidence'));
+    assert.ok(automationItem.nextStep.includes('code-stage only'));
+    assert.ok(automationItem.nextStep.includes('conditional fake host adapters'));
+    assert.ok(automationItem.nextStep.includes('real Node owner SIGKILL/recovery child'));
+    assert.ok(automationItem.nextStep.includes('manual repair attestation pure closeout'));
+    assert.ok(automationItem.nextStep.includes('frozen compensation/crash windows'));
     assert.ok(automationItem.nextStep.includes('V1.33'));
     assert.ok(automationItem.nextStep.includes('V1.32'));
     assert.ok(automationItem.nextStep.includes('V1.31'));

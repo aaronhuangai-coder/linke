@@ -7,7 +7,11 @@ import { LINKE_RELEASE_VERSION } from '../src/version.js';
 
 const README_PATH = resolve(import.meta.dirname, '..', 'README.md');
 
-/** Exact current V1.45 NAS dry-run configuration-readiness PASS signature. */
+/** Exact current V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature. */
+const V146_SIGNATURE =
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure PASS';
+
+/** Exact historical V1.45 signature — retained NAS dry-run configuration readiness; must not be erased. */
 const V145_SIGNATURE =
   'V1.45 NAS dry-run configuration-readiness PASS';
 
@@ -41,6 +45,14 @@ const V138_SIGNATURE =
 
 /** Required honesty boundary phrases — must appear on currentSurface only. */
 const HONESTY_BOUNDARIES = Object.freeze([
+  'manual repair attestation pure closeout',
+  'frozen compensation/crash windows',
+  'real Node owner SIGKILL/recovery child',
+  'no real launchctl',
+  'no clean-Mac lifecycle evidence',
+  'not installation complete',
+  'code-stage only',
+  'conditional fake host adapters',
   'T6d.3 still partial',
   'not T6d.3 complete',
   'not M6d Exit',
@@ -117,10 +129,11 @@ describe('Release Version Consistency', () => {
     assert.ok(LINKE_RELEASE_VERSION.startsWith('V'));
   });
 
-  it('LINKE_RELEASE_VERSION is the V1.45 milestone', () => {
-    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.45');
+  it('LINKE_RELEASE_VERSION is the V1.46 milestone', () => {
+    assert.strictEqual(LINKE_RELEASE_VERSION, 'V1.46');
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0c'));
     assert.ok(!LINKE_RELEASE_VERSION.includes('G0b'));
+    assert.notStrictEqual(LINKE_RELEASE_VERSION, V146_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V145_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V144_SIGNATURE);
     assert.notStrictEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
@@ -153,14 +166,14 @@ describe('Release Version Consistency', () => {
     );
   });
 
-  it('README current surface carries V1.45 NAS dry-run configuration-readiness PASS signature and honesty boundaries', async () => {
+  it('README current surface carries V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature and honesty boundaries', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const { badge, currentRow, currentSurface, lines } = extractCurrentSurface(readme);
 
-    // Exact V1.45 NAS dry-run configuration-readiness PASS signature + fixed phrases on currentSurface
+    // Exact V1.46 LaunchAgent code-stage closure PASS signature + retained Gold/NAS honesty phrases on currentSurface
     assert.ok(
-      currentSurface.includes(V145_SIGNATURE),
-      `README currentSurface must include exact signature: ${V145_SIGNATURE}`,
+      currentSurface.includes(V146_SIGNATURE),
+      `README currentSurface must include exact signature: ${V146_SIGNATURE}`,
     );
     assert.ok(
       currentSurface.includes('nas-dry-run ready'),
@@ -224,9 +237,56 @@ describe('Release Version Consistency', () => {
       );
     }
 
-    // V1.44 demoted to historical: retain real NAS acceptance receipt facts.
+    // V1.45 demoted to historical: retain NAS dry-run configuration-only ready facts.
     // Scoped to the V1.44 table row only — must not be satisfied by currentSurface
     // or any other historical text (false-green guard).
+    const v145Row = lines.find(
+      (line) => line.includes('| V1.45 |') && line.includes('历史版本'),
+    );
+    assert.ok(v145Row, 'README version table must retain V1.45 as 历史版本');
+    assert.ok(
+      !lines.some((line) => line.includes('| V1.45 |') && line.includes('当前版本')),
+      'V1.45 must not remain marked as 当前版本',
+    );
+    assert.ok(
+      v145Row.includes(V145_SIGNATURE),
+      'V1.45 historical row must retain exact V1.45 NAS dry-run configuration-readiness PASS signature',
+    );
+    assert.ok(
+      v145Row.includes('nas-dry-run ready'),
+      'V1.45 historical row must retain nas-dry-run ready',
+    );
+    assert.ok(
+      v145Row.includes('configuration-only ready'),
+      'V1.45 historical row must retain configuration-only ready',
+    );
+    assert.ok(
+      v145Row.includes('real-nas-remote-backup ready'),
+      'V1.45 historical row must retain real-nas-remote-backup ready',
+    );
+    assert.ok(
+      v145Row.includes('NAS-REAL-V144-20260727-01'),
+      'V1.45 historical row must retain NAS-REAL-V144-20260727-01',
+    );
+    assert.ok(
+      v145Row.includes('Gold remains partial 6/3/0/9'),
+      'V1.45 historical row must retain Gold remains partial 6/3/0/9',
+    );
+    // V1.45 historical row must immediately follow the V1.46 current row in the table.
+    const currentRowIndex = lines.findIndex(
+      (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
+    );
+    assert.ok(currentRowIndex >= 0, 'current version table row index must exist');
+    const nextVersionRow = lines
+      .slice(currentRowIndex + 1)
+      .find((line) => /^\| V\d/.test(line.trimStart()));
+    assert.ok(
+      nextVersionRow !== undefined
+        && nextVersionRow.includes('| V1.45 |')
+        && nextVersionRow.includes('历史版本'),
+      'V1.45 historical row must immediately follow the V1.46 current row',
+    );
+
     const v144Row = lines.find(
       (line) => line.includes('| V1.44 |') && line.includes('历史版本'),
     );
@@ -254,20 +314,6 @@ describe('Release Version Consistency', () => {
     assert.ok(
       v144Row.includes('Gold remains partial 5/4/0/9'),
       'V1.44 historical row must retain Gold remains partial 5/4/0/9',
-    );
-    // V1.44 historical row must immediately follow the V1.45 current row in the table.
-    const currentRowIndex = lines.findIndex(
-      (line) => line.includes(`| ${LINKE_RELEASE_VERSION} |`) && line.includes('当前版本'),
-    );
-    assert.ok(currentRowIndex >= 0, 'current version table row index must exist');
-    const nextVersionRow = lines
-      .slice(currentRowIndex + 1)
-      .find((line) => /^\| V\d/.test(line.trimStart()));
-    assert.ok(
-      nextVersionRow !== undefined
-        && nextVersionRow.includes('| V1.44 |')
-        && nextVersionRow.includes('历史版本'),
-      'V1.44 historical row must immediately follow the V1.45 current row',
     );
 
     // V1.43 demoted to historical: retain rotation foundation facts

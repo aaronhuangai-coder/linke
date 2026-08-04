@@ -27,6 +27,8 @@ const REPORT_ABS = join(
 );
 const README_PATH = join(REPO_ROOT, 'README.md');
 
+const V146_SIGNATURE =
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure PASS';
 const V145_SIGNATURE =
   'V1.45 NAS dry-run configuration-readiness PASS';
 const V144_SIGNATURE =
@@ -704,9 +706,10 @@ describe('G0c real-LAN gate default skip + report absent', () => {
   });
 });
 
-describe('G0c V1.45 version / Gold / README honesty (auto harness ≠ real-LAN)', () => {
-  it('LINKE_RELEASE_VERSION is exactly V1.45 (signature not embedded)', () => {
-    assert.equal(LINKE_RELEASE_VERSION, 'V1.45');
+describe('G0c V1.46 version / Gold / README honesty (auto harness ≠ real-LAN)', () => {
+  it('LINKE_RELEASE_VERSION is exactly V1.46 (signature not embedded)', () => {
+    assert.equal(LINKE_RELEASE_VERSION, 'V1.46');
+    assert.notEqual(LINKE_RELEASE_VERSION, V146_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V145_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V144_SIGNATURE);
     assert.notEqual(LINKE_RELEASE_VERSION, V143_SIGNATURE);
@@ -716,9 +719,9 @@ describe('G0c V1.45 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(!LINKE_RELEASE_VERSION.includes(V142_SIGNATURE));
   });
 
-  it('Gold remains partial 6/3/0/9; nas-dry-run configuration-only ready; V1.45 current + V1.44/V1.43/V1.42 evidence honest', () => {
+  it('Gold remains partial 6/3/0/9; LaunchAgent code-stage closure current; V1.45/V1.44/V1.43/V1.42 evidence honest', () => {
     const report = buildGoldReadinessReport({ now: new Date('2026-07-23T12:00:00.000Z') });
-    assert.equal(report.version, 'V1.45');
+    assert.equal(report.version, 'V1.46');
     assert.equal(report.status, 'partial');
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
 
@@ -743,10 +746,22 @@ describe('G0c V1.45 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(nasEvidenceText.includes('wouldWrite:false'));
     assert.ok(nasEvidenceText.includes('configuredEndpointSentinelConnections:0'));
     assert.ok(nasEvidenceText.includes('NAS-REAL-V144-20260727-01'));
+    assert.ok(nasDryRun.nextStep.includes('V1.46'));
     assert.ok(nasDryRun.nextStep.includes('V1.45'));
     assert.ok(nasDryRun.nextStep.includes('configuration-only ready'));
     assert.ok(nasDryRun.nextStep.includes('no real NAS connection is made'));
     assert.ok(nasDryRun.nextStep.includes('not Gold'));
+
+    const automation = report.items.find((i) => i.id === 'automation-installation');
+    assert.ok(automation);
+    assert.equal(automation.status, 'partial');
+    assert.ok(automation.evidence.includes('V1.46 user-level LaunchAgent lifecycle code-stage closure'));
+    assert.ok(automation.evidence.includes('real Node owner SIGKILL/recovery child'));
+    assert.ok(automation.evidence.includes('no real launchctl'));
+    assert.ok(automation.evidence.includes('not installation complete'));
+    assert.ok(automation.nextStep.includes('V1.46'));
+    assert.ok(automation.nextStep.includes('code-stage only'));
+    assert.ok(automation.nextStep.includes('Gold remains partial 6/3/0/9'));
 
     const hardening = report.items.find((i) => i.id === 'production-hardening');
     assert.ok(hardening);
@@ -781,16 +796,16 @@ describe('G0c V1.45 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(/Gold remains blocked 4\/4\/1\/9/.test(hardening.nextStep));
   });
 
-  it('README current surface is V1.45 NAS dry-run configuration-readiness PASS; V1.44/V1.43/V1.42 historical; auto ≠ real-LAN', async () => {
+  it('README current surface is V1.46 LaunchAgent code-stage closure PASS; V1.45/V1.44/V1.43/V1.42 historical; auto ≠ real-LAN', async () => {
     const readme = await readFile(README_PATH, 'utf-8');
     const firstLine = readme.split('\n')[0].trim();
-    assert.equal(firstLine, '# Linke V1.45');
-    assert.ok(readme.includes('**当前版本：V1.45**'));
+    assert.equal(firstLine, '# Linke V1.46');
+    assert.ok(readme.includes('**当前版本：V1.46**'));
 
     const lines = readme.split('\n');
-    const currentRow = lines.find((l) => l.includes('| V1.45 |') && l.includes('当前版本'));
-    assert.ok(currentRow, 'V1.45 current version table row');
-    assert.ok(currentRow.includes(V145_SIGNATURE));
+    const currentRow = lines.find((l) => l.includes('| V1.46 |') && l.includes('当前版本'));
+    assert.ok(currentRow, 'V1.46 current version table row');
+    assert.ok(currentRow.includes(V146_SIGNATURE));
     assert.ok(currentRow.includes('nas-dry-run ready'));
     assert.ok(currentRow.includes('configuration-only ready'));
     assert.ok(currentRow.includes('real-nas-remote-backup ready'));
@@ -804,7 +819,24 @@ describe('G0c V1.45 version / Gold / README honesty (auto harness ≠ real-LAN)'
     assert.ok(currentRow.includes('not Gold'));
     assert.ok(currentRow.includes('Gold remains partial 6/3/0/9'));
     assert.ok(currentRow.includes('three partial items remain'));
+    assert.ok(currentRow.includes('no real launchctl'));
+    assert.ok(currentRow.includes('no clean-Mac lifecycle evidence'));
+    assert.ok(currentRow.includes('not installation complete'));
+    assert.ok(currentRow.includes('code-stage only'));
+    assert.ok(currentRow.includes('conditional fake host adapters'));
+    assert.ok(currentRow.includes('real Node owner SIGKILL/recovery child'));
     assert.ok(!/G0c real-LAN complete/i.test(currentRow));
+
+    const v145Row = lines.find((l) => l.includes('| V1.45 |') && l.includes('历史版本'));
+    assert.ok(v145Row, 'V1.45 historical row retained');
+    assert.ok(v145Row.includes(V145_SIGNATURE));
+    assert.ok(v145Row.includes('nas-dry-run ready'));
+    assert.ok(v145Row.includes('configuration-only ready'));
+    assert.ok(v145Row.includes('real-nas-remote-backup ready'));
+    assert.ok(v145Row.includes('NAS-REAL-V144-20260727-01'));
+    assert.ok(v145Row.includes('not Gold'));
+    assert.ok(v145Row.includes('Gold remains partial 6/3/0/9'));
+    assert.ok(v145Row.includes('three partial items remain'));
 
     const v144Row = lines.find((l) => l.includes('| V1.44 |') && l.includes('历史版本'));
     assert.ok(v144Row, 'V1.44 historical row retained');

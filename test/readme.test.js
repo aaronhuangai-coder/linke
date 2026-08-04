@@ -52,7 +52,11 @@ function extractCurrentBadgeBlockquote(markdown) {
   return collected.join('\n');
 }
 
-/** Exact current V1.45 NAS dry-run configuration-readiness PASS signature. */
+/** Exact current V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature. */
+const V146_SIGNATURE =
+  'V1.46 user-level LaunchAgent lifecycle code-stage closure PASS';
+
+/** Exact historical V1.45 signature — retained NAS dry-run configuration readiness; must not be erased. */
 const V145_SIGNATURE =
   'V1.45 NAS dry-run configuration-readiness PASS';
 
@@ -1960,10 +1964,12 @@ describe('README — V0.69 NAS CLI fail on blocked option', () => {
   });
 });
 
-describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', () => {
-  it('title and badge claim V1.45 as current', () => {
-    assertReadmeContains(/# Linke V1\.45/, 'README title should mention V1.45');
-    assertReadmeContains(/\*\*当前版本：V1\.45\*\*/, 'README badge should mention V1.45');
+describe('README — V1.46 LaunchAgent code-stage closure honesty', () => {
+  it('title and badge claim V1.46 as current', () => {
+    assertReadmeContains(/# Linke V1\.46/, 'README title should mention V1.46');
+    assertReadmeContains(/\*\*当前版本：V1\.46\*\*/, 'README badge should mention V1.46');
+    assertReadmeDoesNotContain(/\*\*当前版本：V1\.45\*\*/, 'README badge must not still claim V1.45 as current');
+    assertReadmeDoesNotContain(/^# Linke V1\.45$/m, 'README title must not still claim V1.45 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.44\*\*/, 'README badge must not still claim V1.44 as current');
     assertReadmeDoesNotContain(/^# Linke V1\.44$/m, 'README title must not still claim V1.44 as current title');
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.43\*\*/, 'README badge must not still claim V1.43 as current');
@@ -2040,7 +2046,7 @@ describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', ()
     assertReadmeDoesNotContain(/\*\*当前版本：V1\.08\*\*/, 'README badge must not still claim V1.08');
   });
 
-  it('badge mentions V1.45 NAS dry-run configuration-readiness PASS signature and honest boundaries', () => {
+  it('badge mentions V1.46 LaunchAgent code-stage closure PASS signature and honest boundaries', () => {
     // Scope ONLY the unique current badge blockquote — never slice(0,N) which bleeds into the version table
     const badge = extractCurrentBadgeBlockquote(readme);
     // Structural canary: extracted badge must not include version-table current row syntax
@@ -2049,8 +2055,8 @@ describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', ()
       `extracted badge must not contain version table row "| ${LINKE_RELEASE_VERSION} | 当前版本 |" (cross-region bleed guard)`,
     );
     assert.ok(
-      badge.includes(V145_SIGNATURE),
-      'top badge must include exact V1.45 NAS dry-run configuration-readiness PASS signature',
+      badge.includes(V146_SIGNATURE),
+      'top badge must include exact V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature',
     );
     assert.ok(
       badge.includes('nas-dry-run ready'),
@@ -2088,6 +2094,21 @@ describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', ()
       badge.includes('Gold remains partial 6/3/0/9'),
       'top badge must include Gold remains partial 6/3/0/9',
     );
+    for (const phrase of [
+      'manual repair attestation pure closeout',
+      'frozen compensation/crash windows',
+      'real Node owner SIGKILL/recovery child',
+      'no real launchctl',
+      'no clean-Mac lifecycle evidence',
+      'not installation complete',
+      'code-stage only',
+      'conditional fake host adapters',
+    ]) {
+      assert.ok(
+        badge.includes(phrase),
+        `top badge must include V1.46 LaunchAgent boundary phrase: ${phrase}`,
+      );
+    }
     assert.ok(
       badge.includes('three partial items remain'),
       'top badge must state three partial items remain',
@@ -2311,72 +2332,120 @@ describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', ()
     }
   });
 
-  it('version table marks V1.45 current, V1.44 historical real NAS acceptance, V1.43 historical rotation, V1.42 historical G0c, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
-    // V1.45 current row — NAS dry-run configuration-readiness PASS signature and fixed honesty phrases
-    const v145RowMatch = readme.match(/\| V1\.45 \| 当前版本 \|[^|\n]*/);
-    assert.ok(v145RowMatch, 'V1.45 current version table row must exist');
+  it('version table marks V1.46 current, V1.45 historical NAS, V1.44 historical real NAS acceptance, V1.43 historical rotation, V1.42 historical G0c, V1.41 historical G0b, V1.40 historical process-lock, V1.39 historical write-admission, V1.38 historical monitor, keeps V1.37/V1.36/V1.35', () => {
+    // V1.46 current row — LaunchAgent code-stage closure PASS signature and fixed honesty phrases
+    const v146RowMatch = readme.match(/\| V1\.46 \| 当前版本 \|[^|\n]*/);
+    assert.ok(v146RowMatch, 'V1.46 current version table row must exist');
+    assert.ok(
+      v146RowMatch[0].includes(V146_SIGNATURE),
+      'V1.46 current table row must include exact V1.46 user-level LaunchAgent lifecycle code-stage closure PASS signature',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('nas-dry-run ready'),
+      'V1.46 current table row must state nas-dry-run ready',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('real-nas-remote-backup ready'),
+      'V1.46 current table row must state real-nas-remote-backup ready',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('configuration-only ready'),
+      'V1.46 current table row must state configuration-only ready',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('runtime mount verification pending'),
+      'V1.46 current table row must state runtime mount verification pending',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('executionAuthorized:false'),
+      'V1.46 current table row must include executionAuthorized:false',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('wouldConnect:false'),
+      'V1.46 current table row must include wouldConnect:false',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('wouldWrite:false'),
+      'V1.46 current table row must include wouldWrite:false',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('not Gold'),
+      'V1.46 current table row must include not Gold',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('Gold remains partial 6/3/0/9'),
+      'V1.46 current table row must include exact Gold remains partial 6/3/0/9',
+    );
+    assert.ok(
+      v146RowMatch[0].includes('three partial items remain'),
+      'V1.46 current table row must state three partial items remain',
+    );
+    assert.ok(
+      !v146RowMatch[0].includes('Gold remains partial 5/4/0/9'),
+      'V1.46 current table row must not keep stale Gold remains partial 5/4/0/9 (V1.44 historical count)',
+    );
+    assert.ok(
+      !v146RowMatch[0].includes('four partial items remain'),
+      'V1.46 current table row must not keep stale four partial items remain (V1.44 historical count)',
+    );
+    assert.ok(
+      !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(v146RowMatch[0]),
+      'V1.46 current table row must not claim Gold/GA/production-ready',
+    );
+    for (const phrase of [
+      'no real launchctl',
+      'no clean-Mac lifecycle evidence',
+      'not installation complete',
+      'code-stage only',
+      'conditional fake host adapters',
+      'real Node owner SIGKILL/recovery child',
+    ]) {
+      assert.ok(
+        v146RowMatch[0].includes(phrase),
+        `V1.46 current table row must include LaunchAgent boundary phrase: ${phrase}`,
+      );
+    }
+    assertReadmeContains(
+      /\| V1\.46 \| 当前版本 \|[^|]*(V1\.46 user-level LaunchAgent lifecycle code-stage closure PASS)[^|]*(no real launchctl)[^|]*(not installation complete)[^|]*(Gold remains partial 6\/3\/0\/9)/i,
+      'V1.46 should be current LaunchAgent code-stage closure milestone',
+    );
+    const v145RowMatch = readme.match(/\| V1\.45 \| 历史版本 \|[^|\n]*/);
+    assert.ok(v145RowMatch, 'V1.45 historical version table row must exist');
     assert.ok(
       v145RowMatch[0].includes(V145_SIGNATURE),
-      'V1.45 current table row must include exact V1.45 NAS dry-run configuration-readiness PASS signature',
+      'V1.45 historical table row must retain exact V1.45 NAS dry-run configuration-readiness PASS signature',
     );
     assert.ok(
       v145RowMatch[0].includes('nas-dry-run ready'),
-      'V1.45 current table row must state nas-dry-run ready',
-    );
-    assert.ok(
-      v145RowMatch[0].includes('real-nas-remote-backup ready'),
-      'V1.45 current table row must state real-nas-remote-backup ready',
+      'V1.45 historical table row must retain nas-dry-run ready',
     );
     assert.ok(
       v145RowMatch[0].includes('configuration-only ready'),
-      'V1.45 current table row must state configuration-only ready',
+      'V1.45 historical table row must retain configuration-only ready',
     );
     assert.ok(
-      v145RowMatch[0].includes('runtime mount verification pending'),
-      'V1.45 current table row must state runtime mount verification pending',
-    );
-    assert.ok(
-      v145RowMatch[0].includes('executionAuthorized:false'),
-      'V1.45 current table row must include executionAuthorized:false',
-    );
-    assert.ok(
-      v145RowMatch[0].includes('wouldConnect:false'),
-      'V1.45 current table row must include wouldConnect:false',
-    );
-    assert.ok(
-      v145RowMatch[0].includes('wouldWrite:false'),
-      'V1.45 current table row must include wouldWrite:false',
-    );
-    assert.ok(
-      v145RowMatch[0].includes('not Gold'),
-      'V1.45 current table row must include not Gold',
+      v145RowMatch[0].includes('real-nas-remote-backup ready'),
+      'V1.45 historical table row must retain real-nas-remote-backup ready',
     );
     assert.ok(
       v145RowMatch[0].includes('Gold remains partial 6/3/0/9'),
-      'V1.45 current table row must include exact Gold remains partial 6/3/0/9',
+      'V1.45 historical table row must retain Gold remains partial 6/3/0/9',
     );
-    assert.ok(
-      v145RowMatch[0].includes('three partial items remain'),
-      'V1.45 current table row must state three partial items remain',
-    );
-    assert.ok(
-      !v145RowMatch[0].includes('Gold remains partial 5/4/0/9'),
-      'V1.45 current table row must not keep stale Gold remains partial 5/4/0/9 (V1.44 historical count)',
-    );
-    assert.ok(
-      !v145RowMatch[0].includes('four partial items remain'),
-      'V1.45 current table row must not keep stale four partial items remain (V1.44 historical count)',
-    );
-    assert.ok(
-      !/\bGold\/GA\b|Gold ready|GA ready|production-ready/i.test(v145RowMatch[0]),
-      'V1.45 current table row must not claim Gold/GA/production-ready',
-    );
-    assertReadmeContains(
-      /\| V1\.45 \| 当前版本 \|[^|]*(V1\.45 NAS dry-run configuration-readiness PASS)[^|]*(nas-dry-run ready)[^|]*(real-nas-remote-backup ready)[^|]*(Gold remains partial 6\/3\/0\/9)/i,
-      'V1.45 should be current NAS dry-run configuration-readiness PASS milestone',
-    );
+    assertReadmeDoesNotContain(/\| V1\.45 \| 当前版本 \|/i, 'V1.45 must not remain marked as current');
+    // V1.45 historical row must immediately follow the V1.46 current row in the table.
+    {
+      const tableLines = readme.split('\n');
+      const currentIdx = tableLines.findIndex((line) => /\| V1\.46 \| 当前版本 \|/.test(line));
+      assert.ok(currentIdx >= 0, 'V1.46 current table row index must exist');
+      const nextVersionRow = tableLines
+        .slice(currentIdx + 1)
+        .find((line) => /^\s*\| V\d/.test(line));
+      assert.ok(
+        nextVersionRow !== undefined && /\| V1\.45 \| 历史版本 \|/.test(nextVersionRow),
+        'V1.45 historical row must immediately follow the V1.46 current row',
+      );
+    }
     // V1.44 historical row — retain real NAS acceptance receipt facts; must not remain 当前版本.
-    // Scoped to the V1.44 table row only so other historical text cannot false-green it.
     const v144RowMatch = readme.match(/\| V1\.44 \| 历史版本 \|[^|\n]*/);
     assert.ok(v144RowMatch, 'V1.44 historical version table row must exist');
     assert.ok(
@@ -2400,19 +2469,6 @@ describe('README — V1.45 NAS dry-run configuration-readiness PASS honesty', ()
       'V1.44 historical table row must retain Gold remains partial 5/4/0/9',
     );
     assertReadmeDoesNotContain(/\| V1\.44 \| 当前版本 \|/i, 'V1.44 must not remain marked as current');
-    // V1.44 historical row must immediately follow the V1.45 current row in the table.
-    {
-      const tableLines = readme.split('\n');
-      const currentIdx = tableLines.findIndex((line) => /\| V1\.45 \| 当前版本 \|/.test(line));
-      assert.ok(currentIdx >= 0, 'V1.45 current table row index must exist');
-      const nextVersionRow = tableLines
-        .slice(currentIdx + 1)
-        .find((line) => /^\s*\| V\d/.test(line));
-      assert.ok(
-        nextVersionRow !== undefined && /\| V1\.44 \| 历史版本 \|/.test(nextVersionRow),
-        'V1.44 historical row must immediately follow the V1.45 current row',
-      );
-    }
     // V1.43 historical row — retain rotation foundation facts; must not remain 当前版本
     const v143RowMatch = readme.match(/\| V1\.43 \| 历史版本 \|[^|\n]*/);
     assert.ok(v143RowMatch, 'V1.43 historical version table row must exist');
