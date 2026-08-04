@@ -2402,7 +2402,7 @@ describe('Gold Readiness Report', () => {
       'audit/integrity-alert-outbox.json',
       'maximum 256 pending entries and 1 MiB state',
       'issued alert enqueue, defensive read, and FIFO exact-head acknowledgement',
-      'no CLI/API/Web consumer wiring yet',
+      'no API/Web outbox consumer wiring yet',
       'not remote notification delivery',
       'not managed scheduler',
       'not production monitoring ready',
@@ -2424,13 +2424,36 @@ describe('Gold Readiness Report', () => {
       'test/agent-audit-integrity-alert-capture.test.js',
       'monitor completes before outbox enqueue',
       'exit 0 ignored healthy / exit 2 queued alert',
-      'no CLI read/ack consumer yet',
+      'explicit local CLI read/ack consumer',
       'not remote notification delivery',
       'not managed scheduler',
       'not production monitoring ready',
       'not end-to-end production audit delivery',
     ]) {
       assert.ok(item.evidence.includes(atom), `missing alert capture evidence atom: ${atom}`);
+    }
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
+  it('records explicit local outbox read/ack CLI without remote-delivery overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'explicit local audit-integrity alert outbox read/ack CLI',
+      'src/agent.js audit-integrity-alert-outbox-read / audit-integrity-alert-outbox-ack',
+      'test/agent-audit-integrity-alert-outbox.test.js',
+      'absent read and empty acknowledgement create no outbox state',
+      'FIFO exact-head acknowledgement with wrong-head fail-closed',
+      'local acknowledgement does not prove remote delivery',
+      'no API/Web outbox consumer wiring yet',
+      'not remote notification delivery',
+      'not managed scheduler',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+    ]) {
+      assert.ok(item.evidence.includes(atom), `missing outbox CLI evidence atom: ${atom}`);
     }
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });

@@ -3105,8 +3105,8 @@ describe('README — long-lived safety boundaries', () => {
       'outbox capacity bounds');
     assertReadmeContains(/FIFO[^\n]*(head|头部)[^\n]*(ack|确认)/i,
       'FIFO exact-head acknowledgement');
-    assertReadmeContains(/no CLI\/API\/Web consumer wiring|尚无 CLI\/API\/Web/i,
-      'no outbox consumer wiring');
+    assertReadmeContains(/no API\/Web outbox consumer|尚无 API\/Web/i,
+      'no API/Web outbox consumer wiring');
     assertReadmeContains(/not remote notification delivery/i,
       'no remote notification delivery');
     assertReadmeContains(/not managed scheduler/i,
@@ -3126,12 +3126,33 @@ describe('README — long-lived safety boundaries', () => {
       'monitor completes before enqueue');
     assertReadmeContains(/exit 0[^\n]*(healthy|ignored)[^\n]*exit 2[^\n]*(alert|queued|告警)/i,
       'capture exit semantics');
-    assertReadmeContains(/no CLI read\/ack consumer|尚无 CLI[^\n]*(read|ack)/i,
-      'no CLI consumer yet');
+    assertReadmeContains(/explicit local CLI read\/ack consumer|本地 CLI[^\n]*(read|ack)/i,
+      'explicit local CLI consumer');
     assertReadmeContains(/not remote notification delivery/i,
       'no remote notification delivery');
     assertReadmeContains(/not managed scheduler/i,
       'no managed scheduler');
+    assertReadmeContains(/not production monitoring ready/i,
+      'not production monitoring ready');
+  });
+
+  it('documents explicit local outbox read/ack CLI and its remote-delivery ceiling', () => {
+    assertReadmeContains(/audit-integrity-alert-outbox-read --data-dir/i,
+      'local outbox read command');
+    assertReadmeContains(/audit-integrity-alert-outbox-ack --data-dir[^\n]*--sequence/i,
+      'local outbox ack command');
+    assertReadmeContains(/FIFO[^\n]*(exact-head|head|头部)[^\n]*(ack|确认)/i,
+      'FIFO exact-head acknowledgement');
+    assertReadmeContains(/absent[^\n]*(read|ack)[^\n]*(no write|不创建|zero)/i,
+      'absent read/ack no-write');
+    assertReadmeContains(/local (acknowledgement|ack)[^\n]*does not prove remote delivery/i,
+      'local ack is not delivery proof');
+    assertReadmeContains(/no API\/Web outbox consumer/i,
+      'no API/Web consumer');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+    assertReadmeContains(/not managed scheduler/i,
+      'not managed scheduler');
     assertReadmeContains(/not production monitoring ready/i,
       'not production monitoring ready');
   });

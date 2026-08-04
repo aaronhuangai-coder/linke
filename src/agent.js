@@ -33,6 +33,8 @@
  *   audit-log           — show sanitized local audit events
  *   audit-integrity-monitor — run-once local audit integrity monitor (JSON on stdout; no network; no write)
  *   audit-integrity-alert-capture — explicitly persist one local monitor result to the bounded outbox
+ *   audit-integrity-alert-outbox-read — read the bounded local alert outbox
+ *   audit-integrity-alert-outbox-ack — acknowledge the exact local FIFO head
  *   audit-integrity-rotate — explicitly rotate the local audit integrity generation
  *   audit-integrity-rotation-recover — explicitly recover a local audit integrity rotation
  *   release-readiness   — evaluate release readiness from health status
@@ -57,7 +59,7 @@
  *   --approval <path>    Approval JSON file path (supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
  *   --manifest <path>    Executor manifest JSON file path (supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
  *   --runner-binding <path> Guarded runner binding JSON file path (supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
- *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor/capture, explicit audit integrity rotation/recovery, and management-auth-rotate
+ *   --data-dir <path>    Data directory for nas-snapshot-replicate, supervisor lifecycle approval persistence, apply readiness, executor readiness, guarded runner execution gate, audit-integrity-monitor/capture/outbox, explicit audit integrity rotation/recovery, and management-auth-rotate
  *   --expected-generation-id <hex> Expected audit generation ID (rotate only; 32 lowercase hex)
  *   --expected-head-digest <hex> Expected audit journal head digest (rotate only; 64 lowercase hex)
  *   --target <name>      NAS target name (nas-snapshot-replicate)
@@ -121,7 +123,11 @@ import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
 } from './audit-integrity-monitor.js';
-import { enqueueAuditIntegrityAlertOutbox } from './audit-integrity-alert-outbox.js';
+import {
+  acknowledgeAuditIntegrityAlertOutboxHead,
+  enqueueAuditIntegrityAlertOutbox,
+  readAuditIntegrityAlertOutbox,
+} from './audit-integrity-alert-outbox.js';
 import {
   recoverAuditIntegrityRotation,
   rotateAuditIntegrityGeneration,
@@ -146,6 +152,22 @@ const AUDIT_INTEGRITY_ALERT_CAPTURE_REFUSED_ERROR =
   'audit-integrity-alert-capture refused';
 const AUDIT_INTEGRITY_ALERT_CAPTURE_EXECUTION_ERROR =
   'audit-integrity-alert-capture failed';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_READ_COMMAND =
+  'audit-integrity-alert-outbox-read';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_READ_ARGS_ERROR =
+  'audit-integrity-alert-outbox-read arguments are invalid';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_READ_REFUSED_ERROR =
+  'audit-integrity-alert-outbox-read refused';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_READ_EXECUTION_ERROR =
+  'audit-integrity-alert-outbox-read failed';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_COMMAND =
+  'audit-integrity-alert-outbox-ack';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_ARGS_ERROR =
+  'audit-integrity-alert-outbox-ack arguments are invalid';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_REFUSED_ERROR =
+  'audit-integrity-alert-outbox-ack refused';
+const AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_EXECUTION_ERROR =
+  'audit-integrity-alert-outbox-ack failed';
 const AUDIT_INTEGRITY_ROTATE_COMMAND = 'audit-integrity-rotate';
 const AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND = 'audit-integrity-rotation-recover';
 const MANAGEMENT_AUTH_ROTATE_COMMAND = 'management-auth-rotate';
@@ -168,6 +190,8 @@ const AUDIT_INTEGRITY_HEAD_DIGEST_RE = /^[0-9a-f]{64}$/;
 const AUDIT_INTEGRITY_LOCAL_STRICT_COMMANDS = new Set([
   AUDIT_INTEGRITY_MONITOR_COMMAND,
   AUDIT_INTEGRITY_ALERT_CAPTURE_COMMAND,
+  AUDIT_INTEGRITY_ALERT_OUTBOX_READ_COMMAND,
+  AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_COMMAND,
   AUDIT_INTEGRITY_ROTATE_COMMAND,
   AUDIT_INTEGRITY_ROTATION_RECOVER_COMMAND,
   MANAGEMENT_AUTH_ROTATE_COMMAND,
@@ -277,6 +301,79 @@ function assertAuditIntegrityAlertCaptureArgs(args, rawArgv) {
   ) {
     throw new Error(AUDIT_INTEGRITY_ALERT_CAPTURE_ARGS_ERROR);
   }
+}
+
+/** Parse the exact local outbox-read argv surface. */
+function parseAuditIntegrityAlertOutboxReadArgs(args, rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 3
+    || rawArgv[0] !== AUDIT_INTEGRITY_ALERT_OUTBOX_READ_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_READ_ARGS_ERROR);
+  }
+  const keys = Object.keys(args);
+  if (
+    keys.length !== AUDIT_INTEGRITY_MONITOR_ARG_KEYS.size
+    || keys.some((key) => !AUDIT_INTEGRITY_MONITOR_ARG_KEYS.has(key))
+    || !Object.hasOwn(args, '_')
+    || !Object.hasOwn(args, 'data-dir')
+    || !Array.isArray(args._)
+    || args._.length !== 1
+    || args._[0] !== AUDIT_INTEGRITY_ALERT_OUTBOX_READ_COMMAND
+    || args['data-dir'] !== rawArgv[2]
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_READ_ARGS_ERROR);
+  }
+  return Object.freeze({ dataDir: rawArgv[2] });
+}
+
+/** Parse the exact local FIFO-head acknowledgement argv surface. */
+function parseAuditIntegrityAlertOutboxAckArgs(args, rawArgv) {
+  if (
+    !Array.isArray(rawArgv)
+    || rawArgv.length !== 5
+    || rawArgv[0] !== AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_COMMAND
+    || rawArgv[1] !== '--data-dir'
+    || typeof rawArgv[2] !== 'string'
+    || rawArgv[2].trim().length === 0
+    || rawArgv[2].startsWith('--')
+    || rawArgv[3] !== '--sequence'
+    || typeof rawArgv[4] !== 'string'
+    || !/^[1-9][0-9]*$/.test(rawArgv[4])
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_ARGS_ERROR);
+  }
+  const sequence = Number(rawArgv[4]);
+  if (!Number.isSafeInteger(sequence)) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_ARGS_ERROR);
+  }
+  const allowed = new Set(['_', 'data-dir', 'sequence']);
+  const keys = Object.keys(args);
+  if (
+    keys.length !== allowed.size
+    || keys.some((key) => !allowed.has(key))
+    || !Object.hasOwn(args, '_')
+    || !Object.hasOwn(args, 'data-dir')
+    || !Object.hasOwn(args, 'sequence')
+    || !Array.isArray(args._)
+    || args._.length !== 1
+    || args._[0] !== AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_COMMAND
+    || args['data-dir'] !== rawArgv[2]
+    || args.sequence !== rawArgv[4]
+  ) {
+    throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_ARGS_ERROR);
+  }
+  return Object.freeze({ dataDir: rawArgv[2], sequence });
+}
+
+function isAuditIntegrityAlertOutboxRefusal(error) {
+  return error instanceof LinkeError
+    && error.code === ERROR_CODES.AUDIT_DELIVERY_UNAVAILABLE;
 }
 
 /**
@@ -1303,6 +1400,8 @@ Commands:
   audit-log           Show sanitized local audit events
   audit-integrity-monitor Run-once local audit integrity monitor (JSON on stdout; no network; no write)
   audit-integrity-alert-capture Explicitly capture one local single-run monitor result into the bounded outbox (no network)
+  audit-integrity-alert-outbox-read Read the bounded local alert outbox (no network; no write)
+  audit-integrity-alert-outbox-ack Acknowledge the exact local FIFO alert head (no network)
   audit-integrity-rotate Explicitly rotate the local audit integrity generation (local only)
   audit-integrity-rotation-recover Explicitly recover a local audit integrity rotation (local only)
   release-readiness   Evaluate release readiness from health status
@@ -1344,7 +1443,8 @@ Options:
   --approval <path>    Approval JSON file path (for supervisor-lifecycle-apply, supervisor-lifecycle-approval-persistence-preview, supervisor-lifecycle-approval-persist)
   --manifest <path>    Executor manifest JSON file path (for supervisor-lifecycle-executor-manifest-readiness, supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
   --runner-binding <path> Guarded runner binding JSON file path (for supervisor-lifecycle-guarded-runner-readiness, supervisor-lifecycle-guarded-runner-execution-preview, supervisor-lifecycle-guarded-runner-execution-gate)
-  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-alert-capture, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
+  --data-dir <path>    Data directory (for nas-snapshot-replicate, supervisor-lifecycle-approval-persist, supervisor-lifecycle-apply-readiness, supervisor-lifecycle-executor-readiness, supervisor-lifecycle-guarded-runner-execution-gate, audit-integrity-monitor, audit-integrity-alert-capture, audit-integrity-alert-outbox-read, audit-integrity-alert-outbox-ack, audit-integrity-rotate, audit-integrity-rotation-recover, management-auth-rotate)
+  --sequence <n>       Exact positive FIFO head sequence (audit-integrity-alert-outbox-ack)
   --expected-generation-id <hex> Expected audit generation ID (audit-integrity-rotate; 32 lowercase hex)
   --expected-head-digest <hex> Expected audit journal head digest (audit-integrity-rotate; 64 lowercase hex)
 `);
@@ -1379,6 +1479,41 @@ export async function main() {
     }
 
     switch (command) {
+      case 'audit-integrity-alert-outbox-read': {
+        const parsed = parseAuditIntegrityAlertOutboxReadArgs(args, rawArgv);
+        try {
+          const state = await readAuditIntegrityAlertOutbox(parsed.dataDir);
+          process.stdout.write(`${JSON.stringify(state)}\n`);
+        } catch (error) {
+          if (isAuditIntegrityAlertOutboxRefusal(error)) {
+            console.error(`Error: ${AUDIT_INTEGRITY_ALERT_OUTBOX_READ_REFUSED_ERROR}`);
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_READ_EXECUTION_ERROR);
+        }
+        break;
+      }
+
+      case 'audit-integrity-alert-outbox-ack': {
+        const parsed = parseAuditIntegrityAlertOutboxAckArgs(args, rawArgv);
+        try {
+          const receipt = await acknowledgeAuditIntegrityAlertOutboxHead(
+            parsed.dataDir,
+            parsed.sequence,
+          );
+          process.stdout.write(`${JSON.stringify(receipt)}\n`);
+        } catch (error) {
+          if (isAuditIntegrityAlertOutboxRefusal(error)) {
+            console.error(`Error: ${AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_REFUSED_ERROR}`);
+            process.exitCode = 2;
+            break;
+          }
+          throw new Error(AUDIT_INTEGRITY_ALERT_OUTBOX_ACK_EXECUTION_ERROR);
+        }
+        break;
+      }
+
       case 'audit-integrity-alert-capture': {
         assertAuditIntegrityAlertCaptureArgs(args, rawArgv);
         try {
