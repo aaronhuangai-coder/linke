@@ -2547,7 +2547,7 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
-  it('records durable local alert delivery claim/fencing foundation without transport overclaim', () => {
+  it('records durable local alert delivery claim/fencing foundation without delivery overclaim', () => {
     const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
     const item = report.items.find((candidate) => candidate.id === 'production-hardening');
     assert.ok(item);
@@ -2564,7 +2564,7 @@ describe('Gold Readiness Report', () => {
       'live-owner lease handling',
       'owner-death/PID-reuse/boot-mismatch recovery',
       'completion and release fencing',
-      'no HTTPS transport executor',
+      // HTTPS transport is a separate milestone; keep non-transport ceilings here.
       'no automatic retry',
       'no dead-letter handling',
       'not managed scheduler',
@@ -2584,6 +2584,54 @@ describe('Gold Readiness Report', () => {
     assertTextProductionHardeningReadyNegated(
       item.nextStep,
       'production-hardening claim/fencing nextStep',
+    );
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
+  it('records bounded programmatic alert HTTPS transport and one-shot delivery without overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item, 'production-hardening should exist');
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'bounded programmatic audit-integrity alert HTTPS transport',
+      'src/audit-integrity-alert-https-transport.js',
+      'test/audit-integrity-alert-https-transport.test.js',
+      'src/audit-integrity-alert-delivery-once.js',
+      'test/audit-integrity-alert-delivery-once.test.js',
+      '10-second total deadline',
+      '4096-byte response bound',
+      'uncertain outcomes preserve the durable claim',
+      'complete bounded non-2xx releases the claim',
+      'at-least-once; not exactly-once',
+      'no automatic retry',
+      'no dead-letter handling',
+      'not managed scheduler',
+      'trusted local caller endpoint only',
+      'no external/untrusted endpoint wiring',
+      'not remote notification delivery',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+      'not production-hardening ready',
+      'not Gold',
+    ]) {
+      assert.ok(
+        item.evidence.includes(atom),
+        `missing HTTPS transport honesty evidence atom: ${atom}`,
+      );
+    }
+    // Stale positive-absence claim must leave the production-hardening evidence surface.
+    assert.ok(
+      !item.evidence.includes('no HTTPS transport executor'),
+      'production-hardening evidence must not retain stale "no HTTPS transport executor"',
+    );
+    assertEvidenceProductionHardeningReadyNegated(
+      item.evidence,
+      'production-hardening HTTPS transport evidence',
+    );
+    assertTextProductionHardeningReadyNegated(
+      item.nextStep,
+      'production-hardening HTTPS transport nextStep',
     );
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });

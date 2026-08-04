@@ -3439,8 +3439,8 @@ describe('README — V1.46 management auth Keychain source', () => {
       'not remote notification delivery');
   });
 
-  it('documents durable local alert delivery claim/fencing foundation and undelivered transport ceiling', () => {
-    // Delivered local claim/fencing foundation (Task 3) — must not be silent in docs.
+  it('documents durable local alert delivery claim/fencing foundation and remaining delivery ceilings', () => {
+    // Delivered local claim/fencing foundation — must not be silent in docs.
     assertReadmeContains(
       /durable local (audit-integrity )?alert delivery claim\/fencing|durable local claim\/fencing foundation|本地.*claim\/fencing/i,
       'durable local claim/fencing foundation',
@@ -3475,11 +3475,7 @@ describe('README — V1.46 management auth Keychain source', () => {
     );
     assertReadmeContains(/completion and release fencing|complete\/release fencing|completion.*release fencing/i,
       'completion and release fencing');
-    // Explicit undelivered ceiling — distinguish claim/fencing from transport/Gold.
-    assertReadmeContains(
-      /no HTTPS transport executor|无 HTTPS transport executor|HTTPS transport executor.*(not delivered|absent|missing)|not.*HTTPS transport executor/i,
-      'no HTTPS transport executor',
-    );
+    // Remaining undelivered ceilings (HTTPS transport itself is a separate honesty surface).
     assertReadmeContains(/no automatic retry|无 automatic retry|not automatic retry/i,
       'no automatic retry');
     assertReadmeContains(/no dead-letter|无 dead-letter|not dead-letter/i,
@@ -3491,6 +3487,58 @@ describe('README — V1.46 management auth Keychain source', () => {
       'not end-to-end production audit delivery');
     assertReadmeContains(/at-least-once/i, 'at-least-once semantics');
     assertReadmeContains(/not exactly-once|非 exactly-once/i, 'not exactly-once');
+    assertReadmeContains(/production-hardening.*(remains )?partial|production-hardening 仍 partial/i,
+      'production-hardening remains partial');
+    assertReadmeContains(/not production-hardening ready/i,
+      'not production-hardening ready');
+    assertReadmeContains(/not Gold|不得宣称.*Gold/i, 'not Gold');
+  });
+
+  it('documents bounded programmatic audit-integrity alert HTTPS transport and one-shot honesty', () => {
+    // Exact current-milestone evidence (Task 1/2 paths + bounds + claim policy).
+    for (const atom of [
+      'bounded programmatic audit-integrity alert HTTPS transport',
+      'src/audit-integrity-alert-https-transport.js',
+      'test/audit-integrity-alert-https-transport.test.js',
+      'src/audit-integrity-alert-delivery-once.js',
+      'test/audit-integrity-alert-delivery-once.test.js',
+      '10-second total deadline',
+      '4096-byte response bound',
+      'uncertain outcomes preserve the durable claim',
+      'complete bounded non-2xx releases the claim',
+      'at-least-once; not exactly-once',
+    ]) {
+      assert.ok(
+        readme.includes(atom),
+        `README must include exact HTTPS transport honesty atom: ${atom}`,
+      );
+    }
+    // Stale positive-absence claim must leave the current surface.
+    assert.ok(
+      !readme.includes('no HTTPS transport executor'),
+      'README must not retain stale "no HTTPS transport executor"',
+    );
+    // Trusted-local endpoint boundary; external/untrusted wiring still undelivered.
+    assert.ok(
+      /trusted local caller/i.test(readme),
+      'README must state only trusted local caller may provide endpoint',
+    );
+    assert.ok(
+      /no external\/untrusted endpoint wiring|external\/untrusted endpoint wiring.*(not delivered|not yet|尚未|absent|missing)/i.test(readme),
+      'README must state external/untrusted endpoint wiring is not delivered',
+    );
+    // Remaining unfinished ceilings — still directly required on honesty surface.
+    assertReadmeContains(/no automatic retry|无 automatic retry|not automatic retry/i,
+      'no automatic retry');
+    assertReadmeContains(/no dead-letter|无 dead-letter|not dead-letter/i,
+      'no dead-letter handling');
+    assertReadmeContains(/not managed scheduler/i, 'not managed scheduler');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+    assertReadmeContains(/not production monitoring ready/i,
+      'not production monitoring ready');
+    assertReadmeContains(/not end-to-end production audit delivery/i,
+      'not end-to-end production audit delivery');
     assertReadmeContains(/production-hardening.*(remains )?partial|production-hardening 仍 partial/i,
       'production-hardening remains partial');
     assertReadmeContains(/not production-hardening ready/i,
