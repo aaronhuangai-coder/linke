@@ -189,6 +189,8 @@ if (profilesExists) {
         ProgramArguments: [nodePath, controllerPath],
         RunAtLoad: true,
         KeepAlive: true,
+        SoftResourceLimits: { Core: 0 },
+        HardResourceLimits: { Core: 0 },
         EnvironmentVariables: {},
       });
       assert.equal(rendered.controller.label, 'com.linke.controller');
@@ -200,6 +202,8 @@ if (profilesExists) {
         ProgramArguments: [nodePath, agentPath, 'run-once', '--config', configPath],
         StartInterval: 3600,
         RunAtLoad: false,
+        SoftResourceLimits: { Core: 0 },
+        HardResourceLimits: { Core: 0 },
       });
       assert.equal(rendered.scheduler.label, 'com.linke.scheduler');
       assert.equal(rendered.scheduler.filename, 'com.linke.scheduler.plist');

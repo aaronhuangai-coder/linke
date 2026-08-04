@@ -405,6 +405,8 @@ async function renderProfiles(value) {
     ],
     RunAtLoad: true,
     KeepAlive: true,
+    SoftResourceLimits: { Core: 0 },
+    HardResourceLimits: { Core: 0 },
     EnvironmentVariables: controllerEnvironment,
   };
   const schedulerDescriptor = {
@@ -418,6 +420,8 @@ async function renderProfiles(value) {
     ],
     StartInterval: scheduleSeconds,
     RunAtLoad: false,
+    SoftResourceLimits: { Core: 0 },
+    HardResourceLimits: { Core: 0 },
   };
   const controllerBytes = renderPlist(controllerDescriptor);
   const schedulerBytes = renderPlist(schedulerDescriptor);

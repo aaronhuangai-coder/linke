@@ -36,6 +36,19 @@ describe('Launchd dry-run', () => {
     assert.ok(plist.includes('7200'));
   });
 
+  it('disables core dumps with matching soft and hard launchd resource limits', () => {
+    const plist = generateLaunchdPlist(baseConfig, '/tmp/c.json');
+
+    assert.match(
+      plist,
+      /<key>SoftResourceLimits<\/key>\s*<dict>\s*<key>Core<\/key>\s*<integer>0<\/integer>\s*<\/dict>/,
+    );
+    assert.match(
+      plist,
+      /<key>HardResourceLimits<\/key>\s*<dict>\s*<key>Core<\/key>\s*<integer>0<\/integer>\s*<\/dict>/,
+    );
+  });
+
   it('plist is valid XML-ish structure', () => {
     const plist = generateLaunchdPlist(baseConfig, '/tmp/c.json');
     assert.ok(plist.startsWith('<?xml'));

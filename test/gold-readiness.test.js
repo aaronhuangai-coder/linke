@@ -231,6 +231,11 @@ const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
   'test/keychain-store.test.js hard timeout and late callback cancellation',
   'Keychain security child timeout fails closed, kills the child, and destroys stdio',
   'fake timer code-stage evidence only; real locked-Keychain and headless bootstrap acceptance not verified',
+  'launchd SoftResourceLimits.Core:0 and HardResourceLimits.Core:0 code-stage mitigation',
+  'src/launchagent-lifecycle/profiles.js controller and scheduler core dump limits',
+  'src/agent.js launchd-dry-run core dump limits',
+  'test/launchagent-lifecycle-profiles.test.js and test/launchd-dry-run.test.js',
+  'code-stage plist evidence only; real installed-process limit acceptance and token-memory exposure review remain incomplete',
 ]);
 
 /**
@@ -2332,7 +2337,8 @@ describe('Gold Readiness Report', () => {
       'four-scope production staging/process-lock CLI',
       'identity/user RBAC',
       'headless bootstrap/unlock real-host acceptance',
-      'token-memory and crash-dump exposure review',
+      'token-memory exposure review',
+      'real-host core-dump-limit acceptance',
       'production-grade audit',
       'distributed rate limiting',
       'independent production security review',

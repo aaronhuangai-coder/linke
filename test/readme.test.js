@@ -3268,6 +3268,13 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/keychain-unavailable/, 'fixed timeout failure code');
   });
 
+  it('documents core-dump mitigation and its remaining host/memory boundary', () => {
+    assertReadmeContains(/SoftResourceLimits\.Core=0/, 'soft core limit');
+    assertReadmeContains(/HardResourceLimits\.Core=0/, 'hard core limit');
+    assertReadmeContains(/真实主机 limit 验收[\s\S]*token-memory exposure review/i,
+      'real-host and token-memory work remain incomplete');
+  });
+
   it('documents fake Keychain boundary, no real credentials and Gold partial wording', () => {
     assertReadmeContains(/fake Keychain/i, 'fake Keychain only in tests');
     assertReadmeContains(/不使用真实凭据|no real credential/i, 'no real credentials');
