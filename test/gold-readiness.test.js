@@ -2482,6 +2482,30 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records stable local alert delivery stream identity without provisioning overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-04T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item);
+    assert.equal(item.status, 'partial');
+    for (const atom of [
+      'stable local audit-integrity alert delivery stream identity foundation',
+      'src/audit-integrity-alert-delivery-stream.js',
+      'test/audit-integrity-alert-delivery-stream.test.js',
+      'audit/integrity-alert-delivery-stream.json',
+      'canonical UUIDv4 state with mode 0600',
+      'same-root queue/process-lock ensure convergence',
+      'explicit local ensure only; no automatic stream provisioning',
+      'identity deletion can create a new namespace; no deletion resistance',
+      'not remote notification delivery',
+      'not managed scheduler',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+    ]) {
+      assert.ok(item.evidence.includes(atom), `missing stream identity evidence atom: ${atom}`);
+    }
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];

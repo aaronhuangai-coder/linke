@@ -3392,4 +3392,21 @@ describe('README — V1.46 management auth Keychain source', () => {
     assertReadmeContains(/production-hardening.*partial/i,
       'production-hardening remains partial');
   });
+
+  it('documents stable local delivery stream identity and deletion boundary', () => {
+    assertReadmeContains(/audit.*alert delivery stream identity|告警.*投递.*stream identity/i,
+      'alert delivery stream identity');
+    assertReadmeContains(/ensureAuditIntegrityAlertDeliveryStream/,
+      'explicit stream identity ensure API');
+    assertReadmeContains(/integrity-alert-delivery-stream\.json/,
+      'fixed stream identity state path');
+    assertReadmeContains(/UUIDv4/i, 'canonical UUIDv4 identity');
+    assertReadmeContains(/mode 0600/i, 'mode 0600');
+    assertReadmeContains(/no automatic stream provisioning|无自动.*stream.*provision/i,
+      'no automatic stream provisioning');
+    assertReadmeContains(/delet.*new namespace|删除.*new namespace|删除.*新.*namespace/i,
+      'identity deletion namespace rotation limitation');
+    assertReadmeContains(/not remote notification delivery/i,
+      'not remote notification delivery');
+  });
 });
