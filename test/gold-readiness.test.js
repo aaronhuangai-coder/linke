@@ -194,6 +194,52 @@ const V146_AUTOMATION_EVIDENCE = Object.freeze([
 ]);
 
 /**
+ * V1.46 security-auth evidence tail: exact ordered suffix of the item's
+ * evidence array documenting the management auth Keychain startup source
+ * code path, while keeping the item partial (real macOS Keychain
+ * provisioning/acceptance not verified).
+ */
+const V146_SECURITY_AUTH_EVIDENCE_TAIL = Object.freeze([
+  'V1.46 management auth Keychain startup source code path',
+  'src/keychain-store.js default service com.linke.gold',
+  'src/management-auth-keychain.js',
+  'src/controller-runtime.js managementAuthKeychainScopes startup load',
+  'test/management-auth-keychain.test.js',
+  'test/controller-runtime.test.js V1.46 management auth Keychain source',
+  'LINKE_MANAGEMENT_AUTH_SOURCE=keychain',
+  'LINKE_MANAGEMENT_AUTH_KEYCHAIN_SCOPES',
+  'loaded once at controller startup; no hot reload',
+  'behavioral tests use an injected in-memory fake Keychain; production Keychain path exists; real macOS Keychain provisioning/acceptance not verified',
+  'no claim of complete secret management or automatic token rotation',
+]);
+
+/**
+ * Exact clause-local direct negations the V1.46 security-auth nextStep must
+ * carry. The audit honesty scanners split text into clauses on
+ * `;` / `,` / `.`-followed-by-space boundaries and require every clause that
+ * mentions a controlled phrase to carry its own local negative context, so
+ * each phrase gets its own `do not claim ...` clause instead of one
+ * comma-joined list whose later clauses would scan as bare positives.
+ */
+const V146_SECURITY_AUTH_NEXTSTEP_NEGATIONS = Object.freeze([
+  'do not claim complete secret management',
+  'do not claim automatic token rotation',
+  'do not claim security-auth ready',
+  'do not claim Gold ready',
+]);
+
+/**
+ * Phrases that must never appear as bare positives in security-auth
+ * nextStep once the direct negation clause above is removed (lowercase).
+ */
+const V146_SECURITY_AUTH_OVERCLAIM_PHRASES = Object.freeze([
+  'complete secret management',
+  'automatic token rotation',
+  'security-auth ready',
+  'gold ready',
+]);
+
+/**
  * Current production-hardening prefix: text before first V1.39/V1.38/V1.37 historical marker.
  * Used to reject stale multi-process denials that are only valid as historical fact.
  */
@@ -2224,6 +2270,81 @@ describe('Gold Readiness Report', () => {
       nasItem.evidence.includes('firstPublishedSnapshotPreserved:true'),
       'real-nas-remote-backup evidence must exact-include firstPublishedSnapshotPreserved:true',
     );
+  });
+
+  // The two V1.46 security-auth tests below were introduced together and were
+  // first observed as behavior RED on the pre-V1.46 HEAD as two independent
+  // failures (evidence tail; nextStep honesty). They are kept as separate
+  // `it` blocks so each contract half is observed independently; both pass
+  // against the current V1.46 production contract.
+  it('locks V1.46 security-auth management auth Keychain evidence tail', () => {
+    const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
+
+    // Regression guards: security-auth stays partial and the report
+    // summary counts remain unchanged.
+    const securityItem = report.items.find(item => item.id === 'security-auth');
+    assert.ok(securityItem, 'security-auth should exist');
+    assert.strictEqual(securityItem.status, 'partial');
+    assert.deepStrictEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+
+    // V1.46 contract: the item evidence array must end with the exact
+    // ordered V1.46 management auth Keychain evidence atoms.
+    assert.ok(Array.isArray(securityItem.evidence), 'security-auth evidence must be an array');
+    assert.deepStrictEqual(
+      securityItem.evidence.slice(-V146_SECURITY_AUTH_EVIDENCE_TAIL.length),
+      [...V146_SECURITY_AUTH_EVIDENCE_TAIL],
+      'security-auth evidence tail must be the exact ordered V1.46 management auth Keychain evidence atoms',
+    );
+  });
+
+  it('locks V1.46 security-auth nextStep honesty contract', () => {
+    const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
+    const securityItem = report.items.find(item => item.id === 'security-auth');
+    assert.ok(securityItem, 'security-auth should exist');
+    const nextStep = securityItem.nextStep || '';
+
+    // V1.46 contract: nextStep must still name the unfinished work
+    // (case-insensitive containment, semantically exact fragments).
+    for (const fragment of [
+      'code-level partial evidence',
+      'real macOS Keychain provisioning/acceptance',
+      'controlled-restart rotation orchestration',
+      'identity/user RBAC',
+      'headless bootstrap/unlock handling',
+      'token-memory and crash-dump exposure review',
+      'production-grade audit',
+      'distributed rate limiting',
+      'independent production security review',
+    ]) {
+      assert.ok(
+        nextStep.toLowerCase().includes(fragment.toLowerCase()),
+        `security-auth nextStep must name unfinished work: ${fragment}`,
+      );
+    }
+
+    // V1.46 contract: nextStep must carry each clause-local direct negation
+    // verbatim, so the clause-local honesty scanners find a local negative
+    // context in every clause that mentions a controlled phrase.
+    for (const negation of V146_SECURITY_AUTH_NEXTSTEP_NEGATIONS) {
+      assert.ok(
+        nextStep.includes(negation),
+        `security-auth nextStep must contain the direct do-not-claim clause: ${negation}`,
+      );
+    }
+
+    // V1.46 contract: phrase-level overclaim guard — once each clause-local
+    // direct negation is removed, no bare positive readiness claim may
+    // survive in the remainder.
+    let stripped = nextStep.toLowerCase();
+    for (const negation of V146_SECURITY_AUTH_NEXTSTEP_NEGATIONS) {
+      stripped = stripped.split(negation.toLowerCase()).join(' ');
+    }
+    for (const phrase of V146_SECURITY_AUTH_OVERCLAIM_PHRASES) {
+      assert.ok(
+        !stripped.includes(phrase),
+        `security-auth nextStep must not contain bare positive "${phrase}" outside the direct negation clauses`,
+      );
+    }
   });
 
   it('rejects vague evidence strings like implemented, works, done, available', () => {
