@@ -1,5 +1,6 @@
 /**
- * Bounded audit integrity alert HTTPS transport — Task 1 baseline + Task 4 DNS pin.
+ * Bounded audit integrity alert HTTPS transport — Task 1 baseline + DNS pin
+ * + Task 4 detailed HTTPS executor RED.
  *
  * Production module:
  *   src/audit-integrity-alert-https-transport.js
@@ -9,11 +10,14 @@
  *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-https-transport-plan.md (Task 1)
  *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-destination-allowlist-design.md
  *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-destination-allowlist-plan.md (Task 4)
+ *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-durable-retry-design.md (§9.3)
+ *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-durable-retry-plan.md (Task 4)
  *
  * Old-HEAD RED is exactly one behavior-specific failure:
  *   assert message = `bounded HTTPS transport implementation missing`
- * Detailed suites register only when executor + test factory exports exist.
- * Module currently exists: this file is incremental Task 4 RED (not missing RED).
+ * Public suites register when public executor + test factory exports exist.
+ * Detailed suites assert detailed executor + detailed factory (RED until GREEN).
+ * Module currently exists: public surface green; detailed surface RED.
  *
  * Deterministic EventEmitter fakes only. No real DNS, TLS handshake, socket,
  * fetch, or external/local network I/O. Every case settles via the virtual harness
@@ -68,6 +72,8 @@ const SPECIAL_V6_DOC = '2001:db8::1';
 const REQUEST_KEYS = Object.freeze(['schemaVersion', 'url', 'method', 'headers', 'body']);
 const HEADER_KEYS = Object.freeze(['content-type', 'idempotency-key']);
 const RESULT_KEYS = Object.freeze(['schemaVersion', 'status']);
+/** Task 4 durable-retry detailed result keys (exact order). */
+const DETAILED_RESULT_KEYS = Object.freeze(['schemaVersion', 'kind']);
 /** Task 4 exact factory deps order. */
 const DEPS_KEYS = Object.freeze(['request', 'lookupAll', 'setTimer', 'clearTimer']);
 const REQUEST_HEADER_KEYS = Object.freeze([
@@ -75,8 +81,10 @@ const REQUEST_HEADER_KEYS = Object.freeze([
   'idempotency-key',
   'content-length',
 ]);
+const FORBIDDEN_PUBLIC_RESULT_CLASSIFIER = 'classifyAuditIntegrityAlertTransportDetailedOutcome';
 
-/** @type {null | {
+/**
+ * @typedef {{
  *   AUDIT_INTEGRITY_ALERT_HTTPS_TIMEOUT_MS: number,
  *   AUDIT_INTEGRITY_ALERT_HTTPS_MAX_RESPONSE_BYTES: number,
  *   AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS: number,
@@ -84,12 +92,22 @@ const REQUEST_HEADER_KEYS = Object.freeze([
  *   AUDIT_INTEGRITY_ALERT_HTTPS_MAX_DNS_ANSWERS: number,
  *   executeAuditIntegrityAlertHttpsRequest: Function,
  *   createAuditIntegrityAlertHttpsExecutorForTesting: Function,
- * }} */
+ *   executeAuditIntegrityAlertHttpsRequestDetailed: Function,
+ *   createAuditIntegrityAlertHttpsDetailedExecutorForTesting: Function,
+ * }} TransportApi
+ */
+
+/** @type {null | TransportApi} */
 let transportApi = null;
+/** @type {null | Record<string, unknown>} */
+let transportModuleExports = null;
 let implementationMissing = true;
 
 try {
   const mod = await import(PRODUCTION_MODULE_URL.href);
+  transportModuleExports = /** @type {Record<string, unknown>} */ (mod);
+  // Public surface gate unchanged: detailed exports are required by the typedef
+  // and attached when present; public suite stays green without them until GREEN.
   if (
     typeof mod.executeAuditIntegrityAlertHttpsRequest === 'function'
     && typeof mod.createAuditIntegrityAlertHttpsExecutorForTesting === 'function'
@@ -107,6 +125,10 @@ try {
       executeAuditIntegrityAlertHttpsRequest: mod.executeAuditIntegrityAlertHttpsRequest,
       createAuditIntegrityAlertHttpsExecutorForTesting:
         mod.createAuditIntegrityAlertHttpsExecutorForTesting,
+      executeAuditIntegrityAlertHttpsRequestDetailed:
+        mod.executeAuditIntegrityAlertHttpsRequestDetailed,
+      createAuditIntegrityAlertHttpsDetailedExecutorForTesting:
+        mod.createAuditIntegrityAlertHttpsDetailedExecutorForTesting,
     };
     implementationMissing = false;
   }
@@ -117,6 +139,7 @@ try {
   if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
     implementationMissing = true;
     transportApi = null;
+    transportModuleExports = null;
   } else {
     // Syntax/load errors in an existing production module must surface as themselves.
     throw error;
@@ -128,6 +151,25 @@ function requireApi() {
     assert.fail(MISSING_MSG);
   }
   return transportApi;
+}
+
+/**
+ * Detailed executor + detailed factory are required for Task 4 RED/GREEN.
+ * @returns {TransportApi}
+ */
+function requireDetailedApi() {
+  const api = requireApi();
+  assert.equal(
+    typeof api.executeAuditIntegrityAlertHttpsRequestDetailed,
+    'function',
+    'executeAuditIntegrityAlertHttpsRequestDetailed must be a function',
+  );
+  assert.equal(
+    typeof api.createAuditIntegrityAlertHttpsDetailedExecutorForTesting,
+    'function',
+    'createAuditIntegrityAlertHttpsDetailedExecutorForTesting must be a function',
+  );
+  return api;
 }
 
 // ─── Exact-key / freeze / error helpers ───────────────────────────────────
@@ -649,6 +691,39 @@ function executeWith(api, harness, descriptor) {
   const execute = api.createAuditIntegrityAlertHttpsExecutorForTesting(harness.deps);
   assert.equal(typeof execute, 'function');
   return execute(descriptor);
+}
+
+/**
+ * @param {ReturnType<typeof requireDetailedApi>} api
+ * @param {ReturnType<typeof createTransportHarness>} harness
+ * @param {unknown} descriptor
+ */
+function executeDetailedWith(api, harness, descriptor) {
+  const execute = api.createAuditIntegrityAlertHttpsDetailedExecutorForTesting(harness.deps);
+  assert.equal(typeof execute, 'function');
+  return execute(descriptor);
+}
+
+/**
+ * Detailed executor result contract: exact frozen {schemaVersion, kind}.
+ * @param {unknown} result
+ * @param {'accepted' | 'retryable-rejected' | 'terminal-rejected'} expectedKind
+ * @param {string} [label]
+ */
+function assertDetailedResult(result, expectedKind, label = 'detailed result') {
+  assertExactKeys(result, DETAILED_RESULT_KEYS, label);
+  assert.deepEqual(result, { schemaVersion: 1, kind: expectedKind });
+  assertDeeplyFrozen(result, label);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(/** @type {object} */ (result), 'statusCode'),
+    false,
+    `${label} must not expose statusCode`,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(/** @type {object} */ (result), 'status'),
+    false,
+    `${label} must not expose public status field`,
+  );
 }
 
 /**
@@ -2116,6 +2191,8 @@ describe('audit integrity alert HTTPS transport (Task 1 + Task 4 DNS pin)', () =
         'node:net',
         './error-codes.js',
         './audit-integrity-alert-public-address.js',
+        // Task 4 pure detailed status classifier (GREEN may import; not required yet).
+        './audit-integrity-alert-https-transport-outcome.js',
       ]);
       for (const imp of imports) {
         assert.equal(allowed.has(imp), true, `unexpected import: ${imp}`);
@@ -2240,6 +2317,286 @@ describe('audit integrity alert HTTPS transport (Task 1 + Task 4 DNS pin)', () =
       );
       // No DNS answer caching surface.
       assert.equal(source.includes('cache'), false, 'must not cache DNS answers');
+    });
+  });
+
+  // ── 14. Task 4 detailed HTTPS executor (durable-retry outcome seam) ─────
+
+  describe('14 Task 4 detailed HTTPS executor', () => {
+    it('exports detailed executor + detailed factory; forbids public-result classifier', () => {
+      const api = requireDetailedApi();
+      assert.equal(typeof api.executeAuditIntegrityAlertHttpsRequestDetailed, 'function');
+      assert.equal(
+        typeof api.createAuditIntegrityAlertHttpsDetailedExecutorForTesting,
+        'function',
+      );
+      // Public surface remains present and distinct.
+      assert.equal(typeof api.executeAuditIntegrityAlertHttpsRequest, 'function');
+      assert.equal(typeof api.createAuditIntegrityAlertHttpsExecutorForTesting, 'function');
+      // There is no classifyAuditIntegrityAlertTransportDetailedOutcome export.
+      assert.ok(transportModuleExports, 'transport module must be loaded');
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(
+          transportModuleExports,
+          FORBIDDEN_PUBLIC_RESULT_CLASSIFIER,
+        ),
+        false,
+        `${FORBIDDEN_PUBLIC_RESULT_CLASSIFIER} must be absent from transport surface`,
+      );
+      assert.equal(
+        typeof transportModuleExports[FORBIDDEN_PUBLIC_RESULT_CLASSIFIER],
+        'undefined',
+      );
+    });
+
+    it('detailed final status 200 → accepted, 429 → retryable-rejected, 404 → terminal-rejected', async () => {
+      const api = requireDetailedApi();
+      /** @type {Array<[number, 'accepted' | 'retryable-rejected' | 'terminal-rejected']>} */
+      const cases = [
+        [200, 'accepted'],
+        [429, 'retryable-rejected'],
+        [404, 'terminal-rejected'],
+      ];
+      for (const [statusCode, kind] of cases) {
+        const harness = createTransportHarness((call) => {
+          settleResponse(harness, call, statusCode);
+        });
+        const result = await executeDetailedWith(api, harness, validDescriptor());
+        assertDetailedResult(result, kind, `detailed status ${statusCode}`);
+        assert.equal(harness.clearTimerCalls >= 1, true, 'timer cleared on detailed settle');
+      }
+    });
+
+    it('public executor for same final fixtures returns only accepted/rejected without kind/statusCode', async () => {
+      // Mutation guard: detailed mapper must not bleed into the public surface.
+      const api = requireApi();
+      /** @type {Array<[number, 'accepted' | 'rejected']>} */
+      const cases = [
+        [200, 'accepted'],
+        [429, 'rejected'],
+        [404, 'rejected'],
+      ];
+      for (const [statusCode, status] of cases) {
+        const harness = createTransportHarness((call) => {
+          settleResponse(harness, call, statusCode);
+        });
+        const result = await executeWith(api, harness, validDescriptor());
+        assertExactKeys(result, RESULT_KEYS, `public status ${statusCode}`);
+        assert.deepEqual(result, { schemaVersion: 1, status });
+        assertDeeplyFrozen(result);
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(/** @type {object} */ (result), 'kind'),
+          false,
+          `public result for ${statusCode} must not expose kind`,
+        );
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(/** @type {object} */ (result), 'statusCode'),
+          false,
+          `public result for ${statusCode} must not expose statusCode`,
+        );
+      }
+    });
+
+    it('detailed timeout throws fixed unavailable with no kind object', async () => {
+      const api = requireDetailedApi();
+      const harness = createTransportHarness(() => {
+        // Hold open: no response. DNS succeeds via default fixture.
+      });
+      const promise = executeDetailedWith(api, harness, validDescriptor());
+      await flushMicrotasks();
+      assert.equal(harness.pendingTimersWithMs(TIMEOUT_MS).length, 1);
+      await assertStillPending(promise);
+      harness.fireDeadline(TIMEOUT_MS);
+      let rejectedError = null;
+      await assert.rejects(promise, (error) => {
+        rejectedError = error;
+        assertUnavailable(error, [CANONICAL_URL, CANONICAL_HOSTNAME, PUBLIC_V4]);
+        return true;
+      });
+      assert.ok(rejectedError);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(/** @type {object} */ (rejectedError), 'kind'),
+        false,
+        'timeout error must not carry kind',
+      );
+      assert.ok(harness.calls[0].req.destroyCount >= 1, 'request destroyed on detailed timeout');
+    });
+
+    it('detailed DNS failure throws fixed unavailable with no kind object', async () => {
+      const api = requireDetailedApi();
+      const harness = createTransportHarness(() => {
+        assert.fail('onEnd must not run for detailed DNS failure');
+      }, {
+        lookupAll(hostname, callback) {
+          harness.lookupAllCalls.push({ hostname, args: [hostname, callback] });
+          callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${SECRET_HOST}`), {
+            code: 'ENOTFOUND',
+            hostname: SECRET_HOST,
+          }));
+        },
+      });
+      let rejectedError = null;
+      await assert.rejects(
+        executeDetailedWith(api, harness, validDescriptor()),
+        (error) => {
+          rejectedError = error;
+          assertUnavailable(error, [
+            CANONICAL_HOSTNAME,
+            SECRET_HOST,
+            'ENOTFOUND',
+            'getaddrinfo',
+            PUBLIC_V4,
+          ]);
+          return true;
+        },
+      );
+      assert.ok(rejectedError);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(/** @type {object} */ (rejectedError), 'kind'),
+        false,
+        'DNS error must not carry kind',
+      );
+      assert.equal(harness.lookupAllInvocations, 1);
+    });
+
+    it('detailed factory rejects missing/reordered deps with fixed error (deps key order parity)', () => {
+      const api = requireDetailedApi();
+      const good = createTransportHarness(() => {});
+      const cases = [
+        // missing request
+        {
+          lookupAll: good.deps.lookupAll,
+          setTimer: good.deps.setTimer,
+          clearTimer: good.deps.clearTimer,
+        },
+        // missing lookupAll
+        {
+          request: good.deps.request,
+          setTimer: good.deps.setTimer,
+          clearTimer: good.deps.clearTimer,
+        },
+        // missing setTimer
+        {
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
+          clearTimer: good.deps.clearTimer,
+        },
+        // missing clearTimer
+        {
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
+          setTimer: good.deps.setTimer,
+        },
+        // reordered (lookupAll after setTimer)
+        {
+          request: good.deps.request,
+          setTimer: good.deps.setTimer,
+          lookupAll: good.deps.lookupAll,
+          clearTimer: good.deps.clearTimer,
+        },
+        // reordered (setTimer first)
+        {
+          setTimer: good.deps.setTimer,
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
+          clearTimer: good.deps.clearTimer,
+        },
+        // reordered (clearTimer first)
+        {
+          clearTimer: good.deps.clearTimer,
+          request: good.deps.request,
+          lookupAll: good.deps.lookupAll,
+          setTimer: good.deps.setTimer,
+        },
+      ];
+      for (const deps of cases) {
+        expectUnavailable(() => {
+          api.createAuditIntegrityAlertHttpsDetailedExecutorForTesting(deps);
+        });
+      }
+      // Exact ordered deps still accepted (parity with public factory contract).
+      const ok = api.createAuditIntegrityAlertHttpsDetailedExecutorForTesting(good.deps);
+      assert.equal(typeof ok, 'function');
+    });
+
+    it('detailed response streaming 4096 settles accepted; 4097 fixed unavailable', async () => {
+      const api = requireDetailedApi();
+
+      // Exactly 4096 bytes → accepted kind, no body retain.
+      {
+        const chunkA = Buffer.alloc(2000, 0x61);
+        const chunkB = Buffer.alloc(2096, 0x62);
+        assert.equal(chunkA.length + chunkB.length, MAX_RESPONSE_BYTES);
+        const harness = createTransportHarness((call) => {
+          settleResponse(harness, call, 200, [chunkA, chunkB]);
+        });
+        const result = await executeDetailedWith(api, harness, validDescriptor());
+        assertDetailedResult(result, 'accepted', 'detailed 4096-byte stream');
+        assert.equal(JSON.stringify(result).includes('aa'), false);
+      }
+
+      // Byte 4097 → fixed unavailable (uncertain path, no kind object).
+      {
+        const harness = createTransportHarness((call) => {
+          const res = createFakeResponse(200);
+          harness.setLastResponse(res);
+          call.onResponse(res);
+          res.emit('data', Buffer.alloc(MAX_RESPONSE_BYTES, 0x63));
+          res.emit('data', Buffer.from(SECRET_BODY_MARKER, 'utf8'));
+        });
+        let rejectedError = null;
+        await assert.rejects(
+          executeDetailedWith(api, harness, validDescriptor()),
+          (error) => {
+            rejectedError = error;
+            assertUnavailable(error, [SECRET_BODY_MARKER, 'ccc']);
+            return true;
+          },
+        );
+        assert.ok(rejectedError);
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(/** @type {object} */ (rejectedError), 'kind'),
+          false,
+        );
+        const res = harness.lastResponse;
+        assert.ok(res);
+        assert.ok(harness.calls[0].req.destroyCount >= 1, 'request destroyed on oversize');
+        assert.ok(res.destroyCount >= 1, 'response destroyed on oversize');
+      }
+    });
+
+    it('detailed single-settlement: late error after end and late end after timeout', async () => {
+      const api = requireDetailedApi();
+
+      // Late error after accepted end must not re-open settlement.
+      {
+        const harness = createTransportHarness((call) => {
+          settleResponse(harness, call, 200);
+        });
+        const result = await executeDetailedWith(api, harness, validDescriptor());
+        assertDetailedResult(result, 'accepted');
+        const res = harness.lastResponse;
+        assert.ok(res, 'response object must be exposed on harness');
+        res.emit('error', new Error(`late ${SECRET_HOST}`));
+        res.emit('data', Buffer.from(SECRET_BODY_MARKER));
+        res.emit('close');
+        await flushMicrotasks();
+        assertDetailedResult(result, 'accepted', 'post-late-events result');
+      }
+
+      // Late end after timeout remains unavailable (no accepted kind).
+      {
+        const harness = createTransportHarness(() => {});
+        const promise = executeDetailedWith(api, harness, validDescriptor());
+        await flushMicrotasks();
+        harness.fireDeadline();
+        await expectUnavailableAsync(promise);
+        const res = createFakeResponse(200);
+        harness.calls[0].onResponse(res);
+        res.emit('end');
+        await flushMicrotasks();
+        assert.equal(harness.clearTimerCalls >= 1, true);
+      }
     });
   });
 });

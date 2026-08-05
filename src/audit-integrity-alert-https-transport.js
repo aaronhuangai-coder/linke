@@ -3,8 +3,9 @@
  *
  * Owns one programmatic request/response settlement for a frozen delivery
  * descriptor. Pins every attempt through a custom lookup that validates all
- * DNS answers as public addresses. Returns only deep-frozen accepted/rejected
- * results, or the fixed path-free audit-delivery-unavailable error.
+ * DNS answers as public addresses. Public results are deep-frozen
+ * accepted/rejected; detailed results are deep-frozen {schemaVersion, kind}.
+ * Uncertain paths throw the fixed path-free audit-delivery-unavailable error.
  * No claim/outbox coordination, environment reads, proxy surface, credentials,
  * filesystem, or scheduling.
  */
@@ -17,6 +18,7 @@ import tls from 'node:tls';
 import { types as utilTypes } from 'node:util';
 
 import { isPublicAuditIntegrityAlertAddress } from './audit-integrity-alert-public-address.js';
+import { classifyAuditIntegrityAlertHttpStatusDetailedOutcome } from './audit-integrity-alert-https-transport-outcome.js';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 
 /** Total wall deadline for one transport attempt (milliseconds). */
@@ -358,23 +360,46 @@ function chunkByteLength(chunk) {
 }
 
 /**
+ * Public final-status mapper (legacy): primitive Number.isInteger only.
+ * Never delegates to the detailed safe-integer classifier.
+ *
  * @param {unknown} statusCode
- * @returns {statusCode is number}
+ * @returns {Readonly<{ schemaVersion: 1, status: 'accepted' | 'rejected' }>}
  */
-function isFinalIntegerStatus(statusCode) {
-  return typeof statusCode === 'number' && Number.isInteger(statusCode);
+function mapPublicFinalStatus(statusCode) {
+  if (typeof statusCode !== 'number' || !Number.isInteger(statusCode)) {
+    fail();
+  }
+  if (statusCode >= 200 && statusCode <= 299) {
+    return Object.freeze({ schemaVersion: 1, status: 'accepted' });
+  }
+  return Object.freeze({ schemaVersion: 1, status: 'rejected' });
 }
 
 /**
+ * Detailed final-status mapper: pure classifier while statusCode is in hand.
+ * Classifier throws fixed unavailable for non-safe / invalid values.
+ *
+ * @param {unknown} statusCode
+ * @returns {Readonly<{ schemaVersion: 1, kind: string }>}
+ */
+function mapDetailedFinalStatus(statusCode) {
+  return classifyAuditIntegrityAlertHttpStatusDetailedOutcome(statusCode);
+}
+
+/**
+ * Shared network core parameterized by an internal final-status settlement mapper.
+ *
  * @param {{
  *   request: Function,
  *   lookupAll: Function,
  *   setTimer: Function,
  *   clearTimer: Function,
  * }} deps
- * @returns {(descriptor: unknown) => Promise<Readonly<{ schemaVersion: 1, status: 'accepted' | 'rejected' }>>}
+ * @param {(statusCode: unknown) => Readonly<object>} mapFinalStatus
+ * @returns {(descriptor: unknown) => Promise<Readonly<object>>}
  */
-function createExecutor(deps) {
+function createExecutor(deps, mapFinalStatus) {
   return function executeWithDeps(descriptor) {
     return new Promise((resolve, reject) => {
       /** @type {{
@@ -460,14 +485,15 @@ function createExecutor(deps) {
       };
 
       /**
-       * @param {'accepted' | 'rejected'} status
+       * Resolve with the mapper's exact frozen result (public status or detailed kind).
+       * @param {Readonly<object>} result
        */
-      const settleResolve = (status) => {
+      const settleResolveResult = (result) => {
         if (settled) return;
         settled = true;
         clearTotalTimer();
         clearDnsTimer();
-        resolve(Object.freeze({ schemaVersion: 1, status }));
+        resolve(result);
       };
 
       /**
@@ -641,14 +667,13 @@ function createExecutor(deps) {
           if (settled) return;
           responseEnded = true;
           const code = activeRes && activeRes.statusCode;
-          if (!isFinalIntegerStatus(code)) {
+          // Mapper failures (invalid / non-safe status) convert to fixed unavailable.
+          // Never let a synchronous throw escape the EventEmitter callback.
+          try {
+            const result = mapFinalStatus(code);
+            settleResolveResult(result);
+          } catch {
             settleReject();
-            return;
-          }
-          if (code >= 200 && code <= 299) {
-            settleResolve('accepted');
-          } else {
-            settleResolve('rejected');
           }
         };
 
@@ -784,17 +809,18 @@ const PRODUCTION_DEPS = {
 };
 
 /**
- * Production executor: one frozen request descriptor, real built-in HTTPS + timers + DNS.
+ * Production public executor: one frozen request descriptor, real built-in HTTPS + timers + DNS.
+ * Resolves only to deep-frozen {schemaVersion:1, status:'accepted'|'rejected'}.
  *
  * @param {unknown} requestDescriptor
  * @returns {Promise<Readonly<{ schemaVersion: 1, status: 'accepted' | 'rejected' }>>}
  */
 export function executeAuditIntegrityAlertHttpsRequest(requestDescriptor) {
-  return createExecutor(PRODUCTION_DEPS)(requestDescriptor);
+  return createExecutor(PRODUCTION_DEPS, mapPublicFinalStatus)(requestDescriptor);
 }
 
 /**
- * Test-only factory. deps must be a plain object with exact ordered keys
+ * Test-only public factory. deps must be a plain object with exact ordered keys
  * request, lookupAll, setTimer, clearTimer (all functions).
  *
  * @param {unknown} deps
@@ -802,7 +828,33 @@ export function executeAuditIntegrityAlertHttpsRequest(requestDescriptor) {
  */
 export function createAuditIntegrityAlertHttpsExecutorForTesting(deps) {
   try {
-    return createExecutor(bindDeps(deps));
+    return createExecutor(bindDeps(deps), mapPublicFinalStatus);
+  } catch {
+    throw unavailableError();
+  }
+}
+
+/**
+ * Production detailed executor: same bounds/DNS/TLS/single-settlement as public,
+ * but settles final status through the pure detailed kind classifier.
+ * Resolves to deep-frozen {schemaVersion:1, kind} or rejects fixed unavailable.
+ *
+ * @param {unknown} requestDescriptor
+ * @returns {Promise<Readonly<{ schemaVersion: 1, kind: string }>>}
+ */
+export function executeAuditIntegrityAlertHttpsRequestDetailed(requestDescriptor) {
+  return createExecutor(PRODUCTION_DEPS, mapDetailedFinalStatus)(requestDescriptor);
+}
+
+/**
+ * Test-only detailed factory. Same exact ordered deps binder as the public factory.
+ *
+ * @param {unknown} deps
+ * @returns {(descriptor: unknown) => Promise<Readonly<{ schemaVersion: 1, kind: string }>>}
+ */
+export function createAuditIntegrityAlertHttpsDetailedExecutorForTesting(deps) {
+  try {
+    return createExecutor(bindDeps(deps), mapDetailedFinalStatus);
   } catch {
     throw unavailableError();
   }
