@@ -1,32 +1,60 @@
 /**
  * Task 2 RED — authorize-before-claim one-shot delivery gate.
+ * Task 5 — authorized delivery integration (real policy/claim/one-shot/HTTPS factory).
  * Authority:
  *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-destination-allowlist-design.md
- *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-destination-allowlist-plan.md (Task 2)
+ *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-destination-allowlist-plan.md
+ *   (Task 2 + Task 5)
  *
- * Production (absent on old HEAD):
+ * Production:
  *   src/audit-integrity-alert-delivery-authorized-once.js
+ *   (+ real destination policy, one-shot, claim, HTTPS transport factory)
  *
  * Old-HEAD RED is exactly one behavior-specific failure:
  *   test name + assert message = `authorized one-shot delivery implementation missing`
  * Full matrix registers only when both public factory exports exist.
  *
- * Pure injected authorize/deliverOnce branch matrix + production factory binding.
- * Production seam uses existing empty mkdtemp dataDir so deny-all cannot be
- * confused with real one-shot empty-receipt success. No real network, DNS,
- * TLS, HTTPS request, fetch, or external I/O.
+ * Task 2: pure injected authorize/deliverOnce branch matrix + production factory binding.
+ * Task 5: layered ForTesting assembly — real policy + real authorized gate + real
+ * one-shot coordinator + real claim/outbox/stream + real HTTPS transport factory;
+ * only lookupAll / request / timers are faked. No real DNS, socket, TLS handshake,
+ * fetch, or external I/O. Temp roots via mkdtemp only.
  * Does not claim Gold / remote delivery readiness.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createAuditIntegrityAlertDestinationPolicy } from '../src/audit-integrity-alert-destination-policy.js';
+import {
+  claimAuditIntegrityAlertDelivery,
+  completeAuditIntegrityAlertDelivery,
+  releaseAuditIntegrityAlertDelivery,
+} from '../src/audit-integrity-alert-delivery-claim.js';
+import {
+  AUDIT_INTEGRITY_ALERT_DELIVERY_CLAIM_RELATIVE_PATH,
+  loadAuditIntegrityAlertDeliveryClaimState,
+  publishAuditIntegrityAlertDeliveryClaimState,
+} from '../src/audit-integrity-alert-delivery-claim-state.js';
+import { createAuditIntegrityAlertDeliveryOnceForTesting } from '../src/audit-integrity-alert-delivery-once.js';
+import { AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_RELATIVE_PATH } from '../src/audit-integrity-alert-delivery-stream.js';
+import {
+  AUDIT_INTEGRITY_ALERT_OUTBOX_RELATIVE_PATH,
+  readAuditIntegrityAlertOutbox,
+} from '../src/audit-integrity-alert-outbox.js';
+import {
+  AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS,
+  createAuditIntegrityAlertHttpsExecutorForTesting,
+} from '../src/audit-integrity-alert-https-transport.js';
+import { enqueueAuditIntegrityWriteTask } from '../src/audit-integrity-write-queue.js';
 import { ERROR_CODES, LinkeError } from '../src/error-codes.js';
+import { assertSafeDataRoot } from '../src/safe-data-files.js';
 
 const PRODUCTION_MODULE_URL = new URL(
   '../src/audit-integrity-alert-delivery-authorized-once.js',
@@ -56,6 +84,51 @@ const SECRET_BODY = '{"body-secret":"do-not-leak"}';
 const SECRET_HEADER = 'authorization: Bearer leak-token';
 
 const EMPTY_RECEIPT_KEYS = Object.freeze(['schemaVersion', 'status', 'delivered']);
+const BUSY_RECEIPT_KEYS = Object.freeze([
+  'schemaVersion',
+  'status',
+  'delivered',
+  'streamId',
+  'sequence',
+  'expiresAt',
+]);
+const DELIVERED_RECEIPT_KEYS = Object.freeze([
+  'schemaVersion',
+  'status',
+  'delivered',
+  'streamId',
+  'sequence',
+  'pendingCount',
+  'completionStatus',
+]);
+
+/** Task 5 integration fixtures (policy-valid hostnames; not reserved suffixes). */
+const ENDPOINT_HOSTNAME = 'alerts.acme.com';
+const FIXED_CHECKED_AT = '2026-08-04T12:00:00.000Z';
+const FIXED_STREAM_ID = 'b2222222-c222-4222-9222-f22222222222';
+const FIXED_EXPIRES_AT = '2026-08-04T12:02:00.000Z';
+const PUBLIC_V4 = '8.8.8.8';
+const PUBLIC_V6 = '2606:4700:4700::1111';
+const PRIVATE_V4 = '10.0.0.1';
+const LOOPBACK_V4 = '127.0.0.1';
+const DNS_TIMEOUT_MS = AUDIT_INTEGRITY_ALERT_HTTPS_DNS_TIMEOUT_MS;
+
+/** Exact ordered deps for one-shot / HTTPS test factories. */
+const ONCE_DEPS_KEYS = Object.freeze([
+  'claimDelivery',
+  'executeRequest',
+  'completeDelivery',
+  'releaseDelivery',
+]);
+const TRANSPORT_DEPS_KEYS = Object.freeze([
+  'request',
+  'lookupAll',
+  'setTimer',
+  'clearTimer',
+]);
+
+const CANONICAL_IDLE_CLAIM_BYTES =
+  '{"schemaVersion":1,"status":"idle","claimId":null,"streamId":null,"sequence":null,"ownerPid":null,"bootSessionIdentity":null,"processStartIdentity":null,"claimedAt":null,"expiresAt":null}\n';
 
 /** @type {null | {
  *   createAuthorizedAuditIntegrityAlertDeliveryOnce: Function,
@@ -334,6 +407,633 @@ function makeConversionTrap(secret) {
     value,
     get hits() {
       return hits;
+    },
+  };
+}
+
+// ─── Task 5 integration helpers (real claim/outbox + fake transport) ──────
+
+/**
+ * Drain a few microtask turns without wall-clock sleep.
+ * @returns {Promise<void>}
+ */
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+/**
+ * Deep freeze walk; functions are terminal leaves.
+ * @param {unknown} value
+ * @param {string} [path]
+ */
+function assertDeeplyFrozen(value, path = 'root') {
+  if (value === null || typeof value !== 'object') return;
+  assert.equal(Object.isFrozen(value), true, `expected frozen at ${path}`);
+  for (const key of Object.keys(/** @type {object} */ (value))) {
+    assertDeeplyFrozen(
+      /** @type {Record<string, unknown>} */ (value)[key],
+      `${path}.${key}`,
+    );
+  }
+}
+
+/**
+ * Public receipts must never expose claim/request/endpoint/wire material.
+ * @param {unknown} receipt
+ * @param {string[]} [extraLeakTokens]
+ */
+function assertReceiptSanitized(receipt, extraLeakTokens = []) {
+  assert.equal(typeof receipt, 'object');
+  assert.notEqual(receipt, null);
+  assert.equal(Object.hasOwn(/** @type {object} */ (receipt), 'claimId'), false);
+  assert.equal(Object.hasOwn(/** @type {object} */ (receipt), 'request'), false);
+  assert.equal(Object.hasOwn(/** @type {object} */ (receipt), 'endpoint'), false);
+  assert.equal(Object.hasOwn(/** @type {object} */ (receipt), 'headers'), false);
+  assert.equal(Object.hasOwn(/** @type {object} */ (receipt), 'body'), false);
+
+  const text = JSON.stringify(receipt);
+  for (const token of [
+    ENDPOINT_A,
+    ENDPOINT_B,
+    ENDPOINT_HOSTNAME,
+    SECRET_TOKEN,
+    SECRET_PATH,
+    SECRET_HOST,
+    SECRET_CLAIM,
+    SECRET_BODY,
+    PUBLIC_V4,
+    PUBLIC_V6,
+    PRIVATE_V4,
+    LOOPBACK_V4,
+    'authorization',
+    'idempotency',
+    'claimId',
+    '"request"',
+    ...extraLeakTokens,
+  ]) {
+    if (!token || token.length < 2) continue;
+    assert.equal(text.includes(token), false, `receipt must not contain ${token}`);
+  }
+}
+
+/**
+ * @param {unknown} receipt
+ */
+function assertEmptyReceipt(receipt) {
+  assertExactKeys(receipt, EMPTY_RECEIPT_KEYS, 'empty receipt');
+  assert.deepEqual(receipt, {
+    schemaVersion: 1,
+    status: 'empty',
+    delivered: false,
+  });
+  assertDeeplyFrozen(receipt);
+  assertReceiptSanitized(receipt);
+}
+
+/**
+ * @param {unknown} receipt
+ * @param {{ streamId: string, sequence: number, expiresAt: string }} expected
+ */
+function assertBusyReceipt(receipt, expected) {
+  assertExactKeys(receipt, BUSY_RECEIPT_KEYS, 'busy receipt');
+  assert.equal(/** @type {{ schemaVersion: number }} */ (receipt).schemaVersion, 1);
+  assert.equal(/** @type {{ status: string }} */ (receipt).status, 'busy');
+  assert.equal(/** @type {{ delivered: boolean }} */ (receipt).delivered, false);
+  assert.equal(/** @type {{ streamId: string }} */ (receipt).streamId, expected.streamId);
+  assert.equal(/** @type {{ sequence: number }} */ (receipt).sequence, expected.sequence);
+  assert.equal(/** @type {{ expiresAt: string }} */ (receipt).expiresAt, expected.expiresAt);
+  assertDeeplyFrozen(receipt);
+  assertReceiptSanitized(receipt);
+}
+
+/**
+ * @param {unknown} receipt
+ * @param {{
+ *   streamId: string,
+ *   sequence: number,
+ *   pendingCount: number,
+ *   completionStatus: string,
+ * }} expected
+ */
+function assertDeliveredReceipt(receipt, expected) {
+  assertExactKeys(receipt, DELIVERED_RECEIPT_KEYS, 'delivered receipt');
+  assert.equal(/** @type {{ schemaVersion: number }} */ (receipt).schemaVersion, 1);
+  assert.equal(/** @type {{ status: string }} */ (receipt).status, 'delivered');
+  assert.equal(/** @type {{ delivered: boolean }} */ (receipt).delivered, true);
+  assert.equal(/** @type {{ streamId: string }} */ (receipt).streamId, expected.streamId);
+  assert.equal(/** @type {{ sequence: number }} */ (receipt).sequence, expected.sequence);
+  assert.equal(
+    /** @type {{ pendingCount: number }} */ (receipt).pendingCount,
+    expected.pendingCount,
+  );
+  assert.equal(
+    /** @type {{ completionStatus: string }} */ (receipt).completionStatus,
+    expected.completionStatus,
+  );
+  assertDeeplyFrozen(receipt);
+  assertReceiptSanitized(receipt);
+}
+
+/**
+ * @param {string} prefix
+ * @param {(root: string) => Promise<unknown>} fn
+ */
+async function withTempRoot(prefix, fn) {
+  const root = await mkdtemp(join(tmpdir(), `linke-authorized-int-${prefix}-`));
+  try {
+    return await fn(root);
+  } finally {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * @param {string} root
+ * @param {(resolvedRoot: string, lease: unknown) => Promise<unknown>} fn
+ */
+async function withLease(root, fn) {
+  const resolvedRoot = await assertSafeDataRoot(root);
+  return enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => fn(resolvedRoot, lease));
+}
+
+/** @param {string} root */
+function claimAbs(root) {
+  return join(root, AUDIT_INTEGRITY_ALERT_DELIVERY_CLAIM_RELATIVE_PATH);
+}
+/** @param {string} root */
+function outboxAbs(root) {
+  return join(root, AUDIT_INTEGRITY_ALERT_OUTBOX_RELATIVE_PATH);
+}
+/** @param {string} root */
+function streamAbs(root) {
+  return join(root, AUDIT_INTEGRITY_ALERT_DELIVERY_STREAM_RELATIVE_PATH);
+}
+
+/**
+ * @param {number} [sequence]
+ * @param {object} [overrides]
+ */
+function headEntry(sequence = 1, overrides = {}) {
+  return {
+    sequence,
+    checkedAt: FIXED_CHECKED_AT,
+    code: 'uninitialized',
+    recoveryRequired: false,
+    nextAction: 'initialize-via-production-write',
+    reasonCode: null,
+    ...overrides,
+  };
+}
+
+/**
+ * @param {number} nextSequence
+ * @param {object[]} entries
+ */
+function canonicalOutbox(nextSequence, entries) {
+  return `${JSON.stringify({ schemaVersion: 1, nextSequence, entries })}\n`;
+}
+
+/** @param {string} streamId */
+function canonicalStream(streamId) {
+  return `${JSON.stringify({ schemaVersion: 1, streamId })}\n`;
+}
+
+/**
+ * @param {string} root
+ * @param {number} nextSequence
+ * @param {object[]} entries
+ */
+async function writeOutbox(root, nextSequence, entries) {
+  const abs = outboxAbs(root);
+  await mkdir(dirname(abs), { recursive: true });
+  const raw = canonicalOutbox(nextSequence, entries);
+  await writeFile(abs, raw, { encoding: 'utf8', mode: 0o600 });
+  return raw;
+}
+
+/**
+ * @param {string} root
+ * @param {string} streamId
+ */
+async function writeStream(root, streamId) {
+  const abs = streamAbs(root);
+  await mkdir(dirname(abs), { recursive: true });
+  const raw = canonicalStream(streamId);
+  await writeFile(abs, raw, { encoding: 'utf8', mode: 0o600 });
+  return raw;
+}
+
+/**
+ * Seed a non-empty outbox FIFO head + stable stream under a temp root.
+ * @param {string} root
+ * @param {{
+ *   sequence?: number,
+ *   nextSequence?: number,
+ *   streamId?: string,
+ *   entries?: object[],
+ * }} [opts]
+ */
+async function seedQueuedHead(root, {
+  sequence = 1,
+  nextSequence = sequence + 1,
+  streamId = FIXED_STREAM_ID,
+  entries,
+} = {}) {
+  const list = entries ?? [headEntry(sequence)];
+  const outboxRaw = await writeOutbox(root, nextSequence, list);
+  const streamRaw = await writeStream(root, streamId);
+  return { outboxRaw, streamRaw, head: list[0], streamId };
+}
+
+/**
+ * @param {string} root
+ */
+async function loadClaim(root) {
+  return withLease(root, async (resolvedRoot, lease) => {
+    return loadAuditIntegrityAlertDeliveryClaimState(resolvedRoot, lease);
+  });
+}
+
+/**
+ * Reset durable claim to logical idle without touching outbox FIFO.
+ * Missing leaf is also idle; publishing the exact idle bytes keeps a leaf present.
+ * @param {string} root
+ */
+async function resetClaimIdle(root) {
+  await withLease(root, async (resolvedRoot, lease) => {
+    await publishAuditIntegrityAlertDeliveryClaimState(resolvedRoot, lease, {
+      schemaVersion: 1,
+      status: 'idle',
+      claimId: null,
+      streamId: null,
+      sequence: null,
+      ownerPid: null,
+      bootSessionIdentity: null,
+      processStartIdentity: null,
+      claimedAt: null,
+      expiresAt: null,
+    });
+  });
+}
+
+/**
+ * @param {string} path
+ * @returns {Promise<string | null>}
+ */
+async function readOptional(path) {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (error) {
+    if (error && /** @type {{ code?: string }} */ (error).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
+ * Fake HTTPS response object for the production onResponse path.
+ * @param {unknown} statusCode
+ */
+function createFakeResponse(statusCode) {
+  const res = new EventEmitter();
+  res.statusCode = statusCode;
+  res.destroyCount = 0;
+  res.destroy = function destroy() {
+    res.destroyCount += 1;
+  };
+  return res;
+}
+
+/**
+ * Deterministic HTTPS transport harness: fake request + lookupAll + timers.
+ * Mirrors node:https by invoking options.lookup before the response script.
+ * No real DNS, socket, or wall-clock timers.
+ *
+ * @param {(call: {
+ *   url: unknown,
+ *   options: Record<string, unknown>,
+ *   body: unknown,
+ *   req: import('node:events').EventEmitter & { destroy: () => void, end: (body?: unknown) => void },
+ *   onResponse: (res: object) => void,
+ * }) => void} [onEnd]
+ * @param {{
+ *   lookupAll?: (hostname: unknown, callback: Function) => void,
+ *   autoLookup?: boolean,
+ * }} [harnessOptions]
+ */
+function createTransportHarness(onEnd, harnessOptions = {}) {
+  /** @type {Array<object>} */
+  const calls = [];
+  /** @type {Array<{ hostname: unknown }>} */
+  const lookupAllCalls = [];
+  /** @type {Map<number, { fn: Function, ms: number }>} */
+  const timers = new Map();
+  let nextTimerId = 1;
+  let clearTimerCalls = 0;
+  let requestInvocations = 0;
+  /** @type {object | null} */
+  let lastCall = null;
+  const autoLookup = harnessOptions.autoLookup !== false;
+
+  /**
+   * Default public DNS answers — at least one public A record.
+   * @param {unknown} hostname
+   * @param {Function} callback
+   */
+  function defaultLookupAll(hostname, callback) {
+    callback(null, Object.freeze([
+      Object.freeze({ address: PUBLIC_V4, family: 4 }),
+    ]));
+  }
+
+  const lookupAllImpl = typeof harnessOptions.lookupAll === 'function'
+    ? harnessOptions.lookupAll
+    : defaultLookupAll;
+
+  const deps = {
+    /**
+     * @param {unknown} url
+     * @param {Record<string, unknown>} options
+     * @param {(res: object) => void} onResponse
+     */
+    request(url, options, onResponse) {
+      assert.equal(typeof onResponse, 'function');
+      requestInvocations += 1;
+      const req = new EventEmitter();
+      req.destroyCount = 0;
+      req.destroy = function destroy() {
+        req.destroyCount += 1;
+      };
+      req.end = function end(body) {
+        const call = {
+          url,
+          options,
+          body,
+          req,
+          onResponse,
+        };
+        lastCall = call;
+        calls.push(call);
+
+        /**
+         * @param {unknown} lookupOptions
+         */
+        function runLookup(lookupOptions) {
+          const lookup = options && typeof options === 'object'
+            ? /** @type {Record<string, unknown>} */ (options).lookup
+            : undefined;
+          if (typeof lookup !== 'function') {
+            queueMicrotask(() => {
+              req.emit('error', new Error('harness: options.lookup missing'));
+            });
+            return;
+          }
+
+          let hostname;
+          try {
+            hostname = typeof url === 'string' ? new URL(url).hostname : undefined;
+          } catch {
+            hostname = undefined;
+          }
+
+          let lookupSettled = false;
+          lookup(hostname, lookupOptions, (err, _addresses) => {
+            if (lookupSettled) return;
+            lookupSettled = true;
+            if (err) {
+              const error = err instanceof Error
+                ? err
+                : Object.assign(new Error('lookup failed'), { cause: err });
+              queueMicrotask(() => {
+                req.emit('error', error);
+              });
+              return;
+            }
+            if (typeof onEnd === 'function') {
+              onEnd(call);
+            }
+          });
+        }
+
+        if (autoLookup) {
+          runLookup(Object.freeze({ all: true }));
+        }
+      };
+      return req;
+    },
+    /**
+     * Always record invocations so custom lookupAll scripts stay countable.
+     * @param {unknown} hostname
+     * @param {Function} callback
+     */
+    lookupAll(hostname, callback) {
+      lookupAllCalls.push({ hostname });
+      return lookupAllImpl(hostname, callback);
+    },
+    /**
+     * @param {Function} fn
+     * @param {number} ms
+     */
+    setTimer(fn, ms) {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    /**
+     * @param {unknown} id
+     */
+    clearTimer(id) {
+      clearTimerCalls += 1;
+      timers.delete(/** @type {number} */ (id));
+    },
+  };
+
+  assertExactKeys(deps, TRANSPORT_DEPS_KEYS, 'transport harness deps');
+
+  /**
+   * Fire exactly one pending timer registered for `expectedMs`.
+   * @param {number} expectedMs
+   */
+  function fireTimerMs(expectedMs) {
+    const matches = [...timers.entries()].filter(([, entry]) => entry.ms === expectedMs);
+    assert.equal(
+      matches.length,
+      1,
+      `exactly one pending timer for ${expectedMs}ms expected, found ${matches.length}`,
+    );
+    matches[0][1].fn();
+  }
+
+  /**
+   * @param {number} ms
+   */
+  function pendingTimersWithMs(ms) {
+    return [...timers.values()].filter((entry) => entry.ms === ms);
+  }
+
+  return {
+    deps,
+    calls,
+    timers,
+    lookupAllCalls,
+    fireTimerMs,
+    pendingTimersWithMs,
+    get lastCall() {
+      return lastCall;
+    },
+    get clearTimerCalls() {
+      return clearTimerCalls;
+    },
+    get requestInvocations() {
+      return requestInvocations;
+    },
+    get setTimerInvocations() {
+      return nextTimerId - 1;
+    },
+    get lookupAllInvocations() {
+      return lookupAllCalls.length;
+    },
+  };
+}
+
+/**
+ * Deliver a fake response through production onResponse, then end.
+ * @param {ReturnType<typeof createTransportHarness>} harness
+ * @param {object} call
+ * @param {unknown} statusCode
+ */
+function settleResponse(harness, call, statusCode) {
+  const res = createFakeResponse(statusCode);
+  /** @type {{ onResponse: (res: object) => void }} */ (call).onResponse(res);
+  res.emit('end');
+  return res;
+}
+
+/**
+ * Layered Task 5 stack via existing ForTesting factories.
+ * Real: destination policy authorize, authorized gate, one-shot coordinator,
+ * claim/complete/release, HTTPS transport factory.
+ * Fake: only the transport deps (request / lookupAll / setTimer / clearTimer).
+ *
+ * @param {ReturnType<typeof requireApi>} api
+ * @param {{
+ *   endpoint?: string,
+ *   policy?: unknown,
+ *   onEnd?: (call: object) => void,
+ *   lookupAll?: (hostname: unknown, callback: Function) => void,
+ *   completeDelivery?: Function,
+ *   releaseDelivery?: Function,
+ * }} [options]
+ */
+function createAuthorizedIntegration(api, options = {}) {
+  const endpoint = options.endpoint ?? ENDPOINT_A;
+  const policy = Object.prototype.hasOwnProperty.call(options, 'policy')
+    ? options.policy
+    : { schemaVersion: 1, endpoints: [endpoint] };
+
+  const capability = createAuditIntegrityAlertDestinationPolicy(policy);
+
+  /** @type {string[]} */
+  const order = [];
+  /** @type {number} */
+  let claimHits = 0;
+  /** @type {number} */
+  let executeHits = 0;
+  /** @type {number} */
+  let completeHits = 0;
+  /** @type {number} */
+  let releaseHits = 0;
+  /** @type {number} */
+  let authorizeHits = 0;
+
+  const transport = createTransportHarness(options.onEnd, {
+    lookupAll: options.lookupAll,
+  });
+
+  // Snapshot-friendly deps: wrap counters before the HTTPS factory binds them.
+  const transportDeps = {
+    request(...args) {
+      order.push('request');
+      return transport.deps.request(...args);
+    },
+    lookupAll(...args) {
+      order.push('lookupAll');
+      return transport.deps.lookupAll(...args);
+    },
+    setTimer(...args) {
+      return transport.deps.setTimer(...args);
+    },
+    clearTimer(...args) {
+      return transport.deps.clearTimer(...args);
+    },
+  };
+  assertExactKeys(transportDeps, TRANSPORT_DEPS_KEYS, 'transport deps');
+
+  const executeRequest = createAuditIntegrityAlertHttpsExecutorForTesting(transportDeps);
+
+  const completeDelivery = typeof options.completeDelivery === 'function'
+    ? options.completeDelivery
+    : async (...args) => {
+      order.push('complete');
+      completeHits += 1;
+      return completeAuditIntegrityAlertDelivery(...args);
+    };
+
+  const releaseDelivery = typeof options.releaseDelivery === 'function'
+    ? options.releaseDelivery
+    : async (...args) => {
+      order.push('release');
+      releaseHits += 1;
+      return releaseAuditIntegrityAlertDelivery(...args);
+    };
+
+  const onceDeps = {
+    async claimDelivery(...args) {
+      order.push('claim');
+      claimHits += 1;
+      return claimAuditIntegrityAlertDelivery(...args);
+    },
+    async executeRequest(...args) {
+      order.push('execute');
+      executeHits += 1;
+      return executeRequest(...args);
+    },
+    completeDelivery: async (...args) => completeDelivery(...args),
+    releaseDelivery: async (...args) => releaseDelivery(...args),
+  };
+  assertExactKeys(onceDeps, ONCE_DEPS_KEYS, 'once deps');
+
+  const deliverOnce = createAuditIntegrityAlertDeliveryOnceForTesting(onceDeps);
+
+  const authDeps = {
+    authorizeDestination(ep) {
+      order.push('authorize');
+      authorizeHits += 1;
+      return capability.authorize(ep);
+    },
+    deliverOnce,
+  };
+  assertExactKeys(authDeps, DEPS_KEYS, 'authorized deps');
+
+  const deliver = api.createAuthorizedAuditIntegrityAlertDeliveryOnceForTesting(authDeps);
+
+  return {
+    deliver,
+    capability,
+    transport,
+    order,
+    counts() {
+      return {
+        authorize: authorizeHits,
+        claim: claimHits,
+        execute: executeHits,
+        complete: completeHits,
+        release: releaseHits,
+        lookupAll: transport.lookupAllInvocations,
+        request: transport.requestInvocations,
+      };
     },
   };
 }
@@ -1082,6 +1782,628 @@ describe('audit integrity alert delivery authorized once (Task 2 RED)', () => {
           `forbidden production surface: ${forbidden}`,
         );
       }
+    });
+  });
+
+  // ── 6. Task 5 authorized delivery integration ───────────────────────────
+  // Real destination policy + authorized gate + one-shot + claim/outbox/stream
+  // + HTTPS transport factory. Only lookupAll/request/timers are faked.
+
+  describe('6 Task 5 authorized delivery integration (real policy/claim/transport, fake network)', () => {
+    it('1 policy deny: zero outbox/claim mutation, zero lookupAll/request', async () => {
+      const api = requireApi();
+      await withTempRoot('deny', async (root) => {
+        const entry = headEntry(3);
+        const seeded = await seedQueuedHead(root, {
+          sequence: 3,
+          nextSequence: 4,
+          entries: [entry],
+        });
+        const claimBefore = await readOptional(claimAbs(root));
+
+        // Deny-all policy (exact empty endpoints) and non-member endpoint.
+        for (const { policy, endpoint } of [
+          { policy: { schemaVersion: 1, endpoints: [] }, endpoint: ENDPOINT_A },
+          {
+            policy: { schemaVersion: 1, endpoints: [ENDPOINT_A] },
+            endpoint: ENDPOINT_B,
+          },
+        ]) {
+          const stack = createAuthorizedIntegration(api, {
+            policy,
+            endpoint: ENDPOINT_A,
+            onEnd: () => {
+              assert.fail('transport onEnd must not run on policy deny');
+            },
+          });
+
+          await expectUnavailableAsync(
+            stack.deliver(root, endpoint, FIXED_NOW),
+            [
+              ENDPOINT_A,
+              ENDPOINT_B,
+              ENDPOINT_HOSTNAME,
+              root,
+              PUBLIC_V4,
+              SECRET_TOKEN,
+              SECRET_PATH,
+            ],
+          );
+
+          assert.deepEqual(stack.counts(), {
+            authorize: 1,
+            claim: 0,
+            execute: 0,
+            complete: 0,
+            release: 0,
+            lookupAll: 0,
+            request: 0,
+          });
+          assert.deepEqual(stack.order, ['authorize']);
+          assert.equal(await readFile(outboxAbs(root), 'utf8'), seeded.outboxRaw);
+          assert.equal(await readFile(streamAbs(root), 'utf8'), seeded.streamRaw);
+          assert.equal(await readOptional(claimAbs(root)), claimBefore);
+        }
+      });
+    });
+
+    it('2 allow + empty or busy: zero lookupAll/request', async () => {
+      const api = requireApi();
+
+      // Empty outbox → exact empty receipt; authorize + claim only.
+      await withTempRoot('empty', async (root) => {
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: () => {
+            assert.fail('transport must not run on empty outbox');
+          },
+        });
+        const receipt = await stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        assertEmptyReceipt(receipt);
+        assert.deepEqual(stack.counts(), {
+          authorize: 1,
+          claim: 1,
+          execute: 0,
+          complete: 0,
+          release: 0,
+          lookupAll: 0,
+          request: 0,
+        });
+        assert.deepEqual(stack.order, ['authorize', 'claim']);
+        assert.equal(await readOptional(claimAbs(root)), null);
+        const outbox = await readAuditIntegrityAlertOutbox(root);
+        assert.equal(outbox.entries.length, 0);
+      });
+
+      // Live claimed head → busy; still zero DNS/request.
+      await withTempRoot('busy', async (root) => {
+        await seedQueuedHead(root, { sequence: 5, nextSequence: 6 });
+        const firstClaim = await claimAuditIntegrityAlertDelivery(
+          root,
+          ENDPOINT_A,
+          FIXED_NOW,
+        );
+        assert.equal(firstClaim.status, 'claimed');
+        assert.equal(firstClaim.sequence, 5);
+        const claimRawBefore = await readFile(claimAbs(root), 'utf8');
+        const outboxBefore = await readFile(outboxAbs(root), 'utf8');
+
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: () => {
+            assert.fail('transport must not run on busy claim');
+          },
+        });
+        const receipt = await stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        assertBusyReceipt(receipt, {
+          streamId: FIXED_STREAM_ID,
+          sequence: 5,
+          expiresAt: FIXED_EXPIRES_AT,
+        });
+        assert.deepEqual(stack.counts(), {
+          authorize: 1,
+          claim: 1,
+          execute: 0,
+          complete: 0,
+          release: 0,
+          lookupAll: 0,
+          request: 0,
+        });
+        assert.equal(await readFile(claimAbs(root), 'utf8'), claimRawBefore);
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), outboxBefore);
+      });
+    });
+
+    it('3 allow + public DNS + 2xx: FIFO head complete, delivered receipt', async () => {
+      const api = requireApi();
+      await withTempRoot('accepted', async (root) => {
+        const e1 = headEntry(10);
+        const e2 = headEntry(11);
+        await seedQueuedHead(root, {
+          sequence: 10,
+          nextSequence: 12,
+          entries: [e1, e2],
+        });
+
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: (call) => {
+            assert.equal(call.url, ENDPOINT_A);
+            assert.equal(
+              /** @type {{ options: { lookup?: unknown } }} */ (call).options
+                && typeof /** @type {{ options: { lookup?: unknown } }} */ (call)
+                  .options.lookup,
+              'function',
+            );
+            settleResponse(stack.transport, call, 200);
+          },
+        });
+
+        const receipt = await stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        assertDeliveredReceipt(receipt, {
+          streamId: FIXED_STREAM_ID,
+          sequence: 10,
+          pendingCount: 1,
+          completionStatus: 'completed',
+        });
+
+        assert.equal(stack.counts().authorize, 1);
+        assert.equal(stack.counts().claim, 1);
+        assert.equal(stack.counts().execute, 1);
+        assert.equal(stack.counts().complete, 1);
+        assert.equal(stack.counts().release, 0);
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.equal(stack.counts().request, 1);
+        assert.deepEqual(stack.order, [
+          'authorize',
+          'claim',
+          'execute',
+          'request',
+          'lookupAll',
+          'complete',
+        ]);
+        assert.equal(stack.transport.lookupAllCalls[0].hostname, ENDPOINT_HOSTNAME);
+
+        const outbox = await readAuditIntegrityAlertOutbox(root);
+        assert.deepEqual(outbox.entries.map((e) => e.sequence), [11]);
+        assert.equal(outbox.nextSequence, 12);
+        assert.deepEqual(outbox.entries[0], e2);
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), canonicalOutbox(12, [e2]));
+        assert.equal(await readFile(claimAbs(root), 'utf8'), CANONICAL_IDLE_CLAIM_BYTES);
+      });
+    });
+
+    it('4 allow + public DNS + bounded non-2xx: release, head unchanged', async () => {
+      const api = requireApi();
+      await withTempRoot('rejected', async (root) => {
+        const entry = headEntry(4);
+        const seeded = await seedQueuedHead(root, {
+          sequence: 4,
+          nextSequence: 5,
+          entries: [entry],
+        });
+
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: (call) => {
+            settleResponse(stack.transport, call, 503);
+          },
+        });
+
+        await expectUnavailableAsync(
+          stack.deliver(root, ENDPOINT_A, FIXED_NOW),
+          [ENDPOINT_A, ENDPOINT_HOSTNAME, root, PUBLIC_V4, SECRET_TOKEN],
+        );
+
+        assert.equal(stack.counts().authorize, 1);
+        assert.equal(stack.counts().claim, 1);
+        assert.equal(stack.counts().execute, 1);
+        assert.equal(stack.counts().complete, 0);
+        assert.equal(stack.counts().release, 1);
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.equal(stack.counts().request, 1);
+        assert.ok(stack.order.includes('release'));
+        assert.equal(stack.order.includes('complete'), false);
+
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), seeded.outboxRaw);
+        assert.equal(await readFile(streamAbs(root), 'utf8'), seeded.streamRaw);
+        assert.equal(await readFile(claimAbs(root), 'utf8'), CANONICAL_IDLE_CLAIM_BYTES);
+        const outbox = await readAuditIntegrityAlertOutbox(root);
+        assert.deepEqual(outbox.entries.map((e) => e.sequence), [4]);
+        assert.deepEqual(outbox.entries[0], entry);
+      });
+    });
+
+    it('5 allow + mixed/private DNS: fixed failure and durable claim remains', async () => {
+      const api = requireApi();
+      await withTempRoot('private-dns', async (root) => {
+        const entry = headEntry(7);
+        const seeded = await seedQueuedHead(root, {
+          sequence: 7,
+          nextSequence: 8,
+          entries: [entry],
+        });
+
+        /** @type {Array<{ answers: unknown }>} */
+        const dnsScripts = [
+          {
+            // mixed public + private
+            answers: [
+              { address: PUBLIC_V4, family: 4 },
+              { address: PRIVATE_V4, family: 4 },
+            ],
+          },
+          {
+            // all-private / special
+            answers: [
+              { address: LOOPBACK_V4, family: 4 },
+            ],
+          },
+        ];
+
+        for (const script of dnsScripts) {
+          // Reset durable state between matrix rows.
+          await writeOutbox(root, 8, [entry]);
+          await writeStream(root, FIXED_STREAM_ID);
+          await resetClaimIdle(root);
+
+          let releaseHits = 0;
+          let completeHits = 0;
+          const stack = createAuthorizedIntegration(api, {
+            lookupAll(_hostname, callback) {
+              callback(null, script.answers);
+            },
+            completeDelivery: async (...args) => {
+              completeHits += 1;
+              return completeAuditIntegrityAlertDelivery(...args);
+            },
+            releaseDelivery: async (...args) => {
+              releaseHits += 1;
+              return releaseAuditIntegrityAlertDelivery(...args);
+            },
+          });
+
+          await expectUnavailableAsync(
+            stack.deliver(root, ENDPOINT_A, FIXED_NOW),
+            [
+              ENDPOINT_A,
+              ENDPOINT_HOSTNAME,
+              root,
+              PUBLIC_V4,
+              PRIVATE_V4,
+              LOOPBACK_V4,
+              SECRET_TOKEN,
+              SECRET_PATH,
+            ],
+          );
+
+          assert.equal(stack.counts().lookupAll, 1);
+          assert.equal(stack.counts().request, 1);
+          assert.equal(completeHits, 0, 'private/mixed DNS must never complete');
+          assert.equal(releaseHits, 0, 'private/mixed DNS must never release');
+
+          const claim = await loadClaim(root);
+          assert.equal(claim.status, 'claimed');
+          assert.equal(claim.streamId, FIXED_STREAM_ID);
+          assert.equal(claim.sequence, 7);
+          assert.match(String(claim.claimId), /^[0-9a-f-]{36}$/);
+          assert.equal(await readFile(outboxAbs(root), 'utf8'), seeded.outboxRaw);
+
+          // Live owner + same now → busy (claim preserved).
+          const busy = await claimAuditIntegrityAlertDelivery(
+            root,
+            ENDPOINT_A,
+            FIXED_NOW,
+          );
+          assert.equal(busy.status, 'busy');
+          assert.equal(busy.sequence, 7);
+          assert.equal(busy.claimId, null);
+          assert.equal(busy.request, null);
+        }
+      });
+    });
+
+    it('6 DNS timeout: durable claim remains', async () => {
+      const api = requireApi();
+      await withTempRoot('dns-timeout', async (root) => {
+        await seedQueuedHead(root, { sequence: 2, nextSequence: 3 });
+        const outboxBefore = await readFile(outboxAbs(root), 'utf8');
+
+        /** @type {(() => void) | null} */
+        let releaseEntered = null;
+        const entered = new Promise((resolve) => {
+          releaseEntered = resolve;
+        });
+
+        let completeHits = 0;
+        let releaseHits = 0;
+        const stack = createAuthorizedIntegration(api, {
+          lookupAll(_hostname, _callback) {
+            // Hang: never invoke callback. DNS sub-deadline must settle the attempt.
+            assert.equal(typeof releaseEntered, 'function');
+            /** @type {() => void} */ (releaseEntered)();
+          },
+          completeDelivery: async (...args) => {
+            completeHits += 1;
+            return completeAuditIntegrityAlertDelivery(...args);
+          },
+          releaseDelivery: async (...args) => {
+            releaseHits += 1;
+            return releaseAuditIntegrityAlertDelivery(...args);
+          },
+        });
+
+        const pending = stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        await entered;
+        await flushMicrotasks();
+
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.equal(stack.counts().request, 1);
+        assert.equal(
+          stack.transport.pendingTimersWithMs(DNS_TIMEOUT_MS).length,
+          1,
+          'DNS sub-deadline must be armed',
+        );
+
+        stack.transport.fireTimerMs(DNS_TIMEOUT_MS);
+
+        await expectUnavailableAsync(pending, [
+          ENDPOINT_A,
+          ENDPOINT_HOSTNAME,
+          root,
+          PUBLIC_V4,
+          SECRET_TOKEN,
+        ]);
+        assert.equal(completeHits, 0);
+        assert.equal(releaseHits, 0);
+
+        const claim = await loadClaim(root);
+        assert.equal(claim.status, 'claimed');
+        assert.equal(claim.sequence, 2);
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), outboxBefore);
+      });
+    });
+
+    it('7 accepted then complete failure: never release, durable claim remains', async () => {
+      const api = requireApi();
+      await withTempRoot('complete-fail', async (root) => {
+        const entry = headEntry(8);
+        await seedQueuedHead(root, {
+          sequence: 8,
+          nextSequence: 9,
+          entries: [entry],
+        });
+        const outboxBefore = await readFile(outboxAbs(root), 'utf8');
+
+        let completeHits = 0;
+        let releaseHits = 0;
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: (call) => {
+            settleResponse(stack.transport, call, 200);
+          },
+          completeDelivery: async () => {
+            completeHits += 1;
+            throw new Error(
+              `injected complete fail path=${SECRET_PATH} token=${SECRET_TOKEN} `
+              + `endpoint=${ENDPOINT_A} body=${SECRET_BODY}`,
+            );
+          },
+          releaseDelivery: async (...args) => {
+            releaseHits += 1;
+            return releaseAuditIntegrityAlertDelivery(...args);
+          },
+        });
+
+        await expectUnavailableAsync(
+          stack.deliver(root, ENDPOINT_A, FIXED_NOW),
+          [
+            ENDPOINT_A,
+            ENDPOINT_HOSTNAME,
+            root,
+            SECRET_PATH,
+            SECRET_TOKEN,
+            SECRET_BODY,
+            PUBLIC_V4,
+            'injected complete',
+          ],
+        );
+
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.equal(stack.counts().request, 1);
+        assert.equal(completeHits, 1);
+        assert.equal(releaseHits, 0, 'accepted+complete-fail must never release');
+
+        const claim = await loadClaim(root);
+        assert.equal(claim.status, 'claimed');
+        assert.equal(claim.sequence, 8);
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), outboxBefore);
+
+        // Recoverable via real complete with durable capability.
+        const recovered = await completeAuditIntegrityAlertDelivery(root, {
+          claimId: claim.claimId,
+          streamId: claim.streamId,
+          sequence: claim.sequence,
+        });
+        assert.equal(recovered.status, 'completed');
+        assert.equal(recovered.completed, true);
+        assert.equal(recovered.sequence, 8);
+        assert.equal(recovered.pendingCount, 0);
+        assert.equal(await readFile(claimAbs(root), 'utf8'), CANONICAL_IDLE_CLAIM_BYTES);
+        const outbox = await readAuditIntegrityAlertOutbox(root);
+        assert.equal(outbox.entries.length, 0);
+        assert.equal(outbox.nextSequence, 9);
+      });
+    });
+
+    it('8 concurrent authorized calls: one claim/one request, other busy', async () => {
+      const api = requireApi();
+      await withTempRoot('concurrent', async (root) => {
+        await seedQueuedHead(root, { sequence: 1, nextSequence: 2 });
+
+        /** @type {object | null} */
+        let heldCall = null;
+        /** @type {(() => void) | null} */
+        let releaseEntered = null;
+        const entered = new Promise((resolve) => {
+          releaseEntered = resolve;
+        });
+
+        const stack = createAuthorizedIntegration(api, {
+          onEnd: (call) => {
+            // Hold the transport open: first call owns the claim + request.
+            heldCall = call;
+            assert.equal(typeof releaseEntered, 'function');
+            /** @type {() => void} */ (releaseEntered)();
+          },
+        });
+
+        const firstPromise = stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        await entered;
+        await flushMicrotasks();
+
+        assert.equal(stack.counts().claim, 1);
+        assert.equal(stack.counts().request, 1);
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.notEqual(heldCall, null);
+
+        const second = await stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        assertBusyReceipt(second, {
+          streamId: FIXED_STREAM_ID,
+          sequence: 1,
+          expiresAt: FIXED_EXPIRES_AT,
+        });
+        // Second call authorizes + claims (busy) only — no second DNS/request.
+        assert.equal(stack.counts().authorize, 2);
+        assert.equal(stack.counts().claim, 2);
+        assert.equal(stack.counts().request, 1, 'only one HTTPS request');
+        assert.equal(stack.counts().lookupAll, 1, 'only one DNS lookup');
+        assert.equal(stack.counts().execute, 1);
+
+        settleResponse(stack.transport, /** @type {object} */ (heldCall), 200);
+        const first = await firstPromise;
+        assertDeliveredReceipt(first, {
+          streamId: FIXED_STREAM_ID,
+          sequence: 1,
+          pendingCount: 0,
+          completionStatus: 'completed',
+        });
+        assert.equal(stack.counts().request, 1);
+        assert.equal(stack.counts().complete, 1);
+        assert.equal(stack.counts().release, 0);
+        assert.equal(await readFile(claimAbs(root), 'utf8'), CANONICAL_IDLE_CLAIM_BYTES);
+      });
+    });
+
+    it('9 public errors never leak endpoint/IP/dataDir/body/token/path/cause', async () => {
+      const api = requireApi();
+      await withTempRoot('no-leak', async (root) => {
+        await seedQueuedHead(root, { sequence: 1, nextSequence: 2 });
+
+        const leak = [
+          ENDPOINT_A,
+          ENDPOINT_B,
+          ENDPOINT_HOSTNAME,
+          root,
+          PUBLIC_V4,
+          PUBLIC_V6,
+          PRIVATE_V4,
+          LOOPBACK_V4,
+          SECRET_TOKEN,
+          SECRET_PATH,
+          SECRET_HOST,
+          SECRET_BODY,
+          SECRET_CLAIM,
+          'authorization',
+          'cause',
+        ];
+
+        // Deny path.
+        {
+          const stack = createAuthorizedIntegration(api, {
+            policy: { schemaVersion: 1, endpoints: [ENDPOINT_A] },
+          });
+          await expectUnavailableAsync(
+            stack.deliver(root, ENDPOINT_B, FIXED_NOW),
+            leak,
+          );
+        }
+
+        // Private DNS path (fresh claim each time via idle after prior deny zero-state).
+        {
+          const stack = createAuthorizedIntegration(api, {
+            lookupAll(_hostname, callback) {
+              callback(null, [{ address: PRIVATE_V4, family: 4 }]);
+            },
+          });
+          await expectUnavailableAsync(
+            stack.deliver(root, ENDPOINT_A, FIXED_NOW),
+            leak,
+          );
+        }
+
+        // Rejected non-2xx path after clearing any durable claim first.
+        {
+          await resetClaimIdle(root);
+          await writeOutbox(root, 2, [headEntry(1)]);
+
+          const stack = createAuthorizedIntegration(api, {
+            onEnd: (call) => {
+              settleResponse(stack.transport, call, 500);
+            },
+          });
+          await expectUnavailableAsync(
+            stack.deliver(root, ENDPOINT_A, FIXED_NOW),
+            leak,
+          );
+        }
+      });
+    });
+
+    it('10 full stack uses only injectable fakes for DNS/request (no real socket)', async () => {
+      const api = requireApi();
+      await withTempRoot('no-real-io', async (root) => {
+        await seedQueuedHead(root, { sequence: 1, nextSequence: 2 });
+
+        let lookupImplHits = 0;
+        let requestSeen = 0;
+        const stack = createAuthorizedIntegration(api, {
+          lookupAll(hostname, callback) {
+            lookupImplHits += 1;
+            assert.equal(hostname, ENDPOINT_HOSTNAME);
+            // Prove this is the only DNS surface: return public fixture only.
+            callback(null, [{ address: PUBLIC_V4, family: 4 }]);
+          },
+          onEnd: (call) => {
+            requestSeen += 1;
+            // Fake request object only — no socket fields / real handles.
+            assert.equal(typeof call.req.on, 'function');
+            assert.equal(typeof call.req.end, 'function');
+            assert.equal(
+              Object.prototype.hasOwnProperty.call(call.req, 'socket'),
+              false,
+            );
+            settleResponse(stack.transport, call, 204);
+          },
+        });
+
+        const receipt = await stack.deliver(root, ENDPOINT_A, FIXED_NOW);
+        assertDeliveredReceipt(receipt, {
+          streamId: FIXED_STREAM_ID,
+          sequence: 1,
+          pendingCount: 0,
+          completionStatus: 'completed',
+        });
+
+        assert.equal(lookupImplHits, 1);
+        assert.equal(requestSeen, 1);
+        assert.equal(stack.counts().lookupAll, 1);
+        assert.equal(stack.counts().request, 1);
+        // Real modules are bound: policy capability, claim coordinator, HTTPS factory.
+        assert.equal(typeof stack.capability.authorize, 'function');
+        assert.equal(stack.capability.status, 'configured');
+        assert.equal(typeof claimAuditIntegrityAlertDelivery, 'function');
+        assert.equal(typeof createAuditIntegrityAlertHttpsExecutorForTesting, 'function');
+        assert.equal(typeof createAuditIntegrityAlertDeliveryOnceForTesting, 'function');
+        // Timer surface is the harness map only (no wall-clock sleep).
+        assert.equal(stack.transport.timers.size, 0);
+        assert.ok(stack.transport.clearTimerCalls >= 1);
+      });
     });
   });
 });
