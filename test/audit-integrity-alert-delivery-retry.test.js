@@ -1,24 +1,20 @@
 /**
- * Task 5 RED — explicit durable retry tick coordinator (non-DLQ paths).
+ * Task 5+6 RED — durable retry tick + dead-letter transaction/recovery.
  * Authority:
- *   .superpowers/sdd/2026-08-05-audit-integrity-alert-durable-retry-plan/task-5-brief.md
+ *   .superpowers/sdd/2026-08-05-audit-integrity-alert-durable-retry-plan/task-6-brief.md
  *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-durable-retry-design.md
- *     (§5.5 deps, §8 paths, §13 public receipts)
- *
- * Production (must remain absent on this RED HEAD):
- *   src/audit-integrity-alert-delivery-retry.js
- *
- * Old-HEAD RED is exactly one behavior-specific failure:
- *   test name + assert message = `durable retry tick implementation missing`
- * Full matrix registers only when both public exports exist.
+ *     (§5.5 deps, §6.7, §7.3/7.4, §8 paths, §10, §11, §13 public receipts)
  *
  * Pure injected factory deps only (authorize / claim / lifecycle / outbox /
  * claim-state / DLQ / detailed executor / pure due+classify). No real network,
  * scheduler, agent/server/web, or overlapping-tick integration (Task 7).
- * Terminal dead-letter success receipts are Task 6 — this suite requires
- * fail-closed on terminal decisions, never green `dead-lettered`.
+ *
+ * Task 6 RED proves missing dead-letter transaction + crash recovery behavior
+ * on the current source HEAD (terminal paths still fail closed; prepared /
+ * blocked parse not yet implemented). Task 5 non-DLQ paths remain green.
  */
 
+import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
@@ -150,6 +146,61 @@ const DLQ_SNAPSHOT_KEYS = Object.freeze([
   'entries',
 ]);
 
+/** Nested deadLetter transaction object (§6.7 exact order). */
+const DEAD_LETTER_NESTED_KEYS = Object.freeze([
+  'deadLetterId',
+  'reason',
+  'sourceAlert',
+  'claim',
+  'deadLetterPre',
+  'deadLetterPost',
+  'outboxPre',
+  'outboxPost',
+  'preparedAt',
+]);
+const SOURCE_ALERT_KEYS = Object.freeze([
+  'sequence',
+  'checkedAt',
+  'code',
+  'recoveryRequired',
+  'nextAction',
+  'reasonCode',
+]);
+const NESTED_CLAIM_KEYS = Object.freeze(['claimId', 'streamId', 'sequence']);
+const FINGERPRINT_KEYS = Object.freeze([
+  'sha256',
+  'byteLength',
+  'entryCount',
+  'nextSequence',
+]);
+/** Persisted DLQ entry exact order (§7.3). */
+const PERSISTED_DLQ_ENTRY_KEYS = Object.freeze([
+  'deadLetterSequence',
+  'deadLetterId',
+  'streamId',
+  'sequence',
+  'idempotencyKey',
+  'enqueuedAt',
+  'attemptCount',
+  'firstAttemptAt',
+  'lastAttemptAt',
+  'reason',
+  'sourceAlert',
+]);
+/** Caller entry omits allocator field deadLetterSequence. */
+const CALLER_DLQ_ENTRY_KEYS = Object.freeze([
+  'deadLetterId',
+  'streamId',
+  'sequence',
+  'idempotencyKey',
+  'enqueuedAt',
+  'attemptCount',
+  'firstAttemptAt',
+  'lastAttemptAt',
+  'reason',
+  'sourceAlert',
+]);
+
 const DATA_DIR = '/safe/secret-data-dir-delivery-retry';
 const ENDPOINT = 'https://alerts.acme.com/hooks/audit-integrity';
 const SECRET_TOKEN = 'Bearer secret-token-xyz-999';
@@ -163,7 +214,28 @@ const CLAIM_ID = 'a1111111-b111-4111-8111-e11111111111';
 const CLAIM_ID_B = 'd4444444-e444-4444-8444-f44444444444';
 const ATTEMPT_ID_1 = 'c3333333-d333-4333-a333-033333333333';
 const ATTEMPT_ID_2 = 'e5555555-f555-4555-9555-155555555555';
+const DEAD_LETTER_ID = 'd4444444-e444-4444-b444-144444444444';
 const SEQUENCE = 1;
+const PREPARED_AT = '2026-08-05T12:00:00.000Z';
+const ENQUEUED_AT = '2026-08-05T12:00:00.000Z';
+
+/** Hand-checked empty DLQ raw identity (compact JSON + trailing LF). */
+const EMPTY_DLQ_BYTE_LENGTH = 50;
+const EMPTY_DLQ_SHA256 =
+  '64349629d2308a26e182374ef6b081b999860f5c42e79ae31128fed4051099bb';
+const SHA_DLQ_POST =
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const SHA_OUTBOX_PRE =
+  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+const SHA_OUTBOX_POST =
+  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+const SHA_MISMATCH =
+  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const MS_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
 const FIXED_NOW = '2026-08-05T12:00:00.000Z';
 const FIXED_CHECKED_AT = '2026-08-05T11:59:00.000Z';
@@ -764,11 +836,404 @@ function claimedClaimState(fields = {}) {
 function emptyDeadLetter() {
   return deepFreeze({
     schemaVersion: 1,
-    status: 'ok',
+    status: 'empty',
     entryCount: 0,
     nextSequence: 1,
     entries: [],
   });
+}
+
+/**
+ * @param {string} sha256
+ * @param {number} byteLength
+ * @param {number} entryCount
+ * @param {number} nextSequence
+ */
+function fingerprint(sha256, byteLength, entryCount, nextSequence) {
+  return deepFreeze({
+    sha256,
+    byteLength,
+    entryCount,
+    nextSequence,
+  });
+}
+
+/**
+ * Canonical DLQ full-file text: compact JSON key order + exactly one trailing LF.
+ * Mirrors src/audit-integrity-alert-dead-letter.js serializeFileState (test-side oracle).
+ * @param {{ schemaVersion: number, nextSequence: number, entries: object[] }} state
+ * @returns {string}
+ */
+function serializeCanonicalDlqFileText(state) {
+  const entries = state.entries.map((entry) => ({
+    deadLetterSequence: entry.deadLetterSequence,
+    deadLetterId: entry.deadLetterId,
+    streamId: entry.streamId,
+    sequence: entry.sequence,
+    idempotencyKey: entry.idempotencyKey,
+    enqueuedAt: entry.enqueuedAt,
+    attemptCount: entry.attemptCount,
+    firstAttemptAt: entry.firstAttemptAt,
+    lastAttemptAt: entry.lastAttemptAt,
+    reason: entry.reason,
+    sourceAlert: {
+      sequence: entry.sourceAlert.sequence,
+      checkedAt: entry.sourceAlert.checkedAt,
+      code: entry.sourceAlert.code,
+      recoveryRequired: entry.sourceAlert.recoveryRequired,
+      nextAction: entry.sourceAlert.nextAction,
+      reasonCode: entry.sourceAlert.reasonCode,
+    },
+  }));
+  return `${JSON.stringify({
+    schemaVersion: state.schemaVersion,
+    nextSequence: state.nextSequence,
+    entries,
+  })}\n`;
+}
+
+/**
+ * SHA-256 + counters for exact durable DLQ raw text.
+ * @param {string} rawText
+ * @param {number} entryCount
+ * @param {number} nextSequence
+ */
+function fingerprintDlqRawText(rawText, entryCount, nextSequence) {
+  return fingerprint(
+    createHash('sha256').update(rawText, 'utf8').digest('hex'),
+    Buffer.byteLength(rawText, 'utf8'),
+    entryCount,
+    nextSequence,
+  );
+}
+
+/**
+ * Independent would-be post fingerprint after appending one caller entry
+ * (10 keys, no deadLetterSequence) onto a known pre allocator snapshot.
+ * Default pre is empty: deadLetterSequence=1, nextSequence becomes 2.
+ *
+ * @param {object} callerEntry
+ * @param {{ preNextSequence?: number, priorPersistedEntries?: object[] }} [opts]
+ */
+function expectedPostFingerprintFromCallerEntry(callerEntry, opts = {}) {
+  const preNextSequence = opts.preNextSequence ?? 1;
+  const priorPersistedEntries = opts.priorPersistedEntries ?? [];
+  const persisted = {
+    deadLetterSequence: preNextSequence,
+    deadLetterId: callerEntry.deadLetterId,
+    streamId: callerEntry.streamId,
+    sequence: callerEntry.sequence,
+    idempotencyKey: callerEntry.idempotencyKey,
+    enqueuedAt: callerEntry.enqueuedAt,
+    attemptCount: callerEntry.attemptCount,
+    firstAttemptAt: callerEntry.firstAttemptAt,
+    lastAttemptAt: callerEntry.lastAttemptAt,
+    reason: callerEntry.reason,
+    sourceAlert: {
+      sequence: callerEntry.sourceAlert.sequence,
+      checkedAt: callerEntry.sourceAlert.checkedAt,
+      code: callerEntry.sourceAlert.code,
+      recoveryRequired: callerEntry.sourceAlert.recoveryRequired,
+      nextAction: callerEntry.sourceAlert.nextAction,
+      reasonCode: callerEntry.sourceAlert.reasonCode,
+    },
+  };
+  const entries = [...priorPersistedEntries, persisted];
+  const nextSequence = preNextSequence + 1;
+  const raw = serializeCanonicalDlqFileText({
+    schemaVersion: 1,
+    nextSequence,
+    entries,
+  });
+  return fingerprintDlqRawText(raw, entries.length, nextSequence);
+}
+
+/**
+ * Real-shape fingerprint that is deterministically unequal to `baseFp`.
+ * Keeps entryCount/nextSequence/byteLength; derives a different real SHA-256.
+ * @param {{ sha256: string, byteLength: number, entryCount: number, nextSequence: number }} baseFp
+ */
+function unequalRealShapeFingerprint(baseFp) {
+  const sha256 = createHash('sha256')
+    .update(`unequal:${baseFp.sha256}:${baseFp.byteLength}:${baseFp.nextSequence}`, 'utf8')
+    .digest('hex');
+  assert.notEqual(sha256, baseFp.sha256);
+  return fingerprint(
+    sha256,
+    baseFp.byteLength,
+    baseFp.entryCount,
+    baseFp.nextSequence,
+  );
+}
+
+function emptyDlqFingerprint() {
+  // Hand-checked constants must equal independent empty serialization.
+  const raw = serializeCanonicalDlqFileText({
+    schemaVersion: 1,
+    nextSequence: 1,
+    entries: [],
+  });
+  const live = fingerprintDlqRawText(raw, 0, 1);
+  assert.equal(live.sha256, EMPTY_DLQ_SHA256);
+  assert.equal(live.byteLength, EMPTY_DLQ_BYTE_LENGTH);
+  return live;
+}
+
+/**
+ * Static recovery-fixture post fingerprint only (simulates already-persisted WAL/disk identity).
+ * Must NOT be used as the sole expected value for first-tick prepared deadLetterPost.
+ * @param {object} [overrides]
+ */
+function postDlqFingerprint(overrides = {}) {
+  return fingerprint(
+    overrides.sha256 ?? SHA_DLQ_POST,
+    overrides.byteLength ?? 512,
+    overrides.entryCount ?? 1,
+    overrides.nextSequence ?? 2,
+  );
+}
+
+function outboxPreFingerprint(entryCount = 1, nextSequence = 2) {
+  return fingerprint(SHA_OUTBOX_PRE, 256, entryCount, nextSequence);
+}
+
+function outboxPostFingerprint(entryCount = 0, nextSequence = 2) {
+  return fingerprint(SHA_OUTBOX_POST, 48, entryCount, nextSequence);
+}
+
+/**
+ * Sanitized outbox head snapshot for nested deadLetter.sourceAlert (§6.7.2).
+ * @param {object} [overrides]
+ */
+function sourceAlertFixture(overrides = {}) {
+  return deepFreeze({
+    sequence: SEQUENCE,
+    checkedAt: FIXED_CHECKED_AT,
+    code: 'uninitialized',
+    recoveryRequired: false,
+    nextAction: 'initialize-via-production-write',
+    reasonCode: null,
+    ...overrides,
+  });
+}
+
+/**
+ * Nested deadLetter transaction object (§6.7 exact keys).
+ * @param {object} [overrides]
+ */
+function nestedDeadLetterFixture(overrides = {}) {
+  const sourceAlert = overrides.sourceAlert ?? sourceAlertFixture();
+  const claim = overrides.claim ?? deepFreeze({
+    claimId: CLAIM_ID,
+    streamId: STREAM_ID,
+    sequence: SEQUENCE,
+  });
+  const row = {
+    deadLetterId: overrides.deadLetterId ?? DEAD_LETTER_ID,
+    reason: overrides.reason ?? 'terminal-http',
+    sourceAlert,
+    claim,
+    deadLetterPre: overrides.deadLetterPre ?? emptyDlqFingerprint(),
+    deadLetterPost: overrides.deadLetterPost ?? postDlqFingerprint(),
+    outboxPre: overrides.outboxPre ?? outboxPreFingerprint(1, 2),
+    outboxPost: overrides.outboxPost ?? outboxPostFingerprint(0, 2),
+    preparedAt: overrides.preparedAt ?? PREPARED_AT,
+  };
+  return deepFreeze(row);
+}
+
+/**
+ * Durable dead-letter-prepared lifecycle (claim fields V throughout).
+ * @param {object} [fields]
+ */
+function deadLetterPreparedLifecycle(fields = {}) {
+  const deadLetter = fields.deadLetter ?? nestedDeadLetterFixture({
+    reason: fields.reason ?? 'terminal-http',
+  });
+  return deepFreeze({
+    schemaVersion: 1,
+    status: 'dead-letter-prepared',
+    lastObservedAt: fields.lastObservedAt ?? FIXED_NOW,
+    streamId: fields.streamId ?? STREAM_ID,
+    sequence: fields.sequence ?? SEQUENCE,
+    idempotencyKey: fields.idempotencyKey ?? IDEMPOTENCY_KEY,
+    attemptId: fields.attemptId ?? ATTEMPT_ID_1,
+    attemptCount: fields.attemptCount ?? 1,
+    firstAttemptAt: fields.firstAttemptAt ?? FIXED_NOW,
+    lastAttemptAt: fields.lastAttemptAt ?? FIXED_NOW,
+    nextAttemptAt: null,
+    claimId: fields.claimId ?? CLAIM_ID,
+    claimExpiresAt: fields.claimExpiresAt ?? CLAIM_EXPIRES_AT,
+    outcome: deepFreeze(
+      fields.outcome ?? { kind: 'terminal-rejected', detail: 'terminal-http' },
+    ),
+    deadLetter,
+  });
+}
+
+/**
+ * Sticky blocked dead-letter-full lifecycle (all binding fields V).
+ * @param {object} [fields]
+ */
+function blockedDeadLetterFullLifecycle(fields = {}) {
+  return deepFreeze({
+    schemaVersion: 1,
+    status: 'blocked',
+    lastObservedAt: fields.lastObservedAt ?? FIXED_NOW,
+    streamId: fields.streamId ?? STREAM_ID,
+    sequence: fields.sequence ?? SEQUENCE,
+    idempotencyKey: fields.idempotencyKey ?? IDEMPOTENCY_KEY,
+    attemptId: fields.attemptId ?? ATTEMPT_ID_1,
+    attemptCount: fields.attemptCount ?? 1,
+    firstAttemptAt: fields.firstAttemptAt ?? FIXED_NOW,
+    lastAttemptAt: fields.lastAttemptAt ?? FIXED_NOW,
+    nextAttemptAt: null,
+    claimId: fields.claimId ?? CLAIM_ID,
+    claimExpiresAt: fields.claimExpiresAt ?? CLAIM_EXPIRES_AT,
+    outcome: deepFreeze({ kind: 'blocked', detail: 'dead-letter-full' }),
+    deadLetter: null,
+  });
+}
+
+/**
+ * Full DLQ snapshot (entryCount at capacity 256) for preflight blocked.
+ * @param {object} [fields]
+ */
+function fullDeadLetterSnapshot(fields = {}) {
+  return deepFreeze({
+    schemaVersion: 1,
+    status: 'ready',
+    entryCount: fields.entryCount ?? 256,
+    nextSequence: fields.nextSequence ?? 257,
+    entries: fields.entries ?? [],
+  });
+}
+
+/**
+ * Ready DLQ snapshot that already holds the exact prepared entry (post state).
+ * @param {object} [fields]
+ */
+function postDeadLetterSnapshot(fields = {}) {
+  const entry = fields.entry ?? deepFreeze({
+    deadLetterSequence: 1,
+    deadLetterId: fields.deadLetterId ?? DEAD_LETTER_ID,
+    streamId: STREAM_ID,
+    sequence: SEQUENCE,
+    idempotencyKey: IDEMPOTENCY_KEY,
+    enqueuedAt: ENQUEUED_AT,
+    attemptCount: fields.attemptCount ?? 1,
+    firstAttemptAt: FIXED_NOW,
+    lastAttemptAt: FIXED_NOW,
+    reason: fields.reason ?? 'terminal-http',
+    sourceAlert: sourceAlertFixture(),
+  });
+  return deepFreeze({
+    schemaVersion: 1,
+    status: 'ready',
+    entryCount: 1,
+    nextSequence: 2,
+    entries: [entry],
+  });
+}
+
+/**
+ * Caller DLQ entry shape (no deadLetterSequence) for append assertions.
+ * @param {object} [fields]
+ */
+function callerDlqEntry(fields = {}) {
+  return deepFreeze({
+    deadLetterId: fields.deadLetterId ?? DEAD_LETTER_ID,
+    streamId: fields.streamId ?? STREAM_ID,
+    sequence: fields.sequence ?? SEQUENCE,
+    idempotencyKey: fields.idempotencyKey ?? IDEMPOTENCY_KEY,
+    enqueuedAt: fields.enqueuedAt ?? ENQUEUED_AT,
+    attemptCount: fields.attemptCount ?? 1,
+    firstAttemptAt: fields.firstAttemptAt ?? FIXED_NOW,
+    lastAttemptAt: fields.lastAttemptAt ?? FIXED_NOW,
+    reason: fields.reason ?? 'terminal-http',
+    sourceAlert: fields.sourceAlert ?? sourceAlertFixture(),
+  });
+}
+
+/**
+ * Assert prepared nested deadLetter exact key order + fingerprint shapes.
+ * @param {unknown} deadLetter
+ * @param {string} reason
+ */
+function assertPreparedNestedDeadLetter(deadLetter, reason) {
+  assert.equal(typeof deadLetter, 'object');
+  assert.notEqual(deadLetter, null);
+  assertExactKeys(deadLetter, DEAD_LETTER_NESTED_KEYS, 'nested deadLetter');
+  const dl = /** @type {Record<string, unknown>} */ (deadLetter);
+  assert.equal(typeof dl.deadLetterId, 'string');
+  assert.match(/** @type {string} */ (dl.deadLetterId), UUID_V4_RE);
+  assert.equal(dl.reason, reason);
+  assertExactKeys(dl.sourceAlert, SOURCE_ALERT_KEYS, 'sourceAlert');
+  assertExactKeys(dl.claim, NESTED_CLAIM_KEYS, 'nested claim');
+  assert.deepEqual(dl.claim, {
+    claimId: CLAIM_ID,
+    streamId: STREAM_ID,
+    sequence: SEQUENCE,
+  });
+  for (const key of ['deadLetterPre', 'deadLetterPost', 'outboxPre', 'outboxPost']) {
+    assertExactKeys(dl[key], FINGERPRINT_KEYS, key);
+    const fp = /** @type {Record<string, unknown>} */ (dl[key]);
+    assert.match(/** @type {string} */ (fp.sha256), SHA256_HEX_RE);
+    assert.equal(typeof fp.byteLength, 'number');
+    assert.equal(typeof fp.entryCount, 'number');
+    assert.equal(typeof fp.nextSequence, 'number');
+    // No invented nested size/sequence aliases.
+    assert.equal(Object.hasOwn(fp, 'deadLetterSize'), false);
+    assert.equal(Object.hasOwn(fp, 'deadLetterSequence'), false);
+  }
+  assert.equal(typeof dl.preparedAt, 'string');
+  assert.match(/** @type {string} */ (dl.preparedAt), MS_UTC_RE);
+}
+
+/**
+ * Assert caller append entry exact keys (no deadLetterSequence).
+ * @param {unknown} entry
+ * @param {string} reason
+ * @param {number} attemptCount
+ */
+function assertCallerDlqEntry(entry, reason, attemptCount) {
+  assertExactKeys(entry, CALLER_DLQ_ENTRY_KEYS, 'caller DLQ entry');
+  const e = /** @type {Record<string, unknown>} */ (entry);
+  assert.match(/** @type {string} */ (e.deadLetterId), UUID_V4_RE);
+  assert.equal(e.streamId, STREAM_ID);
+  assert.equal(e.sequence, SEQUENCE);
+  assert.equal(e.idempotencyKey, IDEMPOTENCY_KEY);
+  assert.equal(e.reason, reason);
+  assert.equal(e.attemptCount, attemptCount);
+  assertExactKeys(e.sourceAlert, SOURCE_ALERT_KEYS, 'entry sourceAlert');
+  assert.equal(Object.hasOwn(e, 'deadLetterSequence'), false);
+}
+
+/**
+ * Find lifecycle publish rows by status.
+ * @param {ReturnType<typeof createHarness>} harness
+ * @param {string} status
+ */
+function publishedOf(harness, status) {
+  return harness.published.filter((p) => p.status === status);
+}
+
+/**
+ * Ordered dep names subsequence must appear in harness.order.
+ * @param {ReturnType<typeof createHarness>} harness
+ * @param {string[]} expected
+ * @param {string} [label]
+ */
+function assertOrderSubsequence(harness, expected, label = 'call order') {
+  let cursor = -1;
+  for (const name of expected) {
+    const idx = harness.order.indexOf(name, cursor + 1);
+    assert.ok(
+      idx > cursor,
+      `${label}: expected ${name} after index ${cursor}; order=${harness.order.join('>')}`,
+    );
+    cursor = idx;
+  }
 }
 
 function unavailableError() {
@@ -821,7 +1286,8 @@ function oracleUncertainDue(lastAttemptAt, attemptCountAfterFailure, claimExpire
 // ─── Injected harness ─────────────────────────────────────────────────────
 
 /**
- * Counting pure-deps harness with durable in-memory lifecycle/outbox/claim.
+ * Counting pure-deps harness with durable in-memory lifecycle/outbox/claim/DLQ.
+ * Defaults keep Task 5 non-DLQ paths green (append throws if unexpectedly called).
  * @param {{
  *   authorize?: (endpoint: unknown) => string,
  *   claim?: object | Error | (() => object | Promise<object> | Error),
@@ -830,9 +1296,12 @@ function oracleUncertainDue(lastAttemptAt, attemptCountAfterFailure, claimExpire
  *   lifecycle?: object | (() => object),
  *   outbox?: object | (() => object),
  *   claimState?: object | (() => object),
- *   deadLetter?: object | (() => object),
+ *   deadLetter?: object | Error | (() => object | Promise<object> | Error),
+ *   append?: object | Error | (() => object | Promise<object> | Error),
+ *   appendDeadLetter?: object | Error | (() => object | Promise<object> | Error),
  *   detailed?: object | Error | (() => object | Promise<object>),
  *   onPublish?: (row: object, meta: { callIndex: number }) => void | Promise<void>,
+ *   onAppend?: (args: unknown[], meta: { callIndex: number }) => void | Promise<void>,
  *   failPublishWhen?: (row: object) => boolean,
  *   afterCompleteReadOutbox?: boolean,
  * }} [script]
@@ -848,6 +1317,10 @@ function createHarness(script = {}) {
   const published = [];
   /** @type {object[]} */
   const lifecycleSnapshots = [];
+  /** @type {unknown[][]} */
+  const appendArgsLog = [];
+  /** @type {object[]} */
+  const appendReturns = [];
 
   // Do not eagerly invoke function scripts at harness construction — authorize
   // gates and multi-tick outer state must control first observation.
@@ -989,14 +1462,51 @@ function createHarness(script = {}) {
     },
     async readDeadLetter(...args) {
       record('readDeadLetter', args);
-      if (typeof script.deadLetter === 'function') {
-        deadLetter = script.deadLetter();
+      if (Object.prototype.hasOwnProperty.call(script, 'deadLetter')) {
+        const resolved = await resolveScript(script.deadLetter, 'deadLetter');
+        deadLetter = /** @type {object} */ (resolved);
+        return deadLetter;
       }
       return deadLetter;
     },
     async appendDeadLetter(...args) {
       record('appendDeadLetter', args);
-      throw new Error('appendDeadLetter must not run in Task 5 non-DLQ paths');
+      appendArgsLog.push(args);
+      if (typeof script.onAppend === 'function') {
+        await script.onAppend(args, { callIndex: appendArgsLog.length - 1 });
+      }
+      const hasAppendScript = Object.prototype.hasOwnProperty.call(script, 'append')
+        || Object.prototype.hasOwnProperty.call(script, 'appendDeadLetter');
+      if (!hasAppendScript) {
+        // Default: Task 5 non-DLQ paths must never reach append.
+        throw new Error('appendDeadLetter must not run in Task 5 non-DLQ paths');
+      }
+      const scripted = Object.prototype.hasOwnProperty.call(script, 'append')
+        ? script.append
+        : script.appendDeadLetter;
+      const result = await resolveScript(scripted, 'append');
+      const frozen = deepFreeze(JSON.parse(JSON.stringify(result)));
+      appendReturns.push(frozen);
+      // Mirror successful append into in-memory DLQ snapshot for recovery ticks.
+      if (
+        frozen
+        && typeof frozen === 'object'
+        && Object.hasOwn(/** @type {object} */ (frozen), 'sha256')
+      ) {
+        const fp = /** @type {{ entryCount?: number, nextSequence?: number }} */ (frozen);
+        deadLetter = deepFreeze({
+          schemaVersion: 1,
+          status: (fp.entryCount ?? 0) === 0 ? 'empty' : 'ready',
+          entryCount: fp.entryCount ?? 1,
+          nextSequence: fp.nextSequence ?? 2,
+          entries: deadLetter && Array.isArray(
+            /** @type {{ entries?: unknown }} */ (deadLetter).entries,
+          )
+            ? /** @type {{ entries: object[] }} */ (deadLetter).entries
+            : [],
+        });
+      }
+      return frozen;
     },
     async executeRequestDetailed(...args) {
       record('executeRequestDetailed', args);
@@ -1042,6 +1552,8 @@ function createHarness(script = {}) {
     counts,
     argsLog,
     published,
+    appendArgsLog,
+    appendReturns,
     get lifecycle() {
       return lifecycle;
     },
@@ -1059,6 +1571,12 @@ function createHarness(script = {}) {
     },
     set claimState(next) {
       claimState = next;
+    },
+    get deadLetter() {
+      return deadLetter;
+    },
+    set deadLetter(next) {
+      deadLetter = next;
     },
     get postCompleteOutboxReads() {
       return postCompleteOutboxReads;
@@ -1101,7 +1619,7 @@ function assertZeroDownstream(harness) {
 
 // ─── Suite ────────────────────────────────────────────────────────────────
 
-describe('audit integrity alert delivery retry tick (Task 5 RED)', () => {
+describe('audit integrity alert delivery retry tick (Task 5+6 RED)', () => {
   // Old-HEAD: exactly one dedicated RED. Full matrix only when exports exist.
   if (implementationMissing || retryApi === null) {
     it('durable retry tick implementation missing', () => {
@@ -2175,61 +2693,807 @@ describe('audit integrity alert delivery retry tick (Task 5 RED)', () => {
     });
   });
 
-  // ── 9. Task 6 terminal fail-closed boundary ────────────────────────────
+  // ── 9. Task 6 dead-letter transaction + crash recovery (RED) ───────────
 
-  describe('9 Task 6 terminal fail-closed boundary (no dead-letter success)', () => {
-    it('terminal-rejected decision fails closed; no outbox ack, no DLQ append, no success receipt', async () => {
-      // Catch: Task 5 implementing dead-letter success path early.
+  describe('9A terminal happy exact order and prepared/entry/receipt', () => {
+    it('terminal-http: readDeadLetter -> prepared(claim V) -> append -> complete -> idle -> dead-lettered', async () => {
+      // Catch: Task 6 terminal transaction missing (current HEAD fails closed after open in-flight).
+      // First-tick prepared deadLetterPost must be the real SHA of would-be DLQ bytes
+      // (runtime deadLetterId); append happy script returns that captured actual post.
+      const api = requireApi();
+      /** @type {object | null} */
+      let preparedRow = null;
+      /** @type {ReturnType<typeof fingerprint> | null} */
+      let capturedPreparedPost = null;
+      const harness = createHarness({
+        lifecycle: idleLifecycle(WATERMARK),
+        outbox: outboxSingleHead(),
+        claim: claimFixture('claimed'),
+        detailed: detailedResult('terminal-rejected'),
+        deadLetter: emptyDeadLetter(),
+        // Happy append returns the actual prepared post captured after prepared publish.
+        append: () => {
+          assert.notEqual(
+            capturedPreparedPost,
+            null,
+            'append must run only after prepared published actual deadLetterPost',
+          );
+          return capturedPreparedPost;
+        },
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        onPublish: (row) => {
+          if (row.status === 'dead-letter-prepared') {
+            preparedRow = row;
+            assert.equal(row.claimId, CLAIM_ID);
+            assert.equal(row.claimExpiresAt, CLAIM_EXPIRES_AT);
+            assert.equal(row.nextAttemptAt, null);
+            assert.notEqual(row.deadLetter, null);
+            assertPreparedNestedDeadLetter(row.deadLetter, 'terminal-http');
+            assert.equal(row.deadLetter.reason, 'terminal-http');
+            // Pre is empty-leaf identity (independent of runtime deadLetterId).
+            assert.deepEqual(row.deadLetter.deadLetterPre, emptyDlqFingerprint());
+            // Capture actual prepared post for append continue-condition (not static bbbb fixture).
+            capturedPreparedPost = deepFreeze(
+              JSON.parse(JSON.stringify(row.deadLetter.deadLetterPost)),
+            );
+          }
+        },
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.notEqual(preparedRow, null, 'must publish dead-letter-prepared');
+      assert.equal(harness.counts.executeRequestDetailed, 1);
+      assert.equal(harness.counts.readDeadLetter, 1);
+      assert.equal(harness.counts.appendDeadLetter, 1);
+      assert.equal(harness.counts.completeDelivery, 1);
+      assert.equal(harness.counts.releaseDelivery, 0);
+
+      assertOrderSubsequence(harness, [
+        'authorizeDestination',
+        'loadLifecycle',
+        'readOutbox',
+        'claimDelivery',
+        'publishLifecycle', // open in-flight
+        'executeRequestDetailed',
+        'classifyRetryDecision',
+        'readDeadLetter',
+        'publishLifecycle', // dead-letter-prepared
+        'appendDeadLetter',
+        'completeDelivery',
+        'publishLifecycle', // idle
+      ], 'terminal happy call order');
+
+      // Append args: (dataDir, entry) only — no lease/prepared fingerprint inputs.
+      assert.equal(harness.appendArgsLog.length, 1);
+      const appendArgs = harness.appendArgsLog[0];
+      assert.equal(appendArgs[0], DATA_DIR);
+      assert.equal(appendArgs.length, 2);
+      assertCallerDlqEntry(appendArgs[1], 'terminal-http', 1);
+      assert.equal(
+        /** @type {{ deadLetterId: string }} */ (appendArgs[1]).deadLetterId,
+        /** @type {{ deadLetter: { deadLetterId: string } }} */ (preparedRow)
+          .deadLetter.deadLetterId,
+      );
+
+      // Independent oracle: prepared deadLetterPost === SHA of canonical post bytes
+      // for the actual caller entry + allocator deadLetterSequence from empty pre.
+      const expectedPost = expectedPostFingerprintFromCallerEntry(appendArgs[1]);
+      assert.deepEqual(
+        /** @type {{ deadLetter: { deadLetterPost: object } }} */ (preparedRow)
+          .deadLetter.deadLetterPost,
+        expectedPost,
+        'prepared deadLetterPost must equal independent canonical post fingerprint',
+      );
+      assert.deepEqual(harness.appendReturns[0], expectedPost);
+      assert.deepEqual(capturedPreparedPost, expectedPost);
+
+      // Complete only after append; capability exact keys.
+      const completeCall = harness.argsLog.find((e) => e[0] === 'completeDelivery');
+      assert.ok(completeCall);
+      const capability = completeCall.find(
+        (a) => a && typeof a === 'object' && Object.hasOwn(/** @type {object} */ (a), 'claimId'),
+      );
+      assert.ok(capability);
+      assertExactKeys(capability, CAPABILITY_KEYS, 'complete capability');
+      assert.deepEqual(capability, {
+        claimId: CLAIM_ID,
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+      });
+
+      const idle = publishedOf(harness, 'idle');
+      assert.equal(idle.length, 1);
+      assert.equal(idle[0].lastObservedAt !== null, true);
+      assert.equal(idle[0].claimId, null);
+      assert.equal(idle[0].deadLetter, null);
+
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'terminal-http',
+      });
+    });
+  });
+
+  describe('9B actual-post mismatch fail-closed', () => {
+    it('append actual post !== prepared deadLetterPost: unavailable; no complete/release/idle', async () => {
+      // Catch: soft-passing fingerprint mismatch or still acking after mismatch.
+      // prepared post is runtime-derived; append returns a clearly unequal real-shape fingerprint.
+      const api = requireApi();
+      /** @type {ReturnType<typeof fingerprint> | null} */
+      let capturedPreparedPost = null;
+      /** @type {ReturnType<typeof fingerprint> | null} */
+      let actualMismatch = null;
+      const harness = createHarness({
+        lifecycle: idleLifecycle(WATERMARK),
+        outbox: outboxSingleHead(),
+        claim: claimFixture('claimed'),
+        detailed: detailedResult('terminal-rejected'),
+        deadLetter: emptyDeadLetter(),
+        // Append returns a real-shape post fingerprint unequal to prepared.deadLetterPost.
+        append: () => {
+          assert.notEqual(
+            capturedPreparedPost,
+            null,
+            'mismatch path requires prepared deadLetterPost before append',
+          );
+          actualMismatch = unequalRealShapeFingerprint(
+            /** @type {NonNullable<typeof capturedPreparedPost>} */ (capturedPreparedPost),
+          );
+          return actualMismatch;
+        },
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        onPublish: (row) => {
+          if (row.status === 'dead-letter-prepared') {
+            assertPreparedNestedDeadLetter(row.deadLetter, 'terminal-http');
+            assert.deepEqual(row.deadLetter.deadLetterPre, emptyDlqFingerprint());
+            capturedPreparedPost = deepFreeze(
+              JSON.parse(JSON.stringify(row.deadLetter.deadLetterPost)),
+            );
+          }
+        },
+      });
+      const tick = tickWith(api, harness);
+      await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+
+      assert.equal(harness.counts.appendDeadLetter, 1);
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(publishedOf(harness, 'idle').length, 0);
+      const preparedRows = publishedOf(harness, 'dead-letter-prepared');
+      assert.equal(preparedRows.length, 1);
+      assertExactKeys(
+        preparedRows[0].deadLetter,
+        DEAD_LETTER_NESTED_KEYS,
+        'mismatch path prepared nested deadLetter',
+      );
+
+      // Independent oracle on the actual caller entry (runtime deadLetterId).
+      assert.equal(harness.appendArgsLog.length, 1);
+      const expectedPost = expectedPostFingerprintFromCallerEntry(
+        harness.appendArgsLog[0][1],
+      );
+      assert.deepEqual(
+        preparedRows[0].deadLetter.deadLetterPost,
+        expectedPost,
+        'prepared deadLetterPost must still be the real would-be post fingerprint',
+      );
+      // Coordinator sole continue condition is actual === prepared.deadLetterPost.
+      assert.notDeepEqual(
+        harness.appendReturns[0],
+        preparedRows[0].deadLetter.deadLetterPost,
+        'append actual post must not equal prepared deadLetterPost',
+      );
+      assert.notEqual(actualMismatch, null);
+      assert.deepEqual(harness.appendReturns[0], actualMismatch);
+      assert.equal(
+        typeof preparedRows[0].deadLetter.deadLetterPost.sha256,
+        'string',
+      );
+      assert.match(preparedRows[0].deadLetter.deadLetterPost.sha256, SHA256_HEX_RE);
+      assert.equal(expectedPost.entryCount, 1);
+      assert.equal(expectedPost.nextSequence, 2);
+      assert.equal(
+        harness.lifecycle.status,
+        'dead-letter-prepared',
+        'prepared must remain last durable lifecycle on mismatch',
+      );
+    });
+  });
+
+  describe('9C attempts-exhausted reasons', () => {
+    it('attempt 8 + retryable-rejected → reason attempts-exhausted-retryable + dead-lettered', async () => {
+      // Catch: missing attempts-exhausted-retryable quarantine reason.
+      const api = requireApi();
+      /** @type {ReturnType<typeof fingerprint> | null} */
+      let capturedPreparedPost = null;
+      const harness = createHarness({
+        lifecycle: retryWaitLifecycle('retryable-rejected', {
+          claimId: null,
+          claimExpiresAt: null,
+          attemptCount: 7,
+          nextAttemptAt: FIXED_NOW,
+          detail: 'retryable-http',
+        }),
+        outbox: outboxSingleHead(),
+        claimState: idleClaimState(),
+        claim: claimFixture('claimed'),
+        detailed: detailedResult('retryable-rejected'),
+        deadLetter: emptyDeadLetter(),
+        append: () => {
+          assert.notEqual(capturedPreparedPost, null);
+          return capturedPreparedPost;
+        },
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        onPublish: (row) => {
+          if (row.status === 'dead-letter-prepared') {
+            capturedPreparedPost = deepFreeze(
+              JSON.parse(JSON.stringify(row.deadLetter.deadLetterPost)),
+            );
+          }
+        },
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.executeRequestDetailed, 1);
+      assert.equal(harness.counts.appendDeadLetter, 1);
+      const prepared = publishedOf(harness, 'dead-letter-prepared')[0];
+      assert.ok(prepared);
+      assertPreparedNestedDeadLetter(prepared.deadLetter, 'attempts-exhausted-retryable');
+      assertCallerDlqEntry(harness.appendArgsLog[0][1], 'attempts-exhausted-retryable', 8);
+      const expectedPost = expectedPostFingerprintFromCallerEntry(
+        harness.appendArgsLog[0][1],
+      );
+      assert.deepEqual(prepared.deadLetter.deadLetterPost, expectedPost);
+      assert.deepEqual(harness.appendReturns[0], expectedPost);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 8,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'attempts-exhausted-retryable',
+      });
+    });
+
+    it('attempt 8 + uncertain → reason attempts-exhausted-uncertain + dead-lettered', async () => {
+      // Catch: missing attempts-exhausted-uncertain quarantine reason.
+      const api = requireApi();
+      /** @type {ReturnType<typeof fingerprint> | null} */
+      let capturedPreparedPost = null;
+      const harness = createHarness({
+        lifecycle: retryWaitLifecycle('unknown', {
+          claimId: null,
+          claimExpiresAt: null,
+          attemptCount: 7,
+          nextAttemptAt: FIXED_NOW,
+          detail: 'uncertain-network',
+        }),
+        outbox: outboxSingleHead(),
+        claimState: idleClaimState(),
+        claim: claimFixture('claimed'),
+        detailed: unavailableError(),
+        deadLetter: emptyDeadLetter(),
+        append: () => {
+          assert.notEqual(capturedPreparedPost, null);
+          return capturedPreparedPost;
+        },
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        onPublish: (row) => {
+          if (row.status === 'dead-letter-prepared') {
+            capturedPreparedPost = deepFreeze(
+              JSON.parse(JSON.stringify(row.deadLetter.deadLetterPost)),
+            );
+          }
+        },
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.executeRequestDetailed, 1);
+      assert.equal(harness.counts.appendDeadLetter, 1);
+      const prepared = publishedOf(harness, 'dead-letter-prepared')[0];
+      assert.ok(prepared);
+      assertPreparedNestedDeadLetter(prepared.deadLetter, 'attempts-exhausted-uncertain');
+      assertCallerDlqEntry(harness.appendArgsLog[0][1], 'attempts-exhausted-uncertain', 8);
+      const expectedPost = expectedPostFingerprintFromCallerEntry(
+        harness.appendArgsLog[0][1],
+      );
+      assert.deepEqual(prepared.deadLetter.deadLetterPost, expectedPost);
+      assert.deepEqual(harness.appendReturns[0], expectedPost);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 8,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'attempts-exhausted-uncertain',
+      });
+    });
+  });
+
+  describe('9D prepared crash truth table', () => {
+    it('DLQ post / outbox pre / claim claimed: complete exact head then idle; zero network', async () => {
+      // Catch: prepared recovery not resuming step 4 ack.
+      const api = requireApi();
+      const prepared = deadLetterPreparedLifecycle({
+        deadLetter: nestedDeadLetterFixture({
+          deadLetterPre: emptyDlqFingerprint(),
+          deadLetterPost: postDlqFingerprint(),
+        }),
+      });
+      const harness = createHarness({
+        lifecycle: prepared,
+        outbox: outboxSingleHead(),
+        claimState: claimedClaimState(),
+        deadLetter: postDeadLetterSnapshot(),
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        detailed: detailedResult('accepted'),
+        claim: claimFixture('busy'),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.claimDelivery, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(harness.counts.completeDelivery, 1);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(publishedOf(harness, 'idle').length, 1);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'terminal-http',
+      });
+    });
+
+    it('DLQ post / outbox post / claim claimed: complete already-completed; preserve successor; idle', async () => {
+      // Catch: residual clear must not ack successor head (pendingCount stays 2).
+      const api = requireApi();
+      const prepared = deadLetterPreparedLifecycle({
+        deadLetter: nestedDeadLetterFixture({
+          outboxPre: outboxPreFingerprint(3, 4),
+          outboxPost: outboxPostFingerprint(2, 4),
+        }),
+      });
+      // Head already advanced: successors 2,3 remain (sequence 1 acked).
+      const residualOutbox = outboxSnapshot([headEntry(2), headEntry(3)], 4);
+      const harness = createHarness({
+        lifecycle: prepared,
+        outbox: residualOutbox,
+        claimState: claimedClaimState(),
+        deadLetter: postDeadLetterSnapshot(),
+        complete: completeFixture('already-completed', {
+          streamId: STREAM_ID,
+          sequence: SEQUENCE,
+          pendingCount: 2,
+        }),
+        detailed: detailedResult('accepted'),
+        claim: claimFixture('busy'),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.completeDelivery, 1);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      // Successors must still be present — complete did not invent a second ack.
+      assert.equal(harness.outbox.entries.length, 2);
+      assert.equal(harness.outbox.entries[0].sequence, 2);
+      assert.equal(publishedOf(harness, 'idle').length, 1);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 2,
+        detail: 'terminal-http',
+      });
+    });
+
+    it('DLQ post / outbox post / claim idle: idle only; no complete/append/network', async () => {
+      // Catch: calling complete when claim already idle after prepared residual.
+      const api = requireApi();
+      const prepared = deadLetterPreparedLifecycle();
+      const harness = createHarness({
+        lifecycle: prepared,
+        // Head already acked → empty entries; nextSequence retained.
+        outbox: outboxSnapshot([], 2),
+        claimState: idleClaimState(),
+        deadLetter: postDeadLetterSnapshot(),
+        complete: completeFixture('already-completed', { pendingCount: 0 }),
+        detailed: detailedResult('accepted'),
+        claim: claimFixture('claimed'),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(harness.counts.claimDelivery, 0);
+      assert.equal(publishedOf(harness, 'idle').length, 1);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'terminal-http',
+      });
+    });
+
+    it('DLQ pre / outbox post: fail closed; zero unsafe mutation', async () => {
+      // Catch: advancing when outbox acked without DLQ evidence.
+      const api = requireApi();
+      const prepared = deadLetterPreparedLifecycle({
+        deadLetter: nestedDeadLetterFixture({
+          deadLetterPre: emptyDlqFingerprint(),
+          deadLetterPost: postDlqFingerprint(),
+        }),
+      });
+      const harness = createHarness({
+        lifecycle: prepared,
+        outbox: outboxSnapshot([], 2),
+        claimState: claimedClaimState(),
+        deadLetter: emptyDeadLetter(), // DLQ still pre
+        complete: completeFixture('already-completed', { pendingCount: 0 }),
+        append: postDlqFingerprint(),
+        detailed: detailedResult('accepted'),
+      });
+      const before = harness.snapshotCounts();
+      const tick = tickWith(api, harness);
+      await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+      assert.equal(harness.counts.completeDelivery - before.completeDelivery, 0);
+      assert.equal(harness.counts.appendDeadLetter - before.appendDeadLetter, 0);
+      assert.equal(harness.counts.publishLifecycle - before.publishLifecycle, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(harness.lifecycle.status, 'dead-letter-prepared');
+    });
+
+    it('fingerprint mismatch on prepared recovery: fail closed; no complete/idle', async () => {
+      // Catch: continuing recovery when durable DLQ post does not match prepared.
+      const api = requireApi();
+      const prepared = deadLetterPreparedLifecycle({
+        deadLetter: nestedDeadLetterFixture({
+          deadLetterPost: postDlqFingerprint({ sha256: SHA_DLQ_POST }),
+        }),
+      });
+      // DLQ is still pre; append reports a different durable post identity.
+      const harness = createHarness({
+        lifecycle: prepared,
+        outbox: outboxSingleHead(),
+        claimState: claimedClaimState(),
+        deadLetter: emptyDeadLetter(),
+        // Scripted append returns mismatched fingerprint if recovery re-appends.
+        append: postDlqFingerprint({ sha256: SHA_MISMATCH }),
+        complete: completeFixture('completed', { pendingCount: 0 }),
+      });
+      const tick = tickWith(api, harness);
+      await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(publishedOf(harness, 'idle').length, 0);
+      assert.equal(harness.lifecycle.status, 'dead-letter-prepared');
+    });
+
+    it('exact duplicate after crash: prepared pre!=post; append actual==post; continue complete', async () => {
+      // Catch: treating pre!=post as failure when append returns exact prepared post.
+      const api = requireApi();
+      const preparedPost = postDlqFingerprint();
+      const preparedPre = emptyDlqFingerprint();
+      assert.notDeepEqual(preparedPre, preparedPost);
+      const prepared = deadLetterPreparedLifecycle({
+        deadLetter: nestedDeadLetterFixture({
+          deadLetterPre: preparedPre,
+          deadLetterPost: preparedPost,
+        }),
+      });
+      const harness = createHarness({
+        lifecycle: prepared,
+        outbox: outboxSingleHead(),
+        claimState: claimedClaimState(),
+        // DLQ is still pre; append returns the exact prepared post idempotently.
+        deadLetter: emptyDeadLetter(),
+        append: preparedPost,
+        complete: completeFixture('completed', { pendingCount: 0 }),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.appendDeadLetter, 1);
+      assert.deepEqual(harness.appendReturns[0], preparedPost);
+      assert.equal(harness.counts.completeDelivery, 1);
+      assert.equal(publishedOf(harness, 'idle').length, 1);
+      assertExactReceipt(receipt, {
+        status: 'dead-lettered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 0,
+        detail: 'terminal-http',
+      });
+    });
+  });
+
+  describe('9E DLQ full initial + sticky later tick', () => {
+    it('first terminal tick: before prepared publish blocked/dead-letter-full all fields V; retain head+claim', async () => {
+      // Catch: publishing prepared into a full DLQ or dropping head/claim.
       const api = requireApi();
       const harness = createHarness({
         lifecycle: idleLifecycle(WATERMARK),
         outbox: outboxSingleHead(),
         claim: claimFixture('claimed'),
         detailed: detailedResult('terminal-rejected'),
+        deadLetter: fullDeadLetterSnapshot(),
+        append: postDlqFingerprint(),
+        complete: completeFixture('completed', { pendingCount: 0 }),
       });
       const tick = tickWith(api, harness);
-      await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
       assert.equal(harness.counts.executeRequestDetailed, 1);
-      assert.equal(harness.counts.completeDelivery, 0);
       assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.completeDelivery, 0);
       assert.equal(harness.counts.releaseDelivery, 0);
-      // Open in-flight may have been published before settlement; no DLQ/ack after.
-      assert.equal(
-        harness.published.some((p) => p.status === 'dead-letter-prepared'),
-        false,
-      );
-      assert.equal(
-        harness.published.some((p) => p.status === 'idle'),
-        false,
-      );
+      assert.equal(publishedOf(harness, 'dead-letter-prepared').length, 0);
+
+      const blocked = publishedOf(harness, 'blocked');
+      assert.equal(blocked.length, 1);
+      const row = blocked[0];
+      assertExactKeys(row, LIFECYCLE_KEYS, 'blocked lifecycle');
+      assert.equal(row.streamId, STREAM_ID);
+      assert.equal(row.sequence, SEQUENCE);
+      assert.equal(row.idempotencyKey, IDEMPOTENCY_KEY);
+      assert.equal(row.attemptId !== null, true);
+      assert.equal(row.attemptCount, 1);
+      assert.equal(row.firstAttemptAt !== null, true);
+      assert.equal(row.lastAttemptAt !== null, true);
+      assert.equal(row.nextAttemptAt, null);
+      assert.equal(row.claimId, CLAIM_ID);
+      assert.equal(row.claimExpiresAt, CLAIM_EXPIRES_AT);
+      assert.deepEqual(row.outcome, { kind: 'blocked', detail: 'dead-letter-full' });
+      assert.equal(row.deadLetter, null);
+      // Head + claim retained (no complete/release).
+      assert.equal(harness.outbox.entries.length, 1);
+      assert.equal(harness.outbox.entries[0].sequence, SEQUENCE);
+
+      assertExactReceipt(receipt, {
+        status: 'blocked',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 1,
+        detail: 'dead-letter-full',
+      });
     });
 
-    it('attempts-exhausted retryable decision fails closed without dead-lettered receipt', async () => {
-      // Catch: attempts-exhausted success receipt before Task 6.
+    it('sticky blocked later tick: after loadLifecycle, before readOutbox; authorize first; zero mutation', async () => {
+      // Catch: re-entering network/append on sticky dead-letter-full blocked.
+      const api = requireApi();
+      let outboxReads = 0;
+      const harness = createHarness({
+        lifecycle: blockedDeadLetterFullLifecycle({ attemptCount: 1 }),
+        outbox: () => {
+          outboxReads += 1;
+          return outboxSingleHead();
+        },
+        claim: claimFixture('claimed'),
+        detailed: detailedResult('accepted'),
+        deadLetter: fullDeadLetterSnapshot(),
+        append: postDlqFingerprint(),
+        complete: completeFixture('completed', { pendingCount: 0 }),
+        release: releaseFixture(),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.order[0], 'authorizeDestination');
+      assert.equal(harness.counts.authorizeDestination, 1);
+      assert.equal(harness.counts.loadLifecycle, 1);
+      // Sticky return after loadLifecycle, before readOutbox (and zero request path).
+      assert.equal(outboxReads, 0);
+      assert.equal(harness.counts.readOutbox, 0);
+      assert.equal(harness.counts.readDeadLetter, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(harness.counts.claimDelivery, 0);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.publishLifecycle, 0);
+      assertExactReceipt(receipt, {
+        status: 'blocked',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 1,
+        detail: 'dead-letter-full',
+      });
+    });
+  });
+
+  describe('9F DLQ corrupt + lifecycle corrupt zero mutation', () => {
+    it('DLQ corrupt at terminal preflight: fixed unavailable; no prepared/blocked/append/complete', async () => {
+      // Catch: faking blocked/dead-lettered on corrupt DLQ.
       const api = requireApi();
       const harness = createHarness({
         lifecycle: idleLifecycle(WATERMARK),
         outbox: outboxSingleHead(),
         claim: claimFixture('claimed'),
-        detailed: detailedResult('retryable-rejected'),
-      });
-      // Force attemptCount 8 via pre-seeded open attempt path: claim then publish with 8.
-      // Simpler: start from retry-wait due with attemptCount 7, new attempt becomes 8.
-      harness.lifecycle = retryWaitLifecycle('retryable-rejected', {
-        claimId: null,
-        claimExpiresAt: null,
-        attemptCount: 7,
-        nextAttemptAt: FIXED_NOW,
-        detail: 'retryable-http',
+        detailed: detailedResult('terminal-rejected'),
+        deadLetter: () => {
+          throw unavailableError();
+        },
+        append: postDlqFingerprint(),
+        complete: completeFixture('completed', { pendingCount: 0 }),
       });
       const tick = tickWith(api, harness);
       await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+      assert.equal(harness.counts.executeRequestDetailed, 1);
       assert.equal(harness.counts.appendDeadLetter, 0);
       assert.equal(harness.counts.completeDelivery, 0);
-      assert.equal(
-        harness.published.some((p) => p.status === 'dead-letter-prepared'),
-        false,
-      );
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(publishedOf(harness, 'blocked').length, 0);
+      assert.equal(publishedOf(harness, 'dead-letter-prepared').length, 0);
+      assert.equal(publishedOf(harness, 'idle').length, 0);
+    });
+
+    it('lifecycle corrupt load: fixed unavailable; zero mutation; no fake blocked/dead-lettered', async () => {
+      // Catch: inventing blocked from corrupt lifecycle.
+      const api = requireApi();
+      const harness = createHarness({
+        lifecycle: deepFreeze({ schemaVersion: 1, status: 'nope' }),
+        outbox: outboxSingleHead(),
+        claim: claimFixture('claimed'),
+        deadLetter: emptyDeadLetter(),
+        append: postDlqFingerprint(),
+      });
+      const tick = tickWith(api, harness);
+      await expectUnavailableAsync(tick(DATA_DIR, ENDPOINT, FIXED_NOW));
+      assert.equal(harness.counts.publishLifecycle, 0);
+      assert.equal(harness.counts.claimDelivery, 0);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(publishedOf(harness, 'blocked').length, 0);
+    });
+  });
+
+  describe('9G accepted-pending already-completed successor receipt', () => {
+    it('accepted-pending residual already-completed: clear claim only; successor preserved; delivered', async () => {
+      // Catch: re-acking or deleting successor on residual already-completed.
+      const api = requireApi();
+      const residualOutbox = outboxSnapshot([headEntry(2), headEntry(3)], 4);
+      const harness = createHarness({
+        lifecycle: acceptedPendingLifecycle(),
+        outbox: residualOutbox,
+        claimState: claimedClaimState(),
+        complete: completeFixture('already-completed', {
+          streamId: STREAM_ID,
+          sequence: SEQUENCE,
+          pendingCount: 2,
+        }),
+        detailed: detailedResult('accepted'),
+        claim: claimFixture('busy'),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.completeDelivery, 1);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.outbox.entries.length, 2);
+      assert.equal(harness.outbox.entries[0].sequence, 2);
+      assert.equal(publishedOf(harness, 'idle').length, 1);
+      assertExactReceipt(receipt, {
+        status: 'delivered',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: null,
+        pendingCount: 2,
+        detail: null,
+      });
+    });
+  });
+
+  describe('9H retain open-in-flight and release-pending zero-network regressions', () => {
+    it('open in-flight at entry: convert retry-wait unknown; zero network/append', async () => {
+      // Catch: regression of §11.3 open in-flight conversion while adding Task 6.
+      const api = requireApi();
+      const open = inFlightLifecycle({
+        attemptCount: 2,
+        attemptId: ATTEMPT_ID_2,
+        lastAttemptAt: FIXED_NOW,
+        firstAttemptAt: WATERMARK,
+      });
+      const expectedDue = '2026-08-05T12:02:00.000Z';
+      const harness = createHarness({
+        lifecycle: open,
+        outbox: outboxSingleHead(),
+        claimState: claimedClaimState({ claimId: CLAIM_ID }),
+        claim: claimFixture('busy'),
+        detailed: detailedResult('accepted'),
+        append: postDlqFingerprint(),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.releaseDelivery, 0);
+      const wait = harness.published.find((p) => p.status === 'retry-wait');
+      assert.ok(wait);
+      assert.deepEqual(wait.outcome, { kind: 'unknown', detail: null });
+      assert.equal(wait.attemptCount, 2);
+      assertExactReceipt(receipt, {
+        status: 'not-due',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 2,
+        nextAttemptAt: expectedDue,
+        pendingCount: 1,
+        detail: null,
+      });
+    });
+
+    it('retry-wait retryable release-pending: release only; zero network/append', async () => {
+      // Catch: regression of release-pending recovery while adding Task 6.
+      const api = requireApi();
+      const releasePending = retryWaitLifecycle('retryable-rejected', {
+        claimId: CLAIM_ID,
+        claimExpiresAt: CLAIM_EXPIRES_AT,
+        nextAttemptAt: BACKOFF_DUE_BY_ATTEMPT[1],
+        detail: 'retryable-http',
+      });
+      const harness = createHarness({
+        lifecycle: releasePending,
+        outbox: outboxSingleHead(),
+        claimState: claimedClaimState({ claimId: CLAIM_ID }),
+        release: releaseFixture(),
+        detailed: detailedResult('accepted'),
+        append: postDlqFingerprint(),
+        claim: claimFixture('claimed'),
+      });
+      const tick = tickWith(api, harness);
+      const receipt = await tick(DATA_DIR, ENDPOINT, FIXED_NOW);
+
+      assert.equal(harness.counts.releaseDelivery, 1);
+      assert.equal(harness.counts.executeRequestDetailed, 0);
+      assert.equal(harness.counts.appendDeadLetter, 0);
+      assert.equal(harness.counts.completeDelivery, 0);
+      assert.equal(harness.counts.claimDelivery, 0);
+      assert.equal(harness.lifecycle.claimId, null);
+      assertExactReceipt(receipt, {
+        status: 'not-due',
+        streamId: STREAM_ID,
+        sequence: SEQUENCE,
+        attemptCount: 1,
+        nextAttemptAt: BACKOFF_DUE_BY_ATTEMPT[1],
+        pendingCount: 1,
+        detail: null,
+      });
     });
   });
 
