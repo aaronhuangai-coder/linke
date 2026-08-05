@@ -1,15 +1,21 @@
 /**
- * Outbox foundation + Task 2 RED — public claim exclusion and lease-guarded
- * internal head acknowledgement.
+ * Outbox foundation + Task 2 claim exclusion + Task 7 manual-ack lifecycle gate.
  * Authority:
  *   docs/superpowers/specs/2026-08-04-audit-integrity-alert-delivery-claim-design.md
  *   docs/superpowers/plans/2026-08-04-audit-integrity-alert-delivery-claim-plan.md
+ *   docs/superpowers/specs/2026-08-05-audit-integrity-alert-durable-retry-design.md
+ *   docs/superpowers/plans/2026-08-05-audit-integrity-alert-durable-retry-plan.md (Task 7)
  *
- * Task 2 production surface (absent on old HEAD):
+ * Task 2 production surface:
  *   acknowledgeAuditIntegrityAlertOutboxHeadUnderLease(resolvedRoot, lease, sequence)
  * Public ack must consult claim state under the write lease and refuse every
  * persisted claimed status; only the under-lease primitive may remove head while
  * claimed. Deadline / Date.now never authorizes manual ack.
+ *
+ * Task 7 production surface (absent on Task-6 HEAD):
+ *   public/manual outbox ack must load lifecycle under the same write lease and
+ *   refuse every non-idle status via assertAuditIntegrityAlertDeliveryLifecycleIdle
+ *   without mutating outbox bytes. Claim `claimed` refusal is retained.
  *
  * Dynamic export inspection: old HEAD registers exactly one behavior-specific
  * RED named/message `lease-guarded outbox acknowledgement implementation missing`
@@ -37,6 +43,11 @@ import {
   AUDIT_INTEGRITY_ALERT_DELIVERY_CLAIM_RELATIVE_PATH,
   publishAuditIntegrityAlertDeliveryClaimState,
 } from '../src/audit-integrity-alert-delivery-claim-state.js';
+import {
+  AUDIT_INTEGRITY_ALERT_DELIVERY_LIFECYCLE_RELATIVE_PATH,
+  publishAuditIntegrityAlertDeliveryLifecycleUnderLease,
+  createIdleAuditIntegrityAlertDeliveryLifecycle,
+} from '../src/audit-integrity-alert-delivery-lifecycle.js';
 import { enqueueAuditIntegrityWriteTask } from '../src/audit-integrity-write-queue.js';
 import { assertSafeDataRoot } from '../src/safe-data-files.js';
 import { appendAuditEventWithIntegrityDualWrite } from '../src/audit-integrity-dual-write.js';
@@ -147,6 +158,155 @@ function outboxAbs(root) {
 
 function claimAbs(root) {
   return join(root, AUDIT_INTEGRITY_ALERT_DELIVERY_CLAIM_RELATIVE_PATH);
+}
+
+function lifecycleAbs(root) {
+  return join(root, AUDIT_INTEGRITY_ALERT_DELIVERY_LIFECYCLE_RELATIVE_PATH);
+}
+
+/** Lifecycle fixtures for Task 7 manual-ack non-idle gate (sequence matches FIFO head). */
+const LC_STREAM_ID = STREAM_ID;
+const LC_CLAIM_ID = CLAIM_ID;
+const LC_ATTEMPT_ID = 'c3333333-d333-4333-a333-033333333333';
+const LC_DEAD_LETTER_ID = 'd4444444-e444-4444-b444-144444444444';
+const LC_SEQUENCE = 1;
+const LC_IDEMPOTENCY_KEY = `audit-integrity-alert:${LC_STREAM_ID}:${LC_SEQUENCE}`;
+const LC_OBSERVED_AT = '2026-08-05T12:00:00.000Z';
+const LC_FIRST_ATTEMPT_AT = '2026-08-05T12:00:00.000Z';
+const LC_LAST_ATTEMPT_AT = '2026-08-05T12:00:30.000Z';
+const LC_NEXT_ATTEMPT_AT = '2026-08-05T12:02:30.000Z';
+const LC_CLAIM_EXPIRES_AT = '2026-08-05T12:02:00.000Z';
+const LC_PREPARED_AT = '2026-08-05T12:05:00.000Z';
+const LC_SOURCE_CHECKED_AT = '2026-08-05T11:59:00.000Z';
+const LC_SHA_EMPTY =
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const LC_SHA_DLQ_POST =
+  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const LC_SHA_OUTBOX_PRE =
+  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+const LC_SHA_OUTBOX_POST =
+  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+
+/**
+ * Bound non-idle lifecycle row with exact top-key insertion order.
+ * @param {string} status
+ * @param {object} [overrides]
+ */
+function buildLifecycleBoundBase(status, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    status,
+    lastObservedAt: LC_OBSERVED_AT,
+    streamId: LC_STREAM_ID,
+    sequence: LC_SEQUENCE,
+    idempotencyKey: LC_IDEMPOTENCY_KEY,
+    attemptId: LC_ATTEMPT_ID,
+    attemptCount: 1,
+    firstAttemptAt: LC_FIRST_ATTEMPT_AT,
+    lastAttemptAt: LC_LAST_ATTEMPT_AT,
+    nextAttemptAt: null,
+    claimId: LC_CLAIM_ID,
+    claimExpiresAt: LC_CLAIM_EXPIRES_AT,
+    outcome: null,
+    deadLetter: null,
+    ...overrides,
+  };
+}
+
+function buildLifecycleDeadLetterNested() {
+  return {
+    deadLetterId: LC_DEAD_LETTER_ID,
+    reason: 'terminal-http',
+    sourceAlert: {
+      sequence: LC_SEQUENCE,
+      checkedAt: LC_SOURCE_CHECKED_AT,
+      code: 'audit-integrity-cross-store-broken',
+      recoveryRequired: true,
+      nextAction: 'run-explicit-recovery',
+      reasonCode: null,
+    },
+    claim: {
+      claimId: LC_CLAIM_ID,
+      streamId: LC_STREAM_ID,
+      sequence: LC_SEQUENCE,
+    },
+    deadLetterPre: {
+      sha256: LC_SHA_EMPTY,
+      byteLength: 48,
+      entryCount: 0,
+      nextSequence: 1,
+    },
+    deadLetterPost: {
+      sha256: LC_SHA_DLQ_POST,
+      byteLength: 512,
+      entryCount: 1,
+      nextSequence: 2,
+    },
+    outboxPre: {
+      sha256: LC_SHA_OUTBOX_PRE,
+      byteLength: 256,
+      entryCount: 1,
+      nextSequence: 2,
+    },
+    outboxPost: {
+      sha256: LC_SHA_OUTBOX_POST,
+      byteLength: 48,
+      entryCount: 0,
+      nextSequence: 2,
+    },
+    preparedAt: LC_PREPARED_AT,
+  };
+}
+
+/** Non-idle lifecycle fixtures required by Task 7 Step 3 (exact closed set). */
+const NON_IDLE_LIFECYCLE_FIXTURES = Object.freeze([
+  Object.freeze({
+    name: 'in-flight',
+    state: buildLifecycleBoundBase('in-flight'),
+  }),
+  Object.freeze({
+    name: 'retry-wait',
+    state: buildLifecycleBoundBase('retry-wait', {
+      nextAttemptAt: LC_NEXT_ATTEMPT_AT,
+      outcome: { kind: 'unknown', detail: null },
+    }),
+  }),
+  Object.freeze({
+    name: 'accepted-pending-completion',
+    state: buildLifecycleBoundBase('accepted-pending-completion', {
+      outcome: { kind: 'accepted', detail: null },
+    }),
+  }),
+  Object.freeze({
+    name: 'dead-letter-prepared',
+    state: buildLifecycleBoundBase('dead-letter-prepared', {
+      attemptCount: 8,
+      outcome: { kind: 'terminal-rejected', detail: 'terminal-http' },
+      deadLetter: buildLifecycleDeadLetterNested(),
+    }),
+  }),
+  Object.freeze({
+    name: 'blocked',
+    state: buildLifecycleBoundBase('blocked', {
+      attemptCount: 8,
+      outcome: { kind: 'blocked', detail: 'dead-letter-full' },
+    }),
+  }),
+]);
+
+/**
+ * Publish lifecycle under a genuine same-root write lease.
+ * @param {string} root
+ * @param {object} state
+ */
+async function publishLifecycleUnderLease(root, state) {
+  return withActiveLease(root, async (resolvedRoot, lease) => {
+    return publishAuditIntegrityAlertDeliveryLifecycleUnderLease(
+      resolvedRoot,
+      lease,
+      state,
+    );
+  });
 }
 
 function assertStateShape(state, { nextSequence, sequences }) {
@@ -925,4 +1085,119 @@ describe('lease-guarded outbox acknowledgement and public claim exclusion (Task 
       false,
     );
   });
+});
+
+describe('Task 7 manual-ack lifecycle non-idle gate (missing outbox lifecycle refusal)', () => {
+  /**
+   * Production defect on Task-6 HEAD: public ack only gates on claim claimed and
+   * does not load/assert lifecycle idle under the same write lease. Non-idle
+   * lifecycle with idle claim must refuse fixed unavailable and leave outbox
+   * bytes byte-identical. Idle lifecycle + idle claim keeps existing success.
+   */
+
+  for (const fixture of NON_IDLE_LIFECYCLE_FIXTURES) {
+    it(
+      `public manual ack refuses lifecycle ${fixture.name} with head present `
+        + 'without mutating outbox (Task 7 missing lifecycle idle gate)',
+      async () => {
+        // Break: missing load+assert lifecycle idle lets operator steal head mid-attempt.
+        const report = await issuedReport();
+        await withTempRoot(`t7-manual-ack-${fixture.name}`, async (root) => {
+          await enqueueAuditIntegrityAlertOutbox(root, report);
+          await enqueueAuditIntegrityAlertOutbox(root, report);
+          await publishClaimUnderLease(root, buildIdleClaimObject());
+          await publishLifecycleUnderLease(root, fixture.state);
+
+          const outboxBefore = await readFile(outboxAbs(root), 'utf8');
+          const claimBefore = await readFile(claimAbs(root), 'utf8');
+          const lifecycleBefore = await readFile(lifecycleAbs(root), 'utf8');
+          assert.equal(claimBefore, CANONICAL_IDLE_CLAIM_BYTES);
+
+          await assert.rejects(
+            acknowledgeAuditIntegrityAlertOutboxHead(root, 1),
+            assertUnavailable,
+          );
+
+          assert.equal(
+            await readFile(outboxAbs(root), 'utf8'),
+            outboxBefore,
+            'outbox bytes must be unchanged after non-idle lifecycle refusal',
+          );
+          assert.equal(await readFile(claimAbs(root), 'utf8'), claimBefore);
+          assert.equal(
+            await readFile(lifecycleAbs(root), 'utf8'),
+            lifecycleBefore,
+          );
+          assertStateShape(await readAuditIntegrityAlertOutbox(root), {
+            nextSequence: 3,
+            sequences: [1, 2],
+          });
+        });
+      },
+    );
+  }
+
+  it(
+    'public manual ack still refuses claim claimed when lifecycle is idle '
+      + '(Task 7 retains claim claimed exclusion)',
+    async () => {
+      // Break: lifecycle gate must not replace claim claimed refusal.
+      const report = await issuedReport();
+      await withTempRoot('t7-manual-ack-claimed-idle-lifecycle', async (root) => {
+        await enqueueAuditIntegrityAlertOutbox(root, report);
+        await publishClaimUnderLease(root, buildClaimedClaimObject({ sequence: 1 }));
+        await publishLifecycleUnderLease(
+          root,
+          createIdleAuditIntegrityAlertDeliveryLifecycle(null),
+        );
+        const outboxBefore = await readFile(outboxAbs(root), 'utf8');
+        const claimBefore = await readFile(claimAbs(root), 'utf8');
+
+        await assert.rejects(
+          acknowledgeAuditIntegrityAlertOutboxHead(root, 1),
+          assertUnavailable,
+        );
+
+        assert.equal(await readFile(outboxAbs(root), 'utf8'), outboxBefore);
+        assert.equal(await readFile(claimAbs(root), 'utf8'), claimBefore);
+      });
+    },
+  );
+
+  it(
+    'public manual ack with idle lifecycle + idle claim + exact head succeeds unchanged '
+      + '(Task 7 must not break idle success path)',
+    async () => {
+      // Break: over-broad lifecycle gate would refuse legitimate idle manual ack.
+      const report = await issuedReport();
+      await withTempRoot('t7-manual-ack-idle-success', async (root) => {
+        await enqueueAuditIntegrityAlertOutbox(root, report);
+        await enqueueAuditIntegrityAlertOutbox(root, report);
+        await publishClaimUnderLease(root, buildIdleClaimObject());
+        await publishLifecycleUnderLease(
+          root,
+          createIdleAuditIntegrityAlertDeliveryLifecycle(LC_OBSERVED_AT),
+        );
+        const claimBefore = await readFile(claimAbs(root), 'utf8');
+        const lifecycleBefore = await readFile(lifecycleAbs(root), 'utf8');
+
+        const receipt = await acknowledgeAuditIntegrityAlertOutboxHead(root, 1);
+        assert.deepEqual(receipt, {
+          schemaVersion: 1,
+          status: 'acknowledged',
+          acknowledged: true,
+          sequence: 1,
+          pendingCount: 1,
+        });
+        assert.equal(Object.isFrozen(receipt), true);
+        assertStateShape(await readAuditIntegrityAlertOutbox(root), {
+          nextSequence: 3,
+          sequences: [2],
+        });
+        assert.equal(await readFile(claimAbs(root), 'utf8'), claimBefore);
+        assert.equal(await readFile(lifecycleAbs(root), 'utf8'), lifecycleBefore);
+        assert.equal(await readFile(claimAbs(root), 'utf8'), CANONICAL_IDLE_CLAIM_BYTES);
+      });
+    },
+  );
 });

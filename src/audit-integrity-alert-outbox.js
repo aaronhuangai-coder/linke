@@ -2,6 +2,10 @@ import { Buffer } from 'node:buffer';
 import { ERROR_CODES, LinkeError } from './error-codes.js';
 import { assertNoAuditIntegrityAlertDeliveryClaim } from './audit-integrity-alert-delivery-claim-state.js';
 import {
+  assertAuditIntegrityAlertDeliveryLifecycleIdle,
+  loadAuditIntegrityAlertDeliveryLifecycle,
+} from './audit-integrity-alert-delivery-lifecycle.js';
+import {
   auditIntegrityMonitorExitCode,
   formatAuditIntegrityMonitorReportJson,
 } from './audit-integrity-monitor.js';
@@ -331,7 +335,8 @@ export async function acknowledgeAuditIntegrityAlertOutboxHeadUnderLease(
 /**
  * Atomically remove exactly the current FIFO head occurrence.
  * Enters the same-root write queue first, refuses any persisted claimed delivery
- * claim, then delegates to the lease-guarded primitive (no nested enqueue).
+ * claim and non-idle lifecycle, then delegates to the lease-guarded primitive
+ * (no nested enqueue).
  */
 export async function acknowledgeAuditIntegrityAlertOutboxHead(dataDir, sequence) {
   if (!Number.isSafeInteger(sequence) || sequence < 1) throw unavailableError();
@@ -340,6 +345,8 @@ export async function acknowledgeAuditIntegrityAlertOutboxHead(dataDir, sequence
     return await enqueueAuditIntegrityWriteTask(resolvedRoot, async (lease) => {
       assertAuditIntegrityWriteLease(resolvedRoot, lease);
       await assertNoAuditIntegrityAlertDeliveryClaim(resolvedRoot, lease);
+      const lifecycle = await loadAuditIntegrityAlertDeliveryLifecycle(resolvedRoot);
+      assertAuditIntegrityAlertDeliveryLifecycleIdle(lifecycle);
       return acknowledgeAuditIntegrityAlertOutboxHeadUnderLease(
         resolvedRoot,
         lease,
