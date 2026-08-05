@@ -2636,6 +2636,72 @@ describe('Gold Readiness Report', () => {
     assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
   });
 
+  it('records exact audit-integrity alert destination allowlist, DNS pin, and authorize-before-claim gate without overclaim', () => {
+    const report = buildGoldReadinessReport({ now: new Date('2026-08-05T12:00:00.000Z') });
+    const item = report.items.find((candidate) => candidate.id === 'production-hardening');
+    assert.ok(item, 'production-hardening should exist');
+    assert.equal(item.status, 'partial');
+    // Positive current evidence: exact public surface atoms only (no whole-array snapshot).
+    for (const atom of [
+      'exact audit-integrity alert destination allowlist',
+      'src/audit-integrity-alert-destination-policy.js',
+      'test/audit-integrity-alert-destination-policy.test.js',
+      'authorize-before-claim delivery gate',
+      'src/audit-integrity-alert-delivery-authorized-once.js',
+      'public-DNS closed-set validation and per-attempt lookup pin',
+      'src/audit-integrity-alert-public-address.js',
+      'all DNS answers must be public',
+      'mixed public/special answers fail closed and preserve the durable claim',
+      '4-second DNS sub-deadline within the 10-second total deadline',
+      'agent:false and explicit autoSelectFamily:true',
+    ]) {
+      assert.ok(
+        item.evidence.includes(atom),
+        `missing destination-allowlist honesty evidence atom: ${atom}`,
+      );
+    }
+    // Direct negatives — local fake/integration evidence must not be written as real remote delivery,
+    // production monitoring, production hardening, or Gold.
+    for (const atom of [
+      'no external endpoint configuration wiring',
+      'no automatic retry',
+      'no dead-letter handling',
+      'not managed scheduler',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+      'not production-hardening ready',
+      'not Gold',
+    ]) {
+      assert.ok(
+        item.evidence.includes(atom),
+        `missing destination-allowlist negative honesty evidence atom: ${atom}`,
+      );
+    }
+    // Special case: one element must carry both the direct helper negation and the plan substring.
+    // Standalone "not real remote notification delivery" fails evidenceElementsDirectlyNegatePhrase
+    // for "remote notification delivery" (needs "not remote..." or "no remote..." in-element).
+    const remoteDeliveryCeiling = item.evidence.find(
+      (element) =>
+        String(element).includes('not remote notification delivery') &&
+        String(element).includes('not real remote notification delivery'),
+    );
+    assert.ok(
+      remoteDeliveryCeiling,
+      'production-hardening evidence must have one element containing both "not remote notification delivery" and "not real remote notification delivery"',
+    );
+    assertEvidenceProductionHardeningReadyNegated(
+      item.evidence,
+      'production-hardening destination-allowlist evidence',
+    );
+    assertTextProductionHardeningReadyNegated(
+      item.nextStep,
+      'production-hardening destination-allowlist nextStep',
+    );
+    // Fixed aggregate: status partial; summary 6/3/0/9.
+    assert.strictEqual(report.status, 'partial');
+    assert.deepEqual(report.summary, { ready: 6, partial: 3, blocked: 0, total: 9 });
+  });
+
   it('rejects vague evidence strings like implemented, works, done, available', () => {
     const report = buildGoldReadinessReport({ now: new Date("2026-07-06T12:00:00.000Z") });
     const vagueWords = ['implemented', 'works', 'done', 'available'];

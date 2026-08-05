@@ -3545,4 +3545,50 @@ describe('README — V1.46 management auth Keychain source', () => {
       'not production-hardening ready');
     assertReadmeContains(/not Gold|不得宣称.*Gold/i, 'not Gold');
   });
+
+  it('documents exact audit-integrity alert destination allowlist, DNS pin, and authorize-before-claim gate honesty', () => {
+    // Task 6 current-milestone positive surface — exact public atoms, not a whole-file snapshot.
+    for (const atom of [
+      'exact audit-integrity alert destination allowlist',
+      'src/audit-integrity-alert-destination-policy.js',
+      'test/audit-integrity-alert-destination-policy.test.js',
+      'authorize-before-claim delivery gate',
+      'src/audit-integrity-alert-delivery-authorized-once.js',
+      'public-DNS closed-set validation and per-attempt lookup pin',
+      'src/audit-integrity-alert-public-address.js',
+      'all DNS answers must be public',
+      'mixed public/special answers fail closed and preserve the durable claim',
+      '4-second DNS sub-deadline within the 10-second total deadline',
+      'agent:false and explicit autoSelectFamily:true',
+    ]) {
+      assert.ok(
+        readme.includes(atom),
+        `README must include exact destination-allowlist honesty atom: ${atom}`,
+      );
+    }
+    // Direct negatives — local fake/integration evidence must not be framed as production delivery.
+    for (const atom of [
+      'no external endpoint configuration wiring',
+      'no automatic retry',
+      'no dead-letter handling',
+      'not managed scheduler',
+      'not real remote notification delivery',
+      'not production monitoring ready',
+      'not end-to-end production audit delivery',
+      'not production-hardening ready',
+      'not Gold',
+    ]) {
+      assert.ok(
+        readme.includes(atom),
+        `README must include exact destination-allowlist negative honesty atom: ${atom}`,
+      );
+    }
+    // Status honesty retained on the current documentation surface.
+    assertReadmeContains(/production-hardening.*(remains )?partial|production-hardening 仍 partial/i,
+      'production-hardening remains partial');
+    assert.ok(
+      /Gold remains partial 6\/3\/0\/9|6 ready \/ 3 partial \/ 0 blocked \/ total 9/i.test(readme),
+      'README must retain Gold partial 6/3/0/9 summary honesty',
+    );
+  });
 });
